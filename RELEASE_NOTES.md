@@ -1,3 +1,28 @@
+# 1.3.5
+
+本次修复右上角「项目改动」面板**取不到当前会话工作区**的问题：它一直显示"当前工作区不是 git 仓库"，而用户实际在用的项目明明是 git 仓库，切换对话也不动。
+
+## 修复
+
+- **项目级面板现在真正跟随当前对话。** 1.3.3 已经把它改成"读当前会话的 cwd"，但**那一步从未生效**——因为插件在自己的 `inject` 里回传了 `useSessions: ctx.sessions?.useSessions`，而 `sessions` 服务上并没有这个成员：
+
+  * `useSessions` / `useWorkspaces` 是**渲染器按 root 作用域提供的标准钩子**（官方 `dsh-client-ui-session` 用 `slots.provideRoot({ hooks: { sessions } })` 提供 source，渲染器再按 `use${Capitalize<N>}` 把它们绑成 props）；
+  * 渲染器合并 props 的顺序是 `{ ...kit, ...injected, ... }`——**inject 会盖掉 kit**，而且不会剔除 `undefined`；
+  * 于是注入进去的那个 `undefined` 恰好把标准钩子遮蔽掉，组件里 `typeof useSessions === 'function'` 永远为假。
+
+  结果就是面板只能退到宿主给的 `process.cwd()`（外壳启动目录）。本机上它是 `C:\Users\Administrator`——不是 git 仓库，而用户实际在用的 `F:\code\dshDesktop` 是。于是现象成了"明明有 git 却报不是仓库"，且怎么切换对话都不动。
+
+  现在插件不再注入这两个钩子，标准钩子原样送到：工作区取**当前会话**的 `cwd`，切换对话与新建对话都会自动跟随；只有在没有当前会话（刚打开、未进入任何对话）时才退回宿主工作区。
+
+- **"不是 git 仓库"这句提示会带上项目名**（如「当前工作区（Administrator）不是 git 仓库」）。只显示目录名、不显示完整路径（面板仍然不展示工作区路径），但把一句死胡同提示变成能一眼看出"它看的是哪个目录"——这次排查多花的两轮往返，正是因为从界面上完全看不出这一点。
+
+## 校验
+
+- 新增 `scripts/test-review-overlay-hooks.mjs`（10 项断言，不需要 Electron）：钉住「inject 不得遮蔽标准钩子」，并**复现旧写法的破坏性**——用 `undefined` 盖掉 kit 之后，面板确实退回到外壳工作区；再验证修好后工作区跟随当前会话、切换对话、新建对话三种情形，以及面板仍然没有选择器、正文里没有绝对路径。
+- 其余检查全部通过：`test-plugin-sync`、`check-plugin-i18n`、`check-imports`、`test-i18n`、`test-version`、`check-version`、`test-unpack`、`test-gitbar-workspace`、`test-review-host`、`test-gitbar-checkout`，以及中英两版 README 校验。
+
+---
+
 # 1.3.4
 
 本次修复**运行时更新后三个内置插件一起消失**的问题：`latest` 变成 `0.1.5-rc.2` 之后，在应用内更新运行时会让分支徽章、「本轮修改」入口与审查面板全部不见，而且**没有任何报错**。
