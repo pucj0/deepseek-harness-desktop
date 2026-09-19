@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
       title: '本轮修改审查',
       summary: '{files} 个文件，+{added} −{removed}',
       noBaseline: '本轮尚未记录基线。开始一轮对话后会自动记录。',
-      notRepo: '当前工作区不是 git 仓库。',
+      notRepo: '当前工作区（{name}）不是 git 仓库。',
       clean: '本轮没有改动任何文件。',
       projectTitle: '项目改动',
       noWorkspace: '当前没有可用的工作区。',
@@ -141,7 +141,7 @@ window.__ModuleLoader__.load({
       title: 'Turn changes',
       summary: '{files} files, +{added} −{removed}',
       noBaseline: 'No baseline recorded for this turn yet. It is captured when a turn starts.',
-      notRepo: 'The current workspace is not a git repository.',
+      notRepo: 'The current workspace ({name}) is not a git repository.',
       clean: 'This turn did not change any file.',
       projectTitle: 'Project changes',
       noWorkspace: 'No workspace is available.',
@@ -575,7 +575,7 @@ window.__ModuleLoader__.load({
      *
      * 刻意不做分页/无限滚动：面板的用途是"快速回顾最近发生了什么"，而不是替代 git 客户端。
      * 需要更早的历史时，用户会在终端里用 git log。
-     * @param props - `{ t, result, phase, message }`。
+     * @param props - `{ t, result, phase, message, workspace }`。
      */
     function HistoryList(props) {
       const { t, result, phase, message } = props
@@ -591,7 +591,11 @@ window.__ModuleLoader__.load({
         )
       }
       if (result?.isRepo === false) {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' } }, t('notRepo'))
+        return react.createElement(
+          'div',
+          { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' } },
+          t('notRepo', { name: projectName(props.workspace) }),
+        )
       }
       const commits = result?.commits ?? []
       if (commits.length === 0) {
@@ -790,6 +794,7 @@ window.__ModuleLoader__.load({
                   result: history.state.result,
                   phase: history.state.phase,
                   message: history.state.message,
+                  workspace,
                 }),
               )
             : null,
@@ -804,6 +809,21 @@ window.__ModuleLoader__.load({
      */
     function asPath(value) {
       return typeof value === 'string' && value !== '' ? value : undefined
+    }
+
+    /**
+     * 取路径的最后一段作为项目名。
+     *
+     * 只用于**诊断文案**（"当前工作区（X）不是 git 仓库"）：面板刻意不显示工作区路径，
+     * 但"不是 git 仓库"这种死胡同提示如果不说是哪个目录，用户只会得出"功能坏了"的结论
+     * ——实际反馈中正是如此（他的项目是 git 仓库，面板看的却是另一个目录）。
+     * @param path - 工作区路径。
+     * @returns 最后一段路径；取不到时返回空串。
+     */
+    function projectName(path) {
+      if (typeof path !== 'string' || path === '') return ''
+      const parts = path.split(/[\\/]/u).filter((part) => part !== '')
+      return parts.length === 0 ? path : (parts[parts.length - 1] ?? path)
     }
 
     /**
@@ -1209,7 +1229,11 @@ window.__ModuleLoader__.load({
         return react.createElement('div', { style: { color: '#f0c8c8', fontSize: '12px', padding: '10px 2px' } }, text)
       }
       if (result?.isRepo === false) {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } }, t('notRepo'))
+        return react.createElement(
+          'div',
+          { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } },
+          t('notRepo', { name: projectName(props.workspace) }),
+        )
       }
       if (result?.empty === true) {
         return react.createElement(
@@ -1589,13 +1613,24 @@ window.__ModuleLoader__.load({
                 id: 'review-project-changes',
                 order: 30,
                 locale: NS,
-                // 声明数据服务，让渲染器把 `useSessions` / `useWorkspaces` 注入进来——
-                // 项目页没有会话，必须靠它们推断"当前项目是哪一个"。
-                inject: () => ({
-                  t: ctx.locale.bind(NS),
-                  useSessions: ctx.sessions?.useSessions ?? ctx.sessions?.use,
-                  useWorkspaces: ctx.workspaces?.useWorkspaces ?? ctx.workspaces?.use,
-                }),
+                // 只注入文案函数。**绝不能注入 useSessions / useWorkspaces。**
+                //
+                // 这两个是渲染器提供给每个 root 槽位的**标准钩子**：官方
+                // `dsh-client-ui-session` 用 `slots.provideRoot({ hooks: { sessions } })`、
+                // `dsh-client-ui-workspace` 同理提供了 `workspaces`，渲染器按
+                // `use<Name>` 约定把它们绑成 props（`use${Capitalize<N>}`）。
+                //
+                // 而渲染器合并 props 的顺序是 `{ ...kit, ...injected, ... }`——
+                // **inject 会盖掉 kit**，且 `bindInjectSources` 不会剔除 undefined 值。
+                // 这里此前写的是 `ctx.sessions?.useSessions ?? ctx.sessions?.use`，而
+                // sessions 服务上并没有这两个成员（它只有 list / open / create / fork …），
+                // 于是注入进去的其实是一个 `undefined`，恰好把标准钩子覆盖掉，组件里
+                // `typeof useSessions === 'function'` 永远为假。
+                //
+                // 这正是"项目级面板拿不到当前会话的工作区"的真正原因。1.3.1 把它误判为
+                // "全局覆盖层不注入 useSessions"，于是改成问宿主要 `process.cwd()`——那
+                // 只是绕过了本插件自己造成的遮蔽。什么都不注入，标准钩子就会原样送到。
+                inject: () => ({ t: ctx.locale.bind(NS) }),
               },
               HeroChangesTrigger,
             ),
@@ -1659,6 +1694,11 @@ window.__ModuleLoader__.load({
     exports.apply = apply
     // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
     // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
+    //
+    // `sessions` 与 `workspaces` 已不再被本插件直接读取（当前工作区改用渲染器注入的
+    // 标准钩子 `useSessions`），但仍然声明：官方 `dsh-client-ui-session` /
+    // `dsh-client-ui-workspace` 正是用 `slots.provideRoot({ hooks: { sessions/workspaces } })`
+    // 把 root source 提供出来的，声明它们可以保证这两个服务先于本项目级入口就位。
     exports.inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'sessions', 'workspaces']
     return module.exports
   },

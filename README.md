@@ -343,6 +343,16 @@ app.asar
 
 `0.1.5-rc.2` 成为 npm 的 `latest` 后就真实发生过一次。因此外壳改为每次启动从自己携带的那份（`<resources>/plugins/`，开发期是仓库的 `plugins/`）同步进当前运行时，一次覆盖三种情形：**更新后自动补齐**、**已经装坏的运行时就地修好**、**外壳升级后刷新旧副本**。
 
+同步只做文件拷贝
+
+#### 写槽位插件时的一个坑：不要注入标准钩子
+
+`useSessions` / `useWorkspaces` 不是服务成员，而是**渲染器按 root 作用域提供的标准钩子**：官方 `dsh-client-ui-session` 用 `slots.provideRoot({ hooks: { sessions } })` 提供 source，`dsh-client-ui-workspace` 同理提供 `workspaces`，渲染器按 `use${Capitalize<N>}` 把它们绑成 props 传给组件。
+
+而渲染器合并 props 的顺序是 `{ ...kit, ...injected, ... }`——**`inject` 会盖掉 kit**，且不会剔除 `undefined`。因此在自己的 `inject` 里回传 `useSessions: ctx.sessions?.useSessions`（服务上并没有这个成员）等于用 `undefined` 遮蔽掉标准钩子：取值代码看着完全正确，运行时却永远拿不到值。
+
+项目级面板踩过这个坑。它因此一直只能退到宿主给的 `process.cwd()`（外壳启动目录，常常是用户主目录），于是长期显示"当前工作区不是 git 仓库"，而用户实际在用的项目明明是 git 仓库。**结论：需要标准钩子时什么都别注入，让它原样送到。** 回归测试见 `scripts/test-review-overlay-hooks.mjs`。
+
 同步只做文件拷贝、单个插件失败只记一条警告，不会阻断启动；内容一致时跳过不重写。
 
 ---
@@ -511,6 +521,7 @@ node scripts/test-gitbar-workspace.mjs   # 插件按请求的工作区查询
 node scripts/test-review-host.mjs        # 审查插件的快照与差异
 node scripts/test-review-sidebar.mjs     # 审查侧栏链路：打开 / 收起 / 重新打开
 node scripts/test-plugin-sync.mjs        # 内置插件同步进运行时（含"换掉运行时后补齐"）
+node scripts/test-review-overlay-hooks.mjs   # 项目级入口：inject 不遮蔽标准钩子、工作区跟随当前会话
 node scripts/check-plugin-i18n.mjs       # 插件里没有硬编码文案
 ```
 

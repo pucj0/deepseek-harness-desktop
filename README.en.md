@@ -261,6 +261,19 @@ composer card visually — the background extends behind the card and reuses the
 Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 `aria-haspopup`), operable from the keyboard, and show a visible focus ring.
 
+**Writing a slot plugin: do not inject the standard hooks.** `useSessions` /
+`useWorkspaces` are not service members — the renderer synthesises them for root-scoped
+entries from the sources official plugins publish with
+`slots.provideRoot({ hooks: { sessions } })` / `… workspaces …`. The renderer merges props
+as `{ ...kit, ...injected, ... }`, so **an entry's own `inject` shadows the kit**, and
+`undefined` values are not stripped: returning `useSessions: ctx.sessions?.useSessions`
+(no such member exists) silently kills the working hook while the reading code looks
+correct. The project-changes panel did exactly that and could therefore only fall back to
+the host's `process.cwd()` — the app's launch directory, often the user's home — which is
+why it kept reporting "the current workspace is not a git repository" while the project
+the user actually worked in was one. Regression test:
+`scripts/test-review-overlay-hooks.mjs`.
+
 ---
 
 ## Where "check for updates" lives
@@ -529,6 +542,7 @@ was verified rather than assumed:
 | `scripts/test-review-host.mjs` | review-plugin snapshots and diffs (throwaway temp repo) |
 | `scripts/test-gitbar-checkout.mjs` | branch switching (throwaway temp repo) |
 | `scripts/test-plugin-sync.mjs` | bundled plugins land in the runtime in use, including the "runtime was swapped" repair (no Electron needed) |
+| `scripts/test-review-overlay-hooks.mjs` | the project panel's overlay entry does not shadow the standard hooks, and its workspace follows the current session (no Electron needed) |
 | `scripts/probe-web.mjs` | boots the runtime headlessly and reports the URL it serves |
 | `scripts/probe-ui.mjs` | drives the live UI over CDP: dump controls, click, evaluate |
 | `scripts/list-slots.mjs`, `scripts/list-slot-kinds.mjs` | enumerate UI extension slots and their kinds |
