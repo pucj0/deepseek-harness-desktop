@@ -45,8 +45,8 @@ const check = (label, actual, expected) => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}: ${actual}${ok ? '' : ` (期望 ${expected})`}`)
 }
 
-/** 审查入口：右上角的固定按钮（title 会随是否有工作区而变）。 */
-const TRIGGER = `[...document.querySelectorAll('button')].find((el) => /项目改动|选择要查看的项目/.test(el.getAttribute('title') || ''))`
+/** 审查入口：右上角的固定按钮（title 固定为「项目改动」）。 */
+const TRIGGER = `[...document.querySelectorAll('button')].find((el) => /项目改动/.test(el.getAttribute('title') || ''))`
 const PANEL = `document.querySelector('aside[style*=fixed]')`
 
 console.log('=== 入口 ===')
@@ -85,7 +85,10 @@ const panel = JSON.parse(
         // 序列化体积被截断成 undefined（实测踩到，断言因此全假失败）。
         hasHistoryTitle: (p.innerText || '').includes('最近提交'),
         hasCommitRow: /\\d{7}/.test(p.innerText || ''),
-        asksToPickProject: (p.innerText || '').includes('选择要查看的项目'),
+        asksForWorkspace: (p.innerText || '').includes('当前没有可用的工作区'),
+        // 工作区必须不可编辑、也不展示路径。
+        hasPicker: p.querySelector('select') !== null,
+        showsPath: /[A-Za-z]:\\\\\\\\/.test(p.innerText || ''),
         head: (p.innerText || '').replace(/\\n+/g, ' | ').slice(0, 120),
         tail: (p.innerText || '').replace(/\\n+/g, ' | ').slice(-160),
         top: Math.round(r.top), left: Math.round(r.left),
@@ -105,7 +108,10 @@ console.log('=== 内容 ===')
 // 关键需求：项目级要能看到 git 记录。
 check('面板含「最近提交」一节', panel.hasHistoryTitle, 'true')
 check('历史不再停留在加载中', !/最近提交 \| 正在读取差异/.test(panel.head + panel.tail), 'true')
-check('面板能确定工作区（未提示选择项目）', panel.asksToPickProject, 'false')
+check('面板能确定工作区（未提示没有可用工作区）', panel.asksForWorkspace, 'false')
+// 关键需求：工作区跟随当前对话，面板既不可编辑、也不展示绝对路径。
+check('面板没有工作区选择器', panel.hasPicker, 'false')
+check('面板不展示工作区路径', panel.showsPath, 'false')
 // 提交历史必须真的有条目，而不只是有个标题。
 check('历史里有提交条目（短哈希）', panel.hasCommitRow, 'true')
 console.log(`  面板开头: ${panel.head}`)

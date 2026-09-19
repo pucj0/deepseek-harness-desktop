@@ -109,7 +109,7 @@ window.__ModuleLoader__.load({
       notRepo: '当前工作区不是 git 仓库。',
       clean: '本轮没有改动任何文件。',
       projectTitle: '项目改动',
-      projectPick: '选择要查看的项目',
+      noWorkspace: '当前没有可用的工作区。',
       projectIdle: '项目暂无改动',
       workspaceClean: '这个项目当前没有未提交的改动。',
       workspaceEmpty: '这个仓库还没有任何提交。',
@@ -144,7 +144,7 @@ window.__ModuleLoader__.load({
       notRepo: 'The current workspace is not a git repository.',
       clean: 'This turn did not change any file.',
       projectTitle: 'Project changes',
-      projectPick: 'Choose a project to inspect',
+      noWorkspace: 'No workspace is available.',
       projectIdle: 'No project changes',
       workspaceClean: 'This project has no uncommitted changes.',
       workspaceEmpty: 'This repository has no commits yet.',
@@ -587,7 +587,7 @@ window.__ModuleLoader__.load({
         return react.createElement(
           'div',
           { style: { color: '#f0c8c8', fontSize: '12px' } },
-          message === 'noWorkspace' ? t('projectPick') : message,
+          message === 'noWorkspace' ? t('noWorkspace') : message,
         )
       }
       if (result?.isRepo === false) {
@@ -641,10 +641,14 @@ window.__ModuleLoader__.load({
      * 返回而不报错。因此项目级面板只能自己管理。
      *
      * 位置用 fixed 相对视口，避免被祖先裁剪（此前自制浮层就因此在小窗口里只露出顶部）。
-     * @param props - `{ t, workspace, sessionId, scope, candidates, onPick }`。
+     *
+     * 面板**不提供工作区选择器**，也不显示工作区路径：工作区由当前对话决定（见
+     * `useCurrentWorkspace`），跟随对话自动切换；把它做成可编辑并列出绝对路径，既
+     * 与"这个面板属于当前对话"的语义冲突，也把用户的目录结构暴露在界面上。
+     * @param props - `{ t, workspace, sessionId, scope, anchor }`。
      */
     function ReviewPanel(props) {
-      const { t, workspace, sessionId, scope, candidates, onPick, anchor } = props
+      const { t, workspace, sessionId, scope, anchor } = props
       const open = usePanelOpen()
       const rootRef = react.useRef(null)
 
@@ -689,7 +693,6 @@ window.__ModuleLoader__.load({
 
       const { files, added, removed } = summarize(active.result)
       const title = scope === 'workspace' ? t('projectTitle') : t('title')
-      const options = Array.isArray(candidates) ? candidates : []
 
       return react.createElement(
         'aside',
@@ -759,36 +762,7 @@ window.__ModuleLoader__.load({
             '×',
           ),
         ),
-        // 工作区选择器：只在项目级且有多个候选时出现。
-        //
-        // 为什么需要：全新状态下应用里可能还没有"当前工作区"（没有任何会话与登记项），
-        // 此时面板必须能列出候选让用户选，而不是猜一个路径。
-        scope === 'workspace' && options.length > 1 && typeof onPick === 'function'
-          ? react.createElement(
-              'div',
-              { style: { padding: '8px 12px 0' } },
-              react.createElement(
-                'select',
-                {
-                  value: workspace ?? '',
-                  onChange: (event) => onPick(event.target.value),
-                  style: {
-                    width: '100%',
-                    padding: '4px 6px',
-                    borderRadius: '6px',
-                    border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
-                    background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-2, #26262c))',
-                    color: 'var(--dsw-alias-label-primary)',
-                    fontSize: '12px',
-                    fontFamily: UI_FONT,
-                  },
-                },
-                options.map((option) =>
-                  react.createElement('option', { key: option, value: option }, option),
-                ),
-              ),
-            )
-          : null,
+        // 工作区选择器已移除：工作区跟随当前对话，不可编辑、也不展示路径。
         react.createElement(
           'div',
           { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '16px 18px 20px' } },
@@ -833,52 +807,38 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 在项目页推断"当前工作区"。
+     * 读取**当前会话**的工作区。
      *
-     * 项目页没有会话，因此没有 `sessionId → cwd` 这条现成的路。按可靠性依次尝试：
-     *   1. 最近会话的 cwd —— 用户实际使用时通常已有历史会话，这条最准；
-     *   2. 工作区列表里的第一项 —— 刚安装、还没有任何会话时的兜底。
-     * 两者都拿不到就不渲染入口，而不是猜一个路径（错误的路径只会得到 400）。
+     * 这是项目级面板唯一正确的取值来源。面板挂在全局覆盖层上，拿不到会话作用域的
+     * `sessionId`，但 `sessions` 服务本身是 `inject` 进来的：`state.current` 就是用户
+     * 此刻打开的那个会话（**新建对话在创建时也会被选中**），而 `byId[current].cwd`
+     * 正是它所属的项目。
+     *
+     * 此前这里用的是"最近一个会话的 cwd"（倒序扫 `state.ids`），于是：
+     *   * 切回一个更早的、属于别的项目的对话时，面板仍停在上一个新会话的项目上；
+     *   * 新建对话时面板不会跟着走。
+     * 两者都会表现为"右上角这块没有切到当前项目的空间"（实际反馈）。改成读
+     * `state.current` 后，切换对话与新建对话都会自动跟随。
+     *
      * @param props - 槽注入的属性。
-     * @returns 工作区路径；无法确定时 undefined。
+     * @returns 工作区路径；没有当前会话或该会话还没有 cwd 时 undefined。
      */
-    function resolveProjectWorkspace(props) {
+    function useCurrentWorkspace(props) {
       // 会话存储：`inject` 里声明了 sessions，钩子会随之注入。
-      if (typeof props?.useSessions === 'function') {
-        const recent = props.useSessions((state) => {
-          const list = state?.ids ?? []
-          for (let index = list.length - 1; index >= 0; index -= 1) {
-            const cwd = asPath(state?.byId?.[list[index]]?.cwd)
-            if (cwd !== undefined) return cwd
-          }
-          return undefined
-        })
-        if (recent !== undefined) return recent
-      }
-
-      // 工作区列表：形状是 `{ items: [...] }`。`inject` 里声明了 workspaces。
-      if (typeof props?.useWorkspaces === 'function') {
-        const first = props.useWorkspaces((state) => {
-          const items = state?.items
-          if (!Array.isArray(items)) return undefined
-          for (const item of items) {
-            const root = asPath(item?.path ?? item?.root)
-            if (root !== undefined) return root
-          }
-          return undefined
-        })
-        if (first !== undefined) return first
-      }
-
-      // 最后退回宿主注入的外壳工作区（由 server.mjs 写入 env，插件在 host 侧读取）。
-      return asPath(props?.workspace)
+      return typeof props?.useSessions === 'function'
+        ? props.useSessions((state) => {
+            const current = state?.current
+            if (current === undefined) return undefined
+            return asPath(state?.byId?.[current]?.cwd)
+          })
+        : undefined
     }
 
     /**
      * 读取**全部**已登记的工作区。
      *
-     * 项目级面板需要它：全新状态下既没有会话也没有"当前工作区"，面板必须能列出候选并
-     * 让用户选，而不是猜一个路径（猜错只会得到 400 workspaceNotAllowed）。
+     * 只作为兜底：还没有任何当前会话（全新状态）时，面板得有个地方拿一个可用路径，
+     * 否则只能空着。**不用于让用户挑选**——工作区由当前会话决定，面板不再提供选择器。
      * @param props - 槽注入的属性。
      * @returns 工作区路径数组。
      */
@@ -942,12 +902,9 @@ window.__ModuleLoader__.load({
       const open = usePanelOpen()
       const { ref, anchor } = useAnchor(open)
 
-      // 工作区候选与"当前工作区"都由宿主给出。
-      //
-      // 为什么连"当前是哪个"也问宿主：项目级面板挂在全局覆盖层上，不按会话作用域注入
-      // `useSessions`，因此客户端无法从会话推断；而宿主进程启动时就 `chdir` 到了工作区，
-      // `process.cwd()` 是唯一无需推断的答案。此前客户端退到 `candidates[0]`，结果面板
-      // 显示的是另一个项目（实测：用户在 mmsm-amis 里工作，面板却在看应用自己的仓库）。
+      // 宿主侧的 `/roots`：给出**允许访问**的工作区名单，以及外壳启动时的工作区
+      // （`process.cwd()`）。名单用于兜底与合法性判断，外壳工作区则只在"还没有当前
+      // 会话"时使用——真正决定面板看哪个项目的是当前会话（见下面的 `useCurrentWorkspace`）。
       const [roots, setRoots] = react.useState([])
       const [hostCurrent, setHostCurrent] = react.useState(undefined)
       react.useEffect(() => {
@@ -971,21 +928,25 @@ window.__ModuleLoader__.load({
 
       const fromHooks = useWorkspaceList(props)
       const candidates = roots.length > 0 ? roots : fromHooks
-      const inferred = resolveProjectWorkspace(props)
+      // **当前会话的工作区**排在第一位：切换对话或新建对话后，面板必须立刻跟到那个
+      // 对话所属的项目上。后面几项只在"还没有当前会话"（全新状态）时兜底。
+      const session = useCurrentWorkspace(props)
 
-      // 诊断快照：这块面板的状态分布在"宿主的当前值 / 宿主给的名单 / 注入的钩子 / 推断"
-      // 四处，出问题时从界面上只能看到"选错了项目"，无法判断是哪一环出错。挂到 window 上
-      // 后，脚本可以一眼看清每一环的实际值。
+      // 诊断快照：这块面板的状态分布在"当前会话 / 宿主的当前值 / 宿主给的名单 /
+      // 注入的钩子"四处，出问题时从界面上只能看到"对不上项目"，无法判断是哪一环出错。
+      // 挂到 window 上后，脚本可以一眼看清每一环的实际值。
       if (typeof window !== 'undefined') {
-        window.__dshDesktopReviewPanel = { roots, hostCurrent, fromHooks, inferred }
+        window.__dshDesktopReviewPanel = { roots, hostCurrent, fromHooks, session }
       }
 
-      // 优先级：用户手动选定 > 宿主给的当前工作区 > 推断值 > 候选第一项。
+      // 优先级：当前会话的 cwd > 宿主给的当前工作区 > 候选第一项。
       //
-      // 宿主给的当前值排在推断之前，因为它来自 `process.cwd()`——进程就启动在那个目录，
-      // 不需要任何推断；而"最近会话的 cwd"在项目页拿不到、在会话页也可能指向别的项目。
-      const [picked, setPicked] = react.useState(undefined)
-      const workspace = picked ?? hostCurrent ?? inferred ?? candidates[0]
+      // 为什么当前会话优先：工作区是**会话的属性**，不是外壳的属性。用户在界面里可以
+      // 让每个对话属于不同项目，而外壳启动时的 `--workspace` 只是其中一个，所以
+      // `process.cwd()` 只能在没有当前会话时用（例如刚打开、还没进对话）。
+      //
+      // 不再保留任何"用户手动选定"的状态：工作区不可编辑，面板始终跟随当前对话。
+      const workspace = session ?? hostCurrent ?? candidates[0]
       const [count, setCount] = react.useState(null)
 
       react.useEffect(() => {
@@ -1007,7 +968,7 @@ window.__ModuleLoader__.load({
         }
       }, [workspace])
 
-      // 拿不到工作区时**也要渲染按钮**：面板自己能列出候选让用户选。
+      // 拿不到工作区时**也要渲染按钮**：面板会说明当前没有可用的工作区。
       // 此前这里直接 return null，结果在"还没有任何会话与登记工作区"的状态下入口彻底
       // 消失，用户看到的是"这个功能不存在"。
       const hasChanges = typeof count === 'number' && count > 0
@@ -1036,7 +997,7 @@ window.__ModuleLoader__.load({
           'button',
           {
             type: 'button',
-            title: workspace === undefined ? t('projectPick') : t('projectTitle'),
+            title: t('projectTitle'),
             'aria-expanded': open,
             onClick: () => panelStore.set(!open),
             style: {
@@ -1076,8 +1037,6 @@ window.__ModuleLoader__.load({
           t,
           workspace,
           scope: 'workspace',
-          candidates,
-          onPick: setPicked,
           anchor,
         }),
       )
@@ -1246,7 +1205,7 @@ window.__ModuleLoader__.load({
       }
       if (phase === 'error') {
         // `noWorkspace` 是一个内部代号，翻成给用户看的话。
-        const text = message === 'noWorkspace' ? t('projectPick') : message
+        const text = message === 'noWorkspace' ? t('noWorkspace') : message
         return react.createElement('div', { style: { color: '#f0c8c8', fontSize: '12px', padding: '10px 2px' } }, text)
       }
       if (result?.isRepo === false) {
