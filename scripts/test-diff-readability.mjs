@@ -78,6 +78,12 @@ async function measure(themeBaseValue) {
       const drawer = document.querySelector('aside[style*=fixed]');
       if (!drawer) return JSON.stringify({ found: false, why: 'no-drawer' });
 
+      // 差异行：按插件自己打的标记取，而不是靠层级猜——面板的外观会变，这个标记不会。
+      // 行的子元素顺序是插件保证的契约：children[0] 行号栏、children[1] 增删标记、
+      // children[2] 代码正文。
+      const rows = [...drawer.querySelectorAll('[data-review-diff-row]')];
+      if (rows.length === 0) return JSON.stringify({ found: false, why: 'no-diff-rows' });
+
       // 断言方式：测出**实际渲染的前景色**，与"主题基色"比较亮度。
       //
       // 为什么不直接用合成后的行底色算对比度：行底色是半透明的，要正确合成必须
@@ -107,8 +113,11 @@ async function measure(themeBaseValue) {
         rowCount: rows.length,
         added: sample(true),
         removed: sample(false),
-        hasLineNumbers: rows.length > 0 && /\\d/.test(rows[0].children[0].textContent || ''),
-        monoFont: /mono/i.test(getComputedStyle(rows[0] ?? drawer).fontFamily || ''),
+        // 取"至少有一行带行号"而不是只看第一行：文件头（diff --git …）那类元数据行
+        // 本来就没有行号，用第一行判定会误报。
+        hasLineNumbers: rows.some((row) => /\\d/.test(row.children[0]?.textContent || '')),
+        // 等宽字体挂在差异容器上，测容器比测某一行稳（行的字体随实现变）。
+        monoFont: /mono/i.test(getComputedStyle(drawer.querySelector('[data-review-diff]') ?? rows[0] ?? drawer).fontFamily || ''),
       });
     })()
   `)

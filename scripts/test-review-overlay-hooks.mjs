@@ -117,6 +117,41 @@ async function renderSettled(Comp, props, key) {
   return out
 }
 
+/**
+ * 收集元素树里的**宿主**节点，并把函数组件就地展开。
+ *
+ * 为什么必须展开：桩渲染器不会自动执行嵌套组件（真实 React 会），而 `FileList`、
+ * `HistoryList`、`statusBlock` 都是函数组件——不展开就只能看到面板自己那一层，
+ * 断言会误判成"文件行没渲染"。
+ *
+ * 展开时按树中的位置给每个组件分配稳定的 hook key，因此跨多次渲染仍然保持状态
+ * （展开文件、切换分组都依赖这一点）。
+ * @param node - 元素树（或其中一棵子树）。
+ * @returns 全部宿主节点。
+ */
+function collectHostNodes(node) {
+  const out = []
+  const visit = (current, key) => {
+    if (current === null || current === undefined) return
+    if (Array.isArray(current)) {
+      current.forEach((child, index) => visit(child, `${key}.${index}`))
+      return
+    }
+    if (typeof current !== 'object') return
+    if (typeof current.type === 'function') {
+      const name = current.type.name === '' ? 'anonymous' : current.type.name
+      const childKey = `${key}:${name}`
+      const { tree } = render(current.type, current.props, childKey)
+      visit(tree, childKey)
+      return
+    }
+    out.push(current)
+    visit(current.props?.children, key)
+  }
+  visit(node, 'root')
+  return out
+}
+
 // ---- 假会话 / 工作区 store（真实形状：{ ids, byId, current }） -------------------
 let sessionSnapshot = {
   current: 's2',
@@ -139,26 +174,68 @@ const makeSelectorHook = (read) => (selector) =>
 
 // ---- 假 DOM / fetch --------------------------------------------------------------
 const fetches = []
-globalThis.fetch = async (url, init) => {
-  fetches.push({ url: String(url), body: init?.body })
-  if (String(url).includes('/roots')) {
-    return {
-      ok: true,
-      text: async () =>
-        JSON.stringify({
-          roots: ['C:\\Users\\Administrator', 'F:\\code\\projA', 'F:\\code\\projB', 'F:\\code\\projC'],
-          // 外壳的工作区：不是仓库，正是当初被误当成"当前工作区"的那个。
-          current: 'C:\\Users\\Administrator',
-        }),
-    }
-  }
-  return { ok: true, text: async () => JSON.stringify({ isRepo: true, files: [] }) }
+/** 改动数据：一份足够真实的最小负载（两个文件 + 一段可展开的差异）。 */
+const CHANGES = {
+  isRepo: true,
+  scope: 'workspace',
+  files: [
+    { path: 'src/app.ts', status: 'M', added: 3, removed: 1 },
+    { path: 'docs/readme.md', status: 'A', added: 5, removed: 0 },
+  ],
+  diff: [
+    'diff --git a/src/app.ts b/src/app.ts',
+    'index 1111111..2222222 100644',
+    '--- a/src/app.ts',
+    '+++ b/src/app.ts',
+    '@@ -1,3 +1,5 @@',
+    ' const a = 1',
+    '-const b = 2',
+    '+const b = 3',
+    '+const c = 4',
+    '',
+  ].join('\n'),
+  truncated: false,
+}
+const HISTORY = {
+  isRepo: true,
+  branch: 'main',
+  commits: [
+    { hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'tester', date: '2026-01-02', subject: 'second commit' },
+    { hash: 'b'.repeat(40), short: 'bbbbbbb', author: 'tester', date: '2026-01-01', subject: 'first commit' },
+  ],
 }
 
+globalThis.fetch = async (url, init) => {
+  fetches.push({ url: String(url), body: init?.body })
+  const target = String(url)
+  const payload = target.includes('/roots')
+    ? {
+        roots: ['C:\\Users\\Administrator', 'F:\\code\\projA', 'F:\\code\\projB', 'F:\\code\\projC'],
+        // 外壳的工作区：不是仓库，正是当初被误当成"当前工作区"的那个。
+        current: 'C:\\Users\\Administrator',
+      }
+    : target.includes('/history')
+      ? HISTORY
+      : CHANGES
+  return { ok: true, text: async () => JSON.stringify(payload) }
+}
+
+/** 事件登记表：`type -> Set<handler>`。拖动要靠它把 mousemove/mouseup 真的派发出去。 */
+const domListeners = new Map()
 globalThis.document = {
   head: { appendChild() {} },
-  addEventListener() {},
-  removeEventListener() {},
+  body: { dataset: {} },
+  addEventListener(type, handler) {
+    if (!domListeners.has(type)) domListeners.set(type, new Set())
+    domListeners.get(type).add(handler)
+  },
+  removeEventListener(type, handler) {
+    domListeners.get(type)?.delete(handler)
+  },
+  /** 派发一个事件（测试用，替代真实 DOM 的事件系统）。 */
+  emit(type, event) {
+    for (const handler of domListeners.get(type) ?? []) handler(event)
+  },
   querySelector: () => null,
   createElement: () => ({ dataset: {}, style: {}, textContent: '', remove() {} }),
 }
@@ -166,7 +243,11 @@ const storage = { 'dsh.review.panelOpen': '1' }
 globalThis.window = {
   innerWidth: 1400,
   innerHeight: 900,
-  localStorage: { getItem: (k) => storage[k] ?? null, setItem: (k, v) => { storage[k] = v } },
+  localStorage: {
+    getItem: (k) => storage[k] ?? null,
+    setItem: (k, v) => { storage[k] = v },
+    removeItem: (k) => { delete storage[k] },
+  },
   addEventListener() {},
   removeEventListener() {},
   __ModuleLoader__: {
@@ -277,6 +358,105 @@ check(
   panel.some((n) => typeof n.props?.children === 'string' && /[A-Za-z]:\\/.test(n.props.children)),
   'false',
 )
+
+// ---- 5. 抽屉本体：宽度可拖动 + IDEA 式结构 -------------------------------------
+//
+// 面板是嵌套组件（挂在 shell.overlay 的入口里），要单独渲染才能看到它的 DOM。
+console.log('')
+console.log('=== 5. 抽屉：宽度可调 ===')
+let panelElement
+walk(third.tree, (node) => {
+  if (typeof node.type === 'function' && node.type.name === 'ReviewPanel') panelElement = node
+})
+check('找到嵌套的 ReviewPanel', panelElement !== undefined, 'true')
+
+const drawer = render(panelElement.type, panelElement.props, 'panel')
+for (const effect of drawer.effects) effect()
+await new Promise((resolve) => setTimeout(resolve, 0))
+
+const drawerNodes = []
+walk(drawer.tree, (node) => drawerNodes.push(node))
+
+check('抽屉是 aside', drawer.tree.type, 'aside')
+check('抽屉是 fixed 定位', drawer.tree.props?.style?.position, 'fixed')
+
+const resizer = drawerNodes.find((node) => node.props?.['data-review-resizer'] !== undefined)
+check('存在宽度手柄', resizer !== undefined, 'true')
+check('手柄是 button', resizer?.type, 'button')
+check('手柄声明为 separator', `${resizer?.props?.role}/${resizer?.props?.['aria-orientation']}`, 'separator/vertical')
+check('手柄有本地化说明', typeof resizer?.props?.['aria-label'], 'string')
+
+// 键盘调整：ArrowLeft 变宽、ArrowRight 变窄、Home 复位（不依赖鼠标事件）。
+const widthOf = (tree) => Number.parseInt(String(tree.props.style.width), 10)
+const startWidth = widthOf(drawer.tree)
+check('宽度取自持久化默认值', startWidth, 480)
+
+const press = (key) => {
+  let prevented = false
+  resizer.props.onKeyDown({ key, preventDefault: () => { prevented = true } })
+  return { prevented, tree: render(panelElement.type, panelElement.props, 'panel').tree }
+}
+const left = press('ArrowLeft')
+check('ArrowLeft 被处理', left.prevented, 'true')
+check('ArrowLeft 之后变宽', widthOf(left.tree) > startWidth, 'true')
+const right = press('ArrowRight')
+check('ArrowRight 之后变窄', widthOf(right.tree) < widthOf(left.tree), 'true')
+const home = press('Home')
+check('Home 复位到默认宽度', widthOf(home.tree), startWidth)
+
+// 鼠标拖动：按下手柄 → 向左移动 120px → 松开，宽度应增加 120。
+const dragStart = { clientX: 1000, button: 0, preventDefault() {} }
+resizer.props.onMouseDown(dragStart)
+check('拖动期间标记了 body', globalThis.document.body?.dataset?.reviewDragging, '1')
+globalThis.document.emit('mousemove', { clientX: 880 })
+const dragged = render(panelElement.type, panelElement.props, 'panel').tree
+check('向左拖动 120px 后变宽 120', widthOf(dragged) - startWidth, 120)
+globalThis.document.emit('mouseup', {})
+check('松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDragging, undefined)
+
+console.log('')
+console.log('=== 6. IDEA 式结构 ===')
+// 面板的数据是异步取的：桩渲染不会自动重渲染，所以"渲染两次 + 执行副作用"才能看到
+// 文件列表与提交历史（真实 React 会在 setState 后自己重渲染）。
+const renderPanel = async () => {
+  let out = render(panelElement.type, panelElement.props, 'panel')
+  for (const effect of out.effects) effect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  out = render(panelElement.type, panelElement.props, 'panel')
+  for (const effect of out.effects) effect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  return out
+}
+
+const settled = await renderPanel()
+const settledNodes = collectHostNodes(settled.tree)
+if (process.env.DSH_TEST_DEBUG === '1') {
+  console.log('  [debug] workspace prop =', JSON.stringify(panelElement.props.workspace))
+  console.log('  [debug] requests =', fetches.map((f) => f.url.replace(/^.*\/review\//u, '')).join(' | '))
+}
+const tags = new Set(settledNodes.filter((n) => typeof n.type === 'string').map((n) => n.type))
+console.log(`  宿主元素: ${[...tags].sort().join(', ')}`)
+check('渲染出两个文件行', settledNodes.filter((n) => typeof n.props?.title === 'string' && n.props.title.includes('/')).length, 2)
+check('有分区标题', settledNodes.some((n) => n.props?.['data-review-section-title'] !== undefined), 'true')
+check('有刷新按钮', settledNodes.some((n) => n.type === 'button' && n.props?.title === 'refresh'), 'true')
+check('有收起按钮', settledNodes.some((n) => n.type === 'button' && n.props?.title === 'collapse'), 'true')
+check('行内「还原」也收成图标按钮', settledNodes.filter((n) => n.props?.className === 'dsh-review-revert' && n.props?.['data-review-icon-button'] !== undefined).length, 2)
+check('还原按钮的 title 仍是「还原」（脚本依赖）', settledNodes.filter((n) => n.props?.title === 'revert').length, 2)
+check('文件行 title 是完整路径（脚本依赖）', settledNodes.some((n) => n.props?.title === 'src/app.ts'), 'true')
+check('文件行带状态徽标', settledNodes.some((n) => n.props?.['data-review-status'] !== undefined), 'true')
+check('提交历史渲染了 2 条', settledNodes.filter((n) => n.props?.className === 'dsh-review-history').length, 2)
+
+// 展开第一个文件：差异容器与差异行必须出现，且行的子元素顺序保持
+// 「行号 → 增删标记 → 代码」（test-diff-readability.mjs 按这个顺序取样）。
+settledNodes.find((n) => n.props?.title === 'src/app.ts').props.onClick()
+const expanded = await renderPanel()
+const expandedNodes = collectHostNodes(expanded.tree)
+check('展开后出现差异容器', expandedNodes.some((n) => n.props?.['data-review-diff'] !== undefined), 'true')
+const diffRows = expandedNodes.filter((n) => n.props?.['data-review-diff-row'] !== undefined)
+check('差异行已渲染', diffRows.length > 0, 'true')
+const addRow = diffRows.find((row) => row.props.children?.[1]?.props?.children === '+')
+check('增行标记在第二个子元素', addRow !== undefined, 'true')
+check('行号在第一个子元素', /\d/.test(JSON.stringify(addRow?.props.children?.[0] ?? null)), 'true')
 
 console.log('')
 console.log(failures === 0 ? '项目级入口钩子全部通过' : `${failures} 项失败`)

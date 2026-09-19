@@ -48,6 +48,12 @@ const MAX_BRANCHES = 500
 /**
  * 运行一条 git 命令。
  *
+ * **一律带上 `-c core.fileMode=false`**：Windows 表达不了可执行位，而仓库若带着
+ * `core.fileMode=true`（从 Linux 仓库带过来的配置极常见），`git status` 会把
+ * `docker/entrypoint.sh` 这类"HEAD 是 100755、工作区是 100644"的文件报成已修改——
+ * 内容一个字没变，徽章上的改动数却是 1。带上该标志后 git 不再比较可执行位，
+ * 实测改动数从 1 变 0（审查插件那边同理，见 dsh-client-ui-review 的说明）。
+ *
  * @param args - 参数数组（不含 `git` 本身）。
  * @param cwd - 仓库工作目录。
  * @returns stdout；失败时抛出带 stderr 的错误。
@@ -57,7 +63,7 @@ function git(args, cwd) {
     execFile(
       'git',
       // `-C <dir>` 而不是 cwd 选项：显式指定仓库目录，且不依赖进程当前目录。
-      ['-C', cwd, ...args],
+      ['-c', 'core.fileMode=false', '-C', cwd, ...args],
       { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error !== null) {

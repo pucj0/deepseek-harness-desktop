@@ -14,7 +14,8 @@
 // 因此基线必须能覆盖未跟踪文件，也必须廉价（大仓库遍历一遍很慢，而 git 会复用已有对象、
 // 只对变化的文件重新哈希）。
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
 /** 插件名，用于诊断与 effect 标签。 */
@@ -36,6 +37,15 @@ const MAX_DIFF_BYTES = 512 * 1024
 /** 树对象 SHA 格式：40 位十六进制。用于校验客户端传来的基线。 */
 const REVISION_PATTERN = /^[0-9a-f]{40}$/u
 
+/**
+ * 判定"残留索引锁"的年龄阈值（毫秒）。
+ *
+ * 必须是"活着的那次快照不可能还在跑"的量级：GIT_TIMEOUT_MS 是 240 秒，但那是给超大
+ * 仓库的余地，正常快照在几秒内结束。取 3 分钟——比正常长得多，又明显短于用户等待的
+ * 耐心，于是既不会误删活锁，也不至于让面板永久卡死。
+ */
+const STALE_LOCK_MS = 3 * 60 * 1000
+
 /** 允许还原的路径形状。
  *
  * 必须挡住绝对路径与 `..`：还原会把文件写回工作区，是少数**写**工作区的操作，
@@ -44,9 +54,6 @@ const SAFE_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]{1,1024}$/u
 
 /** 每个会话的基线状态。 */
 const baselines = new Map()
-
-/** 临时 index 的存放根目录（随进程生命周期，进程退出即失效）。 */
-let scratchRoot
 
 /**
  * 解析外壳允许被操作的工作区集合。
@@ -103,6 +110,15 @@ function validateWorkspace(requested) {
 
 /**
  * 运行一条 git 命令。
+ *
+ * **一律带上 `-c core.fileMode=false`**：本插件用 `git add -A` + `git write-tree` 给
+ * 工作区拍快照，而 Windows 上根本表达不了可执行位。当仓库带着 `core.fileMode=true`
+ * （从 Linux 仓库带过来的配置极常见）时，`add` 会把 `docker/entrypoint.sh` 这类
+ * 文件记成 `100644`，而 HEAD 里是 `100755`——于是快照树与 HEAD 之间冒出一条
+ * `old mode 100755 / new mode 100644` 的"修改"：行数 0/0，内容一个字没变。
+ * 实测复现过：带该标志时快照树保持 100755、差异为空；不带时树变成 100644。
+ * 界面上的表现就是"根本没改过的文件也被列成改动"，这正是用户反馈的现象。
+ *
  * @param args - 参数数组（不含 `git`）。
  * @param cwd - 仓库目录。
  * @param env - 额外环境变量（用于传入临时 index）。
@@ -112,7 +128,7 @@ function git(args, cwd, env) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      ['-C', cwd, ...args],
+      ['-c', 'core.fileMode=false', '-C', cwd, ...args],
       { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
         if (error !== null) {
@@ -126,21 +142,74 @@ function git(args, cwd, env) {
 }
 
 /**
- * 为某个会话取得（必要时创建）临时 index 路径。
+ * 索引内容的格式版本。
  *
- * 按会话保持同一个 index 文件：git 会在里面记录 stat 缓存，因此后续快照只需重新哈希
- * 真正变化的文件，而不是每次遍历整棵树。
- * @param sessionId - 会话标识。
- * @returns index 文件绝对路径与其所在目录。
+ * 凡是会**改变已记录索引内容正确性**的改动都要 +1：git 的索引带 stat 缓存，
+ * 旧索引里的条目会被原样沿用（`add` 发现 stat 未变就跳过），所以修好记录逻辑并不
+ * 自动修好旧索引——幽灵条目会一直在。
+ *
+ * 版本 2：快照改为 `core.fileMode=false`（见上面 `git()` 的说明）。版本 1 的索引里
+ * 可能记着 100644，而 HEAD 是 100755。
  */
-function indexFor(sessionId) {
+const INDEX_VERSION = 2
+
+/** 临时 index 的存放根目录（按进程 PID 命名，只归本进程使用；进程退出即清理）。 */
+let scratchRoot
+
+/** 取（必要时创建）临时 index 的根目录。 */
+function scratchDir() {
   if (scratchRoot === undefined) {
     scratchRoot = join(process.env.TEMP ?? process.env.TMPDIR ?? '/tmp', `dsh-review-${process.pid}`)
     mkdirSync(scratchRoot, { recursive: true })
   }
+  return scratchRoot
+}
+
+/**
+ * 丢弃**旧版本**留下的临时索引。
+ *
+ * 不做这一步的话，升级到本版本后旧索引仍会被沿用，`core.fileMode` 的幽灵条目会一直
+ * 显示到用户换项目、换会话或手工清理临时目录为止——也就是"修了但看起来没修"。
+ * 索引是可再生的派生数据（丢了只是下一次快照慢一点），因此整体丢弃是安全的。
+ */
+function ensureIndexVersion() {
+  const root = scratchDir()
+  const marker = join(root, 'pipeline.json')
+  try {
+    if (JSON.parse(readFileSync(marker, 'utf8'))?.indexVersion === INDEX_VERSION) return
+  } catch {
+    // 没有标记或读不出来：按旧版本处理。
+  }
+  for (const entry of readdirSync(root)) {
+    if (entry.endsWith('.index') || entry.endsWith('.index.lock')) rmSync(join(root, entry), { force: true })
+  }
+  try {
+    writeFileSync(marker, JSON.stringify({ indexVersion: INDEX_VERSION }, null, 2) + '\n')
+  } catch {
+    // 写不了标记只意味着下次启动再清一遍，不影响正确性。
+  }
+}
+
+/**
+ * 为某个会话 + 某个工作区取得临时 index 路径。
+ *
+ * 按"会话 + 工作区"保持同一个 index 文件：git 会在里面记录 stat 缓存，因此后续快照
+ * 只需重新哈希真正变化的文件，而不是每次遍历整棵树。
+ *
+ * **工作区必须参与命名**：索引是与仓库强相关的（路径、stat 缓存、对象库都不同），
+ * 而项目级面板的请求对所有项目共用同一个会话标识（`default`）。此前只用会话命名，
+ * 于是切到另一个项目后 git 会被喂上一份**别的仓库的索引**——轻则结果错乱，重则
+ * 直接报错。工作区路径用哈希进入文件名：它可能很长且含不适合做文件名的字符。
+ *
+ * @param sessionId - 会话标识。
+ * @param workspace - 工作区绝对路径。
+ * @returns index 文件绝对路径。
+ */
+function indexFor(sessionId, workspace) {
   // 会话 id 来自客户端，做个保守的字符过滤以免拼出意外路径。
   const safe = String(sessionId).replace(/[^A-Za-z0-9_-]/gu, '_').slice(0, 80)
-  return join(scratchRoot, `${safe}.index`)
+  const key = createHash('sha1').update(String(workspace)).digest('hex').slice(0, 10)
+  return join(scratchDir(), `${safe}-${key}.index`)
 }
 
 /**
@@ -154,6 +223,43 @@ function indexFor(sessionId) {
 const inFlightSnapshots = new Map()
 
 /**
+ * 在临时索引上跑一段 git，遇到**残留锁**时清掉重试一次。
+ *
+ * 为什么需要：锁目录按进程 PID 命名（`dsh-review-<pid>`），只归本进程使用；同一 key 的
+ * 并发调用已在调用方合并，不同 key 用的是不同索引文件。因此这里遇到的 `index.lock`
+ * 只可能来自**上一次被中断**的运行（快照在超大仓库上要跑几十秒，请求超时或进程被杀时
+ * git 可能来不及清理锁）。
+ *
+ * 后果很严重：锁一旦残留，此后每一次快照都失败，面板永远显示这行 git 报错——本次实测
+ * 就撞上了（一次超时请求留下锁，之后所有请求 500）。所以必须能自愈。
+ *
+ * 只清**旧**锁：正在被另一个 git 持有的锁是新鲜的（快照最长几十秒），删掉它会让两个
+ * git 同时写同一个索引。
+ *
+ * @param indexPath - 临时 index 路径。
+ * @param task - 实际执行的 git 操作。
+ * @returns task 的结果。
+ */
+async function withIndexLockRecovery(indexPath, task) {
+  try {
+    return await task()
+  } catch (error) {
+    const message = String(error?.message ?? error)
+    if (!/index\.lock/u.test(message) || !/File exists/u.test(message)) throw error
+    const lockPath = `${indexPath}.lock`
+    let ageMs = Number.POSITIVE_INFINITY
+    try {
+      ageMs = Date.now() - statSync(lockPath).mtimeMs
+    } catch {
+      // 锁已经不在了（另一个进程自己清掉了）：直接重试。
+    }
+    if (ageMs < STALE_LOCK_MS) throw error
+    rmSync(lockPath, { force: true })
+    return await task()
+  }
+}
+
+/**
  * 从零给工作区拍一张完整快照（遍历整棵树），返回树对象 SHA。
  *
  * **只在记录基线时调用**：它要为所有变动文件重新计算哈希，代价与它们数量成正比。
@@ -165,14 +271,16 @@ const inFlightSnapshots = new Map()
  * @returns 树对象 SHA。
  */
 async function snapshot(workspace, sessionId) {
-  const indexPath = indexFor(sessionId)
+  const indexPath = indexFor(sessionId, workspace)
   const env = { GIT_INDEX_FILE: indexPath }
   try {
-    // 空仓库没有 HEAD 可读——从空 index 开始即可。
-    await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
-    // -A：已跟踪的修改与删除、新增文件、以及按 .gitignore 规则纳入的未跟踪文件。
-    await git(['add', '-A'], workspace, env)
-    return (await git(['write-tree'], workspace, env)).trim()
+    return await withIndexLockRecovery(indexPath, async () => {
+      // 空仓库没有 HEAD 可读——从空 index 开始即可。
+      await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
+      // -A：已跟踪的修改与删除、新增文件、以及按 .gitignore 规则纳入的未跟踪文件。
+      await git(['add', '-A'], workspace, env)
+      return (await git(['write-tree'], workspace, env)).trim()
+    })
   } catch (error) {
     // 临时 index 坏掉时删掉，下次重建。
     rmSync(indexPath, { force: true })
@@ -197,18 +305,20 @@ async function currentTree(workspace, sessionId) {
   if (running !== undefined) return running
 
   const task = (async () => {
-    const indexPath = indexFor(`${sessionId}-current`)
+    const indexPath = indexFor(`${sessionId}-current`, workspace)
     const env = { GIT_INDEX_FILE: indexPath }
-    // 索引首次使用（或损坏）时从 HEAD 起一个基准，让后续的 add -A 有比较对象。
-    //
-    // 绝不能在每次调用时都 read-tree：那会重置索引、连带丢掉 stat 缓存，add -A 于是
-    // 每次都退化成全量重新哈希（实测 4.3 秒而不是 0.22 秒）。这个代价不明显，因为结果
-    // 依然正确——只是慢，所以很容易一直留着。
-    if (!existsSync(indexPath)) {
-      await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
-    }
-    await git(['add', '-A'], workspace, env)
-    return (await git(['write-tree'], workspace, env)).trim()
+    return withIndexLockRecovery(indexPath, async () => {
+      // 索引首次使用（或损坏）时从 HEAD 起一个基准，让后续的 add -A 有比较对象。
+      //
+      // 绝不能在每次调用时都 read-tree：那会重置索引、连带丢掉 stat 缓存，add -A 于是
+      // 每次都退化成全量重新哈希（实测 4.3 秒而不是 0.22 秒）。这个代价不明显，因为结果
+      // 依然正确——只是慢，所以很容易一直留着。
+      if (!existsSync(indexPath)) {
+        await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
+      }
+      await git(['add', '-A'], workspace, env)
+      return (await git(['write-tree'], workspace, env)).trim()
+    })
   })().finally(() => {
     inFlightSnapshots.delete(key)
   })
@@ -261,6 +371,47 @@ async function readSmallBody(request) {
 }
 
 /**
+ * 判断一条改动是否**只有元数据变化**（文件模式），而不是内容变化。
+ *
+ * 为什么会遇到：仓库带 `core.fileMode=true`（从 Linux 仓库带过来的配置很常见）时，
+ * Windows 上 `git add -A` 会把本来 100755 的脚本记成 100644；`git diff` 于是报出一条
+ * `old mode 100755 / new mode 100644`，而行数是 `0 0`——内容一个字都没变。界面上的
+ * 表现就是"根本没改过的文件也被列成改动"（实际反馈里是 `修改 docker/entrypoint.sh +0 −0`）。
+ *
+ * 现在 `git()` 已经统一带上 `-c core.fileMode=false`，正常情况下不会再产生这种条目；
+ * 这里再把它们挡在响应之外，是为了兼容旧索引、以及用户自己用别的工具改过索引的情况。
+ *
+ * 判据用 numstat 的 0/0 **加上**状态 M：二进制的 numstat 是 `-`（解析成 null），
+ * 重命名是 `R100`（状态不是 M，虽然也是 0/0，但必须保留）。
+ * @param file - `{ path, status, added, removed }`。
+ * @returns 只有元数据变化则 true。
+ */
+function isMetadataOnly(file) {
+  return file.status === 'M' && file.added === 0 && file.removed === 0
+}
+
+/**
+ * 从统一差异里删掉指定文件的片段。
+ *
+ * 按行首的 `diff --git ` 切分，再按 `b/<路径>` 取路径。必须连差异正文一起删：文件列表
+ * 与差异是两个来源（numstat / name-status 与 unified），只删列表会在展开处露出一个
+ * 空壳片段。
+ * @param diff - 统一差异全文。
+ * @param paths - 要删掉的路径集合。
+ * @returns 过滤后的差异文本。
+ */
+function dropDiffSections(diff, paths) {
+  if (paths.size === 0 || diff === '') return diff
+  return diff
+    .split(/^(?=diff --git )/mu)
+    .filter((part) => {
+      const match = / b\/(.+)$/u.exec(part.split('\n', 1)[0])
+      return match === null || !paths.has(match[1])
+    })
+    .join('')
+}
+
+/**
  * 把 git 的三份输出整理成前端要的形状。
  *
  * 两处路由（本轮差异、工作区差异）需要同样的结构，因此集中在这里——否则两边的行数
@@ -281,7 +432,7 @@ function describeDiff({ stat, names, diff }) {
     })
   }
 
-  const files = []
+  const all = []
   for (const line of names.split('\n')) {
     if (line.trim() === '') continue
     const [status, ...rest] = line.split('\t')
@@ -289,7 +440,7 @@ function describeDiff({ stat, names, diff }) {
     const path = rest[rest.length - 1]
     if (path === undefined) continue
     const count = counts.get(path)
-    files.push({
+    all.push({
       path,
       status,
       added: count?.added ?? null,
@@ -297,8 +448,12 @@ function describeDiff({ stat, names, diff }) {
     })
   }
 
-  const truncated = diff.length > MAX_DIFF_BYTES
-  return { files, diff: truncated ? diff.slice(0, MAX_DIFF_BYTES) : diff, truncated }
+  const metadataOnly = new Set(all.filter(isMetadataOnly).map((file) => file.path))
+  const files = all.filter((file) => !metadataOnly.has(file.path))
+  const body = dropDiffSections(diff, metadataOnly)
+
+  const truncated = body.length > MAX_DIFF_BYTES
+  return { files, diff: truncated ? body.slice(0, MAX_DIFF_BYTES) : body, truncated }
 }
 
 /**
@@ -588,6 +743,9 @@ function createReviewHandler() {
  * @param ctx - host 侧 cordis 上下文。
  */
 export function apply(ctx) {
+  // 先按版本清理临时索引：旧索引里的 stat 缓存会让它继续沿用修好之前的记录。
+  ensureIndexVersion()
+
   const handler = createReviewHandler()
   for (const path of [
     `${ROUTE_PREFIX}/baseline`,

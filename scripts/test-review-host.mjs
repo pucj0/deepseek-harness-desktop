@@ -12,7 +12,7 @@
 //   4. 未登记的工作区 -> 400
 //   5. 整个过程不污染用户状态：status 与 stash 列表不变
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -249,6 +249,69 @@ try {
   res = await call('/dsh-desktop/review/changes', { workspace: other, sessionId: session })
   check('4) 未登记工作区 -> 400', res.status, 400)
   rmSync(other, { recursive: true, force: true })
+
+  // ---- 10. 只有文件模式变化的不算改动 -------------------------------------
+  //
+  // 实际反馈："这种根本没改变为啥还识别到改动的"——截图里是一条
+  // `修改 docker/entrypoint.sh +0 −0`，差异只有 `old mode 100755 / new mode 100644`。
+  //
+  // 根因：仓库带 core.fileMode=true（从 Linux 仓库带过来的配置很常见）时，Windows 上
+  // `git add -A` 会把 HEAD 里 100755 的脚本记成 100644，于是快照树与 HEAD 之间多出一条
+  // 纯元数据的"修改"。修法有两层：git 调用统一带 `-c core.fileMode=false`（从源头不产生），
+  // 以及 describeDiff 把 `M` + 0/0 的条目连同差异片段一起滤掉（兼容旧索引）。
+  console.log('')
+  console.log('--- 只有模式变化（不该算改动）---')
+  run(['config', 'core.fileMode', 'true'], repo)
+  mkdirSync(join(repo, 'docker'), { recursive: true })
+  writeFileSync(join(repo, 'docker', 'entrypoint.sh'), '#!/bin/sh\necho hi\n')
+  run(['add', '--chmod=+x', 'docker/entrypoint.sh'], repo)
+  run(['commit', '-q', '-m', 'add executable script'], repo)
+  check('   前置：HEAD 里该文件是 100755', run(['ls-tree', 'HEAD', 'docker/entrypoint.sh'], repo).split(' ')[0], '100755')
+
+  res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
+  json = await res.json()
+  const modes = new Map((json.files ?? []).map((f) => [f.path, f]))
+  check('   纯模式变化的文件不在列表里', modes.has('docker/entrypoint.sh'), 'false')
+  check('   差异文本里没有它的片段', (json.diff ?? '').includes('docker/entrypoint.sh'), 'false')
+
+  // 同一个文件真被改了内容时，必须照常列出（证明过滤只针对"0 行变化"）。
+  writeFileSync(join(repo, 'docker', 'entrypoint.sh'), '#!/bin/sh\necho hi\necho changed\n')
+  res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
+  json = await res.json()
+  const changed = (json.files ?? []).find((f) => f.path === 'docker/entrypoint.sh')
+  check('   内容改动后照常列出', changed !== undefined, 'true')
+  check('   且带真实行数', changed?.added, 1)
+  check('   差异里含新内容', (json.diff ?? '').includes('echo changed'), 'true')
+
+  // ---- 11. 残留索引锁必须自愈 ----------------------------------------------
+  //
+  // 实测踩到过：一次超时请求在临时索引上留下 `.index.lock`，此后**每一次**快照都失败，
+  // 面板永远显示那行 git 报错（HTTP 500）。锁目录按 PID 命名、只归本进程使用，因此旧锁
+  // 必然是上一次被中断留下的——清掉重试即可；但**新鲜的锁不能动**，它可能正被另一个
+  // git 持有（两个进程同时写同一个索引会损坏它）。
+  console.log('')
+  console.log('--- 残留索引锁 ---')
+  const scratch = join(tmpdir(), `dsh-review-${child.pid}`)
+  // 项目级请求（/workspace）用的是 `<会话>-workspace-current-<工作区哈希>.index`。
+  // 只针对它断言：恢复逻辑只清"这次真正要用的那个索引"的锁，别的索引等它自己被用到
+  // 时再清——在那里造锁不会影响本次请求，断言它就没意义了。
+  const used = readdirSync(scratch).find((name) => name.startsWith(`${session}-workspace-current`) && name.endsWith('.index'))
+  check('   项目级索引已就位', used !== undefined, 'true')
+  const lockPath = join(scratch, `${used}.lock`)
+
+  const old = new Date(Date.now() - 10 * 60 * 1000)
+  writeFileSync(lockPath, '')
+  utimesSync(lockPath, old, old)
+  res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
+  check('11) 旧锁被清掉并重试成功 -> 200', res.status, 200)
+  check('   该索引的锁已被清理', existsSync(lockPath), 'false')
+
+  writeFileSync(lockPath, '')
+  res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
+  check('   新鲜锁不会被误删（仍然报错）-> 500', res.status, 500)
+  rmSync(lockPath, { force: true })
+  res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
+  check('   清掉锁后恢复正常 -> 200', res.status, 200)
 } catch (error) {
   failures += 1
   console.error('测试异常:', String(error.message).slice(0, 400))

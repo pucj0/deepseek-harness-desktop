@@ -48,6 +48,94 @@ window.__ModuleLoader__.load({
       .dsh-review-history + .dsh-review-history {
         border-top: 1px solid var(--dsw-alias-border-l1, #eceef2);
       }
+
+      /* ---- 面板外观：参照 IDEA 的 Git 工具窗口 ---- */
+
+      /* 抽屉左边缘的拖拽手柄。8px 宽（比视觉上的 1px 分割线宽得多）是为了好抓；
+       * 真正画出来的只有中间那条线。 */
+      [data-review-resizer] {
+        position: absolute; left: 0; top: 0; bottom: 0; width: 8px;
+        cursor: col-resize; z-index: 3; background: transparent; border: none; padding: 0;
+      }
+      [data-review-resizer]::after {
+        content: ''; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px;
+        background: transparent; transition: background-color .15s ease;
+      }
+      [data-review-resizer]:hover::after, [data-review-resizer]:focus-visible::after,
+      [data-review-resizer][data-dragging='1']::after {
+        background: color-mix(in srgb, ${ACCENT} 55%, transparent);
+      }
+      [data-review-resizer]:focus-visible { outline: none; }
+
+      /* 拖动时不要选中文字、也不要让 iframe/文本抢走指针事件。 */
+      body[data-review-dragging='1'] { cursor: col-resize; user-select: none; }
+
+      /* 图标按钮：IDEA 的工具窗按钮是"平时无边框、悬停才出底色"。 */
+      [data-review-icon-button] {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; padding: 0; border-radius: 6px;
+        border: 1px solid transparent; background: transparent;
+        color: var(--dsw-alias-label-secondary); cursor: pointer;
+        transition: background-color .12s ease, color .12s ease;
+      }
+      [data-review-icon-button]:hover:not(:disabled) {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12));
+        color: var(--dsw-alias-label-primary);
+      }
+      [data-review-icon-button]:disabled { opacity: .5; cursor: default; }
+
+      /* 文件行：整行可点、悬停整行高亮，选中态沿用官方强调色。 */
+      .dsh-review-file {
+        transition: background-color .12s ease, border-color .12s ease;
+      }
+      .dsh-review-file[aria-expanded='true'] {
+        border-color: color-mix(in srgb, ${ACCENT} 38%, transparent) !important;
+      }
+      /* 状态徽标：一个字母 + 语义色，扫描列表时最省力。 */
+      [data-review-status] {
+        flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+        min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px;
+        font-family: ${UI_FONT}; font-size: 11px; font-weight: 600; line-height: 1;
+      }
+      /* 路径里的目录部分压暗，文件名留亮——IDEA 的改动列表就是这个层次。 */
+      [data-review-path-dir] { color: var(--dsw-alias-label-tertiary); }
+      [data-review-path-name] { color: var(--dsw-alias-label-primary); font-weight: 500; }
+      [data-review-row]:hover [data-review-path-name] { color: ${ACCENT}; }
+
+      /* 差异区：贴近编辑器的观感——连续行底色、行号栏、上下各留一点白。 */
+      [data-review-diff] {
+        border: 1px solid var(--dsw-alias-border-l1, #eceef2);
+        border-radius: 6px; overflow: hidden;
+        background: var(--dsw-alias-bg-layer-1, #fbfbfd);
+      }
+      [data-review-diff-header] {
+        display: flex; align-items: center; gap: 8px;
+        padding: 5px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1, #eceef2);
+        background: var(--dsw-alias-bg-module-platform, #f3f3f5);
+        color: var(--dsw-alias-label-secondary);
+        font-family: ${UI_FONT}; font-size: 11.5px;
+      }
+      [data-review-diff-row] { min-height: 18px; }
+      [data-review-diff-row]:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
+
+      /* 分区标题：吸顶，滚动时仍知道自己在看哪一段。 */
+      [data-review-section-title] {
+        position: sticky; top: 0; z-index: 2;
+        display: flex; align-items: center; gap: 6px;
+        padding: 6px 0; margin: 0 0 2px;
+        background: var(--dsw-alias-bg-base, #fff);
+        font-family: ${UI_FONT}; font-size: 12px; font-weight: 600;
+        color: var(--dsw-alias-label-secondary);
+        letter-spacing: .02em;
+      }
+      [data-review-count] {
+        padding: 0 6px; border-radius: 999px;
+        background: var(--dsw-alias-bg-module-platform, #f0f0f3);
+        color: var(--dsw-alias-label-secondary);
+        font-size: 11px; font-weight: 500; line-height: 17px;
+      }
+      /* 计数：等宽数字，免得数字位数变化时抖动。 */
+      [data-review-stats] { font-variant-numeric: tabular-nums; }
     `
 
     /** 稳定插件名，用于诊断。 */
@@ -77,6 +165,17 @@ window.__ModuleLoader__.load({
     /** 常驻面板开关的持久化键（按应用而非按会话记忆）。 */
     const PANEL_KEY = 'dsh.review.panelOpen'
 
+    /** 抽屉宽度的持久化键。 */
+    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'
+
+    /** 抽屉宽度：默认、下限、绝对上限（上限还会按视口收窄，见 panelWidthMax）。 */
+    const PANEL_WIDTH_DEFAULT = 480
+    const PANEL_WIDTH_MIN = 320
+    const PANEL_WIDTH_MAX = 980
+
+    /** 键盘调整宽度时的步长（方向键）。 */
+    const PANEL_WIDTH_STEP = 24
+
     /** 侧边栏标签正文与标题的槽位。 */
     const TAB_SLOT = 'sidebar.right.pane.tab'
     const TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
@@ -104,7 +203,6 @@ window.__ModuleLoader__.load({
       turnFiles: '本轮修改 {count}',
       files: '{count} 个文件',
       title: '本轮修改审查',
-      summary: '{files} 个文件，+{added} −{removed}',
       noBaseline: '本轮尚未记录基线。开始一轮对话后会自动记录。',
       notRepo: '当前工作区（{name}）不是 git 仓库。',
       clean: '本轮没有改动任何文件。',
@@ -114,6 +212,9 @@ window.__ModuleLoader__.load({
       workspaceClean: '这个项目当前没有未提交的改动。',
       workspaceEmpty: '这个仓库还没有任何提交。',
       collapse: '收起面板',
+      resize: '拖动调整面板宽度（双击复位）',
+      refresh: '刷新',
+      changesTitle: '改动',
       revert: '还原',
       revertConfirm: '确认还原',
       revertConfirmTitle: '确认还原这个文件？',
@@ -139,7 +240,6 @@ window.__ModuleLoader__.load({
       turnFiles: 'Changes {count}',
       files: '{count} files',
       title: 'Turn changes',
-      summary: '{files} files, +{added} −{removed}',
       noBaseline: 'No baseline recorded for this turn yet. It is captured when a turn starts.',
       notRepo: 'The current workspace ({name}) is not a git repository.',
       clean: 'This turn did not change any file.',
@@ -149,6 +249,9 @@ window.__ModuleLoader__.load({
       workspaceClean: 'This project has no uncommitted changes.',
       workspaceEmpty: 'This repository has no commits yet.',
       collapse: 'Collapse panel',
+      resize: 'Drag to resize (double-click to reset)',
+      refresh: 'Refresh',
+      changesTitle: 'Changes',
       revert: 'Revert',
       revertConfirm: 'Confirm revert',
       revertConfirmTitle: 'Revert this file?',
@@ -215,6 +318,54 @@ window.__ModuleLoader__.load({
      */
     function usePanelOpen() {
       return react.useSyncExternalStore(panelStore.subscribe, panelStore.get, () => false)
+    }
+
+    /**
+     * 抽屉宽度。
+     *
+     * 与开关一样存在模块级 + localStorage：面板在两个槽位下是两个组件实例，而宽度是
+     * **用户对这块面板的偏好**，关掉再打开、甚至重启应用都该保持。
+     *
+     * 上限随视口走：抽屉太宽会把主界面挤没，而"多宽算合适"取决于屏幕，因此不写死。
+     */
+    const panelWidthStore = (() => {
+      const read = () => {
+        try {
+          const stored = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
+          return Number.isFinite(stored) && stored > 0 ? stored : PANEL_WIDTH_DEFAULT
+        } catch {
+          return PANEL_WIDTH_DEFAULT
+        }
+      }
+      return {
+        get: read,
+        set: (value) => {
+          try {
+            window.localStorage.setItem(PANEL_WIDTH_KEY, String(value))
+          } catch {
+            // 存不了就只在本实例内生效。
+          }
+        },
+        reset: () => {
+          try {
+            window.localStorage.removeItem(PANEL_WIDTH_KEY)
+          } catch {
+            // 同上。
+          }
+        },
+      }
+    })()
+
+    /** 把任意宽度夹到允许区间。 */
+    function clampPanelWidth(value) {
+      const max = panelWidthMax()
+      return Math.round(Math.min(Math.max(value, PANEL_WIDTH_MIN), max))
+    }
+
+    /** 当前允许的最大宽度：视口的 72%，且不超过 980px。 */
+    function panelWidthMax() {
+      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
+      return Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, Math.round(viewport * 0.72)))
     }
 
     /**
@@ -421,12 +572,16 @@ window.__ModuleLoader__.load({
           'div',
           {
             key: index,
+            // 差异行是"可读性"测试的取样对象（见 scripts/test-diff-readability.mjs）：
+            // 它按 `children[0]` 是行号、`children[1]` 是增删标记来断言，所以下面的
+            // 子元素顺序不能改。
+            'data-review-diff-row': '',
             style: {
               display: 'flex',
               gap: '10px',
               background,
               color: fg,
-              lineHeight: '1.5',
+              lineHeight: '1.55',
             },
           },
           // 行号栏：删除行只显示旧行号，新增行只显示新行号，上下文行两侧都有。
@@ -580,31 +735,25 @@ window.__ModuleLoader__.load({
     function HistoryList(props) {
       const { t, result, phase, message } = props
       if (phase === 'loading') {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' } }, t('loading'))
+        return statusBlock(t('loading'))
       }
       if (phase === 'error') {
         // `noWorkspace` 是内部代号，翻成给用户看的话。
-        return react.createElement(
-          'div',
-          { style: { color: '#f0c8c8', fontSize: '12px' } },
-          message === 'noWorkspace' ? t('noWorkspace') : message,
-        )
+        return statusBlock(message === 'noWorkspace' ? t('noWorkspace') : message, 'error')
       }
       if (result?.isRepo === false) {
-        return react.createElement(
-          'div',
-          { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' } },
-          t('notRepo', { name: projectName(props.workspace) }),
-        )
+        return statusBlock(t('notRepo', { name: projectName(props.workspace) }))
       }
       const commits = result?.commits ?? []
       if (commits.length === 0) {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' } }, t('noHistory'))
+        return statusBlock(t('noHistory'))
       }
+      // 提交行参照 IDEA 的 Log：左边一条竖线 + 节点圆点（这里不是完整的分支图，但保留
+      // 那条视觉轴线，扫读时"这是一个提交序列"一目了然），右边是标题 + 哈希/作者/日期。
       return react.createElement(
         'div',
         { style: { display: 'flex', flexDirection: 'column' } },
-        commits.map((commit) =>
+        commits.map((commit, index) =>
           react.createElement(
             'div',
             {
@@ -613,24 +762,69 @@ window.__ModuleLoader__.load({
               title: `${commit.hash}\n${commit.author} · ${commit.date}`,
               style: {
                 display: 'flex',
-                flexDirection: 'column',
-                gap: '5px',
-                padding: '10px 2px',
-                fontSize: '13px',
+                gap: '10px',
+                padding: '8px 2px',
+                fontSize: '12.5px',
                 fontFamily: UI_FONT,
-                lineHeight: '1.6',
+                lineHeight: 1.5,
               },
             },
+            // 轴线与节点。最后一条不画下半段，避免悬空一截。
             react.createElement(
-              'span',
-              { style: { color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflowWrap: 'anywhere' } },
-              commit.subject,
+              'div',
+              { style: { position: 'relative', flex: '0 0 auto', width: '10px' } },
+              react.createElement('div', {
+                style: {
+                  position: 'absolute',
+                  left: '4px',
+                  top: index === 0 ? '7px' : 0,
+                  bottom: index === commits.length - 1 ? 'auto' : 0,
+                  height: index === commits.length - 1 ? '1px' : 'auto',
+                  width: '1.5px',
+                  background: 'var(--dsw-alias-border-l2, #d8d8e0)',
+                },
+              }),
+              react.createElement('div', {
+                style: {
+                  position: 'absolute',
+                  left: 0,
+                  top: '2px',
+                  width: '9px',
+                  height: '9px',
+                  borderRadius: '50%',
+                  border: `2px solid ${ACCENT}`,
+                  background: 'var(--dsw-alias-bg-base, #fff)',
+                  boxSizing: 'border-box',
+                },
+              }),
             ),
             react.createElement(
               'div',
-              { style: { display: 'flex', flexWrap: 'wrap', gap: '10px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' } },
-              react.createElement('span', { style: { color: ACCENT, fontFamily: CODE_FONT } }, commit.short),
-              react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, commit.date),
+              { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0, flex: '1 1 auto' } },
+              react.createElement(
+                'span',
+                { style: { color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflowWrap: 'anywhere' } },
+                commit.subject,
+              ),
+              react.createElement(
+                'div',
+                { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
+                react.createElement(
+                  'span',
+                  {
+                    style: {
+                      padding: '0 5px',
+                      borderRadius: '4px',
+                      background: `color-mix(in srgb, ${ACCENT} 10%, transparent)`,
+                      color: ACCENT,
+                      fontFamily: CODE_FONT,
+                      lineHeight: '16px',
+                    },
+                  },
+                  commit.short,
+                ),
+                react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, `${commit.author} · ${commit.date}`),
+              ),
             ),
           ),
         ),
@@ -655,6 +849,78 @@ window.__ModuleLoader__.load({
       const { t, workspace, sessionId, scope, anchor } = props
       const open = usePanelOpen()
       const rootRef = react.useRef(null)
+
+      /** 抽屉宽度（像素）。初值直接读持久化值，因此重新打开不会先闪一下默认宽度。 */
+      const [width, setWidth] = react.useState(() => clampPanelWidth(panelWidthStore.get()))
+      /** 拖动中的宽度：拖动过程中每帧都 setState 会连带重渲染整个文件列表，先记在 ref 里。 */
+      const dragWidthRef = react.useRef(width)
+
+      /**
+       * 视口变窄时把宽度收进允许区间。
+       *
+       * 不做这一步的话，窗口缩小后抽屉会占满整个视口（甚至超过），而用户没法把窗口
+       * 缩回去——那时手柄已经贴着屏幕左边缘了。
+       */
+      react.useEffect(() => {
+        if (!open) return undefined
+        const onResize = () => {
+          const clamped = clampPanelWidth(dragWidthRef.current)
+          dragWidthRef.current = clamped
+          setWidth(clamped)
+        }
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [open])
+
+      /**
+       * 拖动左边缘调整宽度。
+       *
+       * 用 `mousemove`/`mouseup` 挂在 document 上而不是手柄自身：指针一旦移出手柄，
+       * 元素上的监听就收不到事件了，表现为"拖到一半断掉"。
+       *
+       * 拖动期间给 `body` 打标记：禁掉文本选择与指针光标（否则鼠标划过正文会变成
+       * 文本光标，还会顺手选中文字）。
+       */
+      const startResize = react.useCallback((event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault()
+        const startX = event.clientX
+        const startWidth = dragWidthRef.current
+        document.body.dataset.reviewDragging = '1'
+        const onMove = (moveEvent) => {
+          // 抽屉贴右边：向左拖是变宽。
+          const next = clampPanelWidth(startWidth + (startX - moveEvent.clientX))
+          dragWidthRef.current = next
+          setWidth(next)
+        }
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+          delete document.body.dataset.reviewDragging
+          panelWidthStore.set(dragWidthRef.current)
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+      }, [])
+
+      /** 键盘调整：方向键左右各一步，Home 复位（手柄是可聚焦的 separator）。 */
+      const onResizeKeyDown = react.useCallback((event) => {
+        const step = event.key === 'ArrowLeft' ? PANEL_WIDTH_STEP : event.key === 'ArrowRight' ? -PANEL_WIDTH_STEP : 0
+        if (step !== 0) {
+          event.preventDefault()
+          const next = clampPanelWidth(dragWidthRef.current + step)
+          dragWidthRef.current = next
+          setWidth(next)
+          panelWidthStore.set(next)
+          return
+        }
+        if (event.key === 'Home') {
+          event.preventDefault()
+          dragWidthRef.current = PANEL_WIDTH_DEFAULT
+          setWidth(PANEL_WIDTH_DEFAULT)
+          panelWidthStore.reset()
+        }
+      }, [])
 
       /**
        * 点击外部或按 Escape 关闭抽屉。
@@ -697,6 +963,7 @@ window.__ModuleLoader__.load({
 
       const { files, added, removed } = summarize(active.result)
       const title = scope === 'workspace' ? t('projectTitle') : t('title')
+      const reload = scope === 'workspace' ? workspaceChanges.reload : turn.reload
 
       return react.createElement(
         'aside',
@@ -716,10 +983,12 @@ window.__ModuleLoader__.load({
             bottom: 0,
             height: '100vh',
             zIndex: 9998,
-            width: 'min(560px, calc(100vw - 120px))',
+            // 宽度可拖动（见下面的 resizer）；上限随视口收窄，避免把主界面挤没。
+            width: `${width}px`,
+            maxWidth: 'calc(100vw - 64px)',
             display: 'flex',
             flexDirection: 'column',
-            borderLeft: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+            borderLeft: '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
             background: 'var(--dsw-alias-bg-base, #fff)',
             color: 'var(--dsw-alias-label-primary)',
             fontFamily: UI_FONT,
@@ -727,49 +996,88 @@ window.__ModuleLoader__.load({
             overflow: 'hidden',
           },
         },
+        // 左边缘的宽度手柄。用 button 而不是 div：它能被 Tab 聚焦，从而用方向键调整
+        // （`role="separator"` 表达"这是两个区域之间的可调分隔"）。
+        react.createElement('button', {
+          type: 'button',
+          'data-review-resizer': '',
+          role: 'separator',
+          'aria-orientation': 'vertical',
+          'aria-label': t('resize'),
+          title: t('resize'),
+          onMouseDown: startResize,
+          onDoubleClick: () => {
+            dragWidthRef.current = PANEL_WIDTH_DEFAULT
+            setWidth(PANEL_WIDTH_DEFAULT)
+            panelWidthStore.reset()
+          },
+          onKeyDown: onResizeKeyDown,
+        }),
         react.createElement(
           'div',
           {
             style: {
               display: 'flex',
               alignItems: 'center',
-              gap: '10px',
-              padding: '16px 18px',
+              gap: '8px',
+              padding: '10px 12px 10px 16px',
               background: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
-              borderBottom: '1px solid var(--dsw-alias-border-l1, #2f2f36)',
-              fontSize: '14px',
+              borderBottom: '1px solid var(--dsw-alias-border-l1, #e6e6ec)',
+              fontSize: '13px',
               color: 'var(--dsw-alias-label-primary)',
+              flex: '0 0 auto',
             },
           },
           react.createElement('strong', { style: { fontWeight: 600 } }, title),
-          react.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, t('files', { count: files.length })),
+          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
           react.createElement('span', { style: { flex: 1 } }),
+          // 刷新：IDEA 的工具窗左上角也有这个动作；这里放在右侧，靠近"关闭"。
           react.createElement(
             'button',
             {
               type: 'button',
+              'data-review-icon-button': '',
+              onClick: () => reload(),
+              title: t('refresh'),
+              'aria-label': t('refresh'),
+            },
+            react.createElement(
+              'svg',
+              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5.5H10',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }),
+            ),
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-review-icon-button': '',
               onClick: () => panelStore.set(false),
               title: t('collapse'),
               'aria-label': t('collapse'),
-              style: {
-                border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
-                background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-2, #2a2a31))',
-                color: 'var(--dsw-alias-label-primary)',
-                borderRadius: '6px',
-                width: '28px',
-                height: '28px',
-                fontFamily: UI_FONT,
-                cursor: 'pointer',
-                lineHeight: 1,
-              },
             },
-            '×',
+            react.createElement(
+              'svg',
+              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M4 4l8 8M12 4l-8 8',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+              }),
+            ),
           ),
         ),
         // 工作区选择器已移除：工作区跟随当前对话，不可编辑、也不展示路径。
         react.createElement(
           'div',
-          { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '16px 18px 20px' } },
+          { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 20px 18px' } },
           react.createElement(FileList, {
             t,
             result: active.result,
@@ -777,17 +1085,22 @@ window.__ModuleLoader__.load({
             message: active.message,
             workspace,
             sessionId,
-            onChanged: scope === 'workspace' ? workspaceChanges.reload : turn.reload,
+            onChanged: reload,
           }),
           // 提交历史只在项目级面板出现：会话内的标签讲的是"本轮"，与历史无关。
           scope === 'workspace'
             ? react.createElement(
                 'div',
-                { style: { marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--dsw-alias-border-l1, #2f2f36)' } },
+                { style: { marginTop: '18px' } },
                 react.createElement(
                   'div',
-                  { style: { fontSize: '13px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)', marginBottom: '4px' } },
+                  { 'data-review-section-title': '' },
                   t('historyTitle'),
+                  react.createElement(
+                    'span',
+                    { 'data-review-count': '' },
+                    String(history.state.result?.commits?.length ?? 0),
+                  ),
                 ),
                 react.createElement(HistoryList, {
                   t,
@@ -824,6 +1137,21 @@ window.__ModuleLoader__.load({
       if (typeof path !== 'string' || path === '') return ''
       const parts = path.split(/[\\/]/u).filter((part) => part !== '')
       return parts.length === 0 ? path : (parts[parts.length - 1] ?? path)
+    }
+
+    /**
+     * 把仓库内相对路径拆成"目录"与"文件名"。
+     *
+     * 为了分层次显示（目录压暗、文件名留亮，与 IDEA 的改动列表一致）。反斜杠也当分隔符：
+     * git 总是用 `/`，但用户看到的路径可能来自别处。
+     * @param path - 相对路径。
+     * @returns `{ dir, base }`；没有目录时 `dir` 为空串。
+     */
+    function splitPath(path) {
+      const value = typeof path === 'string' ? path : ''
+      const cut = value.lastIndexOf('/') >= 0 ? value.lastIndexOf('/') : value.lastIndexOf('\\')
+      if (cut < 0) return { dir: '', base: value }
+      return { dir: value.slice(0, cut), base: value.slice(cut + 1) }
     }
 
     /**
@@ -1181,6 +1509,46 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 空态 / 状态提示块。
+     *
+     * 面板里"加载中""没有改动""不是仓库"这些状态此前都是一行小字，视觉上像渲染坏了。
+     * 统一成一个居中的块：图标位（一个中性圆点）+ 文案，分量与"确实没有内容"相符。
+     * @param text - 已本地化的文案。
+     * @param tone - `normal` 或 `error`。
+     * @returns React 元素。
+     */
+    function statusBlock(text, tone = 'normal') {
+      const error = tone === 'error'
+      return react.createElement(
+        'div',
+        {
+          role: 'status',
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '28px 16px',
+            textAlign: 'center',
+            color: error ? REMOVED : 'var(--dsw-alias-label-tertiary)',
+            fontSize: '12px',
+            lineHeight: 1.6,
+            fontFamily: UI_FONT,
+          },
+        },
+        react.createElement(
+          'svg',
+          { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', style: { opacity: 0.55 } },
+          react.createElement('circle', { cx: 12, cy: 12, r: 9, stroke: 'currentColor', strokeWidth: 1.4 }),
+          error
+            ? react.createElement('path', { d: 'M12 7.5v5.5M12 16.2v.3', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' })
+            : react.createElement('path', { d: 'M8.5 12.2l2.4 2.4 4.6-5', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        ),
+        react.createElement('span', { style: { maxWidth: '34em', overflowWrap: 'anywhere' } }, text),
+      )
+    }
+
+    /**
      * 文件列表：每行一个文件，点击展开该文件的差异。
      * @param props - `{ t, result, phase, message, workspace, sessionId }`。
      */
@@ -1221,54 +1589,61 @@ window.__ModuleLoader__.load({
       }
 
       if (phase === 'loading') {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } }, t('loading'))
+        return statusBlock(t('loading'))
       }
       if (phase === 'error') {
         // `noWorkspace` 是一个内部代号，翻成给用户看的话。
-        const text = message === 'noWorkspace' ? t('noWorkspace') : message
-        return react.createElement('div', { style: { color: '#f0c8c8', fontSize: '12px', padding: '10px 2px' } }, text)
+        return statusBlock(message === 'noWorkspace' ? t('noWorkspace') : message, 'error')
       }
       if (result?.isRepo === false) {
-        return react.createElement(
-          'div',
-          { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } },
-          t('notRepo', { name: projectName(props.workspace) }),
-        )
+        return statusBlock(t('notRepo', { name: projectName(props.workspace) }))
       }
       if (result?.empty === true) {
-        return react.createElement(
-          'div',
-          { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } },
-          t('workspaceEmpty'),
-        )
+        return statusBlock(t('workspaceEmpty'))
       }
       if (result?.noBaseline === true) {
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } }, t('noBaseline'))
+        return statusBlock(t('noBaseline'))
       }
       if (files.length === 0) {
         // 项目级与轮次级用不同措辞：前者是"没有未提交改动"，后者是"本轮没改文件"。
         const key = result?.scope === 'workspace' ? 'workspaceClean' : 'clean'
-        return react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', padding: '10px 2px' } }, t(key))
+        return statusBlock(t(key))
       }
 
       return react.createElement(
         'div',
-        { style: { display: 'flex', flexDirection: 'column', gap: '8px', fontFamily: UI_FONT } },
+        { style: { display: 'flex', flexDirection: 'column', gap: '2px', fontFamily: UI_FONT } },
+        // 汇总行：IDEA 的工具窗顶部也是"文件数 + 增删行数"，用等宽数字避免抖动。
         react.createElement(
           'div',
-          { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', padding: '0 2px 4px', fontVariantNumeric: 'tabular-nums' } },
-          t('summary', { files: files.length, added, removed }),
+          {
+            'data-review-section-title': '',
+            style: { gap: '8px' },
+          },
+          t('changesTitle'),
+          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
+          react.createElement('span', { style: { flex: 1 } }),
+          react.createElement(
+            'span',
+            { 'data-review-stats': '', style: { fontWeight: 400, fontSize: '11.5px' } },
+            react.createElement('span', { style: { color: ADDED } }, `+${added}`),
+            ' ',
+            react.createElement('span', { style: { color: REMOVED } }, `−${removed}`),
+          ),
         ),
         files.map((file) => {
           const diff = byFile.get(file.path) ?? ''
           const open = expanded === file.path
           const working = busy === file.path
+          const status = file.status?.[0] ?? '?'
+          const color = STATUS_COLORS[status] ?? 'var(--dsw-alias-label-secondary)'
+          const { dir, base } = splitPath(file.path)
           return react.createElement(
             'div',
-            { key: file.path },
+            { key: file.path, 'data-review-row': '' },
             react.createElement(
               'div',
-              { style: { display: 'flex', alignItems: 'stretch', gap: '4px' } },
+              { style: { display: 'flex', alignItems: 'stretch', gap: '2px' } },
               react.createElement(
                 'button',
                 {
@@ -1276,6 +1651,7 @@ window.__ModuleLoader__.load({
                   className: 'dsh-review-file',
                   'aria-expanded': open,
                   onClick: () => setExpanded(open ? '' : file.path),
+                  // title 必须保留完整路径：脚本与用户都靠它辨认（见 test-diff-readability）。
                   title: file.path,
                   style: {
                     display: 'flex',
@@ -1284,92 +1660,187 @@ window.__ModuleLoader__.load({
                     flex: '1 1 auto',
                     minWidth: 0,
                     textAlign: 'left',
-                    padding: '10px',
-                    border: `1px solid ${open ? 'color-mix(in srgb, ' + ACCENT + ' 30%, transparent)' : 'var(--dsh-review-row-border, var(--dsw-alias-border-l1, #eceef2))'}`,
-                    borderRadius: '9px',
-                    background: open ? 'var(--dsw-alias-interactive-bg-hover-accent, #eef2ff)' : 'var(--dsh-review-row-bg, var(--dsw-alias-bg-layer-2, #26262c))',
+                    padding: '6px 8px',
+                    border: '1px solid transparent',
+                    borderRadius: '6px',
+                    background: open
+                      ? 'var(--dsw-alias-interactive-bg-hover-accent, color-mix(in srgb, ' + ACCENT + ' 8%, transparent))'
+                      : 'var(--dsh-review-row-bg, transparent)',
                     color: 'var(--dsw-alias-label-primary)',
-                    fontSize: '12px',
+                    fontSize: '12.5px',
                     fontFamily: UI_FONT,
-                    lineHeight: 1.5,
+                    lineHeight: 1.45,
                     cursor: 'pointer',
                   },
                 },
+                // 状态徽标：字母 + 语义色底。IDEA 用图标，这里用字母是为了不引入图标库，
+                // 而且 A/M/D/R 本身就是 git 的通用缩写。
                 react.createElement(
                   'span',
-                  { style: { color: STATUS_COLORS[file.status?.[0]] ?? 'var(--dsw-alias-label-secondary)', flexShrink: 0, fontSize: '12px', fontWeight: 500 } },
-                  t(STATUS_KEYS[file.status?.[0]] ?? 'statusOther'),
+                  {
+                    'data-review-status': '',
+                    // 本地化的状态词放在 title 上：徽标只放得下一个字母，而"新增/修改/删除"
+                    // 是完整的说法（也让它对读屏工具是有意义的）。
+                    title: t(STATUS_KEYS[status] ?? 'statusOther'),
+                    style: {
+                      color,
+                      background: `color-mix(in srgb, ${color} 14%, transparent)`,
+                    },
+                  },
+                  status,
+                ),
+                // 目录压暗、文件名留亮：一屏几十行时，视线只需扫文件名。
+                //
+                // 用 flex + 让**目录**可收缩来保证文件名永远完整可见。不要用
+                // `direction: rtl` 那套"从左侧省略"的技巧：它会让两个 span 的排列顺序也跟着
+                // 反过来，路径会显示成 `app.tssrc/`。
+                react.createElement(
+                  'span',
+                  {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      flex: 1,
+                      minWidth: 0,
+                      fontFamily: CODE_FONT,
+                    },
+                  },
+                  dir === ''
+                    ? null
+                    : react.createElement(
+                        'span',
+                        {
+                          'data-review-path-dir': '',
+                          style: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                        },
+                        `${dir}/`,
+                      ),
+                  react.createElement(
+                    'span',
+                    {
+                      'data-review-path-name': '',
+                      style: { flex: '0 0 auto', whiteSpace: 'nowrap' },
+                    },
+                    base,
+                  ),
                 ),
                 react.createElement(
                   'span',
-                  { style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.5, fontFamily: CODE_FONT } },
-                  file.path,
-                ),
-                react.createElement(
-                  'span',
-                  { style: { whiteSpace: 'nowrap', fontSize: '12px', fontVariantNumeric: 'tabular-nums', flexShrink: 0 } },
+                  {
+                    'data-review-stats': '',
+                    style: { whiteSpace: 'nowrap', fontSize: '11.5px', flexShrink: 0, fontFamily: CODE_FONT },
+                  },
                   react.createElement('span', { style: { color: ADDED } }, `+${file.added ?? 0}`),
                   ' ',
                   react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? 0}`),
                 ),
+                react.createElement(
+                  'svg',
+                  {
+                    width: 12,
+                    height: 12,
+                    viewBox: '0 0 16 16',
+                    fill: 'none',
+                    'aria-hidden': 'true',
+                    style: {
+                      flexShrink: 0,
+                      color: 'var(--dsw-alias-label-tertiary)',
+                      transform: open ? 'rotate(90deg)' : 'none',
+                      transition: 'transform .12s ease',
+                    },
+                  },
+                  react.createElement('path', {
+                    d: 'M6 4l4 4-4 4',
+                    stroke: 'currentColor',
+                    strokeWidth: 1.6,
+                    strokeLinecap: 'round',
+                    strokeLinejoin: 'round',
+                  }),
+                ),
               ),
               // 还原按钮：点击后弹出确认框（见 ConfirmRevertDialog）。
+              // 平时只显示图标、悬停才染成危险色——IDEA 的行内动作也是这样收着的。
               react.createElement(
                 'button',
                 {
                   type: 'button',
                   className: 'dsh-review-revert',
+                  'data-review-icon-button': '',
                   disabled: working,
                   title: t('revert'),
+                  'aria-label': working ? t('reverting') : t('revert'),
                   onClick: () => setConfirming(file.path),
-                  style: {
-                    flex: '0 0 auto',
-                    padding: '0 10px',
-                    borderRadius: '9px',
-                    border: '1px solid var(--dsh-review-row-border, var(--dsw-alias-border-l1, #eceef2))',
-                    background: 'var(--dsh-review-row-bg, var(--dsw-alias-bg-layer-2, #26262c))',
-                    color: 'var(--dsw-alias-label-secondary)',
-                    fontSize: '12px',
-                    fontFamily: UI_FONT,
-                    cursor: working ? 'default' : 'pointer',
-                    whiteSpace: 'nowrap',
-                  },
+                  style: { flex: '0 0 auto', alignSelf: 'center' },
                 },
-                working ? t('reverting') : t('revert'),
+                working
+                  ? react.createElement('span', { style: { fontSize: '11px' } }, '…')
+                  : react.createElement(
+                      'svg',
+                      { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+                      react.createElement('path', {
+                        d: 'M3.5 5.5h6.2A3.3 3.3 0 0 1 13 8.8v0A3.3 3.3 0 0 1 9.7 12H6.5M3.5 5.5l2.2-2.2M3.5 5.5l2.2 2.2',
+                        stroke: 'currentColor',
+                        strokeWidth: 1.5,
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                      }),
+                    ),
               ),
             ),
             open
               ? react.createElement(
                   'div',
-                  {
-                    style: {
-                      marginTop: '4px',
-                      padding: '0',
-                      border: '1px solid var(--dsw-alias-border-l1, #2f2f36)',
-                      borderRadius: '9px',
-                      background: 'var(--dsw-alias-bg-layer-1, #17171b)',
-                      // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
-                      fontSize: '12px',
-                      lineHeight: 1.6,
-                      fontFamily: CODE_FONT,
-                      fontVariantLigatures: 'none',
-                      // 横向溢出才滚动；纵向交给抽屉整体，避免嵌套滚动条。
-                      overflowX: 'auto',
-                    },
-                  },
-                  isBinaryDiff(diff)
-                    ? react.createElement(
-                        'div',
-                        { style: { color: 'var(--dsw-alias-label-secondary)', padding: '8px', fontFamily: UI_FONT } },
-                        t('binaryDiff'),
-                      )
-                    : react.createElement('div', { style: { padding: '6px 0' } }, renderDiff(diff)),
+                  { style: { margin: '2px 0 8px' } },
+                  // 差异区顶部固定一条信息（路径 + 增删），长差异滚动时不会迷失在行里。
+                  react.createElement(
+                    'div',
+                    { 'data-review-diff': '' },
+                    react.createElement(
+                      'div',
+                      { 'data-review-diff-header': '' },
+                      react.createElement('span', { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } }, status),
+                      react.createElement(
+                        'span',
+                        { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: CODE_FONT } },
+                        file.path,
+                      ),
+                      react.createElement('span', { style: { flex: 1 } }),
+                      react.createElement(
+                        'span',
+                        { 'data-review-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT } },
+                        react.createElement('span', { style: { color: ADDED } }, `+${file.added ?? 0}`),
+                        ' ',
+                        react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? 0}`),
+                      ),
+                    ),
+                    isBinaryDiff(diff)
+                      ? react.createElement(
+                          'div',
+                          { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: '12px' } },
+                          t('binaryDiff'),
+                        )
+                      : react.createElement(
+                          'div',
+                          {
+                            style: {
+                              // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
+                              fontSize: '12px',
+                              lineHeight: 1.55,
+                              fontFamily: CODE_FONT,
+                              fontVariantLigatures: 'none',
+                              // 横向溢出才滚动；纵向交给抽屉整体，避免嵌套滚动条。
+                              overflowX: 'auto',
+                            },
+                          },
+                          renderDiff(diff),
+                        ),
+                  ),
                 )
               : null,
           )
         }),
         result?.truncated === true
-          ? react.createElement('div', { style: { marginTop: '4px', color: '#c9a0a0', fontSize: '11.5px' } }, t('truncated'))
+          ? react.createElement('div', { style: { marginTop: '6px', color: '#c9a0a0', fontSize: '11.5px' } }, t('truncated'))
           : null,
         // 确认弹窗：还原是写操作，必须让用户明确决定。
         confirming === ''

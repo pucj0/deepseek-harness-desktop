@@ -261,6 +261,20 @@ composer card visually — the background extends behind the card and reuses the
 Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 `aria-haspopup`), operable from the keyboard, and show a visible focus ring.
 
+**Project-changes drawer** (top-right entry, `shell.overlay`)
+
+- Follows the **current conversation's** workspace: switching conversations and starting a new
+  one both move it; the panel itself has no workspace picker and never shows an absolute path
+- **Resizable**: drag the left edge (double-click to reset; focus it and use ←/→, or Home to
+  reset). The width is remembered per app
+- The list follows IDEA's Git tool window: a status badge (A/M/D/R), a path with the directory
+  dimmed and the file name emphasised, right-aligned added/removed counts, an inline diff with
+  line numbers and add/remove backgrounds when expanded, and recent commits below
+- **A file whose only change is its mode (a `chmod`) is not a change.** On Windows, a repo with
+  `core.fileMode=true` makes git record a `100755` script as `100644` — a `0/0` "modification"
+  with identical content. The host snapshots with `-c core.fileMode=false` and additionally
+  filters such entries out of the response.
+
 **Writing a slot plugin: do not inject the standard hooks.** `useSessions` /
 `useWorkspaces` are not service members — the renderer synthesises them for root-scoped
 entries from the sources official plugins publish with
