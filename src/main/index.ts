@@ -20,6 +20,7 @@ import { healModuleFallback } from './module-heal'
 import type { PanelRow } from './panel'
 import { resolveRuntime } from './paths'
 import type { RuntimeLocation } from './paths'
+import { syncPluginsAtStartup } from './plugin-sync'
 import { ensureRuntimeUnpacked } from './runtime-unpack'
 import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
@@ -220,6 +221,25 @@ async function main(): Promise<void> {
     app.exit(1)
     return
   }
+
+  // 把随本应用发布的客户端插件同步进**当前实际使用的**运行时。
+  //
+  // 必须在服务端进程启动之前做，而且每次启动都要做：运行时自动更新会整体换掉
+  // `<userData>/runtime/current` 指向的那份运行时，而那份里没有内置插件（它们不在
+  // dsh 的依赖闭包里，只随安装包携带）。缺失时 `server.mjs` 是静默跳过的，表现为
+  // **三个插件一起从界面上消失**且没有任何报错。详见 plugin-sync.ts。
+  //
+  // 放在这里而不放进更新器：更新器只覆盖"更新"这一条路径，而这里同时覆盖"更新后自动
+  // 补齐"、"已经装坏的运行时就地修好"和"外壳升级后刷新旧副本"三种情形。
+  const pluginSync = syncPluginsAtStartup({
+    runtimeDir: runtime.dir,
+    resourcesPath: process.resourcesPath,
+    repoRoot: resolve(__dirname, '..', '..'),
+    userDataDir,
+    packaged: app.isPackaged,
+    ...(unpackedDir === undefined ? {} : { unpackedDir }),
+  })
+  for (const line of pluginSync.messages) process.stderr.write(`${line}\n`)
 
   const runtimeVersion = RuntimeUpdater.readVersion(runtime.dir) ?? runtime.stagedVersion ?? 'unknown'
   activeRuntime = runtime

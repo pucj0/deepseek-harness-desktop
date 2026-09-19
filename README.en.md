@@ -103,7 +103,15 @@ official package is lacking anything.
 | Update the agent runtime | `npm update -g` | in-app Updates window, one click, then restart |
 | Follow a release channel | choose a dist-tag yourself | `latest` / `next` / `alpha` |
 | **Update the app shell itself** | n/a | built-in auto-update (`electron-updater`) |
+| Bundled client plugins after a runtime update | n/a | carried automatically: the shell re-syncs them into whichever runtime is in use on every start |
 | Failed update | diagnose yourself | if the new runtime fails to boot, the app rolls back to the bundled one and restarts |
+
+The bundled plugins (composer toolbar, change review, font-size control) are not part of
+`@deepseek-ai/dsh`'s dependency closure — they ship with this app. A runtime update therefore
+replaces the whole runtime with one that does not contain them, and the harness skips missing
+plugins silently, so all three controls would simply disappear. `src/main/plugin-sync.ts` runs
+before the server child starts and copies them from the copy shipped in `resources/plugins/`
+into the runtime actually in use, which also repairs an install that already lost them.
 
 Everything shell-owned (menus, tray, dialogs, plugin strings) follows the **system language**
 and ships in Chinese and English.
@@ -494,6 +502,7 @@ Unsigned builds work fine but trigger SmartScreen (Windows) and Gatekeeper (macO
 | `src/main/window.ts` | `BrowserWindow`, token handshake, navigation fence, geometry |
 | `src/main/paths.ts` | runtime/toolchain resolution for dev and packaged layouts |
 | `src/main/updater.ts` | npm registry checks, versioned installs, junction activation, rollback |
+| `src/main/plugin-sync.ts` | copies the bundled client plugins into the runtime in use, on every start (also self-heals a swapped-in runtime) |
 | `src/main/credentials.ts` | `safeStorage`-backed sealed credential store |
 | `src/main/tray.ts` | tray menu and close-to-tray |
 | `src/server/server.mjs` | the boot chain, run by the child process |
@@ -519,6 +528,7 @@ was verified rather than assumed:
 | `scripts/check-version.mjs` | `package.json`, the lockfile, and `packages[""]` all agree |
 | `scripts/test-review-host.mjs` | review-plugin snapshots and diffs (throwaway temp repo) |
 | `scripts/test-gitbar-checkout.mjs` | branch switching (throwaway temp repo) |
+| `scripts/test-plugin-sync.mjs` | bundled plugins land in the runtime in use, including the "runtime was swapped" repair (no Electron needed) |
 | `scripts/probe-web.mjs` | boots the runtime headlessly and reports the URL it serves |
 | `scripts/probe-ui.mjs` | drives the live UI over CDP: dump controls, click, evaluate |
 | `scripts/list-slots.mjs`, `scripts/list-slot-kinds.mjs` | enumerate UI extension slots and their kinds |

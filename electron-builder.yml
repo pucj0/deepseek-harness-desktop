@@ -31,6 +31,18 @@ compression: normal
 # <runtime>/server.mjs before spawning, because Node resolves imports from the
 # script's own directory and resources/server/ has no reachable node_modules.
 extraResources:
+  # 随应用携带的客户端插件（gitbar / review / typography）。
+  #
+  # 为什么除了放进运行时归档、还要**再带一份**散文件：运行时可以在应用内被整体替换
+  # （RuntimeUpdater 把新版 dsh 装到 <userData>/runtime/<版本>），而换进来的那份里
+  # 没有这些插件——它们不在 dsh 的依赖闭包里。外壳因此必须在每次启动时把它们同步进
+  # 当前实际使用的运行时（见 src/main/plugin-sync.ts），而这份散文件就是**唯一不依赖
+  # 运行时**的来源。只占约 164 KB，换来的是"运行时怎么换插件都不会丢"。
+  #
+  # 刻意不加 `filter` 白名单：插件将来多一个 .mjs / .cjs 文件时，白名单会**静默漏掉**
+  # 它，而那只有在打包后的应用里才暴露出来。整个目录只有十几 KB 的源码，全带上更安全。
+  - from: plugins
+    to: plugins
   # 携带**压缩后的运行时归档**，而不是散开的 27 400 个文件。
   #
   # 实测：runtime/ 原始 314 MB / 27 400 文件，瘦身后 197 MB，brotli q11 压到 42.9 MB。
@@ -61,6 +73,8 @@ files:
   - '!runtime/**'
   - '!release/**'
   - '!scripts/**'
+  # 插件只以 extraResources 的形式随包发布（见上面那段说明）：进 app.asar 没有用处。
+  - '!plugins/**'
 
 # Native addons and anything the loader imports by path must exist as real files.
 # @deepseek-ai/* is unpacked because the boot chain resolves bundle packages via

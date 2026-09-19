@@ -275,7 +275,8 @@ Electron 主进程                                 dsh 服务端子进程
 │ 窗口 / 菜单 / 托盘            │               │ 官方 @deepseek-ai/dsh        │
 │ 原生目录选择器                │               │ + dsh-base / dsh-web-app     │
 │ 运行时解析与解包              │  spawn        │ + 本项目的三个内置插件        │
-│ 运行时更新（npm）             │ ────────────► │                             │
+│ 运行时更新（npm）             │ ────────────► │   （外壳每次启动同步进去）    │
+│ 内置插件同步（plugin-sync）   │               │                             │
 │ 外壳更新（electron-updater）  │               │ 监听 127.0.0.1:<随机端口>     │
 │ 凭据（系统密钥链）            │ ◄──────────── │ 打印 dsh web: <url>?token=   │
 └──────────────────────────────┘   stdout      └─────────────────────────────┘
@@ -296,6 +297,7 @@ resources/                     安装包释放，位于 app.asar 之外
   runtime.br                   压缩后的运行时归档（42.9 MB，brotli q11）
   runtime.json                 归档的文件数与体积，供诊断
   server/server.mjs            启动脚本（见 src/server/）
+  plugins/                     随应用携带的客户端插件（约 164 KB），每次启动同步进当前运行时
 
 <userData>/bundled-runtime/runtime/   首次启动从 runtime.br 解出（197 MB）
   node_modules/@deepseek-ai/dsh
@@ -327,11 +329,21 @@ app.asar
 三个插件（gitbar、review、typography）都是标准 `dsh` 插件，走**官方插件机制**，不是外壳 hack：
 
 - 它们的 `package.json` 声明 `dsh.bundle.patch`（使其可作为 profile bundle 挂载）与 `dsh.client`（使其客户端半边进入模块图）
-- `scripts/stage-runtime.mjs` 把它们复制进 `runtime/node_modules/`
-- 应用启动时 `src/server/server.mjs` 把它们**链接进 profile 的 `node_modules`** 并**登记为 profile bundle**
+- `scripts/stage-runtime.mjs` 把它们复制进 `runtime/node_modules/`，`extraResources` 另外随应用带一份散文件到 `<resources>/plugins/`
+- **应用每次启动时**由 `src/main/plugin-sync.ts` 把它们同步进**当前实际使用**的那个运行时的 `node_modules/`（详见下面的「为什么插件要每次启动同步」）
+- `src/server/server.mjs` 把它们**链接进 profile 的 `node_modules`** 并**登记为 profile bundle**
 - `dsh` 装载它们：host 半边注册 HTTP 路由，client 半边注册到界面槽位（见 [输入框上方的工具条](#输入框上方的工具条)）
 
-因此它们与官方插件在机制上完全平等，`dsh` 升级不会因为它们不是官方包而失效。
+#### 为什么插件要每次启动同步
+
+插件不在 `dsh` 的依赖闭包里，只随本应用发布。而运行时可以在应用内被**整体替换**（新版 `dsh` 装进 `<userData>/runtime/<版本>/`）——换进来的那份里没有这些插件，`server.mjs` 又是「找不到就跳过」：
+
+- `linkBundledPlugins` 静默 `continue`，`reconcileBundles` 随即把它们从 bundle 列表里摘掉；
+- 结果**不是崩溃，而是三个插件一起从界面上消失**，控制台一句警告都没有。
+
+`0.1.5-rc.2` 成为 npm 的 `latest` 后就真实发生过一次。因此外壳改为每次启动从自己携带的那份（`<resources>/plugins/`，开发期是仓库的 `plugins/`）同步进当前运行时，一次覆盖三种情形：**更新后自动补齐**、**已经装坏的运行时就地修好**、**外壳升级后刷新旧副本**。
+
+同步只做文件拷贝、单个插件失败只记一条警告，不会阻断启动；内容一致时跳过不重写。
 
 ---
 
@@ -363,7 +375,7 @@ app.asar
 
 新版本先装进临时目录，校验通过后再改名就位——下载中断不会留下一个"看起来能用"的运行时。如果更新后的运行时启动失败，应用会删掉 `current` 联接、回退到内置运行时、并重启。
 
-`profiles/node_modules` 在每次启动时自动重建，所以切换运行时后**不需要任何重装步骤**。
+`profiles/node_modules` 在每次启动时自动重建，所以切换运行时后**不需要任何重装步骤**。内置插件同样在每次启动时被同步进当前运行时——见 [为什么插件要每次启动同步](#为什么插件要每次启动同步)。
 
 ### 通道
 
@@ -498,6 +510,7 @@ node scripts/test-gitbar-checkout.mjs    # 分支切换（一次性临时仓库�
 node scripts/test-gitbar-workspace.mjs   # 插件按请求的工作区查询
 node scripts/test-review-host.mjs        # 审查插件的快照与差异
 node scripts/test-review-sidebar.mjs     # 审查侧栏链路：打开 / 收起 / 重新打开
+node scripts/test-plugin-sync.mjs        # 内置插件同步进运行时（含"换掉运行时后补齐"）
 node scripts/check-plugin-i18n.mjs       # 插件里没有硬编码文案
 ```
 
@@ -611,6 +624,7 @@ src/
     runtime-unpack.ts           内置运行时的解包（单状态机）
     dsh-server.ts               spawn 并监督服务端子进程
     updater.ts                  运行时更新（npm）
+    plugin-sync.ts              把内置插件同步进当前运行时（每次启动，含自愈）
     shell-updater.ts            外壳更新（electron-updater）
     credentials.ts              凭据加密存储（safeStorage）
     module-heal.ts              修复失效的模块回退链接
