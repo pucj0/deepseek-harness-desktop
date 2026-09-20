@@ -389,7 +389,10 @@ check('手柄有本地化说明', typeof resizer?.props?.['aria-label'], 'string
 // 键盘调整：ArrowLeft 变宽、ArrowRight 变窄、Home 复位（不依赖鼠标事件）。
 const widthOf = (tree) => Number.parseInt(String(tree.props.style.width), 10)
 const startWidth = widthOf(drawer.tree)
-check('宽度取自持久化默认值', startWidth, 480)
+// 默认宽度是**视口的 50%**（本桩的 innerWidth 是 1400 → 700），与 IDEA 的 Git 工具窗
+// 默认占半屏一致。此前是写死的 480px —— 那个值在 1366 的笔记本上占 35%、在 2560 的
+// 显示器上只占 19%，同一块面板在两种屏上是完全不同的东西。
+check('宽度默认为视口的 50%', startWidth, Math.round(1400 * 0.5))
 
 const press = (key) => {
   let prevented = false
@@ -413,6 +416,16 @@ const dragged = render(panelElement.type, panelElement.props, 'panel').tree
 check('向左拖动 120px 后变宽 120', widthOf(dragged) - startWidth, 120)
 globalThis.document.emit('mouseup', {})
 check('松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDragging, undefined)
+
+// 上限：视口的 80%（1400 → 1120）。往左拖一个远超上限的量，宽度必须停在 80% 而不是
+// 一路拖到把主界面挤没。这条断言钉住"最大可到 80%"这个明确要求。
+{
+  resizer.props.onMouseDown({ clientX: 1000, button: 0, preventDefault() {} })
+  globalThis.document.emit('mousemove', { clientX: -2000 })
+  const widened = render(panelElement.type, panelElement.props, 'panel').tree
+  check('向左猛拖后停在视口的 80%', widthOf(widened), Math.round(1400 * 0.8))
+  globalThis.document.emit('mouseup', {})
+}
 
 console.log('')
 console.log('=== 6. IDEA 式结构 ===')

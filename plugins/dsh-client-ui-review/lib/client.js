@@ -171,10 +171,9 @@ window.__ModuleLoader__.load({
     /** 抽屉宽度的持久化键。 */
     const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'
 
-    /** 抽屉宽度：默认、下限、绝对上限（上限还会按视口收窄，见 panelWidthMax）。 */
-    const PANEL_WIDTH_DEFAULT = 480
+    /** 抽屉宽度：下限，以及超宽屏上的像素上限（比例上限见 panelWidthMax）。 */
     const PANEL_WIDTH_MIN = 320
-    const PANEL_WIDTH_MAX = 980
+    const PANEL_WIDTH_MAX = 1600
 
     /** 键盘调整宽度时的步长（方向键）。 */
     const PANEL_WIDTH_STEP = 24
@@ -524,6 +523,12 @@ window.__ModuleLoader__.load({
       noStagedOrChanged: '工作区干净，没有待提交的改动。',
       stagedNotice: '已暂存 {count} 个文件',
       unstagedNotice: '已取消暂存 {count} 个文件',
+      addToGit: '加入 git',
+      addedNotice: '已把 {count} 个文件加入 git（已暂存）',
+      chosenCount: '已选 {count} 个',
+      untrackedSelectAll: '全选',
+      untrackedClearAll: '全不选',
+      untrackedHint: '勾选要纳入版本控制的文件，再点「加入 git」',
       committedNotice: '已提交：{subject}',
       emptyMessage: '请先填写提交信息。',
       error_emptyMessage: '请先填写提交信息。',
@@ -612,6 +617,12 @@ window.__ModuleLoader__.load({
       noStagedOrChanged: 'The working tree is clean; nothing to commit.',
       stagedNotice: 'Staged {count} file(s)',
       unstagedNotice: 'Unstaged {count} file(s)',
+      addToGit: 'Add to Git',
+      addedNotice: 'Added {count} file(s) to Git (now staged)',
+      chosenCount: '{count} selected',
+      untrackedSelectAll: 'Select all',
+      untrackedClearAll: 'Clear selection',
+      untrackedHint: 'Tick the files to put under version control, then click "Add to Git"',
       committedNotice: 'Committed: {subject}',
       emptyMessage: 'Write a commit message first.',
       error_emptyMessage: 'Write a commit message first.',
@@ -704,9 +715,9 @@ window.__ModuleLoader__.load({
       const read = () => {
         try {
           const stored = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
-          return Number.isFinite(stored) && stored > 0 ? stored : PANEL_WIDTH_DEFAULT
+          return Number.isFinite(stored) && stored > 0 ? stored : panelWidthDefault()
         } catch {
-          return PANEL_WIDTH_DEFAULT
+          return panelWidthDefault()
         }
       }
       return {
@@ -734,10 +745,26 @@ window.__ModuleLoader__.load({
       return Math.round(Math.min(Math.max(value, PANEL_WIDTH_MIN), max))
     }
 
-    /** 当前允许的最大宽度：视口的 72%，且不超过 980px。 */
+    /**
+     * 默认宽度：视口的 **50%**。
+     *
+     * 用比例而不是像素：这块抽屉要装下"文件列表 + 逐行差异"，像素宽度在 1366 的笔记本
+     * 和 2560 的显示器上是完全不同的两件事。50% 与 IDEA 的 Git 工具窗默认占半屏一致。
+     */
+    function panelWidthDefault() {
+      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
+      return clampPanelWidth(Math.round(viewport * 0.5))
+    }
+
+    /**
+     * 当前允许的最大宽度：视口的 **80%**。
+     *
+     * 也保留一个像素上限，避免在超宽屏上抽屉宽到失去"侧栏"的意义（80% 的 5120 是 4096px，
+     * 那时用户真正想要的是把窗口摆成两栏，而不是一个占满的抽屉）。
+     */
     function panelWidthMax() {
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      return Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, Math.round(viewport * 0.72)))
+      return Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, Math.round(viewport * 0.8)))
     }
 
     /**
@@ -1296,8 +1323,8 @@ window.__ModuleLoader__.load({
         }
         if (event.key === 'Home') {
           event.preventDefault()
-          dragWidthRef.current = PANEL_WIDTH_DEFAULT
-          setWidth(PANEL_WIDTH_DEFAULT)
+          dragWidthRef.current = panelWidthDefault()
+          setWidth(panelWidthDefault())
           panelWidthStore.reset()
         }
       }, [])
@@ -1387,8 +1414,8 @@ window.__ModuleLoader__.load({
           title: t('resize'),
           onMouseDown: startResize,
           onDoubleClick: () => {
-            dragWidthRef.current = PANEL_WIDTH_DEFAULT
-            setWidth(PANEL_WIDTH_DEFAULT)
+            dragWidthRef.current = panelWidthDefault()
+            setWidth(panelWidthDefault())
             panelWidthStore.reset()
           },
           onKeyDown: onResizeKeyDown,
@@ -2112,7 +2139,14 @@ window.__ModuleLoader__.load({
     function StagingSection(props) {
       const { t, workspace } = props
       const [state, setState] = react.useState({ phase: 'loading' })
-      const [collapsed, setCollapsed] = react.useState({ staged: false, unstaged: false, untracked: true })
+      const [collapsed, setCollapsed] = react.useState({ staged: false, unstaged: false, untracked: false })
+      /**
+       * 已勾选、准备"加入 git"的未跟踪文件。
+       *
+       * 这是参考 IDEA 的 Git 工具窗加的：未跟踪文件默认**不勾选**（IDEA 里新文件也不会
+       * 自动进暂存区），用户勾哪些就只 add 哪些，另一个按钮负责全选/全不选。
+       */
+      const [chosenUntracked, setChosenUntracked] = react.useState([])
       const [message, setMessage] = react.useState('')
       const [busy, setBusy] = react.useState(false)
       const [trouble, setTrouble] = react.useState(null)
@@ -2221,8 +2255,12 @@ window.__ModuleLoader__.load({
       const staged = tracked.filter((entry) => classifyEntry(entry).staged)
       const unstaged = tracked.filter((entry) => classifyEntry(entry).unstaged)
       const untrackedCount = Number(result.untrackedCount ?? 0)
-      const untrackedSample = Array.isArray(result.untrackedSample) ? result.untrackedSample : []
+      const untrackedPaths = Array.isArray(result.untrackedPaths) ? result.untrackedPaths : []
       const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
+      // 已勾选（准备"加入 git"）的未跟踪文件。用 Set 而不是数组：勾选/取消是逐个发生的，
+      // 列表可能几百行，`includes` 会让每次点击都变成一次线性扫描。
+      const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
+      const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
       // 提交按钮为什么禁用，要在界面上说清楚：灰着而不给理由，用户只会反复点它。
       const commitDisabled = busy || message.trim() === '' || staged.length === 0
 
@@ -2268,7 +2306,16 @@ window.__ModuleLoader__.load({
         )
 
       /** 一条未跟踪文件。 */
-      const untrackedRow = (path) =>
+      /**
+       * 一条未跟踪文件：勾选框 + 路径 + 单个「加入」。
+       *
+       * 勾选框是参考 IDEA 的 Git 工具窗加的——新文件在 IDEA 里默认**不**进暂存区，用户
+       * 勾哪些、再点「加入 git」，才 `git add` 哪些。单行那个 `+` 保留，方便只加一个。
+       *
+       * @param path - 仓库内相对路径。
+       * @param checked - 是否已勾选。
+       */
+      const untrackedRow = (path, checked) =>
         react.createElement(
           'div',
           {
@@ -2277,6 +2324,18 @@ window.__ModuleLoader__.load({
             'data-staging-side': 'untracked',
             style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
           },
+          react.createElement('input', {
+            type: 'checkbox',
+            'data-staging-pick': path,
+            checked: checked === true,
+            disabled: busy,
+            'aria-label': path,
+            onChange: (event) =>
+              setChosenUntracked((current) =>
+                event.target.checked ? [...current, path] : current.filter((item) => item !== path),
+              ),
+            style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
+          }),
           react.createElement(StatusBadge, { letter: '?' }),
           react.createElement(
             'span',
@@ -2289,8 +2348,8 @@ window.__ModuleLoader__.load({
               type: 'button',
               'data-staging-row-action': 'stage',
               disabled: busy,
-              onClick: () => void run('stage', { paths: [path] }, t('stagedNotice', { count: 1 })),
-              title: t('stage'),
+              onClick: () => void run('stage', { paths: [path] }, t('addedNotice', { count: 1 })),
+              title: t('addToGit'),
               style: { flexShrink: 0, padding: '0 6px', border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: '11.5px', cursor: busy ? 'default' : 'pointer' },
             },
             '+',
@@ -2468,7 +2527,7 @@ window.__ModuleLoader__.load({
                     }),
                     collapsed.unstaged ? null : unstaged.map((entry) => fileRow(entry, 'unstaged')),
                   ),
-              // ---- 未跟踪 ----
+              // ---- 未跟踪（可以勾选后"加入 git"）----
               untrackedCount === 0
                 ? null
                 : react.createElement(
@@ -2477,24 +2536,45 @@ window.__ModuleLoader__.load({
                     react.createElement(StagingGroupHeader, {
                       t,
                       id: 'untracked',
-                      // 数量用 host 给的**总数**，不是样本长度：界面上"6,636 个文件"这个数字
-                      // 本身就是用户想知道的第一件事，显示样本数会把它说小。
+                      // 数量用 host 给的**总数**，不是列出的条数：界面上"6,636 个文件"这个
+                      // 数字本身就是用户想知道的第一件事，用它列出的条数会把它说小。
                       label: t('untrackedTitle'),
                       count: untrackedCount,
                       collapsed: collapsed.untracked,
                       onToggle: () => setCollapsed((value) => ({ ...value, untracked: !value.untracked })),
+                      // 全选/全不选。IDEA 的分组标题上也有这个勾选框，它决定"下面那批要不要
+                      // 一起加入"。
                       action: react.createElement(
-                        StagingIconButton,
+                        'button',
                         {
-                          t,
-                          id: 'stage-all-untracked',
-                          label: t('stageAll'),
-                          // 一次暂存上万个文件会让 git 跑很久，而且几乎不是用户想要的
-                          // （那里面有构建产物、日志）。只对**当前列出的**这批做批量。
-                          disabled: busy || untrackedSample.length === 0,
-                          onClick: () => void run('stage', { paths: untrackedSample }),
+                          type: 'button',
+                          'data-staging-toggle-all': 'untracked',
+                          title: allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
+                          'aria-label': allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
+                          'aria-pressed': allChosen,
+                          disabled: busy || untrackedPaths.length === 0,
+                          onClick: (event) => {
+                            event.stopPropagation()
+                            setChosenUntracked(allChosen ? [] : untrackedPaths)
+                          },
+                          style: {
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                            width: '20px',
+                            height: '20px',
+                            padding: 0,
+                            border: 'none',
+                            borderRadius: '4px',
+                            background: 'transparent',
+                            color: allChosen ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+                            fontFamily: UI_FONT,
+                            fontSize: '12px',
+                            cursor: busy ? 'default' : 'pointer',
+                          },
                         },
-                        bulkIcon,
+                        allChosen ? '☑' : '☐',
                       ),
                     }),
                     collapsed.untracked
@@ -2502,14 +2582,53 @@ window.__ModuleLoader__.load({
                       : react.createElement(
                           'div',
                           { 'data-staging-untracked-list': '' },
-                          untrackedSample.map(untrackedRow),
-                          untrackedCount > untrackedSample.length
+                          untrackedPaths.map((path) => untrackedRow(path, chosenUntracked.includes(path))),
+                          result.untrackedTruncated === true
                             ? react.createElement(
                                 'div',
-                                { 'data-staging-untracked-truncated': '', style: { padding: '4px 2px 2px 16px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
-                                t('untrackedTruncated', { count: untrackedSample.length, rest: untrackedCount - untrackedSample.length }),
+                                { 'data-staging-untracked-truncated': '', style: { padding: '4px 2px 2px 22px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
+                                t('untrackedTruncated', {
+                                  count: untrackedPaths.length,
+                                  rest: Math.max(0, untrackedCount - untrackedPaths.length),
+                                }),
                               )
                             : null,
+                          // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
+                          // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
+                          react.createElement(
+                            'div',
+                            { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 2px 2px 22px' } },
+                            react.createElement(
+                              'button',
+                              {
+                                type: 'button',
+                                'data-staging-add-chosen': '',
+                                disabled: busy || chosen.length === 0,
+                                onClick: () =>
+                                  void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
+                                    (ok) => {
+                                      if (ok) setChosenUntracked([])
+                                    },
+                                  ),
+                                style: {
+                                  padding: '4px 12px',
+                                  border: 'none',
+                                  borderRadius: '6px',
+                                  background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
+                                  color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
+                                  fontFamily: UI_FONT,
+                                  fontSize: '12px',
+                                  cursor: busy || chosen.length === 0 ? 'default' : 'pointer',
+                                },
+                              },
+                              t('addToGit'),
+                            ),
+                            react.createElement(
+                              'span',
+                              { 'data-staging-chosen-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
+                              chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
+                            ),
+                          ),
                         ),
                   ),
             ),
@@ -2520,7 +2639,8 @@ window.__ModuleLoader__.load({
      * 文件列表：每行一个文件，点击展开该文件的差异。
      * @param props - `{ t, result, phase, message, workspace, sessionId }`。
      */
-    function FileList(props) {      const { t, result, phase, message } = props
+    function FileList(props) {
+      const { t, result, phase, message } = props
       const [expanded, setExpanded] = react.useState('')
       // 待确认还原的路径：还原是写操作，必须确认——但用**弹窗**确认，而不是"再点一次
       // 这个按钮"。后者的问题：按钮很小、第二次点击容易落空（用户会感觉"点了没反应"），

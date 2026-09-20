@@ -159,7 +159,8 @@ const STATUS = {
   ],
   trackedCount: 3,
   untrackedCount: 25,
-  untrackedSample: ['untracked-1.txt', 'untracked-2.txt', 'untracked-3.txt'],
+  untrackedPaths: ['untracked-1.txt', 'untracked-2.txt', 'untracked-3.txt'],
+  untrackedTruncated: true,
 }
 
 const posts = []
@@ -295,6 +296,19 @@ async function click(node) {
   return true
 }
 
+/**
+ * 勾选/取消勾选一个 checkbox。
+ *
+ * 必须走 `onChange`：`click()` 调的是 `onClick`，而 checkbox 的状态变化走的是
+ * `onChange`，用 click 勾不动它（实测踩到过——断言"勾了两个"却是 0 个）。
+ */
+async function toggleCheck(node, next) {
+  if (node === null || typeof node.props?.onChange !== 'function') return false
+  node.props.onChange({ target: { checked: next === undefined ? node.props.checked !== true : next } })
+  await settle()
+  return true
+}
+
 async function mount() {
   rootKey = `staging${mountSeq++}`
   settledNodes = []
@@ -316,8 +330,9 @@ check('2) 区块已渲染', find('data-staging') !== null, 'true')
   // both.txt 在两组里都出现——这正是 `MM` 的正确表现。
   checkTrue('   both.txt 同时在两组', bySide('staged').includes('both.txt') && bySide('unstaged').includes('both.txt'))
 }
-// 未跟踪组默认折叠：实测一个真实仓库有 6,636 个未跟踪文件。
-check('   未跟踪组默认折叠', find('data-staging-untracked-list') === null, 'true')
+// 未跟踪组默认**展开**（见下面第 3 节）：这一版把它做成可勾选后"加入 git"，
+// 默认折叠会让这个功能看不见。
+check('   未跟踪组默认展开', find('data-staging-untracked-list') !== null, 'true')
 // 未跟踪组的计数必须用 host 给的**总数**（25），不是本地样本的 3 条：界面上"6,636 个文件"
 // 这个数字本身就是用户想知道的第一件事。
 {
@@ -327,11 +342,51 @@ check('   未跟踪组默认折叠', find('data-staging-untracked-list') === nul
 }
 
 console.log('')
-console.log('=== 3. 展开未跟踪组：只列样本 + 截断说明 ===')
-await click(find('data-staging-toggle', 'untracked'))
-check('3) 展开后出现列表', find('data-staging-untracked-list') !== null, 'true')
-check('   列出样本 3 条', findAll('data-staging-row').filter((r) => r.props['data-staging-side'] === 'untracked').length, 3)
+console.log('=== 3. 未跟踪列表：勾选 + 加入 git ===')
+// 未跟踪组**默认展开**：这一版把它从"折叠 + 只列 20 条"改成可勾选后"加入 git"，
+// 默认折叠会让这个功能看不见（用户得先猜到要去哪里展开）。列表上限放宽到 500 条，
+// 因此只在真的被截断时才提示。
+check('3) 列表默认展开', find('data-staging-untracked-list') !== null, 'true')
+check('   列出全部 3 条', findAll('data-staging-row').filter((r) => r.props['data-staging-side'] === 'untracked').length, 3)
 checkTrue('   说明还有 22 个没显示', textOf(find('data-staging-untracked-truncated')).includes('untrackedTruncated'))
+// 每条未跟踪文件都要有勾选框：这正是"把未跟踪文件加入 git"的入口（参考 IDEA）。
+check('   每条都有勾选框', findAll('data-staging-pick').length, 3)
+// 默认**不勾选**（IDEA 里新文件也不会自动进暂存区），因此"加入 git"按钮初始禁用。
+check('   默认没有勾选', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 0)
+check('   「加入 git」初始禁用', find('data-staging-add-chosen')?.props?.disabled, true)
+
+// 勾两个 → 按钮可用、计数正确 → 点它只 add 这两个。
+await toggleCheck(find('data-staging-pick', 'untracked-1.txt'))
+await toggleCheck(find('data-staging-pick', 'untracked-3.txt'))
+check('   勾选计数', textOf(find('data-staging-chosen-count')).includes('chosenCount'), 'true')
+check('   两个勾选框已选中', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 2)
+check('   「加入 git」已可用', find('data-staging-add-chosen')?.props?.disabled, false)
+posts.length = 0
+await click(find('data-staging-add-chosen'))
+check('   点它发出 stage', posts.map((p) => p.route).join(','), 'stage')
+check(
+  '   只加入勾选的那两个',
+  JSON.stringify(posts[0].body.paths),
+  '["untracked-1.txt","untracked-3.txt"]',
+)
+checkTrue('   给出"已加入 git"提示', textOf(find('data-staging-notice')).includes('addedNotice'))
+// 加完之后勾选要清空，否则用户会以为还要再点一次。
+check('   加入后清空勾选', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 0)
+
+console.log('')
+console.log('=== 3b. 全选 / 全不选 ===')
+{
+  await click(find('data-staging-toggle-all', 'untracked'))
+  check('3b) 全选后 3 个都选中', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 3)
+  await click(find('data-staging-toggle-all', 'untracked'))
+  check('   再点一次全部取消', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 0)
+  // 单行的 `+` 仍然可用（只想加一个时不必先勾选）。
+  posts.length = 0
+  const oneRow = findAll('data-staging-row').find((r) => r.props['data-staging-row'] === 'untracked-2.txt')
+  const plus = collectHostNodes(oneRow, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
+  await click(plus)
+  check('   单行 + 加入一个', JSON.stringify(posts[0]?.body?.paths), '["untracked-2.txt"]')
+}
 
 console.log('')
 console.log('=== 4. 单文件暂存 / 取消暂存 ===')
@@ -370,10 +425,18 @@ console.log('=== 5. 批量按钮 ===')
 }
 {
   posts.length = 0
-  await click(find('data-staging-action', 'stage-all-untracked'))
-  // **只暂存列出的样本**，不是全部 25 个：一次 add 上万个文件几乎不是用户想要的
-  // （那里面有构建产物与日志），而且会让 git 跑很久。
-  check('   未跟踪批量只针对列出的样本', JSON.stringify(posts[0]?.body?.paths), '["untracked-1.txt","untracked-2.txt","untracked-3.txt"]')
+  // 未跟踪组的批量入口现在是"全选/全不选"勾选框（IDEA 同款），**不再是**一个直接
+  // add 的按钮：先勾、再点「加入 git」，这样"加哪些"由用户明确决定。
+  await click(find('data-staging-toggle-all', 'untracked'))
+  check('   全选后 3 个都勾上', findAll('data-staging-pick').filter((n) => n.props.checked === true).length, 3)
+  posts.length = 0
+  await click(find('data-staging-add-chosen'))
+  check(
+    '   加入 git 只提交列出的这批路径',
+    JSON.stringify(posts[0]?.body?.paths),
+    '["untracked-1.txt","untracked-2.txt","untracked-3.txt"]',
+  )
+  await click(find('data-staging-toggle-all', 'untracked'))
 }
 
 console.log('')
@@ -425,7 +488,7 @@ console.log('=== 8. 未知 code 不吞掉原始错误 ===')
 console.log('')
 console.log('=== 9. 空仓库与干净工作区 ===')
 {
-  statusResponse = () => ({ isRepo: true, branch: 'main', tracked: [], trackedCount: 0, untrackedCount: 0, untrackedSample: [] })
+  statusResponse = () => ({ isRepo: true, branch: 'main', tracked: [], trackedCount: 0, untrackedCount: 0, untrackedPaths: [], untrackedTruncated: false })
   await mount()
   checkTrue('9) 干净时给出空态', viewText().includes('noStagedOrChanged'))
   check('   没有任何分组', findAll('data-staging-group').length, 0)

@@ -308,8 +308,12 @@ try {
   // 新增文件"的真实结果就是它变成未跟踪。这正是界面要把"已跟踪更改"与"未跟踪文件"
   // 分成两个区块的原因：同一个文件可能同时出现在两边，而两边的可执行操作不同。
   check('   未跟踪计数', res.body.untrackedCount, 2)
-  checkTrue('   未跟踪样本含 untracked.txt', res.body.untrackedSample.includes('untracked.txt'))
-  checkTrue('   未跟踪样本含 d.txt', res.body.untrackedSample.includes('d.txt'))
+  // 状态响应里给的是**完整路径清单**（`untrackedPaths`），不只是样本：这一版把"把未跟踪
+  // 文件加入 git"做成可勾选后批量 `git add`，因此界面需要知道有哪些文件，而不只是数量。
+  checkTrue('   未跟踪清单含 untracked.txt', res.body.untrackedPaths.includes('untracked.txt'))
+  checkTrue('   未跟踪清单含 d.txt', res.body.untrackedPaths.includes('d.txt'))
+  check('   清单长度等于计数', res.body.untrackedPaths.length, res.body.untrackedCount)
+  check('   没有被截断', res.body.untrackedTruncated, false)
   checkTrue('   不在"已跟踪"里重复未跟踪文件', !trackedPaths.includes('untracked.txt'))
   checkTrue('   每条已跟踪项带索引/工作区两列状态', res.body.tracked.every((e) => e.index.length === 1 && e.worktree.length === 1))
 

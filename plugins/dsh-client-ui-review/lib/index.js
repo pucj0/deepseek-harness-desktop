@@ -1275,16 +1275,20 @@ function createReviewHandler() {
         const raw = await git(['status', '--porcelain'], workspace)
         const { tracked, untracked } = parsePorcelain(raw)
         const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')).trim()
-        // 未跟踪文件数量可能上万（实测 6,636 个）。**不把路径全传回去**：那个列表在
-        // 界面上默认是折叠的，一次传 6,636 条路径只是白白占带宽与内存。只给数量+前若干条，
-        // 用户展开时再单独取（见 /untracked）。
+        // 未跟踪文件的**路径清单**要一并给出，因为"加入 git"（`git add`）正是对它们最主要的
+        // 操作：用户要能看见有哪些、能挑几个加进去。IDEA 的 Git 工具窗也是这么做的。
+        //
+        // 仍然设一个上限：实测过 6,636 个未跟踪文件，一次全塞进状态响应会让每次轮询都拖着
+        // 一份长列表。超过上限时只给前若干条并说明总数，界面据此提示"仅显示前 N 个"。
+        const UNTRACKED_LIMIT = 500
         sendJson(response, 200, {
           isRepo: true,
           branch,
           tracked,
           trackedCount: tracked.length,
           untrackedCount: untracked.length,
-          untrackedSample: untracked.slice(0, 20).map((entry) => entry.path),
+          untrackedPaths: untracked.slice(0, UNTRACKED_LIMIT).map((entry) => entry.path),
+          untrackedTruncated: untracked.length > UNTRACKED_LIMIT,
         })
         return
       }
