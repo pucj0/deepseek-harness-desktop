@@ -332,19 +332,30 @@ async function mount() {
 }
 
 console.log('')
-console.log('=== 2. 三组文件按 XY 分类 ===')
+console.log('=== 2. 已跟踪改动合成一组 ===')
 await mount()
 check('2) 区块已渲染', find('data-staging') !== null, 'true')
 {
-  const groups = findAll('data-staging-group').map((n) => n.props['data-staging-group'])
-  // 三组各取一次标题（组容器与标题各带一次属性，因此按出现顺序去重）。
-  check('   三组都在（已暂存/更改/未跟踪）', [...new Set(groups)].join(','), 'staged,unstaged,untracked')
+  const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
+  // 只有两组：已跟踪的改动（**不**再按索引态拆开）+ 未跟踪。
+  // 拆分会让 `MM` 的文件出现两行、还得让用户判断该提交哪一个；索引现在是内部细节，
+  // 因为提交时会自动 add。
+  check('   两组：更改 + 未跟踪', groups.join(','), 'unstaged,untracked')
   const rows = findAll('data-staging-row')
-  const bySide = (side) => rows.filter((r) => r.props['data-staging-side'] === side).map((r) => r.props['data-staging-row'])
-  check('   已暂存组', bySide('staged').join(','), 'new-staged.txt,both.txt')
-  check('   更改组', bySide('unstaged').join(','), 'unstaged.txt,both.txt')
-  // both.txt 在两组里都出现——这正是 `MM` 的正确表现。
-  checkTrue('   both.txt 同时在两组', bySide('staged').includes('both.txt') && bySide('unstaged').includes('both.txt'))
+  const trackedRows = rows.filter((r) => r.props['data-staging-side'] !== 'untracked').map((r) => r.props['data-staging-row'])
+  check('   已跟踪改动每个文件一行（去重）', trackedRows.join(','), 'new-staged.txt,both.txt,unstaged.txt')
+  // `MM` 的 both.txt 只出现一次——这是"不再重复"的直接证据。
+  check('   `MM` 的文件不重复', trackedRows.filter((p) => p === 'both.txt').length, 1)
+  // 但它在索引里已有改动这件事仍要看得出来：那一行的动作按钮是"取消暂存"（−），
+  // 而纯工作区改动的行是"暂存"（+）。
+  const actionOf = (path) => {
+    const row = findAll('data-staging-row').find((n) => n.props['data-staging-row'] === path)
+    if (row === undefined) return '(no-row)'
+    const btn = collectHostNodes(row, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
+    return btn?.props?.['data-staging-row-action'] ?? '(none)'
+  }
+  check('   索引里已有改动 -> 行内动作是取消暂存', actionOf('both.txt'), 'unstage')
+  check('   纯工作区改动 -> 行内动作是暂存', actionOf('unstaged.txt'), 'stage')
 }
 // 未跟踪组默认**展开**（见下面第 3 节）：这一版把它做成可勾选后"加入 git"，
 // 默认折叠会让这个功能看不见。
@@ -432,12 +443,8 @@ console.log('=== 5. 批量按钮 ===')
 {
   posts.length = 0
   await click(find('data-staging-action', 'stage-all'))
-  check('5) 全部暂存：路径是被分类为"未暂存"的那批', JSON.stringify(posts[0]?.body?.paths), '["unstaged.txt","both.txt"]')
-}
-{
-  posts.length = 0
-  await click(find('data-staging-action', 'unstage-all'))
-  check('   全部取消暂存：路径是被分类为"已暂存"的那批', JSON.stringify(posts[0]?.body?.paths), '["new-staged.txt","both.txt"]')
+  // 现在只有一组已跟踪改动，因此"全部暂存"就是这一组里的全部文件。
+  check('5) 全部暂存：这一组里的全部文件', JSON.stringify(posts[0]?.body?.paths), '["new-staged.txt","both.txt","unstaged.txt"]')
 }
 {
   posts.length = 0
@@ -466,7 +473,7 @@ console.log('=== 6. 提交框：禁用条件与请求 ===')
   messageNode.props.onChange({ target: { value: 'feat: 暂存并提交' } })
   await settle()
   check('   填了信息后可用', find('data-staging-commit')?.props?.disabled, false)
-  checkTrue('   提示改成快捷键说明', textOf(find('data-staging-hint')).includes('commitHintCtrlEnter'))
+  checkTrue('   提示说明本次会提交几个', textOf(find('data-staging-hint')).includes('willCommitCount'))
 }
 {
   posts.length = 0
@@ -541,73 +548,87 @@ console.log('=== 9. 空仓库与干净工作区 ===')
 }
 
 console.log('')
-console.log('=== 9b. 勾选要提交的文件（提交选中 / 提交并推送）===')
+console.log('=== 9b. 提交：默认全选、一步到位、可排除 ===')
 {
   statusResponse = () => STATUS
   globalThis.fetch = fetchBase
   await mount()
-  // 两个分组各自有"全选"勾选框；每个已跟踪文件一个勾选框。
-  check('9b) 已暂存组有全选', find('data-staging-group-pick', 'staged') !== null, 'true')
-  check('   更改组有全选', find('data-staging-group-pick', 'unstaged') !== null, 'true')
-  check('   每条已跟踪文件一个勾选框', findAll('data-staging-file-pick').length, 4) // staged 2 + unstaged 2
-  check('   默认都没有勾选', findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length, 0)
+  // 已跟踪改动只显示**一组**（不再拆"已暂存 / 未暂存"）：同一个文件两处都有改动时
+  // 会出现两行重复，还得让用户判断该提交哪一个。索引现在只是内部细节。
+  const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
+  check('9b) 已跟踪改动只有一组', groups.filter((g) => g !== 'untracked').join(','), 'unstaged')
+  // `MM` 的文件只出现一次（这是"不再重复"的直接证据）。
+  const bothRows = findAll('data-staging-row').filter((n) => n.props['data-staging-row'] === 'both.txt' && n.props['data-staging-side'] !== 'untracked')
+  check('   `MM` 的文件只出现一次', bothRows.length, 1)
+  check('   每个已跟踪文件一个勾选框', findAll('data-staging-file-pick').length, 3)
+  // **默认全部勾选** —— 这是"不用先加暂存"的核心：提交直接一步到位。
+  check(
+    '   默认全部勾选',
+    findAll('data-staging-file-pick')
+      .filter((n) => n.props.checked === true)
+      .map((n) => n.props['data-staging-file-pick'])
+      .sort()
+      .join(','),
+    'both.txt,new-staged.txt,unstaged.txt',
+  )
 
-  // 勾选"更改"组里那个未暂存的文件 → 提交按钮的文案变成"提交选中 N 个"。
-  await toggleCheck(find('data-staging-file-pick', 'unstaged.txt'), true)
-  check('   勾一个后按钮文案带数量', textOf(find('data-staging-commit')).includes('commitSelected'), 'true')
-  // 提交按钮仍禁用是因为**没填提交信息**（不是没勾选），此时提示应当说这件事。
-  check('   未填信息时仍禁用', find('data-staging-commit')?.props?.disabled, true)
+  // 只填提交信息就能提交（不需要先暂存、也不需要先勾选）。
+  check('   未填信息时禁用', find('data-staging-commit')?.props?.disabled, true)
   checkTrue('   提示要求先填信息', textOf(find('data-staging-hint')).includes('emptyMessage'))
-
-  // 填上提交信息后按钮可用，且只提交勾选的那个。
-  // （这个测试桩没有通用的 `type` 助手，直接调受控 textarea 的 onChange。）
-  find('data-staging-message').props.onChange({ target: { value: 'feat: 只提交选中的文件' } })
+  find('data-staging-message').props.onChange({ target: { value: 'feat: 一步提交' } })
   await settle()
-  checkTrue('   填了信息后提示变成已选数量', textOf(find('data-staging-hint')).includes('selectedCount'))
-  check('   提交按钮已可用', find('data-staging-commit')?.props?.disabled, false)
+  check('   填了信息后提交可用', find('data-staging-commit')?.props?.disabled, false)
+  checkTrue('   提示说明本次会提交几个', textOf(find('data-staging-hint')).includes('willCommitCount'))
 
-  // 点"提交选中" → 请求体必须带上那个路径（host 先 add 再 commit，未暂存的也能直接提交）。
+  // 默认提交 = 全部已跟踪改动（host 先 add 再 commit）。
   posts.length = 0
   await click(find('data-staging-commit'))
-  const body = posts[0]?.body
   check('   发出 commit', posts[0]?.route, 'commit')
-  check('   带上勾选的路径', JSON.stringify(body?.paths), '["unstaged.txt"]')
-  check('   没有 push 标记', body?.push, undefined)
+  check(
+    '   默认提交全部已跟踪改动',
+    JSON.parse(JSON.stringify(posts[0]?.body?.paths)).sort().join(','),
+    'both.txt,new-staged.txt,unstaged.txt',
+  )
+  check('   没有 push 标记', posts[0]?.body?.push, undefined)
 
-  // 「提交并推送」必须带 push: true。
+  // 取消勾选一个之后，只提交剩下的。
   //
-  // 注意：上一次提交**成功后清空了输入框**（这是有意的——否则用户会重复提交同一句话），
-  // 因此这里必须重新填一次信息，否则按钮是禁用的、点不动。
-  await toggleCheck(find('data-staging-file-pick', 'both.txt'), true)
+  // 注意上一次提交成功后输入框被清空（有意），因此要重新填。
   check('   提交后输入框已清空', find('data-staging-message')?.props?.value, '')
+  await toggleCheck(find('data-staging-file-pick', 'both.txt'), false)
+  find('data-staging-message').props.onChange({ target: { value: 'feat: 排除一个' } })
+  await settle()
+  check('   排除一个后提交仍可用', find('data-staging-commit')?.props?.disabled, false)
+  console.log(`  [debug] 勾选=${JSON.stringify(findAll('data-staging-file-pick').filter((n) => n.props.checked === true).map((n) => n.props['data-staging-file-pick']))}`)
+  posts.length = 0
+  await click(find('data-staging-commit'))
+  check('   排除后确实发出了 commit', posts.length, 1)
+  check(
+    '   排除后只提交剩下的',
+    (posts[0]?.body?.paths ?? []).slice().sort().join(','),
+    'new-staged.txt,unstaged.txt',
+  )
+
+  // 「提交并推送」带 push: true。
   find('data-staging-message').props.onChange({ target: { value: 'feat: 提交并推送' } })
   await settle()
-  check('   重新填信息后按钮可用', find('data-staging-commit-push')?.props?.disabled, false)
   posts.length = 0
   await click(find('data-staging-commit-push'))
   check('   提交并推送发出 commit', posts[0]?.route, 'commit')
   check('   带 push: true', posts[0]?.body?.push, true)
-  check('   带上勾选的路径', JSON.stringify(posts[0]?.body?.paths), '["both.txt"]')
 
-  // 组级全选 / 取消全选（勾选框：click 不会翻转 checked，必须走 onChange）。
+  // 组级全选 / 取消全选。全部取消后没有任何选中 → 提交按钮禁用（那是明确的意图）。
+  await toggleCheck(find('data-staging-group-pick', 'unstaged'), false)
+  check('   取消全选后没有勾选', findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length, 0)
+  find('data-staging-message').props.onChange({ target: { value: 'feat: 全不选' } })
+  await settle()
+  check('   全不选时提交禁用', find('data-staging-commit')?.props?.disabled, true)
+  checkTrue('   提示说明要先勾选', textOf(find('data-staging-hint')).includes('noSelection'))
   await toggleCheck(find('data-staging-group-pick', 'unstaged'), true)
   check(
-    '   更改组全选',
-    // 去重：`both.txt` 同时在"已暂存"与"更改"两组里（`MM`），所以这个文件会出现两次。
-    [...new Set(
-      findAll('data-staging-file-pick')
-        .filter((n) => n.props.checked === true)
-        .map((n) => n.props['data-staging-file-pick']),
-    )]
-      .sort()
-      .join(','),
-    'both.txt,unstaged.txt',
-  )
-  await toggleCheck(find('data-staging-group-pick', 'unstaged'), false)
-  check(
-    '   更改组取消全选',
+    '   再全选回来',
     findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length,
-    0,
+    3,
   )
 }
 

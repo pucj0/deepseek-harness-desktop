@@ -525,6 +525,7 @@ window.__ModuleLoader__.load({
       selectAll: '全选',
       clearSelection: '取消全选',
       selectedCount: '已选 {count}',
+      willCommitCount: '本次将提交 {count} 个文件',
       commitSelected: '提交选中 {count} 个',
       commitAndPush: '提交并推送',
       commitAndPushHint: '提交后推送当前分支到它的上游',
@@ -641,6 +642,7 @@ window.__ModuleLoader__.load({
       selectAll: 'Select all',
       clearSelection: 'Clear selection',
       selectedCount: '{count} selected',
+      willCommitCount: 'Will commit {count} file(s)',
       commitSelected: 'Commit {count} selected',
       commitAndPush: 'Commit and push',
       commitAndPushHint: 'Commit, then push the current branch to its upstream',
@@ -2275,13 +2277,16 @@ window.__ModuleLoader__.load({
        */
       const [chosenUntracked, setChosenUntracked] = react.useState([])
       /**
-       * 已勾选、准备提交的文件路径（已暂存组 + 更改组两部分合起来）。
+       * 用户**主动取消勾选**的已跟踪文件。
        *
-       * 这是"提交选中"的入口，参考 IDEA 的提交对话框：勾哪些就只提交哪些。host 侧
-       * 收到这批路径会先 `git add` 再 `git commit`，因此**未暂存的文件也能直接被提交**
-       * ——这正是 IDEA 的行为（它也是提交时才真正 add）。
+       * 用"记录取消"而不是"记录勾选"，因为默认是**全部已跟踪改动都算待提交**（IDEA 的
+       * 习惯：变更即待提交，不必先暂存）。如果记录勾选集合，那么每次状态刷新（轮询、
+       * 暂存之后重读）都会把用户刚取消掉的那个文件又加回来——实测就踩到了这个：取消
+       * 勾选后按钮仍显示"会提交 3 个"，而且提交的还是 3 个。
+       * 记录取消集合则天然稳定：新出现的文件默认勾选（IDEA 也是这样），用户取消过的
+       * 一直保持取消，直到他重新勾上。
        */
-      const [chosenFiles, setChosenFiles] = react.useState([])
+      const [deselectedFiles, setDeselectedFiles] = react.useState([])
       /** 正在查看变更记录的文件路径（空串表示没有）。 */
       const [history, setHistory] = react.useState('')
       const [message, setMessage] = react.useState('')
@@ -2389,7 +2394,10 @@ window.__ModuleLoader__.load({
           })
           if (ok === undefined) return
           setMessage('')
-          if (selected.length > 0) setChosenFiles([])
+          // 提交成功后清掉"排除"记录：被排除的文件已经提交过了（或已不在列表里），
+          // 留着会让下一次提交莫名其妙地漏掉同名的新改动。
+          setDeselectedFiles([])
+          setChosenUntracked([])
           // 提交成功、推送失败**不算失败**：提交已经落到本地历史里了。把两种结果分开说，
           // 否则用户会以为什么都没发生、于是再提交一次。
           if (ok.pushed === true) {
@@ -2404,6 +2412,16 @@ window.__ModuleLoader__.load({
         [message, run, t, onCommitted],
       )
 
+      // 已跟踪改动默认全部算作已勾选，"提交"因此一步到位、不需要先暂存（详见下面
+      // commitPaths 处的说明）。这里把"不再存在的路径"从取消集合里清掉，避免它无限增长。
+      const knownPathsKey = (state.result?.tracked ?? [])
+        .map((entry) => entry.path)
+        .join('\u0000')
+      react.useEffect(() => {
+        const paths = new Set(knownPathsKey === '' ? [] : knownPathsKey.split('\u0000'))
+        setDeselectedFiles((current) => current.filter((path) => paths.has(path)))
+      }, [knownPathsKey])
+
       // 阶段守卫必须在最前：加载中/无工作区/非仓库/出错这四种情况都不该继续往下算分组。
       if (state.phase === 'loading') return statusBlock(t('loading'))
       if (state.phase === 'noworkspace') return statusBlock(t('noWorkspace'))
@@ -2417,7 +2435,9 @@ window.__ModuleLoader__.load({
        * 而不是一个按钮，是因为它同时要**显示当前状态**（部分选中时无法用按钮表达）。
        */
       const groupPick = (groupId, paths) => {
-        const picked = paths.filter((p) => chosenFiles.includes(p))
+        // 已跟踪那一组用"取消集合"推导；未跟踪组用单独的选择集合（它默认不勾）。
+        const isChosen = groupId === 'untracked' ? (p) => chosenUntracked.includes(p) : (p) => !deselectedFiles.includes(p)
+        const picked = paths.filter(isChosen)
         const all = paths.length > 0 && picked.length === paths.length
         const some = picked.length > 0 && !all
         return react.createElement('input', {
@@ -2431,20 +2451,35 @@ window.__ModuleLoader__.load({
           },
           'aria-label': all ? t('clearSelection') : t('selectAll'),
           title: all ? t('clearSelection') : t('selectAll'),
-          onChange: (event) =>
-            setChosenFiles((current) =>
+          onChange: (event) => {
+            if (groupId === 'untracked') {
+              setChosenUntracked((current) =>
+                event.target.checked ? [...new Set([...current, ...paths])] : current.filter((item) => !paths.includes(item)),
+              )
+              return
+            }
+            // 已跟踪那一组：勾上 = 从"取消集合"里移除；取消 = 加进去。
+            setDeselectedFiles((current) =>
               event.target.checked
-                ? [...new Set([...current, ...paths])]
-                : current.filter((item) => !paths.includes(item)),
-            ),
+                ? current.filter((item) => !paths.includes(item))
+                : [...new Set([...current, ...paths])],
+            )
+          },
           style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
         })
       }
 
       /** 渲染一组行，并在需要时在其下方插入变更记录面板。 */
-      const renderRows = (entries, side) => {
+      /**
+       * 渲染一组行，并在需要时在其下方插入变更记录面板。
+       *
+       * @param entries - 文件条目数组。
+       * @param sideOf - 由条目算出该行显示哪种暂存动作的函数（`'staged'` → 取消暂存）。
+       */
+      const renderRows = (entries, sideOf) => {
         const nodes = []
         for (const entry of entries) {
+          const side = typeof sideOf === 'function' ? sideOf(entry) : sideOf
           nodes.push(fileRow(entry, side))
           if (history === entry.path) {
             nodes.push(react.createElement(FileHistory, {
@@ -2473,13 +2508,34 @@ window.__ModuleLoader__.load({
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
       // 提交按钮为什么禁用，要在界面上说清楚：灰着而不给理由，用户只会反复点它。
       //
-      // `commitPaths` 非空时"提交"只提交勾选的那些（host 先 add 再 commit，因此未暂存的
-      // 文件也能直接被提交——这正是 IDEA 的行为）；为空时提交索引里现有的全部内容。
-      // 勾选可能跨两个分组（已暂存 + 更改），因此按当前列表过滤一次，把已经不在列表里的
-      // 路径丢掉（提交/暂存之后它们会消失）。
-      const allTrackedPaths = [...staged, ...unstaged].map((entry) => entry.path)
-      const commitPaths = chosenFiles.filter((path) => allTrackedPaths.includes(path))
-      const commitDisabled = busy || message.trim() === '' || (commitPaths.length === 0 && staged.length === 0)
+      // **已跟踪改动默认全部算作已勾选**，"提交"因此一步到位，不需要先暂存——IDEA 里
+      // "变更"本来就等同于待提交，git 的索引是它内部处理的细节，不该变成用户必须先做的
+      // 一步（实际反馈："还要先加暂存，交互太麻烦"）。勾选框只用来**排除**个别文件。
+      // host 收到这批路径会先 `git add` 再 `commit`，所以未暂存的文件一样能被提交。
+      //
+      // 未跟踪的文件不默认算在内：把 `git add .` 的语义强加给一次普通提交，会把构建产物
+      // 之类的东西一起提交进去。要带上它们就勾一下（那是明确的意图）。
+      const allTrackedPaths = [...new Set([...staged, ...unstaged].map((entry) => entry.path))]
+      /** 完整的已跟踪文件列表（按路径去重），界面只显示这一组。 */
+      const byPath = new Map()
+      for (const entry of [...staged, ...unstaged]) {
+        if (!byPath.has(entry.path)) byPath.set(entry.path, entry)
+      }
+      const allTracked = [...byPath.values()]
+      /** 一行该显示哪种暂存动作：索引里已有改动 → 取消暂存，否则 → 暂存。 */
+      const sideOf = (entry) => (classifyEntry(entry).staged ? 'staged' : 'unstaged')
+      /**
+       * 一个已跟踪文件当前是否算作"要提交"。
+       * 默认是（IDEA 的习惯：变更即待提交），除非用户主动取消过它。
+       */
+      const isPicked = (path) => !deselectedFiles.includes(path)
+      /** 本次会提交的已跟踪文件。 */
+      const checkedTracked = allTrackedPaths.filter(isPicked)
+      // `chosenUntracked` 是"加入 git / 一并提交"勾选的未跟踪文件（默认不勾）。
+      const checkedUntracked = chosenUntracked.filter((path) => untrackedPaths.includes(path))
+      /** 本次提交的完整文件清单：全部勾中的已跟踪改动 + 勾中的未跟踪文件。 */
+      const commitPaths = [...checkedTracked, ...checkedUntracked]
+      const commitDisabled = busy || message.trim() === '' || commitPaths.length === 0
 
       /**
        * 一行已跟踪的文件（已暂存组或更改组）。
@@ -2493,7 +2549,7 @@ window.__ModuleLoader__.load({
        * @param side - `'staged'` 或 `'unstaged'`。
        */
       const fileRow = (entry, side) => {
-        const picked = chosenFiles.includes(entry.path)
+        const picked = !deselectedFiles.includes(entry.path)
         return react.createElement(
           'div',
           {
@@ -2509,8 +2565,10 @@ window.__ModuleLoader__.load({
             disabled: busy,
             'aria-label': entry.path,
             onChange: (event) =>
-              setChosenFiles((current) =>
-                event.target.checked ? [...current, entry.path] : current.filter((item) => item !== entry.path),
+              setDeselectedFiles((current) =>
+                event.target.checked
+                  ? current.filter((item) => item !== entry.path)
+                  : [...new Set([...current, entry.path])],
               ),
             style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
           }),
@@ -2748,10 +2806,10 @@ window.__ModuleLoader__.load({
               message.trim() === ''
                 ? t('emptyMessage')
                 : commitPaths.length > 0
-                  ? t('selectedCount', { count: commitPaths.length })
-                  : staged.length === 0
-                    ? t('error_nothingStaged')
-                    : t('commitHintCtrlEnter'),
+                  ? t('willCommitCount', { count: commitPaths.length })
+                  : allTrackedPaths.length === 0
+                    ? t('error_nothingToCommit')
+                    : t('noSelection'),
             ),
           ),
         ),
@@ -2792,44 +2850,13 @@ window.__ModuleLoader__.load({
           : react.createElement(
               'div',
               { style: { paddingTop: '4px' } },
-              // ---- 已暂存 ----
-              staged.length === 0
-                ? null
-                : react.createElement(
-                    'div',
-                    { 'data-staging-group': 'staged' },
-                    react.createElement(StagingGroupHeader, {
-                      t,
-                      id: 'staged',
-                      label: t('stagedTitle'),
-                      count: staged.length,
-                      collapsed: collapsed.staged,
-                      onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
-                      action: react.createElement(
-                        'div',
-                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-                        groupPick('staged', staged.map((entry) => entry.path)),
-                        react.createElement(
-                          StagingIconButton,
-                          {
-                            t,
-                            id: 'unstage-all',
-                            label: t('unstageAll'),
-                            disabled: busy,
-                            onClick: () => void run('unstage', { paths: staged.map((entry) => entry.path) }),
-                          },
-                          react.createElement(
-                            'svg',
-                            { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
-                            react.createElement('path', { d: 'M3.5 8h9', strokeLinecap: 'round' }),
-                          ),
-                        ),
-                      ),
-                    }),
-                    collapsed.staged ? null : renderRows(staged, 'staged'),
-                  ),
-              // ---- 更改（未暂存）----
-              unstaged.length === 0
+              // ---- 更改（已跟踪的改动，**一组**）----
+              //
+              // 刻意不再拆成"已暂存 / 未暂存"两组：同一个文件两处都有改动（`MM`）时会
+              // 出现在两个列表里，既有重复行，也让"到底该提交哪个"变成用户的负担。
+              // 现在索引是内部细节——提交时会自动 add，所以列表只回答"改了什么"。
+              // 索引里已有的改动用状态徽标（A/M/D）与行首的已暂存标记区分。
+              allTracked.length === 0
                 ? null
                 : react.createElement(
                     'div',
@@ -2838,13 +2865,13 @@ window.__ModuleLoader__.load({
                       t,
                       id: 'unstaged',
                       label: t('unstagedTitle'),
-                      count: unstaged.length,
+                      count: allTracked.length,
                       collapsed: collapsed.unstaged,
                       onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
                       action: react.createElement(
                         'div',
                         { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-                        groupPick('unstaged', unstaged.map((entry) => entry.path)),
+                        groupPick('unstaged', allTrackedPaths),
                         react.createElement(
                           StagingIconButton,
                           {
@@ -2852,13 +2879,14 @@ window.__ModuleLoader__.load({
                             id: 'stage-all',
                             label: t('stageAll'),
                             disabled: busy,
-                            onClick: () => void run('stage', { paths: unstaged.map((entry) => entry.path) }),
+                            // 仍然保留"只暂存不提交"这条路：有人习惯先把改动摆进索引再逐次提交。
+                            onClick: () => void run('stage', { paths: allTrackedPaths }),
                           },
                           bulkIcon,
                         ),
                       ),
                     }),
-                    collapsed.unstaged ? null : renderRows(unstaged, 'unstaged'),
+                    collapsed.unstaged ? null : renderRows(allTracked, sideOf),
                   ),
               // ---- 未跟踪（可以勾选后"加入 git"）----
               untrackedCount === 0
