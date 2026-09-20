@@ -212,6 +212,21 @@ const sourceText = read(join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'cl
 const targetText = read(join(realTarget, 'node_modules', 'dsh-client-ui-review', 'lib', 'client.js'))
 check('客户端 bundle 内容一致', sourceText === targetText && sourceText !== undefined, 'true')
 
+// 插件目录里**不止 client.js / index.js** 的文件也必须一起复制过去。
+//
+// 提交图的泳道算法有一份独立文件（`lib/graph-layout.js`），它被
+// `scripts/test-graph-layout.mjs` 与 `test-graph-layout-parity.mjs` 直接按路径 import。
+// 同步用的是整目录复制，本该自动带上——但"本该"正是这类断言存在的理由：如果哪天
+// 同步改成按后缀挑选，那两个测试会在开发机上照常通过（它们读的是源目录），
+// 只有打包安装后的用户会遇到"文件不存在"。
+for (const extra of [
+  join('lib', 'graph-layout.js'),
+]) {
+  const from = read(join(ROOT, 'plugins', 'dsh-client-ui-review', extra))
+  const to = read(join(realTarget, 'node_modules', 'dsh-client-ui-review', extra))
+  check(`附属文件 ${extra} 已复制且内容一致`, from !== undefined && from === to, 'true')
+}
+
 rmSync(work, { recursive: true, force: true })
 
 console.log('')

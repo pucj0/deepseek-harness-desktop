@@ -56,6 +56,317 @@ const SAFE_PATH_PATTERN = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]{1,1024}$/u
 const baselines = new Map()
 
 /**
+ * 提交历史图一页的默认条数与上限。
+ *
+ * 分页是必需的而不是"顺手加的"：实测本仓库的 `git log --topo-order` 在 400 条时已经
+ * 需要几十毫秒，而真实项目动辄几万条提交。一次把整部历史读进来、再在渲染进程里排泳道，
+ * 会让打开提交图变成一个可以感知的卡顿。
+ */
+const GRAPH_PAGE_DEFAULT = 80
+const GRAPH_PAGE_MAX = 400
+
+/** 一次 commit 详情最多列多少条改动文件，避免超大提交把面板撑爆。 */
+const COMMIT_FILES_MAX = 2000
+
+/**
+ * 路径的形状校验（与 revert 的同名常量同一套规则）。
+ *
+ * 变化历史那条路由要按路径查单个文件的差异，因此这里是"客户端能提供的路径"的第二处
+ * 入口——和还原一样，只接受仓库内的相对路径，挡掉绝对路径与 `..`。
+ */
+const SAFE_PATH_PATTERN_GRAPH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]{1,1024}$/u
+
+/**
+ * 从 `git log` 的 `%D` 字段解析出装饰信息（分支、标签、HEAD）。
+ *
+ * git 在这里给出的是 `HEAD -> main, origin/main, tag: v1.0.0` 这样的文本，因此必须解析；
+ * 而它是**稳定的机器可读格式**（`%D` 的文档明确列出了这几种前缀），与 `%(upstream:track)`
+ * 那种"给人看的中文括号"不同。逐个前缀判定：
+ *   `HEAD -> x`  当前分支
+ *   `tag: x`     标签
+ *   `origin/x`   远端分支（含 `/` 且不是 tag）
+ *   其余         本地分支
+ *
+ * @param decoration - `%D` 的原文。
+ * @returns `{ refs: Array<{name, kind, isHead}>, headBranch, localBranches, remoteBranches, tags }`。
+ */
+function parseDecoration(decoration) {
+  const refs = []
+  const raw = typeof decoration === 'string' ? decoration.trim() : ''
+  for (const part of raw.split(',')) {
+    const piece = part.trim()
+    if (piece === '') continue
+    if (piece.startsWith('HEAD -> ')) {
+      refs.push({ name: piece.slice('HEAD -> '.length), kind: 'branch', isHead: true })
+      continue
+    }
+    if (piece === 'HEAD') {
+      // 游离 HEAD 时 git 只给 `HEAD`。
+      refs.push({ name: 'HEAD', kind: 'head', isHead: true })
+      continue
+    }
+    if (piece.startsWith('tag: ')) {
+      refs.push({ name: piece.slice('tag: '.length), kind: 'tag', isHead: false })
+      continue
+    }
+    refs.push({ name: piece, kind: piece.includes('/') ? 'remote' : 'branch', isHead: false })
+  }
+
+  const head = refs.find((ref) => ref.isHead === true && ref.kind === 'branch')
+  return {
+    refs,
+    headBranch: head === undefined ? '' : head.name,
+    localBranches: refs.filter((ref) => ref.kind === 'branch').map((ref) => ref.name),
+    remoteBranches: refs.filter((ref) => ref.kind === 'remote').map((ref) => ref.name),
+    tags: refs.filter((ref) => ref.kind === 'tag').map((ref) => ref.name),
+  }
+}
+
+/**
+ * 读取一页提交历史，附带画图所需的父提交与 refs。
+ *
+ * `--topo-order` 而不是默认的日期序：提交图是按父子关系画的，日期序会让父提交出现在
+ * 子提交**之前**（时钟漂移、变基后的旧时间戳都会造成这种乱序），于是所有连线都会往回指。
+ * `--date-order` 只影响同一拓扑层内的顺序，两者一起用才能既保证"父在子之后"，又让
+ * 同一层内按时间排列。
+ *
+ * `%x1f`（单元分隔符）与 `%x1e`（记录分隔符）而不是 `\t`/`\n`：提交标题里可能含制表符，
+ * 作者名里可能含各种空白，只有这两个控制字符在提交信息里不可能出现。
+ *
+ * @param cwd - 工作区路径。
+ * @param options - `{ limit, skip, ref }`。
+ * @returns `{ commits, hasMore, nextSkip }`。
+ */
+async function readGraph(cwd, options) {
+  const limit = Math.min(Math.max(Math.trunc(options.limit), 1), GRAPH_PAGE_MAX)
+  const skip = Math.max(Math.trunc(options.skip), 0)
+  // 多取一条用来判断"还有没有下一页"：比再跑一次 `rev-list --count` 便宜得多。
+  const args = [
+    'log',
+    '--topo-order',
+    '--date-order',
+    // `--no-abbrev` **不能省**：`%p` 会跟随 `core.abbrev` 输出**缩写**哈希（实测在本机
+    // 是 7 位），而客户端要用父提交哈希去匹配同一页里别的提交、决定连线画到哪一行。
+    // 缩写哈希在极端情况下会与另一条提交的前缀相同，那时图会连错线——而且只在很少见的
+    // 仓库里出现，属于最难查的一类 bug。`%H` 本来就是完整的，这里是为了 `%p`。
+    '--no-abbrev',
+    `--max-count=${limit + 1}`,
+    `--skip=${skip}`,
+    '-M',
+    '--pretty=format:%H%x1f%h%x1f%p%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%D%x1f%s%x1e',
+  ]
+  // 只看某个 ref（分支/标签）：界面上的"分支筛选"。以 `-` 开头的值一律不接受，
+  // 否则它就是一个可以注入选项的入口。
+  if (typeof options.ref === 'string' && options.ref !== '') {
+    if (!REF_PATTERN_GRAPH.test(options.ref)) return { commits: [], hasMore: false, nextSkip: skip, invalidRef: true }
+    args.push(options.ref)
+  } else {
+    // 不带 ref 时看**全部**分支，否则提交图上只有当前分支那条线，看不到任何分叉——
+    // 而"看到分叉"正是这个视图存在的理由。
+    args.push('--all')
+  }
+
+  const raw = await git(args, cwd)
+  const records = raw
+    .split('\x1e')
+    .map((record) => record.replace(/^\n/u, ''))
+    .filter((record) => record.trim() !== '')
+    .map((record) => {
+      const [hash, short, parents, author, email, authoredAt, committedAt, decoration, ...rest] = record.split('\x1f')
+      return {
+        hash: String(hash ?? '').trim(),
+        short: String(short ?? '').trim(),
+        // 父提交是空格分隔的哈希串；首提交为空。
+        parents: String(parents ?? '').trim() === '' ? [] : String(parents).trim().split(/\s+/u),
+        author: String(author ?? '').trim(),
+        email: String(email ?? '').trim(),
+        authoredAt: String(authoredAt ?? '').trim(),
+        committedAt: String(committedAt ?? '').trim(),
+        subject: rest.join('\x1f').trim(),
+        ...parseDecoration(decoration),
+      }
+    })
+
+  const hasMore = records.length > limit
+  if (hasMore) records.pop()
+  return { commits: records, hasMore, nextSkip: skip + records.length }
+}
+
+/**
+ * 一条提交的详情：元信息 + 改动文件清单 + 它出现在哪些本地分支上。
+ *
+ * @param cwd - 工作区路径。
+ * @param revision - 已校验的提交 SHA。
+ * @returns 详情对象。
+ */
+async function readCommit(cwd, revision) {
+  const raw = await git(
+    ['show', '--no-patch', '--no-abbrev', '--pretty=format:%H%x1f%h%x1f%p%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%D%x1f%s%x1f%b', revision],
+    cwd,
+  )
+  const parts = raw.split('\x1f')
+  const [hash, short, parents, author, email, authoredAt, committedAt, decoration, subject, ...bodyParts] = parts
+  const commit = {
+    hash: String(hash ?? '').trim(),
+    short: String(short ?? '').trim(),
+    parents: String(parents ?? '').trim() === '' ? [] : String(parents).trim().split(/\s+/u),
+    author: String(author ?? '').trim(),
+    email: String(email ?? '').trim(),
+    authoredAt: String(authoredAt ?? '').trim(),
+    committedAt: String(committedAt ?? '').trim(),
+    subject: String(subject ?? '').trim(),
+    body: bodyParts.join('\x1f').trim(),
+    ...parseDecoration(decoration),
+  }
+
+  // 改动文件清单：与工作区差异用同一套解析（numstat + name-status），因此"重命名怎么显示"
+  // 这类规则在提交详情与未提交改动之间是一致的。
+  //
+  // **根提交必须走 `show`，不能用 `diff --root <rev>`。** 这是一个安静的错：`git diff
+  // --root <rev>` 里的 `--root` 只对"把某个提交与**空树**比较"这一种形式生效
+  // （`git diff --root <rev>` 会被当成"比较 <rev> 与工作区"），于是根提交的"改动清单"
+  // 实际上是"根提交 vs 当前工作区"——实测在临时仓库上会给出 `M a.txt, A b.txt, A c.txt`
+  // 这样的结果（混进了后续提交与工作区的改动），而正确答案是只有 `A a.txt`。
+  // 有父提交时 `show <rev>` 与 `diff <rev>^ <rev>` 等价，因此统一用 show 也行；
+  // 这里保留 diff 分支只是为了少一次格式解析。
+  const [stat, names] = await Promise.all([
+    commit.parents.length === 0
+      ? git(['show', '--numstat', '--format=', '--no-renames', revision], cwd)
+      : git(['diff', '--numstat', `${revision}^`, revision], cwd),
+    commit.parents.length === 0
+      ? git(['show', '--name-status', '--format=', '--no-renames', revision], cwd)
+      : git(['diff', '--name-status', `${revision}^`, revision], cwd),
+  ])
+  const counts = new Map()
+  for (const line of stat.split('\n')) {
+    const fields = line.split('\t')
+    if (fields.length < 3) continue
+    counts.set(fields[2], {
+      added: fields[0] === '-' ? null : Number(fields[0]),
+      removed: fields[1] === '-' ? null : Number(fields[1]),
+    })
+  }
+  const files = []
+  for (const line of names.split('\n')) {
+    if (line.trim() === '') continue
+    const [status, ...rest] = line.split('\t')
+    const path = rest[rest.length - 1]
+    if (path === undefined) continue
+    const count = counts.get(path)
+    files.push({
+      path,
+      status,
+      added: count?.added ?? null,
+      removed: count?.removed ?? null,
+    })
+    if (files.length >= COMMIT_FILES_MAX) break
+  }
+
+  // "在 N 个分支中"：逐个本地分支问"这个提交是不是该分支的祖先"。
+  //
+  // **参数顺序是最容易搞反的一处**：`git merge-base --is-ancestor A B` 问的是
+  // "A 是不是 B 的祖先"，因此要问"分支 B 是否包含提交 R"，必须写成
+  // `--is-ancestor <R> refs/heads/<B>`。早先写成 `--is-ancestor <R> refs/heads/<branch>`
+  // 之外的方向（把分支当第一个参数）会让**合并提交只报出一个分支**——实测
+  // `HEAD`（一个把 feature 合进来的合并提交）只列出 `main`，而正确答案是 `feature,main`。
+  //
+  // 这是 N 次进程调用，因此**只在打开单条提交详情时**做（不是列表），并且本地分支数量
+  // 有上限保护。
+  const branchNames = (await git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], cwd))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .slice(0, 50)
+  const containing = []
+  await Promise.all(
+    branchNames.map(async (branch) => {
+      try {
+        await git(['merge-base', '--is-ancestor', revision, `refs/heads/${branch}`], cwd)
+        containing.push(branch)
+      } catch {
+        // 该分支不含这个提交。
+      }
+    }),
+  )
+
+  return { commit, files, containingBranches: containing.sort() }
+}
+
+/** 路径比较：git 的 diff 输出用 `/`，而仓库根下的相对路径在 Windows 上也是 `/`。 */
+function normalizePath(value) {
+  return String(value).replace(/\\/gu, '/')
+}
+
+/**
+ * 一条提交里单个文件的差异。
+ *
+ * 与工作区差异分开成一条路由，是因为它们的**基线不同**：工作区差异比的是「基线树 vs
+ * 工作区」，这里是「父提交 vs 该提交」，而且后者必须限制在一个路径上——一次提交可能改
+ * 几千个文件，全量 diff 会把响应撑爆。
+ *
+ * @param cwd - 工作区路径。
+ * @param revision - 已校验的提交 SHA。
+ * @param path - 已校验的相对路径。
+ * @returns `{ diff, truncated, binary }`。
+ */
+async function readCommitFileDiff(cwd, revision, path) {
+  // 先确认这个提交真的有这个文件，避免把一条不存在路径的 git 报错当成"差异为空"。
+  const parents = (await git(['show', '--no-patch', '--pretty=format:%P', revision], cwd)).trim()
+  const base = parents === '' ? undefined : parents.split(/\s+/u)[0]
+  const args = [
+    'diff',
+    '--unified=3',
+    ...(base === undefined ? ['--root'] : [base]),
+    revision,
+    '--',
+    normalizePath(path),
+  ]
+  const raw = await git(args, cwd)
+  // `Binary files … differ` 之类没有可展示的行，界面上要区别对待。
+  const binary = /^Binary files |^GIT binary patch/mu.test(raw)
+  const truncated = raw.length > MAX_DIFF_BYTES
+  return { diff: truncated ? raw.slice(0, MAX_DIFF_BYTES) : raw, truncated, binary }
+}
+
+/** 图形路由允许的 ref 形状：分支名/标签名，不含 rev 表达式。 */
+const REF_PATTERN_GRAPH = /^(?![-./])(?!.*\.\.)(?!.*\/\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/u
+
+/**
+ * 解析 `git status --porcelain` 的行，分成"已跟踪改动"与"未跟踪文件"两组。
+ *
+ * 界面上这两组必须分开：VS Code 的源代码管理面板把它们放在两个可折叠区块里，而它们的
+ * 可执行操作也不同——未跟踪文件只能"暂存/删除"，不能"放弃改动"（没有基线可还原）。
+ *
+ * `--porcelain=v1` 的行为：XY 两列是索引与工作区状态，`??` 是未跟踪，`!!` 是被忽略
+ * （`--ignored` 才会出现）。用 `-z` 会得到 NUL 分隔且不做引号转义，但那样重命名
+ * （`R` 状态）的"旧路径 新路径"是两条记录、要靠状态字母配对；这里用普通模式 + 自己剥
+ * 引号，因为路径里的引号转义规则简单（C 风格 `\"`、`\\`）且罕见。
+ *
+ * @param raw - `git status --porcelain` 的原文。
+ * @returns `{ tracked, untracked }`，各自是 `{ path, index, worktree }` 数组。
+ */
+function parsePorcelain(raw) {
+  const tracked = []
+  const untracked = []
+  for (const line of raw.split('\n')) {
+    if (line.length < 4) continue
+    const index = line[0]
+    const worktree = line[1]
+    let path = line.slice(3)
+    // git 会给"含特殊字符"的路径加双引号并做 C 风格转义。只处理这两种转义：
+    // 路径里真的出现双引号或反斜杠的情况极少，不引入一个完整的 unquote 实现。
+    if (path.startsWith('"') && path.endsWith('"')) {
+      path = path.slice(1, -1).replace(/\\(["\\])/gu, '$1')
+    }
+    const entry = { path, index, worktree }
+    if (index === '?' || worktree === '?') untracked.push(entry)
+    else if (index === '!' || worktree === '!') continue
+    else tracked.push(entry)
+  }
+  return { tracked, untracked }
+}
+
+/**
  * 解析外壳允许被操作的工作区集合。
  *
  * 与 gitbar 同样的安全边界：只接受应用登记过的工作区，否则任何能访问本机回环地址的
@@ -730,6 +1041,237 @@ function createReviewHandler() {
         return
       }
 
+      // ---- 提交历史图：一页提交（含父提交与 refs）--------------------------
+      //
+      // 与 /history 的区别：那个是"最近发生了什么"的扁平列表（只给标题与作者），
+      // 这个是**画图**用的——必须带 `%p`（父提交，决定连线）与 `%D`（refs，决定分支
+      // 标签与"当前分支"），并且必须分页。两条路由都保留：侧栏"更改"区块用 /history，
+      // 主区域的提交图用 /graph。
+      if (url.pathname === `${ROUTE_PREFIX}/graph`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? GRAPH_PAGE_DEFAULT)
+        const skipRaw = Number(payload.skip ?? url.searchParams.get('skip') ?? 0)
+        const limit = Number.isFinite(limitRaw) ? limitRaw : GRAPH_PAGE_DEFAULT
+        const skip = Number.isFinite(skipRaw) ? skipRaw : 0
+        const ref = payload.ref ?? url.searchParams.get('ref') ?? ''
+        const page = await readGraph(workspace, { limit, skip, ref })
+        if (page.invalidRef === true) {
+          sendJson(response, 400, { error: 'invalid ref', code: 'invalidRef' })
+          return
+        }
+        // 当前分支单独给一次：客户端要在图里高亮"HEAD 所在的分支名"，
+        // 而 `%D` 只在**恰好有 ref 指向的提交**上带这个信息，当前分支的尖端之外拿不到。
+        const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')).trim()
+        sendJson(response, 200, {
+          isRepo: true,
+          branch,
+          ...page,
+        })
+        return
+      }
+
+      // ---- 一条提交的详情：元信息 + 改动文件 + 出现在哪些分支上 ---------------
+      //
+      // 路径是 `/commit-detail` 而**不是** `/commit`：后者必须是"创建提交"那个写操作。
+      // 早先把详情放在 `/commit` 上，于是 `POST /commit`（创建提交）先命中了这里的
+      // revision 校验、被当成"缺 revision 参数"回 400 invalidRevision——提交功能完全
+      // 不可用，而报错信息指向一个跟提交无关的原因（实测就是这样）。
+      // 同一个路径上放"读详情"与"写提交"这两种语义不同的操作，是这次踩坑的根源。
+      if (url.pathname === `${ROUTE_PREFIX}/commit-detail`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const revision = payload.revision ?? url.searchParams.get('revision')
+        if (typeof revision !== 'string' || !REVISION_PATTERN.test(revision)) {
+          sendJson(response, 400, { error: 'invalid revision', code: 'invalidRevision' })
+          return
+        }
+        try {
+          sendJson(response, 200, { isRepo: true, ...(await readCommit(workspace, revision)) })
+        } catch (error) {
+          // 对象不在本地（浅克隆、被 GC 掉的分支）：这是 404，不是 500。
+          if (/bad object|unknown revision|bad revision|not a valid object/iu.test(String(error?.message ?? error))) {
+            sendJson(response, 404, { error: 'no such commit', code: 'noSuchRef' })
+            return
+          }
+          throw error
+        }
+        return
+      }
+
+      // ---- 一条提交里单个文件的差异 ------------------------------------------
+      if (url.pathname === `${ROUTE_PREFIX}/commit-file`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const revision = payload.revision ?? url.searchParams.get('revision')
+        const filePath = payload.path ?? url.searchParams.get('path')
+        if (typeof revision !== 'string' || !REVISION_PATTERN.test(revision)) {
+          sendJson(response, 400, { error: 'invalid revision', code: 'invalidRevision' })
+          return
+        }
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const result = await readCommitFileDiff(workspace, revision, filePath)
+        sendJson(response, 200, { isRepo: true, path: filePath, ...result })
+        return
+      }
+
+      // ---- 工作区状态：已跟踪改动与未跟踪文件分开两组 ------------------------
+      //
+      // 与 /workspace 的区别：那个给的是"基线树 vs 工作区"的**差异内容**（用来渲染
+      // 逐行 diff），这个给的是 git 视角的**状态分类**（索引态/工作区态、未跟踪、以及
+      // 冲突态）。界面上"已跟踪更改"与"未跟踪文件"要分成两个区块，而分类只有
+      // `status --porcelain` 能准确给出——从差异内容反推分类会在重命名、删除等情形上出错。
+      if (url.pathname === `${ROUTE_PREFIX}/status`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const raw = await git(['status', '--porcelain'], workspace)
+        const { tracked, untracked } = parsePorcelain(raw)
+        const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')).trim()
+        // 未跟踪文件数量可能上万（实测 6,636 个）。**不把路径全传回去**：那个列表在
+        // 界面上默认是折叠的，一次传 6,636 条路径只是白白占带宽与内存。只给数量+前若干条，
+        // 用户展开时再单独取（见 /untracked）。
+        sendJson(response, 200, {
+          isRepo: true,
+          branch,
+          tracked,
+          trackedCount: tracked.length,
+          untrackedCount: untracked.length,
+          untrackedSample: untracked.slice(0, 20).map((entry) => entry.path),
+        })
+        return
+      }
+
+      // ---- 未跟踪文件清单（展开"未跟踪文件"区块时才取）---------------------
+      if (url.pathname === `${ROUTE_PREFIX}/untracked`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? 500)
+        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 500
+        // `ls-files --others --exclude-standard` 正是"未跟踪且未被忽略"的定义，
+        // 与被 git 忽略的文件（`--ignored`）区分开——后者不该出现在"待暂存"里。
+        const raw = await git(['ls-files', '--others', '--exclude-standard'], workspace)
+        const all = raw.split('\n').filter((line) => line.trim() !== '')
+        sendJson(response, 200, {
+          isRepo: true,
+          paths: all.slice(0, limit),
+          total: all.length,
+          truncated: all.length > limit,
+        })
+        return
+      }
+
+      // ---- 暂存 / 取消暂存 / 提交 -------------------------------------------
+      //
+      // 这三条是本插件里**风险最高**的写操作：前面唯一的写操作是 `revert`（把文件恢复
+      // 成基线内容，可找回），而提交会真的往仓库历史里写东西。因此约束比 revert 更紧：
+      //   * 路径必须过 SAFE_PATH_PATTERN_GRAPH（同 revert）；
+      //   * `add`/`restore --staged` 一次只接受仓库内的相对路径，`--` 分隔符必带；
+      //   * 提交信息必须非空（git 自己会拒绝空信息，但我们要回一个稳定的 code）；
+      //   * **不提供 `--amend` / `--force` / `reset --hard` 这类改写历史的能力**：
+      //     需要它们的人在终端里做，从界面一键可达太危险。
+      if (url.pathname === `${ROUTE_PREFIX}/stage` || url.pathname === `${ROUTE_PREFIX}/unstage`) {
+        if (request.method !== 'POST') {
+          response.setHeader('allow', 'POST')
+          sendJson(response, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const requestedPaths = Array.isArray(payload.paths) ? payload.paths : []
+        if (requestedPaths.length === 0) {
+          sendJson(response, 400, { error: 'paths is required', code: 'noPaths' })
+          return
+        }
+        const bad = requestedPaths.find((item) => typeof item !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(item))
+        if (bad !== undefined) {
+          sendJson(response, 400, { error: `unsafe path: ${String(bad).slice(0, 80)}`, code: 'unsafePath' })
+          return
+        }
+        const staging = url.pathname.endsWith('/stage')
+        const normalized = requestedPaths.map(normalizePath)
+        try {
+          if (staging) {
+            await git(['add', '--', ...normalized], workspace)
+          } else {
+            // 仓库尚无 HEAD 时 `restore --staged` 没有源可恢复，用 `rm --cached`：
+            // 那正是"把这个文件从索引里去掉、但保留工作区文件"的语义。
+            const hasHead = (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], workspace).then(() => true).catch(() => false))
+            if (hasHead) await git(['restore', '--staged', '--', ...normalized], workspace)
+            else await git(['rm', '--cached', '--quiet', '--', ...normalized], workspace)
+          }
+        } catch (error) {
+          sendJson(response, 409, {
+            error: staging ? 'stage failed' : 'unstage failed',
+            code: staging ? 'stageFailed' : 'unstageFailed',
+            detail: String(error?.message ?? error),
+          })
+          return
+        }
+        sendJson(response, 200, { isRepo: true, staged: staging ? normalized : [], unstaged: staging ? [] : normalized })
+        return
+      }
+
+      if (url.pathname === `${ROUTE_PREFIX}/commit`) {
+        if (request.method !== 'POST') {
+          response.setHeader('allow', 'POST')
+          sendJson(response, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const message = typeof payload.message === 'string' ? payload.message.trim() : ''
+        if (message === '') {
+          // 空提交信息是 git 自己也会拒绝的，但那会回一个英文长句；这里先挡掉并给出
+          // 稳定 code，界面才能说"请填写提交信息"。
+          sendJson(response, 400, { error: 'empty message', code: 'emptyMessage' })
+          return
+        }
+        // 暂存区为空时 git 会以非零退出（"nothing to commit"）。提前判掉，并区分
+        // "没有任何改动"与"有改动但没暂存"——这两种情况该给用户的下一步完全不同。
+        const statusRaw = await git(['status', '--porcelain'], workspace)
+        const { tracked } = parsePorcelain(statusRaw)
+        const staged = tracked.filter((entry) => entry.index !== ' ' && entry.index !== '?')
+        if (staged.length === 0) {
+          sendJson(response, 409, {
+            error: 'nothing staged',
+            code: tracked.length > 0 ? 'nothingStaged' : 'nothingToCommit',
+          })
+          return
+        }
+        try {
+          // `-F -` 从标准输入读提交信息太绕；这里用 `-m`，它是参数数组里的一个元素，
+          // 不会被 shell 解释。多行信息由 `-m` 重复传递，但界面只给单行，因此不需要。
+          await git(['commit', '-m', message], workspace)
+        } catch (error) {
+          sendJson(response, 409, {
+            error: 'commit failed',
+            code: 'commitFailed',
+            detail: String(error?.message ?? error),
+          })
+          return
+        }
+        const head = (await git(['rev-parse', 'HEAD'], workspace).catch(() => '')).trim()
+        sendJson(response, 200, { isRepo: true, committed: true, head })
+        return
+      }
+
       sendJson(response, 404, { error: 'not found' })
     } catch (error) {
       // 任何未预期错误都转成 JSON，避免客户端拿到 HTML 错误页而无法解析。
@@ -754,6 +1296,14 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/revert`,
     `${ROUTE_PREFIX}/history`,
     `${ROUTE_PREFIX}/roots`,
+    `${ROUTE_PREFIX}/graph`,
+    `${ROUTE_PREFIX}/commit-detail`,
+    `${ROUTE_PREFIX}/commit-file`,
+    `${ROUTE_PREFIX}/status`,
+    `${ROUTE_PREFIX}/untracked`,
+    `${ROUTE_PREFIX}/stage`,
+    `${ROUTE_PREFIX}/unstage`,
+    `${ROUTE_PREFIX}/commit`,
   ]) {
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }), `review: ${path}`)
   }

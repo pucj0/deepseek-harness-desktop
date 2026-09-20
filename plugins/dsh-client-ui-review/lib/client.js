@@ -27,6 +27,9 @@ window.__ModuleLoader__.load({
     const ACCENT = 'var(--dsw-alias-state-business-primary, #4d6bfe)'
     const ADDED = 'var(--dsw-alias-state-success-primary, #16834a)'
     const REMOVED = 'var(--dsw-alias-state-error-primary, #d44747)'
+    // 提交流水图那一块的三栏需要描边色（原有的组件各自内联写死了颜色，迁移到常量上
+    // 只为新增部分服务，不去动已有渲染，以免顺手改坏已经在跑的界面）。
+    const BORDER = 'var(--dsw-alias-border-l1, #eceef2)'
     const styles = `
       [data-desktop-review-surface] button:focus-visible, [data-desktop-review]:focus-visible,
       [data-review-trigger] > button:focus-visible {
@@ -180,6 +183,10 @@ window.__ModuleLoader__.load({
     const TAB_SLOT = 'sidebar.right.pane.tab'
     const TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
 
+    /** 提交图的侧栏图标槽（list / root）与主区域内容槽（keyed / root）。 */
+    const PANEL_SLOT = 'sidebar.panellist'
+    const MAIN_SLOT = 'main'
+
     /** 标签类型标识：同时作为两个槽位的 key。 */
     const KIND = 'review-changes'
 
@@ -197,6 +204,251 @@ window.__ModuleLoader__.load({
      *
      * 取 10 秒：每次轮询都要让宿主核对工作区状态，而"本轮改了几个文件"晚几秒更新无感。 */
     const POLL_MS = 10000
+
+    // =========================================================================
+    // 提交图：泳道布局（与 `lib/graph-layout.js` 是同一份算法）
+    // =========================================================================
+    //
+    // **这段代码是从 `lib/graph-layout.js` 逐字内联进来的**，原因是客户端 bundle 的
+    // 契约只允许一个文件：`dsh-client-modules` 只把插件包的 `exports["./client"]` 指向
+    // 的那一个脚本送到浏览器（`/plugins/<id>/client.js`），**同目录下的其它文件取不到**，
+    // 而运行时的模块加载器只认它自己的基线表（react 等），不接受自定义子路径。
+    // 因此"把算法放一个共享文件里、两边 import"这条路在这里走不通。
+    //
+    // 代价是同一份逻辑有两个副本，所以加了 `scripts/test-graph-layout-parity.mjs`：
+    // 它对同一批输入同时跑这里的内联版本与 `lib/graph-layout.js`，逐字段比较结果。
+    // **改这里就必须改那边**，否则那条测试会红——这是防止两份实现悄悄漂移的唯一手段。
+    //
+    // 输入前提（三条，任何一条错了图就会画歪）：
+    //   1. 提交按**显示顺序**给出：下标 0 最新、画在最上面一行；父提交一定在它后面的行。
+    //   2. 窗口一定是**被截断**的：父提交可能根本不在这个数组里，因此"等不到的线"是常态。
+    //   3. 输出里的 `lane` 是**本行的数组下标**，不是整张图的固定列号：每行的线都会向左
+    //      紧凑，同一列在不同行可能属于不同分支。渲染器必须按 `rows[i]` 加
+    //      `edges[].fromLane/toLane` 来画。
+
+    /** 调色板大小：`color` 的取值恒在 `0..9` 之间。 */
+    const GRAPH_COLOR_COUNT = 10
+
+    /** 默认泳道上限：画布宽度必须有界（见 graph-layout.js 的说明）。 */
+    const GRAPH_LANE_MAX = 32
+
+    /** 泳道颜色：浅色/深色两套，各自 10 色。 */
+    const LANE_COLORS_LIGHT = [
+      '#4d6bfe', '#e8590c', '#2f9e44', '#c2255c', '#9c36b5',
+      '#0b7285', '#a67c00', '#5f3dc4', '#087f5b', '#c92a2a',
+    ]
+    const LANE_COLORS_DARK = [
+      '#7c93ff', '#ff9f43', '#51cf66', '#f783ac', '#cc5de8',
+      '#3bc9db', '#ffe066', '#9775fa', '#38d9a9', '#ff8787',
+    ]
+
+    /**
+     * 判断当前是否深色主题。
+     *
+     * 与 `isDarkTheme` 同一套做法（读主题变量的实际颜色算亮度），但**不共用**它：
+     * 那个函数在下面的差异渲染里被调用，而这里是图表着色，两者要能各自独立地演进。
+     *
+     * @returns 深色则 true。
+     */
+    function graphIsDark() {
+      try {
+        const raw = getComputedStyle(document.documentElement).getPropertyValue('--dsw-alias-bg-base').trim()
+        const match = /#([0-9a-f]{6})/iu.exec(raw)
+        if (match === null) return false
+        const value = Number.parseInt(match[1], 16)
+        const r = (value >> 16) & 255
+        const g = (value >> 8) & 255
+        const b = value & 255
+        return (r * 299 + g * 587 + b * 114) / 1000 < 128
+      } catch {
+        return false
+      }
+    }
+
+    /** 取一套泳道颜色。 */
+    function lanePalette() {
+      return graphIsDark() ? LANE_COLORS_DARK : LANE_COLORS_LIGHT
+    }
+
+    /** 规范化泳道上限：只接受 ≥1 的整数，其余当没传（见 graph-layout.js 的说明）。 */
+    function normalizeLaneLimit(value) {
+      return Number.isInteger(value) && value >= 1 ? value : GRAPH_LANE_MAX
+    }
+
+    /** 取提交的哈希，形状不对时给空串。 */
+    function hashOf(commit) {
+      const hash = commit?.hash
+      return typeof hash === 'string' ? hash : String(hash ?? '')
+    }
+
+    /** 取父提交哈希列表，形状不对时给空数组。 */
+    function parentListOf(commit) {
+      const parents = commit?.parents
+      if (!Array.isArray(parents)) return []
+      return parents.map((parent) => (typeof parent === 'string' ? parent : String(parent ?? '')))
+    }
+
+    /** 某个哈希在 `from` 这一行（含）之后还会不会出现。 */
+    function appearsAtOrAfter(lastIndex, hash, from) {
+      const last = lastIndex.get(hash)
+      return last !== undefined && last >= from
+    }
+
+    /**
+     * 计算一个提交窗口的泳道布局。
+     *
+     * @param commits - 显示顺序的提交：下标 0 最新、画在最上面一行。
+     * @param options - `maxLanes` 给出这一屏最多画几列。
+     * @returns `{ lanes, rows, truncated }`；`rows[i]` 是 `{ hash, lane, laneCount, edges }`。
+     */
+    function layoutGraph(commits, options) {
+      const list = Array.isArray(commits) ? commits : []
+      const limit = normalizeLaneLimit(options?.maxLanes)
+
+      const lastIndex = new Map()
+      for (let i = 0; i < list.length; i += 1) lastIndex.set(hashOf(list[i]), i)
+
+      const rows = []
+      let pending = []
+      let lanes = 0
+
+      for (let i = 0; i < list.length; i += 1) {
+        const hash = hashOf(list[i])
+        const parents = parentListOf(list[i])
+
+        const slots = pending.slice()
+        let lane = -1
+        for (let j = 0; j < slots.length; j += 1) {
+          if (slots[j].hash === hash) {
+            lane = j
+            break
+          }
+        }
+
+        // 颜色取「当前任何活着的线都没占用」的最小非负整数：否则两条同时可见的线会撞色，
+        // 而用户正是靠颜色把一条分支从上读到下的。
+        const usedColors = new Set(slots.map((line) => line.color))
+        const takeColor = () => {
+          for (let n = 0; n < GRAPH_COLOR_COUNT; n += 1) {
+            if (!usedColors.has(n)) {
+              usedColors.add(n)
+              return n
+            }
+          }
+          const recycled = usedColors.size % GRAPH_COLOR_COUNT
+          usedColors.add(recycled)
+          return recycled
+        }
+
+        let color
+        if (lane < 0) {
+          // 没有任何线在等它：这是并行的另一条分支的尖端，在右侧新开一列。
+          lane = slots.length
+          color = takeColor()
+          slots.push({ hash, color })
+        } else {
+          color = slots[lane].color
+        }
+
+        const next = []
+        const dest = new Array(slots.length).fill(0)
+        const first = parents[0]
+
+        // **必须一趟按列从左到右处理**：早先把第一父提交在整趟走完之后才追加，它会被排到
+        // 所有存活线的最后面，于是合并提交上面那条主线会从自己的列跳到最右列，而右边那条线
+        // 同时左移，两线在图上凭空交叉一次。
+        for (let j = 0; j < slots.length; j += 1) {
+          if (j === lane) {
+            if (first === undefined) {
+              dest[j] = j
+            } else {
+              dest[j] = next.length
+              next.push({ hash: first, color })
+            }
+            continue
+          }
+          const line = slots[j]
+          if (line.hash === hash) {
+            dest[j] = -1
+            continue
+          }
+          if (appearsAtOrAfter(lastIndex, line.hash, i + 1)) {
+            dest[j] = next.length
+            next.push(line)
+          } else {
+            // 这条线等的提交再也不会出现了（分页截断或嫁接边界）。**必须**丢掉它：
+            // 留着这一列就永久空着，10 个这样的父提交就能把一屏挤成 10 列。
+            dest[j] = j
+          }
+        }
+
+        // 汇入本提交的其它线：在本行结束，去向就是提交那条线的去向，图上画出一个「V」。
+        for (let j = 0; j < slots.length; j += 1) {
+          if (j !== lane && slots[j].hash === hash) dest[j] = dest[lane]
+        }
+
+        const edges = []
+        for (let j = 0; j < slots.length; j += 1) {
+          edges.push(
+            j === lane
+              ? { fromLane: j, toLane: dest[j], color, kind: 'commit' }
+              : { fromLane: j, toLane: dest[j], color: slots[j].color, kind: 'through' },
+          )
+        }
+
+        // 额外的父提交（第二、三……个）：已有线在等同一个父提交时**复用**那一列。
+        for (let p = 1; p < parents.length; p += 1) {
+          const target = parents[p]
+          let column = -1
+          for (let k = 0; k < next.length; k += 1) {
+            if (next[k].hash === target) {
+              column = k
+              break
+            }
+          }
+          let mergeColor
+          if (column < 0) {
+            column = next.length
+            mergeColor = takeColor()
+            next.push({ hash: target, color: mergeColor })
+          } else {
+            mergeColor = next[column].color
+          }
+          edges.push({ fromLane: lane, toLane: column, color: mergeColor, kind: 'merge' })
+        }
+
+        edges.sort((a, b) => a.fromLane - b.fromLane)
+
+        let laneCount = lane + 1
+        for (const edge of edges) {
+          laneCount = Math.max(laneCount, edge.fromLane + 1, edge.toLane + 1)
+        }
+        if (laneCount > lanes) lanes = laneCount
+
+        rows.push({ hash, lane, laneCount, edges })
+        pending = next
+      }
+
+      // 超出上限时**事后夹取**：遍历中拒绝新列会让"哪些提交落在哪一列"依赖上限值，
+      // 同一个仓库换个宽度就整张图重排。
+      let truncated = false
+      if (lanes > limit) {
+        truncated = true
+        const cap = limit - 1
+        for (const row of rows) {
+          row.lane = Math.min(row.lane, cap)
+          row.laneCount = Math.min(row.laneCount, limit)
+          for (const edge of row.edges) {
+            edge.fromLane = Math.min(edge.fromLane, cap)
+            edge.toLane = Math.min(edge.toLane, cap)
+          }
+        }
+        lanes = limit
+      }
+
+      return { lanes, rows, truncated }
+    }
+
 
     const zh = {
       idle: '本轮暂无改动',
@@ -233,6 +485,56 @@ window.__ModuleLoader__.load({
       statusOther: '变更',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
+      // ---- 提交图（主区域的独立面板）----
+      graphPanelLabel: '提交图',
+      graphTitle: '提交图',
+      graphHead: 'HEAD（当前分支）',
+      graphLocal: '本地',
+      graphRemote: '远程',
+      graphTags: '标签',
+      graphNoCommits: '这个仓库还没有任何提交。',
+      graphLoadMore: '加载更多',
+      graphLoading: '正在读取提交历史…',
+      graphTruncatedLanes: '打开的线太多，右侧已折叠显示。',
+      graphAllBranches: '全部分支',
+      graphFilterRef: '按分支筛选',
+      graphDetailTitle: '提交详情',
+      graphSelectCommit: '从左侧选一条提交查看改动。',
+      graphFiles: '{count} 个文件',
+      graphInBranches: '在 {count} 个分支中：{names}',
+      graphNoFiles: '这条提交没有改动任何文件（空提交）。',
+      graphHideGraph: '收起提交图',
+      // ---- 暂存与提交（更改区块）----
+      stagedTitle: '已暂存',
+      unstagedTitle: '更改',
+      untrackedTitle: '未进行版本管理的文件',
+      stage: '暂存',
+      unstage: '取消暂存',
+      stageAll: '全部暂存',
+      unstageAll: '全部取消暂存',
+      commitMessage: '提交信息（{branch}）',
+      commit: '提交',
+      committing: '提交中…',
+      commitHintCtrlEnter: 'Ctrl+Enter 提交',
+      stagedCount: '已暂存 {count}',
+      untrackedCount: '{count} 个文件',
+      untrackedTruncated: '只列出前 {count} 个，另有 {rest} 个未显示。',
+      browseUntracked: '浏览',
+      noStagedOrChanged: '工作区干净，没有待提交的改动。',
+      stagedNotice: '已暂存 {count} 个文件',
+      unstagedNotice: '已取消暂存 {count} 个文件',
+      committedNotice: '已提交：{subject}',
+      emptyMessage: '请先填写提交信息。',
+      error_emptyMessage: '请先填写提交信息。',
+      error_nothingStaged: '有改动，但都还没暂存。先「全部暂存」再提交。',
+      error_nothingToCommit: '工作区没有改动，没有可提交的内容。',
+      error_stageFailed: '暂存失败。',
+      error_unstageFailed: '取消暂存失败。',
+      error_commitFailed: '提交失败。',
+      error_noPaths: '没有选中任何文件。',
+      error_unsafePath: '文件路径不合法，已拒绝。',
+      error_workspaceNotAllowed: '该工作区未在本应用中登记，已拒绝访问。',
+      error_unknownReview: '操作失败。',
     }
 
     const en = {
@@ -270,10 +572,78 @@ window.__ModuleLoader__.load({
       statusOther: 'changed',
       binaryDiff: 'This file is binary; no line diff is shown.',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
+      // ---- Commit graph (its own main-area panel) ----
+      graphPanelLabel: 'Commit graph',
+      graphTitle: 'Commit graph',
+      graphHead: 'HEAD (current branch)',
+      graphLocal: 'Local',
+      graphRemote: 'Remote',
+      graphTags: 'Tags',
+      graphNoCommits: 'This repository has no commits yet.',
+      graphLoadMore: 'Load more',
+      graphLoading: 'Reading commit history…',
+      graphTruncatedLanes: 'Too many open lines; the right side is collapsed.',
+      graphAllBranches: 'All branches',
+      graphFilterRef: 'Filter by branch',
+      graphDetailTitle: 'Commit details',
+      graphSelectCommit: 'Select a commit on the left to see its changes.',
+      graphFiles: '{count} files',
+      graphInBranches: 'In {count} branches: {names}',
+      graphNoFiles: 'This commit changed no files (empty commit).',
+      graphHideGraph: 'Hide commit graph',
+      // ---- Staging and committing (the Changes section) ----
+      stagedTitle: 'Staged',
+      unstagedTitle: 'Changes',
+      untrackedTitle: 'Untracked files',
+      stage: 'Stage',
+      unstage: 'Unstage',
+      stageAll: 'Stage all',
+      unstageAll: 'Unstage all',
+      commitMessage: 'Commit message ({branch})',
+      commit: 'Commit',
+      committing: 'Committing…',
+      commitHintCtrlEnter: 'Ctrl+Enter to commit',
+      stagedCount: '{count} staged',
+      untrackedCount: '{count} files',
+      untrackedTruncated: 'Showing the first {count}; {rest} more not shown.',
+      browseUntracked: 'Browse',
+      noStagedOrChanged: 'The working tree is clean; nothing to commit.',
+      stagedNotice: 'Staged {count} file(s)',
+      unstagedNotice: 'Unstaged {count} file(s)',
+      committedNotice: 'Committed: {subject}',
+      emptyMessage: 'Write a commit message first.',
+      error_emptyMessage: 'Write a commit message first.',
+      error_nothingStaged: 'There are changes, but nothing is staged. Use "Stage all" first.',
+      error_nothingToCommit: 'The working tree has no changes to commit.',
+      error_stageFailed: 'Staging failed.',
+      error_unstageFailed: 'Unstaging failed.',
+      error_commitFailed: 'Commit failed.',
+      error_noPaths: 'No files selected.',
+      error_unsafePath: 'That file path was rejected.',
+      error_workspaceNotAllowed: 'That workspace is not registered with this app; access denied.',
+      error_unknownReview: 'The operation failed.',
     }
 
     /** git 的 name-status 首字母到字典键。 */
     const STATUS_KEYS = { A: 'statusAdded', M: 'statusModified', D: 'statusDeleted', R: 'statusRenamed' }
+
+    /**
+     * 暂存/提交路由的稳定 code 到字典键。
+     *
+     * host 不知道界面语言，只回 code；短句在这里按 code 渲染，git 的英文原文放在
+     * `detail` 里原样展示（它是权威信息，翻译反而失真）。与 gitbar 那边同一套约定。
+     */
+    const STAGING_ERROR_KEYS = {
+      noPaths: 'error_noPaths',
+      unsafePath: 'error_unsafePath',
+      stageFailed: 'error_stageFailed',
+      unstageFailed: 'error_unstageFailed',
+      emptyMessage: 'error_emptyMessage',
+      nothingStaged: 'error_nothingStaged',
+      nothingToCommit: 'error_nothingToCommit',
+      commitFailed: 'error_commitFailed',
+      workspaceNotAllowed: 'error_workspaceNotAllowed',
+    }
 
     /** 状态字母对应的颜色，让列表一眼能分辨增删改。 */
     const STATUS_COLORS = { A: ADDED, M: 'var(--dsw-alias-state-warn-label, #9a6700)', D: REMOVED, R: ACCENT }
@@ -1078,6 +1448,26 @@ window.__ModuleLoader__.load({
         react.createElement(
           'div',
           { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 20px 18px' } },
+          // 暂存与提交只在**项目级**面板出现。
+          //
+          // 会话内那个标签讲的是"本轮改了什么"（基线与本轮开始时的快照比较），而暂存与
+          // 提交是**仓库**级动作：它动的是索引与历史，与"本轮"没有关系。把提交框放进
+          // 会话标签里会让人以为提交只针对本轮，那是错的。
+          scope === 'workspace'
+            ? react.createElement(StagingSection, {
+                t,
+                workspace,
+                // 提交之后两边都要重取：暂存区变了（状态区块自己会重读），而改动差异与
+                // 提交历史也随之变化（由外层 reload 负责）。
+                onCommitted: () => {
+                  reload()
+                  history.reload()
+                },
+              })
+            : null,
+          scope === 'workspace'
+            ? react.createElement('div', { 'data-review-section-title': '' }, t('changesTitle'))
+            : null,
           react.createElement(FileList, {
             t,
             result: active.result,
@@ -1549,11 +1939,560 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一条文件行在界面上属于哪一组。
+     *
+     * `git status --porcelain` 的 XY 两列是**两个独立的维度**（实测确认）：
+     *   `X` = 索引相对 HEAD 的状态，`Y` = 工作区相对索引的状态，`??` 是未跟踪。
+     *   例：` M tracked.txt` 只有未暂存的修改；`A  new.txt` 只有已暂存的改动；
+     *   `MM both.txt` **两边都有**——同一个文件会同时出现在「已暂存」与「更改」两组里。
+     *   `M ` 反过来是"暂存了修改、工作区与索引一致"。
+     *
+     * 这个判定必须用 porcelain 的状态列，**不能从差异内容反推**：`/workspace` 那条路由
+     * 给的是"HEAD vs 工作区"的内容差异，它根本不含索引态，`MM` 与 ` M` 在它眼里都是
+     * 一个被修改的文件——用它来分组会把"已暂存"和"未暂存"混在一起。
+     *
+     * @param entry - `{ index, worktree }`。
+     * @returns `{ staged, unstaged }`。
+     */
+    function classifyEntry(entry) {
+      const index = typeof entry?.index === 'string' ? entry.index : ' '
+      const worktree = typeof entry?.worktree === 'string' ? entry.worktree : ' '
+      const untracked = index === '?' || worktree === '?'
+      return {
+        staged: !untracked && index !== ' ',
+        unstaged: !untracked && worktree !== ' ',
+      }
+    }
+
+    /** 状态字母对应的界面文案键与颜色（porcelain 的 X/Y 单字符）。 */
+    const PORCELAIN_STATUS = {
+      M: { key: 'statusModified', color: STATUS_COLORS.M },
+      A: { key: 'statusAdded', color: STATUS_COLORS.A },
+      D: { key: 'statusDeleted', color: STATUS_COLORS.D },
+      R: { key: 'statusRenamed', color: STATUS_COLORS.R },
+      C: { key: 'statusAdded', color: STATUS_COLORS.A },
+      '?': { key: 'statusAdded', color: STATUS_COLORS.A },
+      U: { key: 'statusModified', color: STATUS_COLORS.M },
+    }
+
+    /**
+     * 一个状态徽标。
+     * @param props - `{ letter }`。
+     * @returns React 元素。
+     */
+    function StatusBadge(props) {
+      const letter = typeof props?.letter === 'string' && props.letter !== '' ? props.letter : '?'
+      const meta = PORCELAIN_STATUS[letter] ?? { key: 'statusOther', color: 'var(--dsw-alias-label-secondary)' }
+      return react.createElement(
+        'span',
+        {
+          'data-staging-status': letter,
+          title: meta.key,
+          style: {
+            flexShrink: 0,
+            width: '14px',
+            textAlign: 'center',
+            padding: '0 3px',
+            borderRadius: '4px',
+            fontSize: '11px',
+            lineHeight: '16px',
+            color: meta.color,
+            background: `color-mix(in srgb, ${meta.color} 14%, transparent)`,
+          },
+        },
+        letter,
+      )
+    }
+
+    /**
+     * 一个分组标题（可折叠 + 右侧批量按钮）。
+     *
+     * @param props - `{ t, id, label, count, collapsed, onToggle, action }`。
+     * @returns React 元素。
+     */
+    function StagingGroupHeader(props) {
+      const { label, count, collapsed, onToggle, action } = props
+      return react.createElement(
+        'div',
+        { 'data-staging-group': props.id, style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 2px 3px' } },
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-staging-toggle': props.id,
+            'aria-expanded': collapsed !== true,
+            onClick: onToggle,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              flex: '1 1 auto',
+              minWidth: 0,
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '11.5px',
+              fontWeight: 600,
+              textAlign: 'left',
+              cursor: 'pointer',
+            },
+          },
+          react.createElement(
+            'svg',
+            { width: 10, height: 10, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, 'aria-hidden': 'true', style: { flexShrink: 0, transform: collapsed === true ? 'rotate(-90deg)' : 'none' } },
+            react.createElement('path', { d: 'M3 6l5 5 5-5', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+          ),
+          react.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+          react.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400 } }, String(count)),
+        ),
+        action ?? null,
+      )
+    }
+
+    /** 分组标题右侧的小图标按钮。 */
+    function StagingIconButton(props) {
+      const { t, id, label, onClick, disabled, children } = props
+      return react.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-staging-action': id,
+          title: label,
+          'aria-label': label,
+          disabled: disabled === true,
+          onClick: (event) => {
+            event.stopPropagation()
+            onClick()
+          },
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+            width: '20px',
+            height: '20px',
+            padding: 0,
+            border: 'none',
+            borderRadius: '4px',
+            background: 'transparent',
+            color: 'var(--dsw-alias-label-tertiary)',
+            cursor: disabled === true ? 'default' : 'pointer',
+            opacity: disabled === true ? 0.5 : 1,
+          },
+        },
+        children,
+      )
+    }
+
+    /**
+     * 暂存与提交区块。
+     *
+     * 三组文件（已暂存 / 更改 / 未进行版本管理的文件）+ 一个提交框。分组依据是
+     * `git status --porcelain` 的索引态与工作区态两列（见 classifyEntry），**不是**
+     * 差异内容——差异里没有索引态。
+     *
+     * 未跟踪文件默认**折叠且只取前若干条**：实测一个真实仓库有 6,636 个未跟踪文件，
+     * 一次列全会让这块面板变成一堵墙，而用户日常只是想知道"有多少、有没有我要找的那个"。
+     *
+     * @param props - `{ t, workspace, phase, onCommitted }`。
+     * @returns React 元素。
+     */
+    function StagingSection(props) {
+      const { t, workspace } = props
+      const [state, setState] = react.useState({ phase: 'loading' })
+      const [collapsed, setCollapsed] = react.useState({ staged: false, unstaged: false, untracked: true })
+      const [message, setMessage] = react.useState('')
+      const [busy, setBusy] = react.useState(false)
+      const [trouble, setTrouble] = react.useState(null)
+      const [notice, setNotice] = react.useState('')
+      const onCommitted = typeof props?.onCommitted === 'function' ? props.onCommitted : () => undefined
+
+      /** 重新读一次状态。 */
+      const reload = react.useCallback(async () => {
+        if (typeof workspace !== 'string' || workspace === '') {
+          setState({ phase: 'noworkspace' })
+          return
+        }
+        try {
+          const result = await call('status', { workspace })
+          if (result?.isRepo === false) {
+            setState({ phase: 'notrepo' })
+            return
+          }
+          setState({ phase: 'ready', result })
+        } catch (cause) {
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setTrouble(error.detail ?? error.message)
+          setState({ phase: 'error' })
+        }
+      }, [workspace])
+
+      react.useEffect(() => {
+        void reload()
+      }, [reload])
+
+      /**
+       * 跑一次写操作，然后把状态重新读一遍。
+       *
+       * 与 gitbar 那边同一套约定：host 只回稳定的 code，短句由这里按 code 渲染，
+       * git 原文放在 `detail` 里原样展示。
+       */
+      const run = react.useCallback(
+        async (route, body, onSuccess) => {
+          setBusy(true)
+          setTrouble(null)
+          setNotice('')
+          try {
+            // 注意本插件的 `call` 是**只发 POST** 的辅助函数（第二个参数是请求体，不是
+            // fetch 的 init）。写成 `call(route, { method, headers, body })` 会把那一整包
+            // 当成请求体发出去，服务端收到的 `paths` 就是 undefined —— 表现是"点了暂存
+            // 没反应"，而路由本身完全正常（实测踩到过）。
+            await call(route, { workspace, ...body })
+            await reload()
+            if (typeof onSuccess === 'string') setNotice(onSuccess)
+            return true
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            const code = typeof error.code === 'string' ? error.code : ''
+            const key = code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : ''
+            setTrouble({ key, detail: typeof error.detail === 'string' ? error.detail : '', code })
+            return false
+          } finally {
+            setBusy(false)
+          }
+        },
+        [workspace, reload],
+      )
+
+      /**
+       * 提交。
+       *
+       * 提交信息来自受控 textarea，且**成功后才清空**：失败时保留用户刚敲的字，
+       * 否则他要重新打一遍（而失败原因往往与提交信息无关，比如"没有暂存内容"）。
+       */
+      const submitCommit = react.useCallback(async () => {
+        const text = message.trim()
+        if (text === '') return
+        const ok = await run('commit', { message: text })
+        if (ok) {
+          setMessage('')
+          setNotice(t('committedNotice', { subject: text }))
+          onCommitted()
+        }
+      }, [message, run, t, onCommitted])
+
+      if (state.phase === 'loading') return statusBlock(t('loading'))
+      if (state.phase === 'noworkspace') return statusBlock(t('noWorkspace'))
+      if (state.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
+      if (state.phase === 'error') return statusBlock(trouble?.detail ?? '', 'error')
+
+      const result = state.result ?? {}
+      const tracked = Array.isArray(result.tracked) ? result.tracked : []
+      const staged = tracked.filter((entry) => classifyEntry(entry).staged)
+      const unstaged = tracked.filter((entry) => classifyEntry(entry).unstaged)
+      const untrackedCount = Number(result.untrackedCount ?? 0)
+      const untrackedSample = Array.isArray(result.untrackedSample) ? result.untrackedSample : []
+      const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
+      // 提交按钮为什么禁用，要在界面上说清楚：灰着而不给理由，用户只会反复点它。
+      const commitDisabled = busy || message.trim() === '' || staged.length === 0
+
+      /** 一行文件。 */
+      const fileRow = (entry, side) =>
+        react.createElement(
+          'div',
+          {
+            key: `${side}:${entry.path}`,
+            'data-staging-row': entry.path,
+            'data-staging-side': side,
+            style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
+          },
+          react.createElement(StatusBadge, { letter: side === 'staged' ? entry.index : entry.worktree }),
+          react.createElement(
+            'span',
+            { title: entry.path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
+            `\u200e${entry.path}`,
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-row-action': side === 'staged' ? 'unstage' : 'stage',
+              disabled: busy,
+              onClick: () =>
+                void run(side === 'staged' ? 'unstage' : 'stage', { paths: [entry.path] }, side === 'staged' ? t('unstagedNotice', { count: 1 }) : t('stagedNotice', { count: 1 })),
+              title: side === 'staged' ? t('unstage') : t('stage'),
+              style: {
+                flexShrink: 0,
+                padding: '0 6px',
+                border: 'none',
+                borderRadius: '4px',
+                background: 'transparent',
+                color: 'var(--dsw-alias-label-tertiary)',
+                fontFamily: UI_FONT,
+                fontSize: '11.5px',
+                cursor: busy ? 'default' : 'pointer',
+              },
+            },
+            side === 'staged' ? '−' : '+',
+          ),
+        )
+
+      /** 一条未跟踪文件。 */
+      const untrackedRow = (path) =>
+        react.createElement(
+          'div',
+          {
+            key: `untracked:${path}`,
+            'data-staging-row': path,
+            'data-staging-side': 'untracked',
+            style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
+          },
+          react.createElement(StatusBadge, { letter: '?' }),
+          react.createElement(
+            'span',
+            { title: path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
+            `\u200e${path}`,
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-row-action': 'stage',
+              disabled: busy,
+              onClick: () => void run('stage', { paths: [path] }, t('stagedNotice', { count: 1 })),
+              title: t('stage'),
+              style: { flexShrink: 0, padding: '0 6px', border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: '11.5px', cursor: busy ? 'default' : 'pointer' },
+            },
+            '+',
+          ),
+        )
+
+      const bulkIcon = react.createElement(
+        'svg',
+        { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+        react.createElement('path', { d: 'M8 3.5v9M3.5 8h9', strokeLinecap: 'round' }),
+      )
+
+      return react.createElement(
+        'div',
+        { 'data-staging': '', style: { display: 'flex', flexDirection: 'column', fontFamily: UI_FONT } },
+        // ---- 提交框 ----
+        react.createElement(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '6px', padding: '2px 2px 8px', borderBottom: `1px solid ${BORDER}` } },
+          react.createElement('textarea', {
+            'data-staging-message': '',
+            value: message,
+            rows: 2,
+            placeholder: t('commitMessage', { branch: result.branch ?? '' }),
+            'aria-label': t('commitMessage', { branch: result.branch ?? '' }),
+            spellCheck: false,
+            disabled: busy,
+            onChange: (event) => setMessage(event.target.value),
+            onKeyDown: (event) => {
+              // Ctrl+Enter 提交（与 IDEA 的提交框一致）。**必须 stopPropagation**：
+              // 否则这个按键会冒泡到聊天输入框的全局快捷键上。
+              event.stopPropagation()
+              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault()
+                if (commit.disabled !== true) void submitCommit()
+              }
+            },
+            style: {
+              boxSizing: 'border-box',
+              width: '100%',
+              padding: '6px 8px',
+              border: `1px solid ${BORDER}`,
+              borderRadius: '7px',
+              background: 'var(--dsw-alias-bg-base, #fff)',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              lineHeight: 1.5,
+              resize: 'vertical',
+            },
+          }),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-commit': '',
+                disabled: commitDisabled,
+                onClick: () => void submitCommit(),
+                style: {
+                  padding: '5px 14px',
+                  border: 'none',
+                  borderRadius: '7px',
+                  background: commitDisabled ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
+                  color: commitDisabled ? 'var(--dsw-alias-label-tertiary)' : '#fff',
+                  fontFamily: UI_FONT,
+                  fontSize: '12.5px',
+                  cursor: commitDisabled ? 'default' : 'pointer',
+                },
+              },
+              busy ? t('committing') : t('commit'),
+            ),
+            // 为什么禁用要说清楚：按钮灰着而不给理由，用户只会反复点它。
+            react.createElement(
+              'span',
+              { 'data-staging-hint': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
+              message.trim() === '' ? t('emptyMessage') : staged.length === 0 ? t('error_nothingStaged') : t('commitHintCtrlEnter'),
+            ),
+          ),
+        ),
+
+        trouble === null
+          ? null
+          : react.createElement(
+              'div',
+              {
+                'data-staging-error': trouble.code === '' ? 'unknown' : trouble.code,
+                style: {
+                  margin: '8px 2px 0',
+                  padding: '7px 9px',
+                  borderRadius: '8px',
+                  background: `color-mix(in srgb, ${REMOVED} 6%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${REMOVED} 20%, transparent)`,
+                  color: REMOVED,
+                  fontSize: '12px',
+                  lineHeight: 1.5,
+                },
+              },
+              react.createElement('div', null, trouble.key === '' ? t('error_unknownReview') : t(trouble.key)),
+              trouble.detail === ''
+                ? null
+                : react.createElement('div', { style: { marginTop: '4px', paddingTop: '4px', borderTop: '1px solid color-mix(in srgb, currentColor 20%, transparent)', fontFamily: CODE_FONT, fontSize: '11.5px', whiteSpace: 'pre-wrap' } }, trouble.detail),
+            ),
+
+        notice === ''
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-staging-notice': '', style: { margin: '8px 2px 0', padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ADDED} 7%, transparent)`, border: `1px solid color-mix(in srgb, ${ADDED} 20%, transparent)`, color: ADDED, fontSize: '12px' } },
+              notice,
+            ),
+
+        clean
+          ? react.createElement('div', { style: { padding: '16px 2px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' } }, t('noStagedOrChanged'))
+          : react.createElement(
+              'div',
+              { style: { paddingTop: '4px' } },
+              // ---- 已暂存 ----
+              staged.length === 0
+                ? null
+                : react.createElement(
+                    'div',
+                    { 'data-staging-group': 'staged' },
+                    react.createElement(StagingGroupHeader, {
+                      t,
+                      id: 'staged',
+                      label: t('stagedTitle'),
+                      count: staged.length,
+                      collapsed: collapsed.staged,
+                      onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
+                      action: react.createElement(
+                        StagingIconButton,
+                        {
+                          t,
+                          id: 'unstage-all',
+                          label: t('unstageAll'),
+                          disabled: busy,
+                          onClick: () => void run('unstage', { paths: staged.map((entry) => entry.path) }),
+                        },
+                        react.createElement(
+                          'svg',
+                          { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+                          react.createElement('path', { d: 'M3.5 8h9', strokeLinecap: 'round' }),
+                        ),
+                      ),
+                    }),
+                    collapsed.staged ? null : staged.map((entry) => fileRow(entry, 'staged')),
+                  ),
+              // ---- 更改（未暂存）----
+              unstaged.length === 0
+                ? null
+                : react.createElement(
+                    'div',
+                    { 'data-staging-group': 'unstaged' },
+                    react.createElement(StagingGroupHeader, {
+                      t,
+                      id: 'unstaged',
+                      label: t('unstagedTitle'),
+                      count: unstaged.length,
+                      collapsed: collapsed.unstaged,
+                      onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
+                      action: react.createElement(
+                        StagingIconButton,
+                        {
+                          t,
+                          id: 'stage-all',
+                          label: t('stageAll'),
+                          disabled: busy,
+                          onClick: () => void run('stage', { paths: unstaged.map((entry) => entry.path) }),
+                        },
+                        bulkIcon,
+                      ),
+                    }),
+                    collapsed.unstaged ? null : unstaged.map((entry) => fileRow(entry, 'unstaged')),
+                  ),
+              // ---- 未跟踪 ----
+              untrackedCount === 0
+                ? null
+                : react.createElement(
+                    'div',
+                    { 'data-staging-group': 'untracked' },
+                    react.createElement(StagingGroupHeader, {
+                      t,
+                      id: 'untracked',
+                      // 数量用 host 给的**总数**，不是样本长度：界面上"6,636 个文件"这个数字
+                      // 本身就是用户想知道的第一件事，显示样本数会把它说小。
+                      label: t('untrackedTitle'),
+                      count: untrackedCount,
+                      collapsed: collapsed.untracked,
+                      onToggle: () => setCollapsed((value) => ({ ...value, untracked: !value.untracked })),
+                      action: react.createElement(
+                        StagingIconButton,
+                        {
+                          t,
+                          id: 'stage-all-untracked',
+                          label: t('stageAll'),
+                          // 一次暂存上万个文件会让 git 跑很久，而且几乎不是用户想要的
+                          // （那里面有构建产物、日志）。只对**当前列出的**这批做批量。
+                          disabled: busy || untrackedSample.length === 0,
+                          onClick: () => void run('stage', { paths: untrackedSample }),
+                        },
+                        bulkIcon,
+                      ),
+                    }),
+                    collapsed.untracked
+                      ? null
+                      : react.createElement(
+                          'div',
+                          { 'data-staging-untracked-list': '' },
+                          untrackedSample.map(untrackedRow),
+                          untrackedCount > untrackedSample.length
+                            ? react.createElement(
+                                'div',
+                                { 'data-staging-untracked-truncated': '', style: { padding: '4px 2px 2px 16px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
+                                t('untrackedTruncated', { count: untrackedSample.length, rest: untrackedCount - untrackedSample.length }),
+                              )
+                            : null,
+                        ),
+                  ),
+            ),
+      )
+    }
+
+    /**
      * 文件列表：每行一个文件，点击展开该文件的差异。
      * @param props - `{ t, result, phase, message, workspace, sessionId }`。
      */
-    function FileList(props) {
-      const { t, result, phase, message } = props
+    function FileList(props) {      const { t, result, phase, message } = props
       const [expanded, setExpanded] = react.useState('')
       // 待确认还原的路径：还原是写操作，必须确认——但用**弹窗**确认，而不是"再点一次
       // 这个按钮"。后者的问题：按钮很小、第二次点击容易落空（用户会感觉"点了没反应"），
@@ -1891,6 +2830,731 @@ window.__ModuleLoader__.load({
       return react.createElement('span', { style: { fontSize: '12px', fontFamily: UI_FONT } }, t('title'))
     }
 
+    // =========================================================================
+    // 提交图（主区域的三栏视图）
+    // =========================================================================
+
+    /** 提交图面板在 `sidebar.panellist` 与 `main` 两个槽位共用的 id。 */
+    const GRAPH_ID = 'git-graph'
+
+    /** 泳道列宽与行高。两者都是常量，因为虚拟滚动要靠它们算偏移。 */
+    const GRAPH_LANE_WIDTH = 14
+    const GRAPH_ROW_HEIGHT = 24
+
+    /** 每页拉多少条提交。 */
+    const GRAPH_PAGE_SIZE = 80
+
+    /** 一屏最多渲染多少行（超出靠滚动占位撑开）。 */
+    const GRAPH_WINDOW = 40
+
+    /** 提交图上的取色：与泳道无关的常规色。 */
+    const GRAPH_DIM = 'var(--dsw-alias-label-tertiary, #9aa0a6)'
+
+    /**
+     * 拉一页提交历史。
+     *
+     * @param workspace - 工作区路径。
+     * @param options - `{ skip, ref }`。
+     * @returns host 的响应。
+     */
+    async function fetchGraph(workspace, options) {
+      return call('graph', {
+        workspace,
+        limit: GRAPH_PAGE_SIZE,
+        skip: options?.skip ?? 0,
+        ...(options?.ref === undefined || options.ref === '' ? {} : { ref: options.ref }),
+      })
+    }
+
+    /**
+     * 分支树：HEAD / 本地 / 远程 / 标签 四段。
+     *
+     * 数据直接从**当前已加载的提交**里聚合出来，而不是再问一次 host：`%D` 已经带了每个
+     * ref 落在哪条提交上，聚合是纯本地计算。代价是"只加载了一页时，更早的分支看不见"，
+     * 因此每段末尾在还有下一页时给一个提示——比让用户以为"分支就这么多"要好。
+     *
+     * @param props - `{ t, commits, loading, hasMore, ref, onPickRef }`。
+     * @returns React 元素。
+     */
+    function GraphBranchTree(props) {
+      const { t, commits, hasMore, ref, onPickRef } = props
+      const head = []
+      const local = []
+      const remote = []
+      const tags = []
+      const seen = new Set()
+      for (const commit of commits) {
+        for (const entry of commit.refs ?? []) {
+          const key = `${entry.kind}:${entry.name}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          const row = { name: entry.name, hash: commit.hash, subject: commit.subject }
+          if (entry.isHead === true && entry.kind === 'branch') head.push(row)
+          else if (entry.kind === 'tag') tags.push(row)
+          else if (entry.kind === 'remote') remote.push(row)
+          else if (entry.kind === 'branch') local.push(row)
+        }
+      }
+
+      const section = (key, label, rows) =>
+        react.createElement(
+          'div',
+          { key, 'data-graph-tree-section': key },
+          react.createElement(
+            'div',
+            { style: { padding: '10px 10px 4px', fontSize: '11px', fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } },
+            label,
+          ),
+          rows.length === 0
+            ? react.createElement('div', { style: { padding: '2px 10px 6px', fontSize: '12px', color: GRAPH_DIM } }, '—')
+            : rows.map((row) =>
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    key: `${key}:${row.name}`,
+                    'data-graph-tree-row': row.name,
+                    onClick: () => onPickRef(row.name),
+                    title: `${row.name}\n${row.hash.slice(0, 8)} ${row.subject}`,
+                    style: {
+                      display: 'block',
+                      boxSizing: 'border-box',
+                      width: '100%',
+                      padding: '4px 10px',
+                      border: 'none',
+                      borderRadius: '5px',
+                      background: ref === row.name ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
+                      color: ref === row.name ? ACCENT : 'inherit',
+                      fontFamily: UI_FONT,
+                      fontSize: '12.5px',
+                      textAlign: 'left',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      cursor: 'pointer',
+                    },
+                  },
+                  row.name,
+                ),
+              ),
+        )
+
+      return react.createElement(
+        'div',
+        { 'data-graph-tree': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', fontFamily: UI_FONT } },
+        section('head', t('graphHead'), head),
+        section('local', t('graphLocal'), local),
+        section('remote', t('graphRemote'), remote),
+        section('tags', t('graphTags'), tags),
+        hasMore
+          ? react.createElement(
+              'div',
+              { style: { padding: '8px 10px', fontSize: '11.5px', color: GRAPH_DIM } },
+              t('graphLoadMore'),
+            )
+          : null,
+      )
+    }
+
+    /**
+     * 提交列表：左边一列泳道 SVG + 右边提交信息。
+     *
+     * 行高与列宽都是常量，因此这里做**简单的窗口化**：只渲染可见范围内的行，其余用一个
+     * 等高的占位 div 撑开。仓库动辄几万条提交，一次渲染几千行会让滚动卡住——而这正是
+     * "打开提交图要等很久"的直接原因。
+     *
+     * @param props - `{ t, rows, layout, commits, selected, onSelect, scrollTop, viewportHeight }`。
+     * @returns React 元素。
+     */
+    function GraphCommitList(props) {
+      const { t, commits, layout, selected, onSelect, scrollTop, viewportHeight } = props
+      const palette = lanePalette()
+      const first = Math.max(0, Math.floor(scrollTop / GRAPH_ROW_HEIGHT) - 5)
+      const count = Math.ceil(viewportHeight / GRAPH_ROW_HEIGHT) + 10
+      const last = Math.min(commits.length, first + count)
+      const lanes = Math.min(layout.lanes, 12)
+
+      const visible = []
+      for (let i = first; i < last; i += 1) {
+        const commit = commits[i]
+        const row = layout.rows[i]
+        if (commit === undefined || row === undefined) continue
+        const isSelected = selected === commit.hash
+
+        // 泳道：每条边一条路径。同一列上下直连画直线，跨列画贝塞尔——跨列只在合并/分叉
+        // 处出现，用曲线能让"这两条线是同一支"一眼看出来。
+        const edges = row.edges.map((edge, index) => {
+          const x1 = edge.fromLane * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2
+          const x2 = edge.toLane * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2
+          const top = 0
+          const bottom = GRAPH_ROW_HEIGHT
+          const mid = GRAPH_ROW_HEIGHT / 2
+          // 根提交（或第一父提交落在窗口外）只有点、没有向下的线：`parents` 为空时不画。
+          const hasDown = commit.parents.length > 0
+          const d =
+            x1 === x2
+              ? `M ${x1} ${top} L ${x2} ${hasDown ? bottom : mid}`
+              : `M ${x1} ${top} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${bottom}`
+          return react.createElement('path', {
+            key: `e${index}`,
+            d,
+            fill: 'none',
+            stroke: palette[edge.color % palette.length],
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            'data-graph-edge': edge.kind,
+          })
+        })
+
+        visible.push(
+          react.createElement(
+            'div',
+            {
+              key: commit.hash,
+              'data-graph-row': commit.hash,
+              'aria-selected': isSelected ? 'true' : undefined,
+              onClick: () => onSelect(commit.hash),
+              style: {
+                position: 'absolute',
+                top: `${i * GRAPH_ROW_HEIGHT}px`,
+                left: 0,
+                right: 0,
+                height: `${GRAPH_ROW_HEIGHT}px`,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                paddingRight: '8px',
+                boxSizing: 'border-box',
+                background: isSelected ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+                cursor: 'pointer',
+                fontFamily: UI_FONT,
+                fontSize: '12.5px',
+              },
+            },
+            react.createElement(
+              'svg',
+              {
+                width: lanes * GRAPH_LANE_WIDTH,
+                height: GRAPH_ROW_HEIGHT,
+                viewBox: `0 0 ${Math.max(lanes, 1) * GRAPH_LANE_WIDTH} ${GRAPH_ROW_HEIGHT}`,
+                'aria-hidden': 'true',
+                style: { flexShrink: 0, overflow: 'visible' },
+              },
+              edges,
+              // 点画在**这一行**的列上，颜色取 `commit` 那条边（它恒存在，哪怕根提交）。
+              react.createElement('circle', {
+                cx: row.lane * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2,
+                cy: GRAPH_ROW_HEIGHT / 2,
+                r: isSelected ? 4.5 : 3.5,
+                fill: palette[(row.edges.find((edge) => edge.kind === 'commit')?.color ?? 0) % palette.length],
+                'data-graph-dot': '',
+              }),
+            ),
+            // 分支/标签徽标。只显示前三个，多的收成一个计数——一排标签会把消息挤没。
+            ...(commit.refs ?? []).slice(0, 3).map((entry, index) =>
+              react.createElement(
+                'span',
+                {
+                  key: `r${index}`,
+                  'data-graph-ref': entry.kind,
+                  style: {
+                    flexShrink: 0,
+                    padding: '0 5px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    lineHeight: '16px',
+                    background: entry.isHead === true
+                      ? `color-mix(in srgb, ${ACCENT} 18%, transparent)`
+                      : 'var(--dsw-alias-bg-module-platform, #f0f1f3)',
+                    color: entry.isHead === true ? ACCENT : GRAPH_DIM,
+                    maxWidth: '160px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  },
+                },
+                entry.name,
+              ),
+            ),
+            react.createElement(
+              'span',
+              { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              commit.subject,
+            ),
+            react.createElement(
+              'span',
+              { style: { flexShrink: 0, color: GRAPH_DIM, fontFamily: CODE_FONT, fontSize: '11.5px' } },
+              commit.short,
+            ),
+            react.createElement(
+              'span',
+              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: '11.5px', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              commit.author,
+            ),
+            react.createElement(
+              'span',
+              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } },
+              (commit.committedAt ?? '').slice(0, 10),
+            ),
+          ),
+        )
+      }
+
+      return react.createElement(
+        'div',
+        {
+          'data-graph-list': '',
+          style: { position: 'relative', height: `${commits.length * GRAPH_ROW_HEIGHT}px` },
+        },
+        visible,
+      )
+    }
+
+    /**
+     * 提交详情：元信息 + 改动文件 + 单文件差异。
+     *
+     * @param props - `{ t, workspace, revision, onOpenCommitFile }`。
+     * @returns React 元素。
+     */
+    function GraphCommitDetail(props) {
+      const { t, workspace, revision } = props
+      const [state, setState] = react.useState({ phase: 'idle' })
+
+      react.useEffect(() => {
+        if (revision === '') {
+          setState({ phase: 'idle' })
+          return undefined
+        }
+        let alive = true
+        setState({ phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('commit-detail', { workspace, revision })
+            if (alive) setState({ phase: 'ready', result })
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            if (alive) setState({ phase: 'error', message: error.detail ?? error.message })
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [workspace, revision])
+
+      if (revision === '') {
+        return react.createElement(
+          'div',
+          { style: { padding: '16px', fontSize: '12.5px', color: GRAPH_DIM, fontFamily: UI_FONT } },
+          t('graphSelectCommit'),
+        )
+      }
+      if (state.phase === 'loading') return statusBlock(t('loading'))
+      if (state.phase === 'error') return statusBlock(state.message, 'error')
+
+      const commit = state.result?.commit
+      const files = state.result?.files ?? []
+      const containing = state.result?.containingBranches ?? []
+
+      /** 一条改动文件，点击展开它的差异。 */
+      const fileRow = (file) =>
+        react.createElement(GraphFileRow, {
+          key: file.path,
+          t,
+          file,
+          workspace,
+          revision,
+        })
+
+      return react.createElement(
+        'div',
+        { 'data-graph-detail': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: UI_FONT } },
+        react.createElement(
+          'div',
+          { style: { padding: '10px 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 } },
+          react.createElement('div', { style: { fontSize: '12.5px', fontWeight: 600, marginBottom: '4px', overflowWrap: 'anywhere' } }, commit?.subject ?? ''),
+          react.createElement(
+            'div',
+            { style: { fontSize: '11.5px', color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+            react.createElement('span', { style: { fontFamily: CODE_FONT } }, commit?.short ?? ''),
+            react.createElement('span', null, `${commit?.author ?? ''} <${commit?.email ?? ''}>`),
+            react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, (commit?.committedAt ?? '').replace('T', ' ').slice(0, 16)),
+          ),
+          containing.length > 0
+            ? react.createElement(
+                'div',
+                { 'data-graph-containing': '', style: { marginTop: '5px', fontSize: '11.5px', color: ACCENT } },
+                t('graphInBranches', { count: containing.length, names: containing.join(', ') }),
+              )
+            : null,
+          (commit?.body ?? '') === ''
+            ? null
+            : react.createElement(
+                'div',
+                { style: { marginTop: '6px', fontSize: '12px', color: 'inherit', whiteSpace: 'pre-wrap', maxHeight: '120px', overflowY: 'auto' } },
+                commit.body,
+              ),
+        ),
+        react.createElement(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px 4px', flexShrink: 0 } },
+          react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } }, t('changesTitle')),
+          react.createElement('span', { 'data-graph-file-count': '', style: { fontSize: '11.5px', color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
+        ),
+        react.createElement(
+          'div',
+          { style: { minHeight: 0, overflowY: 'auto', padding: '0 6px 10px' } },
+          files.length === 0
+            ? react.createElement('div', { style: { padding: '8px 6px', fontSize: '12px', color: GRAPH_DIM } }, t('graphNoFiles'))
+            : files.map(fileRow),
+        ),
+      )
+    }
+
+    /**
+     * 提交详情里的一条文件，点开才去取它的差异。
+     *
+     * 按需取而不是随详情一起取：一次提交可能改几百个文件，把全部 diff 一次拉回来会让
+     * 打开详情变慢，而用户通常只看其中一两个。
+     *
+     * @param props - `{ t, file, workspace, revision }`。
+     * @returns React 元素。
+     */
+    function GraphFileRow(props) {
+      const { t, file, workspace, revision } = props
+      const [open, setOpen] = react.useState(false)
+      const [state, setState] = react.useState({ phase: 'idle' })
+      const status = file.status?.[0] ?? '?'
+      const color = STATUS_COLORS[status] ?? GRAPH_DIM
+      const { dir, base } = splitPath(file.path)
+
+      const toggle = () => {
+        const next = !open
+        setOpen(next)
+        if (!next || state.phase === 'ready') return
+        setState({ phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('commit-file', { workspace, revision, path: file.path })
+            setState({ phase: 'ready', result })
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            setState({ phase: 'error', message: error.detail ?? error.message })
+          }
+        })()
+      }
+
+      return react.createElement(
+        'div',
+        { 'data-graph-file': file.path },
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-graph-file-row': file.path,
+            'aria-expanded': open,
+            onClick: toggle,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '7px',
+              boxSizing: 'border-box',
+              width: '100%',
+              minHeight: '26px',
+              padding: '3px 6px',
+              border: 'none',
+              borderRadius: '5px',
+              background: 'transparent',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              textAlign: 'left',
+              cursor: 'pointer',
+            },
+          },
+          react.createElement(
+            'span',
+            { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', fontSize: '11px', color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
+            status,
+          ),
+          dir === ''
+            ? null
+            : react.createElement('span', { style: { flexShrink: 1, minWidth: 0, color: GRAPH_DIM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl' } }, `\u200e${dir}/`),
+          react.createElement('span', { style: { flex: '0 0 auto', fontWeight: 500 } }, base),
+          react.createElement(
+            'span',
+            { style: { flex: '1 1 auto', textAlign: 'right', fontFamily: CODE_FONT, fontSize: '11.5px', color: GRAPH_DIM, fontVariantNumeric: 'tabular-nums' } },
+            `${file.added ?? '·'} +  ${file.removed ?? '·'} −`,
+          ),
+        ),
+        open
+          ? react.createElement(
+              'div',
+              { 'data-graph-file-diff': '' },
+              state.phase === 'loading'
+                ? statusBlock(t('loading'))
+                : state.phase === 'error'
+                  ? statusBlock(state.message, 'error')
+                  : state.result?.binary === true
+                    ? statusBlock(t('binaryDiff'))
+                    : renderDiff(state.result?.diff ?? ''),
+            )
+          : null,
+      )
+    }
+
+    /**
+     * 提交图：主区域里的三栏视图（分支树 / 提交列表 / 提交详情）。
+     *
+     * 挂在 `main` 槽上，由 `sidebar.panellist` 里那个图标打开。这与右侧抽屉（`shell.overlay`
+     * 上的自绘浮层）是两条独立的路径：抽屉宽度有限，画不下三栏；而这个视图需要整块主区域。
+     *
+     * @param props - 槽注入的属性，含渲染器提供的标准钩子。
+     * @returns React 元素。
+     */
+    function CommitGraphView(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { sessionId, useSessions, usePanelInfo } = props ?? {}
+      // 工作区跟当前会话走；没有会话时退回宿主工作区（与项目改动面板同一套优先级）。
+      const sessionWorkspace =
+        typeof useSessions === 'function' && sessionId !== undefined
+          ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
+          : undefined
+      const [fallbackWorkspace, setFallbackWorkspace] = react.useState(undefined)
+      react.useEffect(() => {
+        let alive = true
+        void (async () => {
+          try {
+            const result = await call('roots', {})
+            if (alive && typeof result?.current === 'string') setFallbackWorkspace(result.current)
+          } catch {
+            // 没有可用的兜底工作区：下面会显示空态。
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [])
+      const workspace = sessionWorkspace ?? fallbackWorkspace
+
+      const [commits, setCommits] = react.useState([])
+      const [hasMore, setHasMore] = react.useState(false)
+      const [phase, setPhase] = react.useState('loading')
+      const [errorMessage, setErrorMessage] = react.useState('')
+      const [selected, setSelected] = react.useState('')
+      const [ref, setRef] = react.useState('')
+      const [scrollTop, setScrollTop] = react.useState(0)
+      const [viewport, setViewport] = react.useState(600)
+      const scrollRef = react.useRef(null)
+
+      /** 拉第一页（或换筛选后重拉）。 */
+      const reload = react.useCallback(async () => {
+        if (workspace === undefined) return
+        setPhase('loading')
+        setErrorMessage('')
+        try {
+          const result = await fetchGraph(workspace, { ref })
+          if (result?.isRepo === false) {
+            setPhase('notRepo')
+            setCommits([])
+            return
+          }
+          setCommits(result.commits ?? [])
+          setHasMore(result.hasMore === true)
+          setPhase('ready')
+        } catch (cause) {
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setErrorMessage(error.detail ?? error.message)
+          setPhase('error')
+        }
+      }, [workspace, ref])
+
+      react.useEffect(() => {
+        void reload()
+      }, [reload])
+
+      /** 追加下一页。 */
+      const loadMore = react.useCallback(async () => {
+        if (workspace === undefined || !hasMore) return
+        try {
+          const result = await fetchGraph(workspace, { skip: commits.length, ref })
+          setCommits((current) => [...current, ...(result.commits ?? [])])
+          setHasMore(result.hasMore === true)
+        } catch (cause) {
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setErrorMessage(error.detail ?? error.message)
+          setPhase('error')
+        }
+      }, [workspace, commits.length, hasMore, ref])
+
+      // 布局用 useMemo：它是这份视图里最贵的一步（O(提交数 × 列数)），而滚动会让组件
+      // 重渲染。不 memo 的话每一帧都要重算一遍泳道，滚动会明显掉帧。
+      const layout = react.useMemo(() => layoutGraph(commits), [commits])
+
+      const onScroll = react.useCallback((event) => {
+        setScrollTop(event.target.scrollTop)
+        setViewport(event.target.clientHeight)
+      }, [])
+
+      if (phase === 'loading') {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('graphLoading')))
+      }
+      if (phase === 'notRepo') {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notRepo', { name: projectName(workspace ?? '') })))
+      }
+      if (phase === 'error') {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(errorMessage, 'error'))
+      }
+
+      return react.createElement(
+        'div',
+        {
+          'data-graph-view': '',
+          style: {
+            display: 'grid',
+            // 三栏：分支树固定 200px、提交列表自适应、详情固定 320px。
+            gridTemplateColumns: '200px minmax(0, 1fr) 320px',
+            height: '100%',
+            minHeight: 0,
+            background: 'var(--dsw-alias-bg-base, #fff)',
+            color: 'var(--dsw-alias-label-primary, #202124)',
+            fontFamily: UI_FONT,
+          },
+        },
+        // ---- 左：分支树 ----
+        react.createElement(
+          'div',
+          { style: { borderRight: `1px solid ${BORDER}`, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          react.createElement(GraphBranchTree, {
+            t,
+            commits,
+            hasMore,
+            ref,
+            onPickRef: (name) => setRef((current) => (current === name ? '' : name)),
+          }),
+        ),
+        // ---- 中：提交列表 ----
+        react.createElement(
+          'div',
+          { style: { minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          react.createElement(
+            'div',
+            {
+              style: {
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '8px 12px',
+                borderBottom: `1px solid ${BORDER}`,
+                flexShrink: 0,
+                fontSize: '12px',
+              },
+            },
+            react.createElement('span', { style: { fontWeight: 600 } }, t('graphTitle')),
+            react.createElement('span', { 'data-graph-count': '', style: { color: GRAPH_DIM } }, t('graphFiles', { count: commits.length })),
+            ref === ''
+              ? null
+              : react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-graph-clear-ref': '',
+                    onClick: () => setRef(''),
+                    style: {
+                      padding: '1px 6px',
+                      borderRadius: '4px',
+                      border: `1px solid ${BORDER}`,
+                      background: 'transparent',
+                      color: ACCENT,
+                      fontFamily: UI_FONT,
+                      fontSize: '11.5px',
+                      cursor: 'pointer',
+                    },
+                  },
+                  `${t('graphFilterRef')}: ${ref} ✕`,
+                ),
+            layout.truncated
+              ? react.createElement('span', { 'data-graph-truncated': '', style: { marginLeft: 'auto', color: GRAPH_DIM, fontSize: '11.5px' } }, t('graphTruncatedLanes'))
+              : null,
+          ),
+          react.createElement(
+            'div',
+            {
+              ref: scrollRef,
+              'data-graph-scroll': '',
+              onScroll,
+              style: { minHeight: 0, flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' },
+            },
+            commits.length === 0
+              ? statusBlock(t('graphNoCommits'))
+              : react.createElement(GraphCommitList, {
+                  t,
+                  commits,
+                  layout,
+                  selected,
+                  onSelect: (hash) => setSelected(hash),
+                  scrollTop,
+                  viewportHeight: viewport,
+                }),
+            hasMore
+              ? react.createElement(
+                  'div',
+                  { style: { padding: '8px 12px' } },
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-graph-more': '',
+                      onClick: () => void loadMore(),
+                      style: {
+                        width: '100%',
+                        padding: '6px',
+                        borderRadius: '6px',
+                        border: `1px solid ${BORDER}`,
+                        background: 'transparent',
+                        color: 'inherit',
+                        fontFamily: UI_FONT,
+                        fontSize: '12.5px',
+                        cursor: 'pointer',
+                      },
+                    },
+                    t('graphLoadMore'),
+                  ),
+                )
+              : null,
+          ),
+        ),
+        // ---- 右：提交详情 ----
+        react.createElement(
+          'div',
+          { style: { borderLeft: `1px solid ${BORDER}`, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          react.createElement(GraphCommitDetail, { t, workspace, revision: selected }),
+        ),
+      )
+    }
+
+    /**
+     * 侧栏里的提交图图标。
+     *
+     * `sidebar.panellist` 的每个 list id 对应 `main` 槽的**同名 key**：侧栏负责画按钮，
+     * 主区域负责在有这个 key 时渲染内容。因此这里只需要一个图标。
+     *
+     * @param props - `{ size, active }`。
+     * @returns React 元素。
+     */
+    function GraphPanelIcon(props) {
+      const size = typeof props?.size === 'number' ? props.size : 16
+      const stroke = props?.active === true ? ACCENT : 'currentColor'
+      // 一个"分叉的线 + 三个点"的图形：与提交图的语义一致，且在小尺寸下仍然分得清。
+      return react.createElement(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke, strokeWidth: 1.5, 'aria-hidden': 'true', 'data-graph-icon': '' },
+        react.createElement('path', { d: 'M4 3.5v9M4 7h4.5a3 3 0 0 0 3-3', strokeLinecap: 'round' }),
+        react.createElement('circle', { cx: 4, cy: 2.5, r: 1.6 }),
+        react.createElement('circle', { cx: 4, cy: 13.5, r: 1.6 }),
+        react.createElement('circle', { cx: 12, cy: 4, r: 1.6 }),
+      )
+    }
+
     /**
      * 输入框上方的改动概览入口：显示本轮改动文件数，点击在侧边栏查看详情。
      *
@@ -2159,10 +3823,73 @@ window.__ModuleLoader__.load({
           ),
         'dsh-client-ui-review: review tab title',
       )
+
+      // 提交图：**两处注册缺一不可**。
+      //
+      //   `sidebar.panellist`（list / root）——侧栏那一列图标，`id` 就是主区域的 key；
+      //   `main`（keyed / root）——按同一个 key 渲染内容，由布局侧 `ctx.layout.selectPanel(id)` 切换。
+      //
+      // 与项目改动抽屉（shell.overlay 上的自绘浮层）是两条独立路径：抽屉最多 980px 宽，
+      // 画不下"分支树 + 提交列表 + 详情"三栏；这个视图要整块主区域。
+      ctx.effect(
+        () =>
+          ctx.slots.inject(PANEL_SLOT, () =>
+            ctx.slots.register(
+              {
+                name: PANEL_SLOT,
+                id: GRAPH_ID,
+                // 排在官方那些图标之后。
+                order: 80,
+                // label 支持 thunk：语言切换时由 owner 重新读取，不需要重新注册。
+                label: () => ctx.locale.bind(NS)('graphPanelLabel'),
+              },
+              GraphPanelIcon,
+            ),
+          ),
+        'dsh-client-ui-review: graph panel icon',
+      )
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject(MAIN_SLOT, () =>
+            ctx.slots.register(
+              {
+                name: MAIN_SLOT,
+                key: GRAPH_ID,
+                locale: NS,
+                // 只注入文案函数。**绝不能注入 useSessions / usePanelInfo。**
+                // 这两个是渲染器提供给 root 槽位的标准钩子，而渲染器合并 props 的顺序是
+                // `{ ...kit, ...injected, ... }`——inject 会盖掉 kit，且 `bindInjectSources`
+                // 不剔除 undefined。1.3.5 修过一次同样的坑（那时是项目级面板拿不到当前会话），
+                // 这里不能再犯。
+                inject: () => ({ t: ctx.locale.bind(NS) }),
+              },
+              CommitGraphView,
+            ),
+          ),
+        'dsh-client-ui-review: commit graph view',
+      )
     }
 
     exports.name = name
     exports.apply = apply
+    // ---- 只给测试用的钩子 ------------------------------------------------------
+    //
+    // 泳道算法在本文件里有一份**内联副本**（原因见上面那段注释）。`scripts/test-graph-layout-parity.mjs`
+    // 需要对同一批输入跑"这里的内联版本"与 `lib/graph-layout.js`，逐字段比较结果，才能
+    // 保证两个副本不漂移——否则唯一的验证手段是起一个 Electron 去看图，没人会为改一行
+    // 算法去跑那个。
+    //
+    // 因此把这两个引用挂到导出上。它们不是公开 API，也不被 `apply` 使用；命名带
+    // `ForTest` 后缀，避免被误当成插件契约的一部分。
+    exports.__graphLayoutForTest = layoutGraph
+    exports.__graphColorCountForTest = GRAPH_COLOR_COUNT
+    exports.__graphLaneMaxForTest = GRAPH_LANE_MAX
+    // 暂存区块的两个内部件同样只给测试用：`classifyEntry` 是"一个文件属于哪一组"的
+    // 唯一判定（porcelain 的 XY 两列），错一处就会把文件分错组，而那是纯函数，
+    // 直接断言比隔着界面点更可靠。
+    exports.__stagingClassifyForTest = classifyEntry
+    exports.__stagingSectionForTest = StagingSection
     // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
     // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
     //
@@ -2170,7 +3897,7 @@ window.__ModuleLoader__.load({
     // 标准钩子 `useSessions`），但仍然声明：官方 `dsh-client-ui-session` /
     // `dsh-client-ui-workspace` 正是用 `slots.provideRoot({ hooks: { sessions/workspaces } })`
     // 把 root source 提供出来的，声明它们可以保证这两个服务先于本项目级入口就位。
-    exports.inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'sessions', 'workspaces']
+    exports.inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'sessions', 'workspaces', 'layout']
     return module.exports
   },
 })

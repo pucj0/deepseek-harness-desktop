@@ -70,9 +70,20 @@ try {
     existsSync(join(first.dir, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
     'true',
   )
+  // 三个内置插件都要随包。只查一个不够：`scripts/sync-plugins.mjs` 是按目录自动带走的，
+  // 而"某个插件目录没被 stage 进压缩包"这种错误在只抽查一个插件时完全看不出来。
+  for (const plugin of ['dsh-client-ui-gitbar', 'dsh-client-ui-review', 'dsh-client-ui-typography']) {
+    check(
+      `插件随包（${plugin}）`,
+      existsSync(join(first.dir, 'runtime', 'node_modules', plugin, 'package.json')),
+      'true',
+    )
+  }
+  // 附属文件也要在包里：提交图的泳道算法是独立文件，客户端 bundle 之外还要能被
+  // 开发期的单测按路径读到（见 test-graph-layout.mjs / test-graph-layout-parity.mjs）。
   check(
-    '插件随包（gitbar）',
-    existsSync(join(first.dir, 'runtime', 'node_modules', 'dsh-client-ui-gitbar', 'package.json')),
+    '插件附属文件随包（graph-layout.js）',
+    existsSync(join(first.dir, 'runtime', 'node_modules', 'dsh-client-ui-review', 'lib', 'graph-layout.js')),
     'true',
   )
 
