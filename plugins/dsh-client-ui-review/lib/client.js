@@ -484,6 +484,7 @@ window.__ModuleLoader__.load({
       statusRenamed: '重命名',
       statusOther: '变更',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
+      diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
       // ---- 提交图（主区域的独立面板）----
       graphPanelLabel: '提交图',
@@ -571,6 +572,7 @@ window.__ModuleLoader__.load({
       statusRenamed: 'renamed',
       statusOther: 'changed',
       binaryDiff: 'This file is binary; no line diff is shown.',
+      diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
       // ---- Commit graph (its own main-area panel) ----
       graphPanelLabel: 'Commit graph',
@@ -996,7 +998,15 @@ window.__ModuleLoader__.load({
       const [state, setState] = react.useState({ phase: 'loading' })
 
       const reload = react.useCallback(async () => {
-        if (workspace === undefined || sessionId === undefined) return
+        // **没有工作区时必须进入明确的错误态，不能直接 return。**
+        //
+        // 此前这里只是 `return`，`state` 就永远停在初值 `phase: 'loading'` —— 界面表现是
+        // 永久"正在读取差异…"，而真实原因是"不知道该看哪个项目"（刚切换对话、工作区还没
+        // 解析出来）。这与 `useWorkspaceChanges` 里已经修过的那处是同一个坑，只是漏改了这个。
+        if (workspace === undefined || sessionId === undefined) {
+          setState({ phase: 'error', message: 'noWorkspace' })
+          return
+        }
         try {
           const result = await call('changes', { workspace, sessionId })
           setState({ phase: 'ready', result })
@@ -2108,6 +2118,15 @@ window.__ModuleLoader__.load({
       const [trouble, setTrouble] = react.useState(null)
       const [notice, setNotice] = react.useState('')
       const onCommitted = typeof props?.onCommitted === 'function' ? props.onCommitted : () => undefined
+      /**
+       * 当前正在读取的工作区。
+       *
+       * 用来丢弃**过期响应**：切换对话/工作区后，上一个工作区那次仍在飞的请求回来时会把
+       * 新工作区的数据覆盖掉，界面于是短暂（有时是长期）显示另一个项目的文件——这正是
+       * "切换了对话/切换了工作空间就直接获取不出来、对不上"的来源。异步结果落地前先
+       * 核对它属于哪一次请求。
+       */
+      const wanted = react.useRef(workspace)
 
       /** 重新读一次状态。 */
       const reload = react.useCallback(async () => {
@@ -2115,14 +2134,17 @@ window.__ModuleLoader__.load({
           setState({ phase: 'noworkspace' })
           return
         }
+        const mine = workspace
         try {
           const result = await call('status', { workspace })
+          if (wanted.current !== mine) return
           if (result?.isRepo === false) {
             setState({ phase: 'notrepo' })
             return
           }
           setState({ phase: 'ready', result })
         } catch (cause) {
+          if (wanted.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
           setTrouble(error.detail ?? error.message)
           setState({ phase: 'error' })
@@ -2130,8 +2152,14 @@ window.__ModuleLoader__.load({
       }, [workspace])
 
       react.useEffect(() => {
+        // 工作区变了：记下新的期望值，并让界面立刻回到"加载中"而不是继续显示旧项目的
+        // 文件——否则切换项目时会看到上一个项目的列表停留一会儿。
+        wanted.current = workspace
+        setState({ phase: 'loading' })
+        setTrouble(null)
+        setNotice('')
         void reload()
-      }, [reload])
+      }, [workspace, reload])
 
       /**
        * 跑一次写操作，然后把状态重新读一遍。
@@ -2552,6 +2580,30 @@ window.__ModuleLoader__.load({
       return react.createElement(
         'div',
         { style: { display: 'flex', flexDirection: 'column', gap: '2px', fontFamily: UI_FONT } },
+        // 逐行差异读不出来时（改动体量超出上限）必须说明原因。
+        //
+        // 不说的话，用户看到的是一列点不开的文件——而真正的原因是仓库里有个没被
+        // `.gitignore` 覆盖的大目录（实测：`tmp/` 下 6,635 个日志文件、45.9 MB 差异）。
+        // 这条提示同时也是给用户的修复建议：把那个目录加进 .gitignore。
+        result?.diffOversized === true
+          ? react.createElement(
+              'div',
+              {
+                'data-review-diff-oversized': '',
+                style: {
+                  margin: '0 2px 8px',
+                  padding: '7px 9px',
+                  borderRadius: '8px',
+                  background: `color-mix(in srgb, ${REMOVED} 6%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${REMOVED} 22%, transparent)`,
+                  color: REMOVED,
+                  fontSize: '12px',
+                  lineHeight: 1.6,
+                },
+              },
+              t('diffOversized'),
+            )
+          : null,
         // 汇总行：IDEA 的工具窗顶部也是"文件数 + 增删行数"，用等宽数字避免抖动。
         react.createElement(
           'div',
@@ -2562,9 +2614,17 @@ window.__ModuleLoader__.load({
           t('changesTitle'),
           react.createElement('span', { 'data-review-count': '' }, String(files.length)),
           react.createElement('span', { style: { flex: 1 } }),
+          // 总变动行数：`+N −M` 是这一屏所有文件的和。
+          //
+          // 与下面每行的行内数字是同一套来源（`/workspace` 或 `/changes` 的 numstat），
+          // 因此总数恒等于各行之和——这正是"外部数字显示对不上"要根治的那类问题：
+          // 任何"用另一条路由单独算总数"的写法都会在两次请求之间不一致。
           react.createElement(
             'span',
-            { 'data-review-stats': '', style: { fontWeight: 400, fontSize: '11.5px' } },
+            {
+              'data-review-total-stats': '',
+              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap' },
+            },
             react.createElement('span', { style: { color: ADDED } }, `+${added}`),
             ' ',
             react.createElement('span', { style: { color: REMOVED } }, `−${removed}`),
@@ -2579,7 +2639,9 @@ window.__ModuleLoader__.load({
           const { dir, base } = splitPath(file.path)
           return react.createElement(
             'div',
-            { key: file.path, 'data-review-row': '' },
+            // `data-review-row` 带**路径**而不只是空标记：下面那个暂存标记要靠它才能
+            // 对应到具体文件，否则"哪个文件已暂存"在 DOM 上无法核验（脚本与人工都一样）。
+            { key: file.path, 'data-review-row': file.path },
             react.createElement(
               'div',
               { style: { display: 'flex', alignItems: 'stretch', gap: '2px' } },
@@ -2673,6 +2735,43 @@ window.__ModuleLoader__.load({
                   ' ',
                   react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? 0}`),
                 ),
+                // 暂存状态：哪个文件已经进了索引。
+                //
+                // 这一列是"选择性提交"能不能用的前提——没有它，用户在下面勾了暂存、
+                // 上面那份列表却看不出任何区别，于是只能靠记忆（实际反馈："文件可以选择性
+                // 提交"）。`staged`/`unstaged` 由 host 在同一次请求里随文件一起给出
+                // （见 indexStates），因此这里的标记与下面分组的判定不可能不一致。
+                file.untracked === true
+                  ? react.createElement(
+                      'span',
+                      {
+                        'data-review-staged': 'untracked',
+                        title: t('untrackedTitle'),
+                        style: { flexShrink: 0, fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
+                      },
+                      '?',
+                    )
+                  : react.createElement(
+                      'span',
+                      {
+                        'data-review-staged': file.staged === true ? 'yes' : 'no',
+                        title: file.staged === true ? t('stagedTitle') : t('unstagedTitle'),
+                        style: {
+                          flexShrink: 0,
+                          padding: '0 4px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          lineHeight: '15px',
+                          color: file.staged === true ? ADDED : 'var(--dsw-alias-label-tertiary)',
+                          background:
+                            file.staged === true
+                              ? `color-mix(in srgb, ${ADDED} 14%, transparent)`
+                              : 'transparent',
+                        },
+                      },
+                      // 只用一个字形，不写文字：列表一屏几十行，文字会把文件名挤窄。
+                      file.staged === true ? '●' : '○',
+                    ),
                 react.createElement(
                   'svg',
                   {
@@ -3890,6 +3989,9 @@ window.__ModuleLoader__.load({
     // 直接断言比隔着界面点更可靠。
     exports.__stagingClassifyForTest = classifyEntry
     exports.__stagingSectionForTest = StagingSection
+    // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
+    // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
+    exports.__fileListForTest = FileList
     // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
     // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
     //

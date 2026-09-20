@@ -216,6 +216,34 @@ try {
   check('   恰好取完时 hasMore 为假', exact.body.hasMore, false)
 
   console.log('')
+  console.log('=== 4b. /workspace 兼报索引态（分组与列表同源）===')
+  // 界面上"已暂存 / 更改 / 未跟踪"三个分组与文件列表必须是**同一次请求的同一份数据**。
+  // 此前两者来自 `/status` 与 `/workspace` 两条路由，各自独立请求与缓存，于是会出现
+  // "分组里是 A 项目的文件、列表里是 B 项目的文件"（实际反馈）。这里钉住：
+  // `/workspace` 的每个文件都带上 `staged` / `unstaged` / `untracked`。
+  res = await get('workspace')
+  check('4b) /workspace 200', res.status, 200)
+  checkTrue('   每个文件都带 staged 标记', (res.body.files ?? []).every((f) => typeof f.staged === 'boolean'))
+  checkTrue('   每个文件都带 unstaged 标记', (res.body.files ?? []).every((f) => typeof f.unstaged === 'boolean'))
+  checkTrue('   每个文件都带 untracked 标记', (res.body.files ?? []).every((f) => typeof f.untracked === 'boolean'))
+  // 此刻工作区里**已跟踪**的那些改动全都是未暂存的（测试的前面几节没有 add 过东西）。
+  // 未跟踪的文件（`??`）要单独看：它们的 X 列是 `?`，语义上不是"已暂存"，标记为
+  // `untracked: true`，因此断言必须把这部分排除在外。
+  const trackedFiles = (res.body.files ?? []).filter((f) => f.untracked !== true)
+  checkTrue('   有已跟踪的改动可供断言', trackedFiles.length > 0)
+  checkTrue('   已跟踪的改动都标记为未暂存', trackedFiles.every((f) => f.unstaged === true && f.staged === false))
+  // 暂存之后同一个文件必须变成 staged。
+  await post('stage', { paths: ['a.txt'] })
+  res = await get('workspace')
+  const stagedFile = (res.body.files ?? []).find((f) => f.path === 'a.txt')
+  check('   暂存后 a.txt 的 staged', stagedFile?.staged, true)
+  check('   暂存后 a.txt 的 unstaged', stagedFile?.unstaged, false)
+  await post('unstage', { paths: ['a.txt'] })
+  res = await get('workspace')
+  const unstagedAgain = (res.body.files ?? []).find((f) => f.path === 'a.txt')
+  check('   取消暂存后 staged', unstagedAgain?.staged, false)
+
+  console.log('')
   console.log('=== 4. ref 筛选 ===')
   const featureOnly = await get('graph', '&ref=feature')
   check('4) 200', featureOnly.status, 200)

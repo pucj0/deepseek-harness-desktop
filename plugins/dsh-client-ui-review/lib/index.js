@@ -321,7 +321,9 @@ async function readCommitFileDiff(cwd, revision, path) {
     '--',
     normalizePath(path),
   ]
-  const raw = await git(args, cwd)
+  // 单个文件的差异也可能很大（一份生成物、一个巨大的 JSON），因此同样放宽缓冲：
+  // "32 MB 对单文件够用"只是通常成立，而它不成立时的表现是整条路由 500。
+  const raw = await git(args, cwd, undefined, diffBufferFor(1))
   // `Binary files … differ` 之类没有可展示的行，界面上要区别对待。
   const binary = /^Binary files |^GIT binary patch/mu.test(raw)
   const truncated = raw.length > MAX_DIFF_BYTES
@@ -330,6 +332,47 @@ async function readCommitFileDiff(cwd, revision, path) {
 
 /** 图形路由允许的 ref 形状：分支名/标签名，不含 rev 表达式。 */
 const REF_PATTERN_GRAPH = /^(?![-./])(?!.*\.\.)(?!.*\/\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/u
+
+/**
+ * 把 `git status --porcelain` 解析成"路径 → 索引态/工作区态"的查表。
+ *
+ * `XY` 两列是**两个独立的维度**：`X` 是索引相对 HEAD 的状态，`Y` 是工作区相对索引的
+ * 状态。实测确认过的四种形状：
+ *   `A  new-staged.txt`  只有已暂存
+ *   ` M unstaged.txt`    只有未暂存
+ *   `MM both.txt`        **两边都有**（同一个文件会同时出现在两组里，这是对的）
+ *   `?? untracked.txt`   未跟踪（此时**不取 X**：untracked 的 X 是 `?`，它不是"已暂存"）
+ *
+ * 为什么查表而不是把 status 直接当数据源：文件列表（内容与增删行数）来自差异路由，
+ * 而这个查表只补"索引态"这一维度，两者合并成**一次请求的同一份数据**，
+ * 界面上的分组与列表因此不可能对不上。
+ *
+ * @param raw - `git status --porcelain` 的原文。
+ * @returns `Map<path, { staged, unstaged, untracked, index, worktree }>`。
+ */
+function indexStates(raw) {
+  const table = new Map()
+  for (const line of raw.split('\n')) {
+    if (line.length < 4) continue
+    const index = line[0]
+    const worktree = line[1]
+    let path = line.slice(3)
+    if (path.startsWith('"') && path.endsWith('"')) {
+      path = path.slice(1, -1).replace(/\\(["\\])/gu, '$1')
+    }
+    if (index === '!' || worktree === '!') continue
+    const untracked = index === '?' || worktree === '?'
+    table.set(path, {
+      index,
+      worktree,
+      untracked,
+      // 未跟踪的文件不计入"已暂存"：它的 X 是 `?`，语义上不是索引里的改动。
+      staged: !untracked && index !== ' ',
+      unstaged: !untracked && worktree !== ' ',
+    })
+  }
+  return table
+}
 
 /**
  * 解析 `git status --porcelain` 的行，分成"已跟踪改动"与"未跟踪文件"两组。
@@ -420,6 +463,38 @@ function validateWorkspace(requested) {
 }
 
 /**
+ * `git` 的 stdout 缓冲上限（默认 32 MB）。
+ *
+ * 这个默认值对元数据类输出（numstat / name-status / log）绰绰有余，**但对完整统一
+ * 差异不够**：实测 `E:\workspace\mmsm-amis` 上一个没有被 `.gitignore` 覆盖的 `tmp/`
+ * 目录（6,635 个日志文件、37.7 MB）会让 `git diff --unified=3` 输出 **45.9 MB /
+ * 1,062,664 行**，直接把 32 MB 的缓冲撑爆，`execFile` 报
+ * `stdout maxBuffer length exceeded`。
+ *
+ * 后果不是"少显示一部分"，而是**整条 `/review/workspace` 返回 500** —— 界面上的表现是
+ * "这个项目当前没有未提交的改动"（0 个文件），而"最近提交"照常显示 20 条，于是看起来
+ * 像是"项目级 git 取不到数据"。这一个错误信息就够定位了，但它藏在 HTTP 500 的正文里，
+ * 不主动去看是看不到的。
+ */
+const GIT_MAX_BUFFER = 32 * 1024 * 1024
+
+/**
+ * 大差异命令的缓冲上限（256 MB）。
+ *
+ * 只在"输出体量与改动文件数成正比"的命令上放宽（统一差异）。为什么能估准：统一差异的
+ * 体积 ≈ 每文件的行数 × 平均行长，而文件数由 numstat 一次拿到，所以
+ * `max(64 MB, 每文件 4 KB × 文件数)` 对"一堆小文件"和"少量大文件"都够用，同时给
+ * 病态仓库留了一个有界的上限——超了就走"截断"而不是把进程打死。
+ */
+const GIT_MAX_BUFFER_LARGE = 256 * 1024 * 1024
+
+/** 估算统一差异需要的缓冲：以改动文件数为准，下限 64 MB。 */
+function diffBufferFor(fileCount) {
+  const estimate = Math.max(64 * 1024 * 1024, Number(fileCount) * 4096)
+  return Math.min(estimate, GIT_MAX_BUFFER_LARGE)
+}
+
+/**
  * 运行一条 git 命令。
  *
  * **一律带上 `-c core.fileMode=false`**：本插件用 `git add -A` + `git write-tree` 给
@@ -433,14 +508,15 @@ function validateWorkspace(requested) {
  * @param args - 参数数组（不含 `git`）。
  * @param cwd - 仓库目录。
  * @param env - 额外环境变量（用于传入临时 index）。
+ * @param maxBuffer - stdout 上限，默认 `GIT_MAX_BUFFER`。
  * @returns stdout。
  */
-function git(args, cwd, env) {
+function git(args, cwd, env, maxBuffer = GIT_MAX_BUFFER) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       ['-c', 'core.fileMode=false', '-C', cwd, ...args],
-      { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, ...env } },
+      { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer, env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(new Error(String(stderr).trim() || error.message))
@@ -768,6 +844,35 @@ function describeDiff({ stat, names, diff }) {
 }
 
 /**
+ * 取"基线 vs 当前"的完整统一差异，缓冲按改动文件数放宽。
+ *
+ * 为什么需要单独一层、而不是直接 `git(['diff', '--unified=3', …])`：统一差异的体量
+ * 与改动**文件数**成正比（实测 6,639 个文件 → 45.9 MB），固定 32 MB 缓冲会让整条路由
+ * 500。这里按 numstat 给出的文件数估一个够用的上限。
+ *
+ * 仍然撑爆时**不再抛出**，而是返回空差异 + `oversized`：此时文件列表（numstat /
+ * name-status 的体积只有 2.3 MB，一定拿得到）照常显示，用户能看到"改了哪些文件"，
+ * 只是看不到逐行内容。这比"整块面板变成 0 个改动"好得多——后者会让人以为项目级 git
+ * 完全取不到数据。
+ *
+ * @param cwd - 工作区路径。
+ * @param from - 基线对象。
+ * @param to - 当前树对象。
+ * @param fileCount - 改动文件数（来自 numstat），用于估算缓冲。
+ * @returns `{ diff, oversized }`。
+ */
+async function readUnifiedDiff(cwd, from, to, fileCount) {
+  try {
+    const diff = await git(['diff', '--unified=3', from, to], cwd, undefined, diffBufferFor(fileCount))
+    return { diff, oversized: false }
+  } catch (error) {
+    const message = String(error?.message ?? error)
+    if (/maxBuffer/iu.test(message)) return { diff: '', oversized: true }
+    throw error
+  }
+}
+
+/**
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
@@ -882,19 +987,35 @@ function createReviewHandler() {
         // 就把它们算了进去，收窄集合依然是 6640 条。让索引保持热才是真正的办法。
         const current = await currentTree(workspace, sessionId)
 
-        const [stat, names, diff] = await Promise.all([
+        const [stat, names] = await Promise.all([
           git(['diff', '--numstat', stored.revision, current], workspace),
           git(['diff', '--name-status', stored.revision, current], workspace),
-          git(['diff', '--unified=3', stored.revision, current], workspace),
         ])
+        // 文件数先由 numstat 得到，再据此估算统一差异的缓冲（见 readUnifiedDiff）。
+        const { diff, oversized } = await readUnifiedDiff(
+          workspace,
+          stored.revision,
+          current,
+          stat.split('\n').length,
+        )
+        // 索引态一并取回：会话内的"本轮修改"列表同样要能看出哪些已暂存（见 indexStates）。
+        const porcelain = await git(['status', '--porcelain'], workspace).catch(() => '')
 
         // --numstat 给出每条文件的新增/删除行数，与 --name-status 的顺序一致。
+        const payload = describeDiff({ stat, names, diff })
+        const states = indexStates(porcelain)
+        const files = payload.files.map((file) => ({
+          ...file,
+          ...(states.get(file.path) ?? { staged: false, unstaged: true, untracked: false }),
+        }))
         sendJson(response, 200, {
           isRepo: true,
           scope: 'turn',
           revision: stored.revision,
           takenAt: stored.takenAt,
-          ...describeDiff({ stat, names, diff }),
+          ...payload,
+          files,
+          ...(oversized ? { diffOversized: true } : {}),
         })
         return
       }
@@ -916,17 +1037,33 @@ function createReviewHandler() {
           return
         }
         const current = await currentTree(workspace, `${sessionId}-workspace`)
-        const [stat, names, diff] = await Promise.all([
+        const [stat, names, porcelain] = await Promise.all([
           git(['diff', '--numstat', revision, current], workspace),
           git(['diff', '--name-status', revision, current], workspace),
-          git(['diff', '--unified=3', revision, current], workspace),
+          // 顺带把 `status --porcelain` 的索引/工作区两列取回来（见 indexStates）。
+          //
+          // 为什么要一起给：界面上"已暂存 / 更改 / 未跟踪"三个分组与下面那份文件列表
+          // **是同一批文件**，而它们此前来自两条不同的路由（`/status` 与 `/workspace`），
+          // 各自独立发起、各自缓存——只要工作区在中途被切换或某一边先返回，就会出现
+          // "分组里是 A 项目的文件、列表里是 B 项目的文件"这种对不上的界面（实际反馈）。
+          // 让一次请求同时给出内容与索引态，两边就不可能不一致。
+          git(['status', '--porcelain'], workspace),
         ])
+        const { diff, oversized } = await readUnifiedDiff(workspace, revision, current, stat.split('\n').length)
         const payload = describeDiff({ stat, names, diff })
+        // 把"已暂存 / 只有工作区改动"的判断直接附在文件上（见 indexStates 的说明）。
+        const states = indexStates(porcelain)
+        const files = payload.files.map((file) => ({
+          ...file,
+          ...(states.get(file.path) ?? { staged: false, unstaged: true, untracked: false }),
+        }))
         sendJson(response, 200, {
           isRepo: true,
           scope: 'workspace',
           revision,
           ...payload,
+          files,
+          ...(oversized ? { diffOversized: true } : {}),
         })
         return
       }

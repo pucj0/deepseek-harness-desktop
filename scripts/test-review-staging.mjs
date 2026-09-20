@@ -462,5 +462,65 @@ console.log('=== 9. 空仓库与干净工作区 ===')
 }
 
 console.log('')
+console.log('=== 10. 文件列表：总变动行数 + 暂存标记 ===')
+// `FileList` 是"总变动行数"与"暂存标记"的渲染处。用户反馈的两件事——"外部数字显示
+// 有问题"与"文件可以选择性提交（但看不出哪个已暂存）"——都落在这里，因此逐条钉住：
+//   1. 头部的总数必须**等于各行之和**（同一份数据算出来，不可能不一致）；
+//   2. 每个文件都要有暂存标记，且与数据一致。
+{
+  const FileList = loaded.__fileListForTest
+  checkTrue('10) 导出了 FileList', typeof FileList === 'function')
+
+  const files = [
+    { path: 'src/a.ts', status: 'M', added: 3, removed: 1, staged: false, unstaged: true, untracked: false },
+    { path: 'src/b.ts', status: 'A', added: 10, removed: 0, staged: true, unstaged: false, untracked: false },
+    { path: 'new.txt', status: 'A', added: 2, removed: 0, staged: false, unstaged: false, untracked: true },
+  ]
+  const listProps = {
+    t: mountProps.t,
+    result: { isRepo: true, scope: 'workspace', files, diff: '', truncated: false },
+    phase: 'ready',
+    message: '',
+    workspace: 'F:\\code\\projA',
+    sessionId: 's1',
+    onChanged: () => undefined,
+  }
+  const listKey = 'filelist'
+  const listOut = render(FileList, listProps, listKey)
+  for (const effect of listOut.effects) effect()
+  const hosts = collectHostNodes(render(FileList, listProps, listKey).tree, listKey)
+
+  const totalNode = hosts.find((n) => n.props?.['data-review-total-stats'] !== undefined)
+  checkTrue('   头部有总变动行数', totalNode !== undefined)
+  const totalText = textOf(totalNode).replace(/\s+/gu, '')
+  const expectAdded = files.reduce((sum, f) => sum + (f.added ?? 0), 0)
+  const expectRemoved = files.reduce((sum, f) => sum + (f.removed ?? 0), 0)
+  check('   总数等于各行之和（新增）', totalText.includes(`+${expectAdded}`), true)
+  check('   总数等于各行之和（删除）', totalText.includes(`−${expectRemoved}`), true)
+
+  // 每个文件都要有暂存标记，且与数据一致。
+  //
+  // 按**值**断言而不是按"行里嵌着标记"的层级：假渲染器把宿主节点平铺展开，
+  // 用 `collectHostNodes(row)` 去找行内的子孙并不可靠（实测只命中 1 个）。
+  const marks = hosts
+    .filter((n) => n.props?.['data-review-staged'] !== undefined)
+    .map((n) => n.props['data-review-staged'])
+  check('   每个文件一个暂存标记', marks.length, files.length)
+  check('   其中 1 个已暂存', marks.filter((m) => m === 'yes').length, 1)
+  check('   其中 1 个未暂存', marks.filter((m) => m === 'no').length, 1)
+  check('   其中 1 个未跟踪', marks.filter((m) => m === 'untracked').length, 1)
+  // 标记必须真的挂在对应的那一行上（靠 `data-review-row` 与 path 的对应关系核对）。
+  const rowPaths = hosts
+    .filter((n) => n.props?.['data-review-row'] !== undefined)
+    .map((n) => n.props['data-review-row'])
+  check('   三行都渲染了', rowPaths.join(','), files.map((f) => f.path).join(','))
+  check(
+    '   每行都有行内增删数字',
+    hosts.filter((n) => n.props?.['data-review-stats'] !== undefined).length,
+    files.length,
+  )
+}
+
+console.log('')
 console.log(failures === 0 ? '全部通过' : `${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)
