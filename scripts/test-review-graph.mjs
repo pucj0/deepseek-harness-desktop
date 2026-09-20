@@ -414,6 +414,67 @@ try {
   check('   只在 main 上的提交只可达于 main', (await get('commit-detail', `&revision=${sideHash}`)).body.containingBranches.join(','), 'main')
 
   console.log('')
+  console.log('=== 12. 可选的"只提交选中"与"提交并推送" ===')
+  // 只提交勾选的文件：host 先 `git add` 那批路径再提交，**其余不碰**。
+  writeFileSync(join(repo, 'pick-a.txt'), 'a\n')
+  writeFileSync(join(repo, 'pick-b.txt'), 'b\n')
+  res = await post('commit', { message: 'test: 只提交 pick-a', paths: ['pick-a.txt'] })
+  check('12) 只提交选中 -> 200', res.status, 200)
+  checkTrue('   未选中的 pick-b.txt 仍是未跟踪', (await git(['status', '--porcelain'], repo)).includes('?? pick-b.txt'))
+  check('   未选中的文件没有被提交', await git(['cat-file', '-e', 'HEAD:pick-b.txt'], repo).then(() => 'yes').catch(() => 'no'), 'no')
+  check('   选中的文件已提交', await git(['cat-file', '-e', 'HEAD:pick-a.txt'], repo).then(() => 'yes').catch(() => 'no'), 'yes')
+
+  // 越界路径必须挡住，且不能顺手 add 任何东西。
+  res = await post('commit', { message: 'x', paths: ['../outside.txt'] })
+  check('   路径穿越 -> 400', res.status, 400)
+  check('   code 是 unsafePath', res.body.code, 'unsafePath')
+
+  // 提交并推送：造一个本地 bare 远端并建立跟踪，全程离线。
+  const originDir = join(root, 'origin.git')
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', originDir])
+  await git(['remote', 'add', 'origin', originDir], repo)
+  await git(['push', '-q', '-u', 'origin', 'main'], repo)
+  await post('stage', { paths: ['pick-b.txt'] })
+  const beforePush = (await git(['rev-parse', 'HEAD'], repo)).trim()
+  res = await post('commit', { message: 'test: 提交并推送 pick-b', paths: ['pick-b.txt'], push: true })
+  check('   提交并推送 -> 200', res.status, 200)
+  check('   committed', res.body.committed, true)
+  check('   pushed 为真', res.body.pushed, true)
+  const localHead = (await git(['rev-parse', 'HEAD'], repo)).trim()
+  checkTrue('   本地 HEAD 已前进', localHead !== beforePush)
+  check('   远端 main 与本地一致', (await git(['--git-dir', originDir, 'rev-parse', 'main'], repo)).trim(), localHead)
+
+  // 推送失败**不算提交失败**：提交已落到本地历史，仍回 200 + pushed:false + pushError。
+  await git(['remote', 'set-url', 'origin', join(root, 'no-such-remote.git')], repo)
+  writeFileSync(join(repo, 'pick-c.txt'), 'c\n')
+  await post('stage', { paths: ['pick-c.txt'] })
+  res = await post('commit', { message: 'test: 推送会失败', paths: ['pick-c.txt'], push: true })
+  check('   推送失败仍回 200', res.status, 200)
+  check('   committed 仍为真', res.body.committed, true)
+  check('   pushed 为假', res.body.pushed, false)
+  checkTrue('   带上 pushError 原文', typeof res.body.pushError === 'string' && res.body.pushError.length > 0)
+  check('   提交确实落到了本地', (await git(['log', '-1', '--pretty=%s'], repo)).trim(), 'test: 推送会失败')
+
+  console.log('')
+  console.log('=== 13. GET /file-history：单个文件的变更记录 ===')
+  res = await post('file-history', { path: 'pick-a.txt' })
+  check('13) 200', res.status, 200)
+  checkTrue('   有提交记录', Array.isArray(res.body.commits) && res.body.commits.length > 0)
+  check('   最新一条是提交它的那次', res.body.commits[0]?.subject, 'test: 只提交 pick-a')
+  checkTrue(
+    '   每条带哈希/作者/日期/标题',
+    res.body.commits.every((c) => /^[0-9a-f]{40}$/u.test(c.hash) && c.author !== '' && c.date !== '' && 'subject' in c),
+  )
+  // 未跟踪的文件没有历史：空列表，不是错误。
+  writeFileSync(join(repo, 'never-committed.txt'), 'x\n')
+  res = await post('file-history', { path: 'never-committed.txt' })
+  check('   未跟踪文件 -> 200', res.status, 200)
+  check('   历史为空', res.body.commits.length, 0)
+  res = await post('file-history', { path: '../outside.txt' })
+  check('   路径穿越 -> 400', res.status, 400)
+  check('   code 是 unsafePath', res.body.code, 'unsafePath')
+
+  console.log('')
   console.log('=== 11. 安全边界：工作区必须已登记 ===')
   const stray = join(root, 'stray')
   mkdirSync(stray, { recursive: true })

@@ -166,19 +166,33 @@ const STATUS = {
 const posts = []
 let statusResponse = () => STATUS
 let writeError = null
+/** 记录每一次请求的 `{ route, body, url }`，供"发到哪条路由、带了什么"的断言使用。 */
+const requests = []
 
-globalThis.fetch = async (url, init) => {
+/**
+ * 未跟踪文件假数据：`file-history` 也要有个响应，否则点开变更记录会拿到 `{ isRepo: true }`
+ * 而没有 `commits`，界面显示空列表——那样就分不清"没有历史"与"请求没发出去"。
+ */
+const FILE_HISTORY = {
+  isRepo: true,
+  commits: [
+    { hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'tester', date: '2026-01-02', subject: 'second touch' },
+    { hash: 'b'.repeat(40), short: 'bbbbbbb', author: 'tester', date: '2026-01-01', subject: 'first touch' },
+  ],
+}
+
+const fetchBase = async (url, init) => {
   const target = String(url)
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
+  requests.push({ route, body, url: target })
   // 本插件的 `call` 是**只发 POST** 的辅助函数，读接口也走 POST —— 因此"是不是写操作"
   // 必须按**路由**判断，不能按 method 判断。早先按 method 判断，于是读 status 也被当成
   // 写操作，返回了 `{ isRepo: true }`（没有 tracked/untracked），面板于是显示"工作区干净"，
   // 而真实界面是对的。
-  if (route === 'status' || route === 'untracked') {
-    const payload = route === 'status' ? statusResponse() : { isRepo: true, paths: [], total: 0, truncated: false }
-    return { ok: true, text: async () => JSON.stringify(payload) }
-  }
+  if (route === 'status') return { ok: true, text: async () => JSON.stringify(statusResponse()) }
+  if (route === 'file-history') return { ok: true, text: async () => JSON.stringify(FILE_HISTORY) }
+  if (route === 'untracked') return { ok: true, text: async () => JSON.stringify({ isRepo: true, paths: [], total: 0, truncated: false }) }
   posts.push({ route, body })
   if (writeError !== null) {
     const failure = writeError
@@ -187,6 +201,8 @@ globalThis.fetch = async (url, init) => {
   }
   return { ok: true, text: async () => JSON.stringify({ isRepo: true }) }
 }
+
+globalThis.fetch = fetchBase
 
 // ---- 加载插件 -------------------------------------------------------------------
 let loaded
@@ -522,6 +538,94 @@ console.log('=== 9. 空仓库与干净工作区 ===')
     check('   没有把失败误当成"工作区干净"', text.includes('noStagedOrChanged'), false)
     check('   没有渲染出任何分组', all.filter((n) => n.props?.['data-staging-group'] !== undefined).length, 0)
   }
+}
+
+console.log('')
+console.log('=== 9b. 勾选要提交的文件（提交选中 / 提交并推送）===')
+{
+  statusResponse = () => STATUS
+  globalThis.fetch = fetchBase
+  await mount()
+  // 两个分组各自有"全选"勾选框；每个已跟踪文件一个勾选框。
+  check('9b) 已暂存组有全选', find('data-staging-group-pick', 'staged') !== null, 'true')
+  check('   更改组有全选', find('data-staging-group-pick', 'unstaged') !== null, 'true')
+  check('   每条已跟踪文件一个勾选框', findAll('data-staging-file-pick').length, 4) // staged 2 + unstaged 2
+  check('   默认都没有勾选', findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length, 0)
+
+  // 勾选"更改"组里那个未暂存的文件 → 提交按钮的文案变成"提交选中 N 个"。
+  await toggleCheck(find('data-staging-file-pick', 'unstaged.txt'), true)
+  check('   勾一个后按钮文案带数量', textOf(find('data-staging-commit')).includes('commitSelected'), 'true')
+  // 提交按钮仍禁用是因为**没填提交信息**（不是没勾选），此时提示应当说这件事。
+  check('   未填信息时仍禁用', find('data-staging-commit')?.props?.disabled, true)
+  checkTrue('   提示要求先填信息', textOf(find('data-staging-hint')).includes('emptyMessage'))
+
+  // 填上提交信息后按钮可用，且只提交勾选的那个。
+  // （这个测试桩没有通用的 `type` 助手，直接调受控 textarea 的 onChange。）
+  find('data-staging-message').props.onChange({ target: { value: 'feat: 只提交选中的文件' } })
+  await settle()
+  checkTrue('   填了信息后提示变成已选数量', textOf(find('data-staging-hint')).includes('selectedCount'))
+  check('   提交按钮已可用', find('data-staging-commit')?.props?.disabled, false)
+
+  // 点"提交选中" → 请求体必须带上那个路径（host 先 add 再 commit，未暂存的也能直接提交）。
+  posts.length = 0
+  await click(find('data-staging-commit'))
+  const body = posts[0]?.body
+  check('   发出 commit', posts[0]?.route, 'commit')
+  check('   带上勾选的路径', JSON.stringify(body?.paths), '["unstaged.txt"]')
+  check('   没有 push 标记', body?.push, undefined)
+
+  // 「提交并推送」必须带 push: true。
+  //
+  // 注意：上一次提交**成功后清空了输入框**（这是有意的——否则用户会重复提交同一句话），
+  // 因此这里必须重新填一次信息，否则按钮是禁用的、点不动。
+  await toggleCheck(find('data-staging-file-pick', 'both.txt'), true)
+  check('   提交后输入框已清空', find('data-staging-message')?.props?.value, '')
+  find('data-staging-message').props.onChange({ target: { value: 'feat: 提交并推送' } })
+  await settle()
+  check('   重新填信息后按钮可用', find('data-staging-commit-push')?.props?.disabled, false)
+  posts.length = 0
+  await click(find('data-staging-commit-push'))
+  check('   提交并推送发出 commit', posts[0]?.route, 'commit')
+  check('   带 push: true', posts[0]?.body?.push, true)
+  check('   带上勾选的路径', JSON.stringify(posts[0]?.body?.paths), '["both.txt"]')
+
+  // 组级全选 / 取消全选（勾选框：click 不会翻转 checked，必须走 onChange）。
+  await toggleCheck(find('data-staging-group-pick', 'unstaged'), true)
+  check(
+    '   更改组全选',
+    // 去重：`both.txt` 同时在"已暂存"与"更改"两组里（`MM`），所以这个文件会出现两次。
+    [...new Set(
+      findAll('data-staging-file-pick')
+        .filter((n) => n.props.checked === true)
+        .map((n) => n.props['data-staging-file-pick']),
+    )]
+      .sort()
+      .join(','),
+    'both.txt,unstaged.txt',
+  )
+  await toggleCheck(find('data-staging-group-pick', 'unstaged'), false)
+  check(
+    '   更改组取消全选',
+    findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length,
+    0,
+  )
+}
+
+console.log('')
+console.log('=== 9c. 每个文件都能看变更记录 ===')
+{
+  await mount()
+  check('9c) 每行都有变更记录按钮', findAll('data-staging-history').length >= 4, 'true')
+  check('   默认没有展开记录面板', find('data-staging-history-panel') === null, 'true')
+  await click(find('data-staging-history', 'unstaged.txt'))
+  check('   点开后出现记录面板', find('data-staging-history-panel') !== null, 'true')
+  const historyRequest = requests.filter((r) => r.url.includes('/review/file-history'))
+  check('   请求了 file-history', historyRequest.length, 1)
+  check('   带上文件路径', historyRequest[0].body.path, 'unstaged.txt')
+  // 展开的必须是点的那一个文件。
+  check('   面板属于被点的文件', find('data-staging-history-panel')?.props?.['data-staging-history-panel'], 'unstaged.txt')
+  await click(find('data-staging-history', 'unstaged.txt'))
+  check('   再点收起', find('data-staging-history-panel') === null, 'true')
 }
 
 console.log('')

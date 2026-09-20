@@ -521,10 +521,28 @@ window.__ModuleLoader__.load({
       untrackedTruncated: '只列出前 {count} 个，另有 {rest} 个未显示。',
       browseUntracked: '浏览',
       noStagedOrChanged: '工作区干净，没有待提交的改动。',
-      stagedNotice: '已暂存 {count} 个文件',
-      unstagedNotice: '已取消暂存 {count} 个文件',
+      // ---- 选择与提交（参考 IDEA：勾选要提交的文件，再提交/提交并推送）----
+      selectAll: '全选',
+      clearSelection: '取消全选',
+      selectedCount: '已选 {count}',
+      commitSelected: '提交选中 {count} 个',
+      commitAndPush: '提交并推送',
+      commitAndPushHint: '提交后推送当前分支到它的上游',
+      pushing: '推送中…',
+      pushedNotice: '已提交并推送：{subject}',
+      pushFailedNotice: '已提交，但推送失败：{detail}',
+      error_pushFailed: '推送失败。',
+      fileHistory: '变更记录',
+      fileHistoryTitle: '变更记录',
+      fileHistoryEmpty: '这个文件还没有提交记录。',
+      fileHistoryMore: '只显示最近 {count} 条。',
+      hideHistory: '收起变更记录',
+      // ---- 选择与提交 ----
+      noSelection: '先勾选要提交的文件。',
       addToGit: '加入 git',
       addedNotice: '已把 {count} 个文件加入 git（已暂存）',
+      stagedNotice: '已暂存 {count} 个文件',
+      unstagedNotice: '已取消暂存 {count} 个文件',
       chosenCount: '已选 {count} 个',
       untrackedSelectAll: '全选',
       untrackedClearAll: '全不选',
@@ -619,6 +637,23 @@ window.__ModuleLoader__.load({
       unstagedNotice: 'Unstaged {count} file(s)',
       addToGit: 'Add to Git',
       addedNotice: 'Added {count} file(s) to Git (now staged)',
+      // ---- Selection and commit (IDEA style) ----
+      selectAll: 'Select all',
+      clearSelection: 'Clear selection',
+      selectedCount: '{count} selected',
+      commitSelected: 'Commit {count} selected',
+      commitAndPush: 'Commit and push',
+      commitAndPushHint: 'Commit, then push the current branch to its upstream',
+      pushing: 'Pushing…',
+      pushedNotice: 'Committed and pushed: {subject}',
+      pushFailedNotice: 'Committed, but the push failed: {detail}',
+      error_pushFailed: 'The push failed.',
+      fileHistory: 'History',
+      fileHistoryTitle: 'History',
+      fileHistoryEmpty: 'No commits touch this file yet.',
+      fileHistoryMore: 'Showing the most recent {count}.',
+      hideHistory: 'Hide history',
+      noSelection: 'Tick the files to commit first.',
       chosenCount: '{count} selected',
       untrackedSelectAll: 'Select all',
       untrackedClearAll: 'Clear selection',
@@ -1976,6 +2011,98 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一个文件的变更记录（IDEA 的"显示历史"）。
+     *
+     * 用 `git log --follow` 取：重命名之后仍然能追到改名前的提交，否则历史会在改名那一处
+     * 断掉——而那正是用户最想看的"这个文件原来是什么"。未跟踪的文件没有历史，返回空列表
+     * 并显示"还没有提交记录"，不是错误。
+     *
+     * @param props - `{ t, workspace, path, onClose }`。
+     * @returns React 元素。
+     */
+    function FileHistory(props) {
+      const { t, workspace, path } = props
+      const [state, setState] = react.useState({ phase: 'loading' })
+
+      react.useEffect(() => {
+        if (typeof path !== 'string' || path === '' || typeof workspace !== 'string' || workspace === '') return undefined
+        let alive = true
+        setState({ phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('file-history', { workspace, path, limit: 20 })
+            if (alive) setState({ phase: 'ready', commits: result?.commits ?? [] })
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            if (alive) setState({ phase: 'error', message: error.detail ?? error.message })
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [workspace, path])
+
+      if (state.phase === 'loading') {
+        return react.createElement(
+          'div',
+          { 'data-staging-history-panel': path, style: { padding: '6px 2px 6px 40px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } },
+          t('loading'),
+        )
+      }
+      if (state.phase === 'error') {
+        return react.createElement(
+          'div',
+          { 'data-staging-history-panel': path, style: { padding: '6px 2px 6px 40px', fontSize: '11.5px', color: REMOVED, fontFamily: UI_FONT } },
+          state.message,
+        )
+      }
+      const commits = state.commits ?? []
+      return react.createElement(
+        'div',
+        {
+          'data-staging-history-panel': path,
+          style: {
+            margin: '2px 2px 6px 40px',
+            padding: '6px 8px',
+            borderRadius: '6px',
+            border: `1px solid ${BORDER}`,
+            background: 'var(--dsw-alias-bg-module-platform, #f7f8fa)',
+            fontFamily: UI_FONT,
+          },
+        },
+        react.createElement(
+          'div',
+          { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', marginBottom: '4px' } },
+          t('fileHistoryTitle'),
+        ),
+        commits.length === 0
+          ? react.createElement('div', { style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryEmpty'))
+          : commits.map((commit) =>
+              react.createElement(
+                'div',
+                {
+                  key: commit.hash,
+                  'data-staging-history-row': commit.hash,
+                  title: `${commit.hash}\n${commit.author} · ${commit.date}`,
+                  style: { display: 'flex', gap: '8px', alignItems: 'baseline', padding: '2px 0', fontSize: '11.5px', lineHeight: 1.5 },
+                },
+                // 短哈希用等宽 + 色块，扫读时能与提交标题分开。
+                react.createElement(
+                  'span',
+                  { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', background: `color-mix(in srgb, ${ACCENT} 10%, transparent)`, color: ACCENT, fontFamily: CODE_FONT } },
+                  commit.short,
+                ),
+                react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, commit.subject),
+                react.createElement('span', { style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' } }, commit.date),
+              ),
+            ),
+        commits.length >= 20
+          ? react.createElement('div', { style: { marginTop: '3px', fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryMore', { count: 20 }))
+          : null,
+      )
+    }
+
+    /**
      * 一条文件行在界面上属于哪一组。
      *
      * `git status --porcelain` 的 XY 两列是**两个独立的维度**（实测确认）：
@@ -2147,6 +2274,16 @@ window.__ModuleLoader__.load({
        * 自动进暂存区），用户勾哪些就只 add 哪些，另一个按钮负责全选/全不选。
        */
       const [chosenUntracked, setChosenUntracked] = react.useState([])
+      /**
+       * 已勾选、准备提交的文件路径（已暂存组 + 更改组两部分合起来）。
+       *
+       * 这是"提交选中"的入口，参考 IDEA 的提交对话框：勾哪些就只提交哪些。host 侧
+       * 收到这批路径会先 `git add` 再 `git commit`，因此**未暂存的文件也能直接被提交**
+       * ——这正是 IDEA 的行为（它也是提交时才真正 add）。
+       */
+      const [chosenFiles, setChosenFiles] = react.useState([])
+      /** 正在查看变更记录的文件路径（空串表示没有）。 */
+      const [history, setHistory] = react.useState('')
       const [message, setMessage] = react.useState('')
       const [busy, setBusy] = react.useState(false)
       const [trouble, setTrouble] = react.useState(null)
@@ -2211,16 +2348,19 @@ window.__ModuleLoader__.load({
             // fetch 的 init）。写成 `call(route, { method, headers, body })` 会把那一整包
             // 当成请求体发出去，服务端收到的 `paths` 就是 undefined —— 表现是"点了暂存
             // 没反应"，而路由本身完全正常（实测踩到过）。
-            await call(route, { workspace, ...body })
+            const result = await call(route, { workspace, ...body })
             await reload()
             if (typeof onSuccess === 'string') setNotice(onSuccess)
-            return true
+            // **返回响应体而不是布尔**：提交那条路由要在成功里区分"已提交并推送"与
+            // "已提交但推送失败"（`pushed` / `pushError`），布尔会把这条信息丢掉。
+            // 调用方按 `!== undefined` 判断成功。
+            return result ?? true
           } catch (cause) {
             const error = cause instanceof Error ? cause : new Error(String(cause))
             const code = typeof error.code === 'string' ? error.code : ''
             const key = code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : ''
             setTrouble({ key, detail: typeof error.detail === 'string' ? error.detail : '', code })
-            return false
+            return undefined
           } finally {
             setBusy(false)
           }
@@ -2233,22 +2373,92 @@ window.__ModuleLoader__.load({
        *
        * 提交信息来自受控 textarea，且**成功后才清空**：失败时保留用户刚敲的字，
        * 否则他要重新打一遍（而失败原因往往与提交信息无关，比如"没有暂存内容"）。
+       *
+       * `paths` 非空时只提交那些文件（host 先 add 再 commit）；为空时提交索引里现有的
+       * 全部内容。`push` 为真则提交成功后继续推送到上游（IDEA 的 Commit and Push）。
        */
-      const submitCommit = react.useCallback(async () => {
-        const text = message.trim()
-        if (text === '') return
-        const ok = await run('commit', { message: text })
-        if (ok) {
+      const submitCommit = react.useCallback(
+        async (paths, push) => {
+          const text = message.trim()
+          if (text === '') return
+          const selected = Array.isArray(paths) ? paths : []
+          const ok = await run('commit', {
+            message: text,
+            ...(selected.length > 0 ? { paths: selected } : {}),
+            ...(push === true ? { push: true } : {}),
+          })
+          if (ok === undefined) return
           setMessage('')
-          setNotice(t('committedNotice', { subject: text }))
+          if (selected.length > 0) setChosenFiles([])
+          // 提交成功、推送失败**不算失败**：提交已经落到本地历史里了。把两种结果分开说，
+          // 否则用户会以为什么都没发生、于是再提交一次。
+          if (ok.pushed === true) {
+            setNotice(t('pushedNotice', { subject: text }))
+          } else if (ok.pushed === false) {
+            setNotice(t('pushFailedNotice', { detail: String(ok.pushError ?? '').slice(0, 200) }))
+          } else {
+            setNotice(t('committedNotice', { subject: text }))
+          }
           onCommitted()
-        }
-      }, [message, run, t, onCommitted])
+        },
+        [message, run, t, onCommitted],
+      )
 
+      // 阶段守卫必须在最前：加载中/无工作区/非仓库/出错这四种情况都不该继续往下算分组。
       if (state.phase === 'loading') return statusBlock(t('loading'))
       if (state.phase === 'noworkspace') return statusBlock(t('noWorkspace'))
       if (state.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
       if (state.phase === 'error') return statusBlock(trouble?.detail ?? '', 'error')
+
+      /**
+       * 分组标题右侧的"全选/取消全选"勾选框。
+       *
+       * 用户明确要求「更改」和「未进行版本管理的文件」两组都能全选与取消全选。做成勾选框
+       * 而不是一个按钮，是因为它同时要**显示当前状态**（部分选中时无法用按钮表达）。
+       */
+      const groupPick = (groupId, paths) => {
+        const picked = paths.filter((p) => chosenFiles.includes(p))
+        const all = paths.length > 0 && picked.length === paths.length
+        const some = picked.length > 0 && !all
+        return react.createElement('input', {
+          type: 'checkbox',
+          'data-staging-group-pick': groupId,
+          checked: all,
+          disabled: busy || paths.length === 0,
+          // 部分选中用 indeterminate 表达（原生 DOM 属性，React 需要直接设）。
+          ref: (node) => {
+            if (node !== null) node.indeterminate = some
+          },
+          'aria-label': all ? t('clearSelection') : t('selectAll'),
+          title: all ? t('clearSelection') : t('selectAll'),
+          onChange: (event) =>
+            setChosenFiles((current) =>
+              event.target.checked
+                ? [...new Set([...current, ...paths])]
+                : current.filter((item) => !paths.includes(item)),
+            ),
+          style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
+        })
+      }
+
+      /** 渲染一组行，并在需要时在其下方插入变更记录面板。 */
+      const renderRows = (entries, side) => {
+        const nodes = []
+        for (const entry of entries) {
+          nodes.push(fileRow(entry, side))
+          if (history === entry.path) {
+            nodes.push(react.createElement(FileHistory, {
+              key: `history:${side}:${entry.path}`,
+              t,
+              workspace,
+              path: entry.path,
+            }))
+          }
+        }
+        return nodes
+      }
+
+      // ---- 暂存与提交（更改区块）----
 
       const result = state.result ?? {}
       const tracked = Array.isArray(result.tracked) ? result.tracked : []
@@ -2262,11 +2472,29 @@ window.__ModuleLoader__.load({
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
       // 提交按钮为什么禁用，要在界面上说清楚：灰着而不给理由，用户只会反复点它。
-      const commitDisabled = busy || message.trim() === '' || staged.length === 0
+      //
+      // `commitPaths` 非空时"提交"只提交勾选的那些（host 先 add 再 commit，因此未暂存的
+      // 文件也能直接被提交——这正是 IDEA 的行为）；为空时提交索引里现有的全部内容。
+      // 勾选可能跨两个分组（已暂存 + 更改），因此按当前列表过滤一次，把已经不在列表里的
+      // 路径丢掉（提交/暂存之后它们会消失）。
+      const allTrackedPaths = [...staged, ...unstaged].map((entry) => entry.path)
+      const commitPaths = chosenFiles.filter((path) => allTrackedPaths.includes(path))
+      const commitDisabled = busy || message.trim() === '' || (commitPaths.length === 0 && staged.length === 0)
 
-      /** 一行文件。 */
-      const fileRow = (entry, side) =>
-        react.createElement(
+      /**
+       * 一行已跟踪的文件（已暂存组或更改组）。
+       *
+       * 三个交互都是 IDEA 里有的：
+       *   * 勾选框 —— 决定"提交哪些"（提交时 host 会先 add 再 commit，所以未暂存的也能直接提交）；
+       *   * 点路径 —— 展开它的逐行差异；
+       *   * 「变更记录」 —— 看这个文件历次提交（`git log --follow`）。
+       *
+       * @param entry - `{ path, index, worktree }`。
+       * @param side - `'staged'` 或 `'unstaged'`。
+       */
+      const fileRow = (entry, side) => {
+        const picked = chosenFiles.includes(entry.path)
+        return react.createElement(
           'div',
           {
             key: `${side}:${entry.path}`,
@@ -2274,11 +2502,47 @@ window.__ModuleLoader__.load({
             'data-staging-side': side,
             style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
           },
+          react.createElement('input', {
+            type: 'checkbox',
+            'data-staging-file-pick': entry.path,
+            checked: picked,
+            disabled: busy,
+            'aria-label': entry.path,
+            onChange: (event) =>
+              setChosenFiles((current) =>
+                event.target.checked ? [...current, entry.path] : current.filter((item) => item !== entry.path),
+              ),
+            style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
+          }),
           react.createElement(StatusBadge, { letter: side === 'staged' ? entry.index : entry.worktree }),
           react.createElement(
             'span',
             { title: entry.path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
             `\u200e${entry.path}`,
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-history': entry.path,
+              disabled: busy,
+              onClick: () => setHistory((current) => (current === entry.path ? '' : entry.path)),
+              title: history === entry.path ? t('hideHistory') : t('fileHistory'),
+              'aria-label': t('fileHistory'),
+              'aria-expanded': history === entry.path,
+              style: {
+                flexShrink: 0,
+                padding: '0 5px',
+                border: 'none',
+                borderRadius: '4px',
+                background: history === entry.path ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+                color: history === entry.path ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+                fontFamily: UI_FONT,
+                fontSize: '11px',
+                cursor: busy ? 'default' : 'pointer',
+              },
+            },
+            t('fileHistory'),
           ),
           react.createElement(
             'button',
@@ -2304,6 +2568,7 @@ window.__ModuleLoader__.load({
             side === 'staged' ? '−' : '+',
           ),
         )
+      }
 
       /** 一条未跟踪文件。 */
       /**
@@ -2341,6 +2606,32 @@ window.__ModuleLoader__.load({
             'span',
             { title: path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
             `\u200e${path}`,
+          ),
+          // 未跟踪的文件同样能看变更记录：通常是空的（还没提交过），但"以后有没有"这件事
+          // 只有点开才知道。IDEA 也是每个文件都能看历史。
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-history': path,
+              disabled: busy,
+              onClick: () => setHistory((current) => (current === path ? '' : path)),
+              title: history === path ? t('hideHistory') : t('fileHistory'),
+              'aria-label': t('fileHistory'),
+              'aria-expanded': history === path,
+              style: {
+                flexShrink: 0,
+                padding: '0 5px',
+                border: 'none',
+                borderRadius: '4px',
+                background: history === path ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+                color: history === path ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+                fontFamily: UI_FONT,
+                fontSize: '11px',
+                cursor: busy ? 'default' : 'pointer',
+              },
+            },
+            t('fileHistory'),
           ),
           react.createElement(
             'button',
@@ -2384,7 +2675,7 @@ window.__ModuleLoader__.load({
               event.stopPropagation()
               if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault()
-                if (commit.disabled !== true) void submitCommit()
+                if (commitDisabled !== true) void submitCommit(commitPaths)
               }
             },
             style: {
@@ -2403,14 +2694,14 @@ window.__ModuleLoader__.load({
           }),
           react.createElement(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             react.createElement(
               'button',
               {
                 type: 'button',
                 'data-staging-commit': '',
                 disabled: commitDisabled,
-                onClick: () => void submitCommit(),
+                onClick: () => void submitCommit(commitPaths),
                 style: {
                   padding: '5px 14px',
                   border: 'none',
@@ -2422,13 +2713,45 @@ window.__ModuleLoader__.load({
                   cursor: commitDisabled ? 'default' : 'pointer',
                 },
               },
-              busy ? t('committing') : t('commit'),
+              busy
+                ? t('committing')
+                : commitPaths.length > 0
+                  ? t('commitSelected', { count: commitPaths.length })
+                  : t('commit'),
             ),
-            // 为什么禁用要说清楚：按钮灰着而不给理由，用户只会反复点它。
+            // 「提交并推送」——对应 IDEA 的 Commit and Push。
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-commit-push': '',
+                disabled: commitDisabled,
+                title: t('commitAndPushHint'),
+                onClick: () => void submitCommit(commitPaths, true),
+                style: {
+                  padding: '5px 14px',
+                  border: `1px solid ${commitDisabled ? BORDER : ACCENT}`,
+                  borderRadius: '7px',
+                  background: 'transparent',
+                  color: commitDisabled ? 'var(--dsw-alias-label-tertiary)' : ACCENT,
+                  fontFamily: UI_FONT,
+                  fontSize: '12.5px',
+                  cursor: commitDisabled ? 'default' : 'pointer',
+                },
+              },
+              t('commitAndPush'),
+            ),
+            // 为什么禁用／会提交什么，都要说清楚：按钮灰着而不给理由，用户只会反复点它。
             react.createElement(
               'span',
               { 'data-staging-hint': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
-              message.trim() === '' ? t('emptyMessage') : staged.length === 0 ? t('error_nothingStaged') : t('commitHintCtrlEnter'),
+              message.trim() === ''
+                ? t('emptyMessage')
+                : commitPaths.length > 0
+                  ? t('selectedCount', { count: commitPaths.length })
+                  : staged.length === 0
+                    ? t('error_nothingStaged')
+                    : t('commitHintCtrlEnter'),
             ),
           ),
         ),
@@ -2483,22 +2806,27 @@ window.__ModuleLoader__.load({
                       collapsed: collapsed.staged,
                       onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
                       action: react.createElement(
-                        StagingIconButton,
-                        {
-                          t,
-                          id: 'unstage-all',
-                          label: t('unstageAll'),
-                          disabled: busy,
-                          onClick: () => void run('unstage', { paths: staged.map((entry) => entry.path) }),
-                        },
+                        'div',
+                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                        groupPick('staged', staged.map((entry) => entry.path)),
                         react.createElement(
-                          'svg',
-                          { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
-                          react.createElement('path', { d: 'M3.5 8h9', strokeLinecap: 'round' }),
+                          StagingIconButton,
+                          {
+                            t,
+                            id: 'unstage-all',
+                            label: t('unstageAll'),
+                            disabled: busy,
+                            onClick: () => void run('unstage', { paths: staged.map((entry) => entry.path) }),
+                          },
+                          react.createElement(
+                            'svg',
+                            { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+                            react.createElement('path', { d: 'M3.5 8h9', strokeLinecap: 'round' }),
+                          ),
                         ),
                       ),
                     }),
-                    collapsed.staged ? null : staged.map((entry) => fileRow(entry, 'staged')),
+                    collapsed.staged ? null : renderRows(staged, 'staged'),
                   ),
               // ---- 更改（未暂存）----
               unstaged.length === 0
@@ -2514,18 +2842,23 @@ window.__ModuleLoader__.load({
                       collapsed: collapsed.unstaged,
                       onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
                       action: react.createElement(
-                        StagingIconButton,
-                        {
-                          t,
-                          id: 'stage-all',
-                          label: t('stageAll'),
-                          disabled: busy,
-                          onClick: () => void run('stage', { paths: unstaged.map((entry) => entry.path) }),
-                        },
-                        bulkIcon,
+                        'div',
+                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                        groupPick('unstaged', unstaged.map((entry) => entry.path)),
+                        react.createElement(
+                          StagingIconButton,
+                          {
+                            t,
+                            id: 'stage-all',
+                            label: t('stageAll'),
+                            disabled: busy,
+                            onClick: () => void run('stage', { paths: unstaged.map((entry) => entry.path) }),
+                          },
+                          bulkIcon,
+                        ),
                       ),
                     }),
-                    collapsed.unstaged ? null : unstaged.map((entry) => fileRow(entry, 'unstaged')),
+                    collapsed.unstaged ? null : renderRows(unstaged, 'unstaged'),
                   ),
               // ---- 未跟踪（可以勾选后"加入 git"）----
               untrackedCount === 0
@@ -2582,7 +2915,19 @@ window.__ModuleLoader__.load({
                       : react.createElement(
                           'div',
                           { 'data-staging-untracked-list': '' },
-                          untrackedPaths.map((path) => untrackedRow(path, chosenUntracked.includes(path))),
+                          untrackedPaths.flatMap((path) => {
+                            const row = untrackedRow(path, chosenUntracked.includes(path))
+                            if (history !== path) return [row]
+                            return [
+                              row,
+                              react.createElement(FileHistory, {
+                                key: `history:untracked:${path}`,
+                                t,
+                                workspace,
+                                path,
+                              }),
+                            ]
+                          }),
                           result.untrackedTruncated === true
                             ? react.createElement(
                                 'div',
@@ -2607,7 +2952,8 @@ window.__ModuleLoader__.load({
                                 onClick: () =>
                                   void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
                                     (ok) => {
-                                      if (ok) setChosenUntracked([])
+                                      // `run` 现在返回响应体（成功）或 undefined（失败）。
+                                      if (ok !== undefined) setChosenUntracked([])
                                     },
                                   ),
                                 style: {

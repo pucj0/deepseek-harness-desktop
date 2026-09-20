@@ -31,6 +31,14 @@ const ROUTE_PREFIX = '/dsh-desktop/review'
  * 因此这里给足余量；而每次轮询走的"只哈希变化文件"路径是毫秒级的。 */
 const GIT_TIMEOUT_MS = 240000
 
+/**
+ * 联网操作的超时。
+ *
+ * `push` 要等远端握手与传输，用本地操作的 240 秒虽然也够，但"提交并推送"里用户是盯着
+ * 界面的——超时太长会让一次网络故障表现为长时间无响应。180 秒与 gitbar 那边一致。
+ */
+const GIT_NETWORK_TIMEOUT_MS = 180000
+
 /** 单个响应的差异文本上限，避免超大改动把面板压垮。 */
 const MAX_DIFF_BYTES = 512 * 1024
 
@@ -509,14 +517,15 @@ function diffBufferFor(fileCount) {
  * @param cwd - 仓库目录。
  * @param env - 额外环境变量（用于传入临时 index）。
  * @param maxBuffer - stdout 上限，默认 `GIT_MAX_BUFFER`。
+ * @param timeoutMs - 超时，默认 `GIT_TIMEOUT_MS`（联网操作用 `GIT_NETWORK_TIMEOUT_MS`）。
  * @returns stdout。
  */
-function git(args, cwd, env, maxBuffer = GIT_MAX_BUFFER) {
+function git(args, cwd, env, maxBuffer = GIT_MAX_BUFFER, timeoutMs = GIT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       ['-c', 'core.fileMode=false', '-C', cwd, ...args],
-      { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer, env: { ...process.env, ...env } },
+      { timeout: timeoutMs, windowsHide: true, maxBuffer, env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(new Error(String(stderr).trim() || error.message))
@@ -1384,6 +1393,32 @@ function createReviewHandler() {
           sendJson(response, 400, { error: 'empty message', code: 'emptyMessage' })
           return
         }
+        // ---- 可选的"只提交这些文件" ------------------------------------------
+        //
+        // 界面上的勾选框要能挑着提交（IDEA 的提交对话框就是这样）。做法是先把选中的路径
+        // `git add` 进索引再提交——**只 add 选中的那些**，其余不碰。
+        //
+        // 路径必须逐个过形状校验：这是"客户端能提供路径"的第三个入口（前两个是 revert 与
+        // stage），规则与它们一致——只接受仓库内的相对路径、挡掉绝对路径与 `..`。
+        const commitPaths = Array.isArray(payload.paths) ? payload.paths : []
+        if (commitPaths.length > 0) {
+          const bad = commitPaths.find((item) => typeof item !== 'string' || !SAFE_PATH_PATTERN.test(item))
+          if (bad !== undefined) {
+            sendJson(response, 400, { error: `unsafe path: ${String(bad).slice(0, 80)}`, code: 'unsafePath' })
+            return
+          }
+          try {
+            await git(['add', '--', ...commitPaths.map((p) => p.replace(/\\/gu, '/'))], workspace)
+          } catch (error) {
+            sendJson(response, 409, {
+              error: 'stage failed',
+              code: 'stageFailed',
+              detail: String(error?.message ?? error),
+            })
+            return
+          }
+        }
+
         // 暂存区为空时 git 会以非零退出（"nothing to commit"）。提前判掉，并区分
         // "没有任何改动"与"有改动但没暂存"——这两种情况该给用户的下一步完全不同。
         const statusRaw = await git(['status', '--porcelain'], workspace)
@@ -1409,7 +1444,91 @@ function createReviewHandler() {
           return
         }
         const head = (await git(['rev-parse', 'HEAD'], workspace).catch(() => '')).trim()
-        sendJson(response, 200, { isRepo: true, committed: true, head })
+
+        // ---- 可选的"提交并推送" ----------------------------------------------
+        //
+        // 与 IDEA 的 Commit and Push 对应。推送**失败不算提交失败**：提交已经落到本地历史
+        // 里了，把两者混在一个错误里会让用户以为什么都没发生，进而重复提交一次。
+        // 因此成功时回 `pushed: true`，推送失败时回 `pushed: false` + `pushError`，
+        // HTTP 仍是 200——界面据此显示"已提交，但推送失败：…"。
+        let pushed
+        let pushError
+        if (payload.push === true) {
+          try {
+            // 不加远端与分支：用仓库自己的上游配置（`git push` 的默认行为）。
+            // 指定远端会把"该推到哪"这个决定从用户的 git 配置里抢过来。
+            await git(['push'], workspace, undefined, GIT_MAX_BUFFER, GIT_NETWORK_TIMEOUT_MS)
+            pushed = true
+          } catch (error) {
+            pushed = false
+            pushError = String(error?.message ?? error)
+          }
+        }
+
+        sendJson(response, 200, {
+          isRepo: true,
+          committed: true,
+          head,
+          ...(pushed === undefined ? {} : { pushed }),
+          ...(pushError === undefined ? {} : { pushError }),
+        })
+        return
+      }
+
+      // ---- 单个文件的变更记录（点文件看历史）--------------------------------
+      //
+      // 对应 IDEA 文件行右侧的"显示历史"。用 `--follow`：重命名之后仍然能追到改名前的
+      // 提交，否则历史会在改名那一处断掉——而那正是用户最想看的"这个文件原来是什么"。
+      if (url.pathname === `${ROUTE_PREFIX}/file-history`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const filePath = payload.path ?? url.searchParams.get('path')
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? 20)
+        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 100) : 20
+        let raw
+        try {
+          raw = await git(
+            [
+              'log',
+              '--follow',
+              '--no-abbrev',
+              `--max-count=${limit}`,
+              '--date=short',
+              '--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1e',
+              '--',
+              filePath.replace(/\\/gu, '/'),
+            ],
+            workspace,
+          )
+        } catch (error) {
+          // 未跟踪的文件没有历史，这不是错误：返回空列表，界面显示"尚无提交记录"。
+          if (/does not have any commits|unknown revision|bad revision/iu.test(String(error?.message ?? error))) {
+            sendJson(response, 200, { isRepo: true, path: filePath, commits: [] })
+            return
+          }
+          throw error
+        }
+        const commits = raw
+          .split('\x1e')
+          .map((record) => record.replace(/^\n/u, ''))
+          .filter((record) => record.trim() !== '')
+          .map((record) => {
+            const [hash, short, author, date, ...rest] = record.split('\x1f')
+            return {
+              hash: String(hash ?? '').trim(),
+              short: String(short ?? '').trim(),
+              author: String(author ?? '').trim(),
+              date: String(date ?? '').trim(),
+              subject: rest.join('\x1f').trim(),
+            }
+          })
+        sendJson(response, 200, { isRepo: true, path: filePath, commits })
         return
       }
 
@@ -1440,6 +1559,7 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/graph`,
     `${ROUTE_PREFIX}/commit-detail`,
     `${ROUTE_PREFIX}/commit-file`,
+    `${ROUTE_PREFIX}/file-history`,
     `${ROUTE_PREFIX}/status`,
     `${ROUTE_PREFIX}/untracked`,
     `${ROUTE_PREFIX}/stage`,
