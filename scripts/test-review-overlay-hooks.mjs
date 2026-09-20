@@ -127,9 +127,11 @@ async function renderSettled(Comp, props, key) {
  * 展开时按树中的位置给每个组件分配稳定的 hook key，因此跨多次渲染仍然保持状态
  * （展开文件、切换分组都依赖这一点）。
  * @param node - 元素树（或其中一棵子树）。
+ * @param queued - 可选：把展开过程中各组件产生的副作用收进这个数组，交给调用方执行。
+ *   不给就丢掉（老行为）；需要"新挂载的组件真的去取数"时必须给。
  * @returns 全部宿主节点。
  */
-function collectHostNodes(node) {
+function collectHostNodes(node, queued) {
   const out = []
   const visit = (current, key) => {
     if (current === null || current === undefined) return
@@ -141,7 +143,8 @@ function collectHostNodes(node) {
     if (typeof current.type === 'function') {
       const name = current.type.name === '' ? 'anonymous' : current.type.name
       const childKey = `${key}:${name}`
-      const { tree } = render(current.type, current.props, childKey)
+      const { tree, effects } = render(current.type, current.props, childKey)
+      if (queued !== undefined) queued.push(...effects)
       visit(tree, childKey)
       return
     }
@@ -205,6 +208,33 @@ const HISTORY = {
   ],
 }
 
+/** 一次提交的详情：抽屉里点开某条提交记录后要看到的内容。 */
+const COMMIT_DETAIL = {
+  isRepo: true,
+  commit: {
+    hash: 'a'.repeat(40),
+    short: 'aaaaaaa',
+    author: 'tester',
+    email: 't@example.com',
+    committedAt: '2026-01-02T09:30:00+08:00',
+    subject: 'second commit',
+    body: '',
+  },
+  files: [
+    { path: 'src/app.ts', status: 'M', added: 3, removed: 1 },
+    { path: 'docs/readme.md', status: 'A', added: 5, removed: 0 },
+  ],
+  containingBranches: ['main'],
+}
+/** 提交里某个文件的差异。 */
+const COMMIT_FILE = {
+  isRepo: true,
+  path: 'src/app.ts',
+  diff: ['diff --git a/src/app.ts b/src/app.ts', '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@', '-old', '+new', ''].join('\n'),
+  truncated: false,
+  binary: false,
+}
+
 globalThis.fetch = async (url, init) => {
   fetches.push({ url: String(url), body: init?.body })
   const target = String(url)
@@ -214,9 +244,13 @@ globalThis.fetch = async (url, init) => {
         // 外壳的工作区：不是仓库，正是当初被误当成"当前工作区"的那个。
         current: 'C:\\Users\\Administrator',
       }
-    : target.includes('/history')
-      ? HISTORY
-      : CHANGES
+    : target.includes('/commit-detail')
+      ? COMMIT_DETAIL
+      : target.includes('/commit-file')
+        ? COMMIT_FILE
+        : target.includes('/history')
+          ? HISTORY
+          : CHANGES
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
 
@@ -327,7 +361,15 @@ check('旧写法退回到外壳工作区（非仓库）', workspacesAsked().join
 
 console.log('')
 console.log('=== 3. 修好之后：工作区跟随当前会话 ===')
-const props = { ...kit, ...injected, t: (key) => key }
+// `t` 记录调用参数并做插值：光返回 key 的话，"所在分支"那条断言只能看到模板键，
+// 分不清"组件没渲染"与"渲染了但没插值"。插值 + 记录参数能把这两种情况分开。
+const tCalls = []
+const t = (key, params) => {
+  tCalls.push({ key, params, from: 'test' })
+  if (params === undefined) return key
+  return Object.entries(params).reduce((text, [name, value]) => text.split(`{${name}}`).join(String(value)), key)
+}
+const props = { ...kit, ...injected, t }
 
 fetches.length = 0
 const first = await renderSettled(Hero, props, 'hero')
@@ -459,11 +501,123 @@ check('文件行 title 是完整路径（脚本依赖）', settledNodes.some((n)
 check('文件行带状态徽标', settledNodes.some((n) => n.props?.['data-review-status'] !== undefined), 'true')
 check('提交历史渲染了 2 条', settledNodes.filter((n) => n.props?.className === 'dsh-review-history').length, 2)
 
+console.log('')
+console.log('=== 7. 点提交记录 → 看改动文件 → 点文件 → 看差异 ===')
+// 这三步是用户直接提出的交互（"点击提交记录可以看到提交的文件，点击还能看到文件修改了啥"），
+// 并且每一步都要**按需**去宿主取数据：不点不取、点了才取、取回来的东西要真的渲染出来。
+const textOf = (node) => {
+  if (node === null || node === undefined) return ''
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (typeof node !== 'object') return ''
+  return textOf(node.props?.children)
+}
+const settlePanel = async () => {
+  const out = await renderPanel()
+  return collectHostNodes(out.tree)
+}
+// `collectHostNodes` 只展开组件、**丢掉它们产生的副作用**，所以刚点开后新挂载的
+// `CommitChangesPanel` / `CommitFileRow` 的取数 effect 不会被执行（表现为"点了提交
+// 什么都不发生"）。这里照 test-review-graph-view.mjs 的做法，边展开边把副作用收进队列，
+// 再逐个执行、等异步落定，然后重新渲染——等价于真实 React 的挂载 + 自动重渲染。
+const drain = async () => {
+  const out = await renderPanel()
+  const queued = []
+  collectHostNodes(out.tree, queued)
+  for (const effect of queued) effect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const next = await renderPanel()
+  return collectHostNodes(next.tree)
+}
+const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
+const has = (label, actual) => check(label, actual === true, true)
+const detailCalls = () => fetches.filter((f) => f.url.includes('/review/commit-detail'))
+const fileCalls = () => fetches.filter((f) => f.url.includes('/review/commit-file'))
+/** 在**当前**界面上找节点，并立刻触发它的点击。 */
+const clickNow = async (attr, value) => {
+  const nodes = await drain()
+  const node = nodes.find((n) => (value === undefined ? n.props?.[attr] !== undefined : n.props?.[attr] === value))
+  if (node === undefined || typeof node.props.onClick !== 'function') return false
+  node.props.onClick()
+  return true
+}
+
+// 未点击时是收起的：只有可点的行，没有改动面板，也**没有**取过详情。
+check('未展开时没有改动面板', rowsOf(settledNodes, 'data-review-commit-changes').length, 0)
+check('未展开时不取提交详情', detailCalls().length, 0)
+const firstHistory = settledNodes.find((n) => n.props?.className === 'dsh-review-history')
+check('第一条提交记录可点', typeof firstHistory?.props?.onClick, 'function')
+check('提交记录带展开标记', firstHistory?.props?.['data-review-commit-toggle'], 'a'.repeat(40))
+
+// 第一步：点提交记录。
+check('点得中第一条提交记录', await clickNow('data-review-commit-toggle', 'a'.repeat(40)), 'true')
+fetches.length = 0
+let stepNodes = await drain()
+const changePanels = rowsOf(stepNodes, 'data-review-commit-changes')
+check('点开后出现改动面板', changePanels.length, 1)
+check('面板对应被点的那次提交', changePanels[0]?.props?.['data-review-commit-changes'], 'a'.repeat(40))
+check('展开标记已置位', stepNodes.find((n) => n.props?.className === 'dsh-review-history')?.props?.['aria-expanded'], 'true')
+// 详情只取一次：元信息（CommitSummary）与文件列表（CommitFileList）共用同一个结果。
+check('只取一次提交详情', detailCalls().length, 1)
+check('详情请求带上工作区', JSON.parse(detailCalls()[0]?.body).workspace, 'F:\\code\\projC')
+check('详情请求带上该提交的哈希', JSON.parse(detailCalls()[0]?.body).revision, 'a'.repeat(40))
+// 这次提交改动的两个文件都列出来了。主区域的文件列表用的是 `data-review-row`，
+// 所以 `data-graph-file-row` 只可能来自改动面板（下面那条断言把这个前提也钉住）。
+const changedRows = rowsOf(stepNodes, 'data-graph-file-row')
+check('列出这次提交改动的文件', changedRows.length, 2)
+has('含 src/app.ts', changedRows.some((n) => n.props['data-graph-file-row'] === 'src/app.ts'))
+has('含 docs/readme.md', changedRows.some((n) => n.props['data-graph-file-row'] === 'docs/readme.md'))
+// 元信息：标题/哈希/作者/所在分支（`data-graph-containing` 只在分支信息存在时才渲染）。
+const summaryText = textOf(rowsOf(stepNodes, 'data-commit-summary')[0] ?? null)
+has('显示提交标题', summaryText.includes('second commit'))
+has('显示短哈希', summaryText.includes('aaaaaaa'))
+has('显示作者与邮箱', summaryText.includes('tester') && summaryText.includes('t@example.com'))
+// 所在分支：`data-graph-containing` 只在**确有**分支信息时才渲染，节点存在即说明这一行
+// 渲染了；插值本身归宿主侧的 `locale` 管（这个桩的 `bind` 按约定回显 key，见 ctx.locale），
+// 所以这里断言"节点存在 + 文案函数收到正确实参"，不去比对拼接后的整句。
+const containingNode = rowsOf(stepNodes, 'data-graph-containing')[0]
+has('渲染了所在分支这一行', containingNode !== undefined)
+check('分支行的文案键', containingNode?.props?.children, 'graphInBranches')
+const branchCall = tCalls.filter((c) => c.key === 'graphInBranches').pop()
+check('分支文案收到分支名', branchCall?.params?.names, 'main')
+check('分支文案收到分支数', branchCall?.params?.count, 1)
+// 文件差异仍然是按需的：刚点开提交时一个差异都没取、也没渲染。
+check('展开提交后仍不取文件差异', fileCalls().length, 0)
+check('展开提交后没有差异容器', rowsOf(stepNodes, 'data-graph-file-diff').length, 0)
+
+// 点文件 → 取这个文件在这次提交里的差异并渲染出来。
+check('点得中改动文件', await clickNow('data-graph-file-row', 'src/app.ts'), 'true')
+stepNodes = await drain()
+const diffCalls = fileCalls()
+check('点了文件才取差异', diffCalls.length, 1)
+check('差异请求带上文件路径', JSON.parse(diffCalls[0]?.body).path, 'src/app.ts')
+check('差异请求带上提交哈希', JSON.parse(diffCalls[0]?.body).revision, 'a'.repeat(40))
+check('出现差异容器', rowsOf(stepNodes, 'data-graph-file-diff').length, 1)
+// 差异行在容器**内部**（`renderDiff` 返回的是数组），所以要从那个子树里递归找，
+// 不能在整棵树的一层里筛。
+const diffContainer = rowsOf(stepNodes, 'data-graph-file-diff')[0]
+const diffLines = collectHostNodes(diffContainer).filter((n) => n.props?.['data-review-diff-row'] !== undefined)
+has('差异内容已渲染', diffLines.length > 0)
+// 行的子元素第 2 个是增删标记、第 3 个是代码本身（顺序被 test-diff-readability 钉住）。
+has('差异里有新增行', diffLines.some((n) => n.props.children?.[1]?.props?.children === '+' && textOf(n).includes('new')))
+check('只有被点开的那个文件展开', rowsOf(stepNodes, 'data-graph-file-diff').length, 1)
+
+// 再点一次收起：面板消失，但不必重新取数据。
+check('点得中同一个文件行', await clickNow('data-graph-file-row', 'src/app.ts'), 'true')
+stepNodes = await drain()
+check('再次点击收起差异', rowsOf(stepNodes, 'data-graph-file-diff').length, 0)
+check('收起不重复取差异', fileCalls().length, 1)
+
+// 再点提交记录收起：改动面板消失。
+check('点得中同一条提交记录', await clickNow('data-review-commit-toggle', 'a'.repeat(40)), 'true')
+stepNodes = await drain()
+check('再次点击提交记录收起改动面板', rowsOf(stepNodes, 'data-review-commit-changes').length, 0)
+check('收起改动面板不重复取详情', detailCalls().length, 1)
+
 // 展开第一个文件：差异容器与差异行必须出现，且行的子元素顺序保持
 // 「行号 → 增删标记 → 代码」（test-diff-readability.mjs 按这个顺序取样）。
-settledNodes.find((n) => n.props?.title === 'src/app.ts').props.onClick()
-const expanded = await renderPanel()
-const expandedNodes = collectHostNodes(expanded.tree)
+check('点得中改动文件行', await clickNow('title', 'src/app.ts'), 'true')
+const expandedNodes = await drain()
 check('展开后出现差异容器', expandedNodes.some((n) => n.props?.['data-review-diff'] !== undefined), 'true')
 const diffRows = expandedNodes.filter((n) => n.props?.['data-review-diff-row'] !== undefined)
 check('差异行已渲染', diffRows.length > 0, 'true')

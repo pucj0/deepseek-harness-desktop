@@ -1192,86 +1192,200 @@ window.__ModuleLoader__.load({
       if (commits.length === 0) {
         return statusBlock(t('noHistory'))
       }
-      // 提交行参照 IDEA 的 Log：左边一条竖线 + 节点圆点（这里不是完整的分支图，但保留
-      // 那条视觉轴线，扫读时"这是一个提交序列"一目了然），右边是标题 + 哈希/作者/日期。
+      // 提交行参照 IDEA 的 Log：左边一条竖线 + 节点圆点，右边是标题 + 哈希/作者/日期。
+      // **每一行都可以点开**，展开后显示这次提交改了哪些文件、点文件看具体差异
+      // （见 HistoryCommitRow / CommitChangesPanel）。
       return react.createElement(
         'div',
         { style: { display: 'flex', flexDirection: 'column' } },
         commits.map((commit, index) =>
+          react.createElement(HistoryCommitRow, {
+            key: commit.hash,
+            t,
+            workspace: props.workspace,
+            commit,
+            index,
+            last: index === commits.length - 1,
+          }),
+        ),
+      )
+    }
+
+    /**
+     * 「最近提交」里的一条提交：**点击展开**这次提交改了哪些文件。
+     *
+     * 与主区域的提交图共用 `CommitSummary` / `CommitFileList`，因此两处显示的
+     * 信息与交互完全一致（包括"在 N 个分支中"和点文件才取差异）。
+     *
+     * @param props - `{ t, workspace, commit, index, last }`。
+     * @returns React 元素。
+     */
+    function HistoryCommitRow(props) {
+      const { t, workspace, commit, index, last } = props
+      const [open, setOpen] = react.useState(false)
+
+      return react.createElement(
+        'div',
+        { 'data-review-commit': commit.hash, style: { display: 'flex', flexDirection: 'column' } },
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-review-history',
+            'data-review-commit-toggle': commit.hash,
+            'aria-expanded': open,
+            // 保留完整哈希与作者：脚本与用户都靠 title 辨认（既有断言依赖它）。
+            title: `${commit.hash}\n${commit.author} · ${commit.date}`,
+            onClick: () => setOpen((value) => !value),
+            style: {
+              display: 'flex',
+              gap: '10px',
+              width: '100%',
+              boxSizing: 'border-box',
+              padding: '8px 2px',
+              border: 'none',
+              background: open ? `color-mix(in srgb, ${ACCENT} 6%, transparent)` : 'transparent',
+              borderRadius: '6px',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              lineHeight: 1.5,
+              textAlign: 'left',
+              cursor: 'pointer',
+            },
+          },
+          // 轴线与节点。最后一条不画下半段，避免悬空一截。
           react.createElement(
             'div',
-            {
-              key: commit.hash,
-              className: 'dsh-review-history',
-              title: `${commit.hash}\n${commit.author} · ${commit.date}`,
+            { style: { position: 'relative', flex: '0 0 auto', width: '10px' } },
+            react.createElement('div', {
               style: {
-                display: 'flex',
-                gap: '10px',
-                padding: '8px 2px',
-                fontSize: '12.5px',
-                fontFamily: UI_FONT,
-                lineHeight: 1.5,
+                position: 'absolute',
+                left: '4px',
+                top: index === 0 ? '7px' : 0,
+                bottom: last ? 'auto' : 0,
+                height: last ? '1px' : 'auto',
+                width: '1.5px',
+                background: 'var(--dsw-alias-border-l2, #d8d8e0)',
               },
-            },
-            // 轴线与节点。最后一条不画下半段，避免悬空一截。
+            }),
+            react.createElement('div', {
+              style: {
+                position: 'absolute',
+                left: 0,
+                top: '2px',
+                width: '9px',
+                height: '9px',
+                borderRadius: '50%',
+                border: `2px solid ${ACCENT}`,
+                background: 'var(--dsw-alias-bg-base, #fff)',
+                boxSizing: 'border-box',
+              },
+            }),
+          ),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0, flex: '1 1 auto' } },
             react.createElement(
-              'div',
-              { style: { position: 'relative', flex: '0 0 auto', width: '10px' } },
-              react.createElement('div', {
-                style: {
-                  position: 'absolute',
-                  left: '4px',
-                  top: index === 0 ? '7px' : 0,
-                  bottom: index === commits.length - 1 ? 'auto' : 0,
-                  height: index === commits.length - 1 ? '1px' : 'auto',
-                  width: '1.5px',
-                  background: 'var(--dsw-alias-border-l2, #d8d8e0)',
-                },
-              }),
-              react.createElement('div', {
-                style: {
-                  position: 'absolute',
-                  left: 0,
-                  top: '2px',
-                  width: '9px',
-                  height: '9px',
-                  borderRadius: '50%',
-                  border: `2px solid ${ACCENT}`,
-                  background: 'var(--dsw-alias-bg-base, #fff)',
-                  boxSizing: 'border-box',
-                },
-              }),
+              'span',
+              { style: { color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflowWrap: 'anywhere' } },
+              commit.subject,
             ),
             react.createElement(
               'div',
-              { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0, flex: '1 1 auto' } },
+              { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
               react.createElement(
                 'span',
-                { style: { color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflowWrap: 'anywhere' } },
-                commit.subject,
-              ),
-              react.createElement(
-                'div',
-                { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
-                react.createElement(
-                  'span',
-                  {
-                    style: {
-                      padding: '0 5px',
-                      borderRadius: '4px',
-                      background: `color-mix(in srgb, ${ACCENT} 10%, transparent)`,
-                      color: ACCENT,
-                      fontFamily: CODE_FONT,
-                      lineHeight: '16px',
-                    },
+                {
+                  style: {
+                    padding: '0 5px',
+                    borderRadius: '4px',
+                    background: `color-mix(in srgb, ${ACCENT} 10%, transparent)`,
+                    color: ACCENT,
+                    fontFamily: CODE_FONT,
+                    lineHeight: '16px',
                   },
-                  commit.short,
-                ),
-                react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, `${commit.author} · ${commit.date}`),
+                },
+                commit.short,
               ),
+              react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, `${commit.author} · ${commit.date}`),
+            ),
+          ),
+          // 展开指示：一个会转的小箭头，让"这一行可以点"这件事看得出来。
+          react.createElement(
+            'span',
+            { style: { flexShrink: 0, alignSelf: 'flex-start', color: 'var(--dsw-alias-label-tertiary)', display: 'flex' } },
+            react.createElement(
+              'svg',
+              { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': 'true', style: { transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .12s ease' } },
+              react.createElement('path', { d: 'M6 4l4 4-4 4', strokeLinecap: 'round', strokeLinejoin: 'round' }),
             ),
           ),
         ),
+        open
+          ? react.createElement(CommitChangesPanel, { t, workspace, revision: commit.hash })
+          : null,
+      )
+    }
+
+    /**
+     * 一次提交的改动面板：元信息 + 文件列表（点文件展开它的差异）。
+     *
+     * 抽屉里的"最近提交"用它；主区域的提交图用同一对 `CommitSummary` / `CommitFileList`，
+     * 因此两处的行为不会漂移。
+     *
+     * @param props - `{ t, workspace, revision }`。
+     * @returns React 元素。
+     */
+    function CommitChangesPanel(props) {
+      const { t, workspace, revision } = props
+      const [state, setState] = react.useState({ phase: 'loading' })
+
+      react.useEffect(() => {
+        let alive = true
+        setState({ phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('commit-detail', { workspace, revision })
+            if (alive) setState({ phase: 'ready', result })
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            if (alive) setState({ phase: 'error', message: error.detail ?? error.message })
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [workspace, revision])
+
+      if (state.phase === 'loading') return statusBlock(t('loading'))
+      if (state.phase === 'error') return statusBlock(state.message, 'error')
+
+      const commit = state.result?.commit
+      const files = state.result?.files ?? []
+      return react.createElement(
+        'div',
+        {
+          'data-review-commit-changes': revision,
+          style: {
+            margin: '0 0 6px 20px',
+            padding: '8px 10px',
+            borderRadius: '6px',
+            border: `1px solid ${BORDER}`,
+            background: 'var(--dsw-alias-bg-module-platform, #f7f8fa)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+          },
+        },
+        react.createElement(CommitSummary, { t, commit, containingBranches: state.result?.containingBranches ?? [] }),
+        react.createElement(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', textTransform: 'uppercase' } }, t('changesTitle')),
+          react.createElement('span', { 'data-review-commit-file-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('graphFiles', { count: files.length })),
+        ),
+        react.createElement(CommitFileList, { t, files, workspace, revision }),
       )
     }
 
@@ -3704,6 +3818,108 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一条提交的元信息摘要（标题、哈希、作者、时间、所在分支、正文）。
+     *
+     * `commit` 与 `revision` 二选一：
+     *   * 调用方**已经**有 commit 对象时传 `commit`（提交图那条链路的数据就是它自己取的）；
+     *   * 只有一个哈希时传 `revision`，这里自己去取详情。
+     * 若调用方已经拿到了详情里的 `containingBranches`，一并传进来，省掉重复取详情。
+     *
+     * 做成组件而不是两处各写一遍：抽屉的"最近提交"与主区域提交图要显示同一份信息
+     * （其中"在 N 个分支中"要跑 N 次 git），各写一遍必然漂移。
+     *
+     * @param props - `{ t, workspace, commit?, revision?, containingBranches? }`。
+     * @returns React 元素或 null（摘要还没到手）。
+     */
+    function CommitSummary(props) {
+      const { t, workspace, revision } = props
+      const [fetched, setFetched] = react.useState(undefined)
+      // 调用方已经给了 commit 对象（提交图那条链路自己取过详情）就不必再取一次。
+      // 也不能把 `containingBranches` 写进依赖数组：它是每次渲染新建的数组字面量，
+      // 写进去会让 effect 每次都重跑（实测表现为收起再展开会重复请求一次详情）。
+      const needFetch = props.commit === undefined && typeof revision === 'string' && revision !== ''
+
+      react.useEffect(() => {
+        if (!needFetch) return undefined
+        let alive = true
+        void (async () => {
+          try {
+            const result = await call('commit-detail', { workspace, revision })
+            if (alive) setFetched(result)
+          } catch {
+            // 取不到摘要不算失败：下面的文件列表会自己显示它的错误。
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [needFetch, workspace, revision])
+
+      const commit = props.commit ?? fetched?.commit
+      // "在 N 个分支中"来自详情接口（要跑 N 次 git）。调用方**顺手把已经拿到的详情传进来**
+      // （`containingBranches`）就不要再多取一次；只给了哈希的自取路径则从取回的详情里读。
+      // 早先这里读的是 `props.commit?.containingBranches`——而详情接口把分支集合放在
+      // 结果对象的顶层而不是 `commit` 里，于是提交图那条链路永远渲染不出这一行。
+      const containing = props.containingBranches ?? fetched?.containingBranches ?? []
+      if (commit === undefined) return null
+
+      return react.createElement(
+        'div',
+        {
+          'data-commit-summary': commit.hash ?? '',
+          style: { display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: UI_FONT },
+        },
+        react.createElement('div', { style: { fontSize: '12.5px', fontWeight: 600, overflowWrap: 'anywhere' } }, commit.subject ?? ''),
+        react.createElement(
+          'div',
+          { style: { fontSize: '11.5px', color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+          react.createElement('span', { style: { fontFamily: CODE_FONT } }, commit.short ?? ''),
+          react.createElement('span', null, `${commit.author ?? ''} <${commit.email ?? ''}>`),
+          react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, (commit.committedAt ?? '').replace('T', ' ').slice(0, 16)),
+        ),
+        containing.length > 0
+          ? react.createElement(
+              'div',
+              { 'data-graph-containing': '', style: { fontSize: '11.5px', color: ACCENT } },
+              t('graphInBranches', { count: containing.length, names: containing.join(', ') }),
+            )
+          : null,
+        (commit.body ?? '') === ''
+          ? null
+          : react.createElement(
+              'div',
+              { style: { fontSize: '12px', color: 'inherit', whiteSpace: 'pre-wrap', maxHeight: '120px', overflowY: 'auto' } },
+              commit.body,
+            ),
+      )
+    }
+
+    /**
+     * 一次提交改动的文件列表：容器 + 每条文件一行（点开才取差异）。
+     *
+     * @param props - `{ t, files, workspace, revision }`。
+     * @returns React 元素。
+     */
+    function CommitFileList(props) {
+      const { t, files, workspace, revision } = props
+      return react.createElement(
+        'div',
+        { 'data-graph-files': '', style: { display: 'flex', flexDirection: 'column' } },
+        files.length === 0
+          ? react.createElement('div', { style: { padding: '8px 6px', fontSize: '12px', color: GRAPH_DIM } }, t('graphNoFiles'))
+          : files.map((file) =>
+              react.createElement(CommitFileRow, {
+                key: file.path,
+                t,
+                file,
+                workspace,
+                revision,
+              }),
+            ),
+      )
+    }
+
+    /**
      * 提交详情：元信息 + 改动文件 + 单文件差异。
      *
      * @param props - `{ t, workspace, revision, onOpenCommitFile }`。
@@ -3746,17 +3962,7 @@ window.__ModuleLoader__.load({
 
       const commit = state.result?.commit
       const files = state.result?.files ?? []
-      const containing = state.result?.containingBranches ?? []
-
-      /** 一条改动文件，点击展开它的差异。 */
-      const fileRow = (file) =>
-        react.createElement(GraphFileRow, {
-          key: file.path,
-          t,
-          file,
-          workspace,
-          revision,
-        })
+      const containingBranches = state.result?.containingBranches ?? []
 
       return react.createElement(
         'div',
@@ -3764,28 +3970,7 @@ window.__ModuleLoader__.load({
         react.createElement(
           'div',
           { style: { padding: '10px 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 } },
-          react.createElement('div', { style: { fontSize: '12.5px', fontWeight: 600, marginBottom: '4px', overflowWrap: 'anywhere' } }, commit?.subject ?? ''),
-          react.createElement(
-            'div',
-            { style: { fontSize: '11.5px', color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
-            react.createElement('span', { style: { fontFamily: CODE_FONT } }, commit?.short ?? ''),
-            react.createElement('span', null, `${commit?.author ?? ''} <${commit?.email ?? ''}>`),
-            react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, (commit?.committedAt ?? '').replace('T', ' ').slice(0, 16)),
-          ),
-          containing.length > 0
-            ? react.createElement(
-                'div',
-                { 'data-graph-containing': '', style: { marginTop: '5px', fontSize: '11.5px', color: ACCENT } },
-                t('graphInBranches', { count: containing.length, names: containing.join(', ') }),
-              )
-            : null,
-          (commit?.body ?? '') === ''
-            ? null
-            : react.createElement(
-                'div',
-                { style: { marginTop: '6px', fontSize: '12px', color: 'inherit', whiteSpace: 'pre-wrap', maxHeight: '120px', overflowY: 'auto' } },
-                commit.body,
-              ),
+          react.createElement(CommitSummary, { t, commit, containingBranches }),
         ),
         react.createElement(
           'div',
@@ -3796,9 +3981,7 @@ window.__ModuleLoader__.load({
         react.createElement(
           'div',
           { style: { minHeight: 0, overflowY: 'auto', padding: '0 6px 10px' } },
-          files.length === 0
-            ? react.createElement('div', { style: { padding: '8px 6px', fontSize: '12px', color: GRAPH_DIM } }, t('graphNoFiles'))
-            : files.map(fileRow),
+          react.createElement(CommitFileList, { t, files, workspace, revision }),
         ),
       )
     }
@@ -3812,7 +3995,7 @@ window.__ModuleLoader__.load({
      * @param props - `{ t, file, workspace, revision }`。
      * @returns React 元素。
      */
-    function GraphFileRow(props) {
+    function CommitFileRow(props) {
       const { t, file, workspace, revision } = props
       const [open, setOpen] = react.useState(false)
       const [state, setState] = react.useState({ phase: 'idle' })
