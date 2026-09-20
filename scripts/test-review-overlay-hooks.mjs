@@ -268,8 +268,16 @@ globalThis.fetch = async (url, init) => {
 
 /** 事件登记表：`type -> Set<handler>`。拖动要靠它把 mousemove/mouseup 真的派发出去。 */
 const domListeners = new Map()
+/** 插件注入的样式块（`ctx.effect` 里 createElement('style') + appendChild）。 */
+const styledBlocks = []
 globalThis.document = {
-  head: { appendChild() {} },
+  // 样式块容器要留个引用：这一版的可操作性主要靠 :hover / :focus-visible 规则，
+  // 而"规则有没有被真的注入"是唯一能在桩里断言的部分。
+  head: {
+    appendChild(node) {
+      if (node?.tagName === 'style' || node?.dataset?.plugin !== undefined) styledBlocks.push(node)
+    },
+  },
   body: { dataset: {} },
   addEventListener(type, handler) {
     if (!domListeners.has(type)) domListeners.set(type, new Set())
@@ -283,7 +291,7 @@ globalThis.document = {
     for (const handler of domListeners.get(type) ?? []) handler(event)
   },
   querySelector: () => null,
-  createElement: () => ({ dataset: {}, style: {}, textContent: '', remove() {} }),
+  createElement: (tagName) => ({ tagName, dataset: {}, style: {}, textContent: '', remove() {} }),
 }
 const storage = { 'dsh.review.panelOpen': '1' }
 globalThis.window = {
@@ -346,6 +354,23 @@ const check = (label, actual, expected) => {
   if (!ok) failures += 1
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}: ${actual}${ok ? '' : `（期望 ${expected}）`}`)
 }
+/** 值比较（不转字符串）：用于布尔与"是否为某个精确值"的断言。 */
+const is = (label, actual, expected) => {
+  const ok = Object.is(actual, expected)
+  if (!ok) failures += 1
+  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}: ${JSON.stringify(actual)}${ok ? '' : `（期望 ${JSON.stringify(expected)}）`}`)
+}
+/** 元素文本（递归展开 children）。 */
+const textOf = (node) => {
+  if (node === null || node === undefined) return ''
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (typeof node !== 'object') return ''
+  return textOf(node.props?.children)
+}
+/** 行筛选：带某个 `data-*` 标记的宿主节点。 */
+const has = (label, actual) => is(label, actual === true, true)
+const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
 
 const workspacesAsked = () =>
   fetches.filter((f) => f.url.includes('/review/workspace')).map((f) => JSON.parse(f.body).workspace)
@@ -483,13 +508,15 @@ check('松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDr
 
 console.log('')
 console.log('=== 6. IDEA 式结构 ===')
+/** 抽屉的 hook key。第 9 节会换一个新 key 重新挂载，拿到干净状态。 */
+let panelKey = 'panel'
 // 面板的数据是异步取的：桩渲染不会自动重渲染，所以"渲染两次 + 执行副作用"才能看到
 // 文件列表与提交历史（真实 React 会在 setState 后自己重渲染）。
 const renderPanel = async () => {
-  let out = render(panelElement.type, panelElement.props, 'panel')
+  let out = render(panelElement.type, panelElement.props, panelKey)
   for (const effect of out.effects) effect()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  out = render(panelElement.type, panelElement.props, 'panel')
+  out = render(panelElement.type, panelElement.props, panelKey)
   for (const effect of out.effects) effect()
   await new Promise((resolve) => setTimeout(resolve, 0))
   return out
@@ -512,39 +539,58 @@ check('还原按钮的 title 仍是「还原」（脚本依赖）', settledNodes
 check('文件行 title 是完整路径（脚本依赖）', settledNodes.some((n) => n.props?.title === 'src/app.ts'), 'true')
 check('文件行带状态徽标', settledNodes.some((n) => n.props?.['data-review-status'] !== undefined), 'true')
 check('提交历史渲染了 2 条', settledNodes.filter((n) => n.props?.className === 'dsh-review-history').length, 2)
+// 头栏：抽屉里第一个要回答的问题是"我在哪个分支上提交"。分支名取自**已有的**历史响应，
+// 不额外打一次 git（这一节的请求清单里没有多出来的 `graph`/`status` 就是证据）。
+{
+  check('有头栏', settledNodes.some((n) => n.props?.['data-review-header'] !== undefined), 'true')
+  const chips = settledNodes.filter((n) => n.props?.['data-review-branch'] !== undefined)
+  check('头栏有分支徽标', chips.length, 1)
+  check('分支徽标显示当前分支', chips[0]?.props?.['data-review-branch'], 'main')
+}
 
 console.log('')
 console.log('=== 7. 点提交记录 → 看改动文件 → 点文件 → 看差异 ===')
 // 这三步是用户直接提出的交互（"点击提交记录可以看到提交的文件，点击还能看到文件修改了啥"），
 // 并且每一步都要**按需**去宿主取数据：不点不取、点了才取、取回来的东西要真的渲染出来。
-const textOf = (node) => {
-  if (node === null || node === undefined) return ''
-  if (Array.isArray(node)) return node.map(textOf).join('')
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (typeof node !== 'object') return ''
-  return textOf(node.props?.children)
-}
-const settlePanel = async () => {
-  const out = await renderPanel()
-  return collectHostNodes(out.tree)
-}
+//
 // `collectHostNodes` 只展开组件、**丢掉它们产生的副作用**，所以刚点开后新挂载的
 // `CommitChangesPanel` / `CommitFileRow` 的取数 effect 不会被执行（表现为"点了提交
-// 什么都不发生"）。这里照 test-review-graph-view.mjs 的做法，边展开边把副作用收进队列，
-// 再逐个执行、等异步落定，然后重新渲染——等价于真实 React 的挂载 + 自动重渲染。
+// 什么都不发生"）。`drain` 照 test-review-graph-view.mjs 的做法，边展开边把副作用收进
+// 队列，再逐个执行、等异步落定，然后重新渲染——等价于真实 React 的挂载 + 自动重渲染。
+/**
+ * 渲染 + 展开整棵树 + 执行**嵌套组件**产生的副作用，反复到不再有新副作用为止。
+ *
+ * 为什么不能直接用 `renderPanel()`：它只渲染抽屉本身，而抽屉的子树（暂存区、文件列表、
+ * 提交历史、提交详情）都是**嵌套组件**——桩渲染器不给嵌套组件跑 effect，只有
+ * `collectHostNodes` 展开它们时才会把 effect 收进队列。所以"执行副作用"这件事必须由
+ * 展开这一步负责，否则那些组件永远停在"加载中"（实测踩到过：面板一直显示 loading）。
+ */
 const drain = async () => {
-  const out = await renderPanel()
-  const queued = []
-  collectHostNodes(out.tree, queued)
-  for (const effect of queued) effect()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  const next = await renderPanel()
-  return collectHostNodes(next.tree)
+  let out = await renderPanel()
+  for (let pass = 0; pass < 8; pass += 1) {
+    const queued = [...out.effects]
+    collectHostNodes(out.tree, queued)
+    if (queued.length === 0) break
+    for (const effect of queued) effect()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    out = await renderPanel()
+  }
+  return collectHostNodes(out.tree)
 }
-const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
-const has = (label, actual) => check(label, actual === true, true)
 const detailCalls = () => fetches.filter((f) => f.url.includes('/review/commit-detail'))
 const fileCalls = () => fetches.filter((f) => f.url.includes('/review/commit-file'))
+/**
+ * 用**另一个** hook key 重新挂载抽屉，拿到一份干净的状态。
+ *
+ * 第 9 节要断言"默认长什么样"，而前面的小节把某条提交留在了展开状态；同一个 key 下
+ * 的 hook 槽会带着那份状态，因此必须换 key。
+ * @param label - 新 key 的后缀。
+ */
+const mount = async (label) => {
+  panelKey = `panel-${label}`
+  await renderPanel()
+  return drain()
+}
 /** 在**当前**界面上找节点，并立刻触发它的点击。 */
 const clickNow = async (attr, value) => {
   const nodes = await drain()

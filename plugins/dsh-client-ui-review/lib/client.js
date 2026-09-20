@@ -91,6 +91,11 @@ window.__ModuleLoader__.load({
       .dsh-review-file {
         transition: background-color .12s ease, border-color .12s ease;
       }
+      /* 行底（含行尾的「还原」按钮）一起高亮：只让路径那一块变色的话，
+       * 鼠标移到行尾的动作按钮上时整行反而"灭"了，看起来像换了一行。 */
+      .dsh-review-file-row:hover {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10));
+      }
       .dsh-review-file[aria-expanded='true'] {
         border-color: color-mix(in srgb, ${ACCENT} 38%, transparent) !important;
       }
@@ -121,24 +126,176 @@ window.__ModuleLoader__.load({
       [data-review-diff-row] { min-height: 18px; }
       [data-review-diff-row]:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
 
-      /* 分区标题：吸顶，滚动时仍知道自己在看哪一段。 */
+      /* 分区标题：吸顶，滚动时仍知道自己在看哪一段。
+       *
+       * 具体外观见文件末尾的"现代观感层"里的同名选择器——那里是这一版统一后的
+       * 唯一定义，这里只保留"吸顶"这个行为特性。 */
       [data-review-section-title] {
         position: sticky; top: 0; z-index: 2;
-        display: flex; align-items: center; gap: 6px;
-        padding: 6px 0; margin: 0 0 2px;
         background: var(--dsw-alias-bg-base, #fff);
-        font-family: ${UI_FONT}; font-size: 12px; font-weight: 600;
-        color: var(--dsw-alias-label-secondary);
-        letter-spacing: .02em;
-      }
-      [data-review-count] {
-        padding: 0 6px; border-radius: 999px;
-        background: var(--dsw-alias-bg-module-platform, #f0f0f3);
-        color: var(--dsw-alias-label-secondary);
-        font-size: 11px; font-weight: 500; line-height: 17px;
       }
       /* 计数：等宽数字，免得数字位数变化时抖动。 */
       [data-review-stats] { font-variant-numeric: tabular-nums; }
+
+      /* =====================================================================
+       * 抽屉的现代观感层
+       * =====================================================================
+       *
+       * 为什么把样式集中到类上、而不是继续写内联对象：
+       *   1. 内联样式里没法写 :hover / :focus-visible 规则，于是"这行能不能点、
+       *      这个按钮是什么"只能靠猜——这是这一版主要想解决的可操作性来源；
+       *   2. 同一类控件（行、图标按钮、徽标、分区）此前各写一份内联样式，
+       *      行高 26/20/18 混杂、圆角 4/6/7 混杂，一屏里能看出七八种不同的节奏；
+       *   3. 内联样式无法复用官方主题变量做统一降级。
+       *
+       * 契约：这些类只负责**外观**。所有 data-* 标记、title、role、aria-* 属性
+       * 一律保持不变——脚本与无障碍读的都是它们（改它们等于改接口）。
+       *
+       * 尺寸节奏：控件一律 24px 高，行内图标按钮 22px，行最小高度 28px，
+       * 圆角 6/8/10 三档，间距走 4 的倍数。 */
+
+      /* 设计令牌挂在面板根上，子树统一取用；同时给浏览器声明这是浅色底，
+       * 避免原生 checkbox / scrollbar 在深色系统主题下被画成深色。 */
+      [data-desktop-review-surface='panel'] {
+        color-scheme: light;
+        --dsh-review-row-h: 28px;
+        --dsh-review-line: var(--dsw-alias-border-l1, #e9ebf0);
+        --dsh-review-card: var(--dsw-alias-bg-layer-1, #fbfbfd);
+        --dsh-review-soft: var(--dsw-alias-bg-module-platform, #f4f5f8);
+        --dsh-review-hover: var(--dsw-alias-interactive-bg-hover, rgba(77,107,254,.07));
+      }
+
+      /* ---- 头部 ---- */
+      [data-review-header] {
+        display: flex; align-items: center; gap: 8px;
+        flex: 0 0 auto;
+        height: 44px; padding: 0 10px 0 16px; box-sizing: border-box;
+        background: var(--dsw-alias-bg-module-platform, #f5f6f7);
+        border-bottom: 1px solid var(--dsh-review-line);
+      }
+      [data-review-title] {
+        display: flex; align-items: baseline; gap: 7px; min-width: 0;
+        font-size: 13px; font-weight: 600; letter-spacing: .01em;
+        color: var(--dsw-alias-label-primary);
+      }
+      /* 分支徽标：整个抽屉里"我现在在哪个分支"是第一个要回答的问题。 */
+      [data-review-branch] {
+        display: inline-flex; align-items: center; gap: 4px;
+        max-width: 190px; padding: 1px 7px; border-radius: 999px;
+        background: color-mix(in srgb, ${ACCENT} 9%, transparent);
+        color: ${ACCENT};
+        font-family: ${CODE_FONT}; font-size: 11.5px; font-weight: 500; line-height: 17px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+
+        // 分区标题：小号、加粗、次级色，用**字重与颜色**表达层级，不用大写转换
+        // （CSS 的 text-transform: uppercase 对中文没有可见效果，却会让混排的英文单词
+        // 显得像另一种字体，反而不像同一个界面）。
+        [data-review-section-title] {
+          display: flex; align-items: center; gap: 7px;
+          margin: 0; padding: 10px 2px 5px;
+          font-family: ${UI_FONT}; font-size: 11.5px; font-weight: 600;
+          letter-spacing: .02em;
+          color: var(--dsw-alias-label-secondary);
+        }
+
+      /* ---- 行与卡片 ---- */
+      /* 行容器本身不吃事件，行内控件各自吃：这样点空白处不会误触展开。 */
+      [data-staging-row] { pointer-events: none; }
+      [data-staging-row] > * { pointer-events: auto; }
+      [data-staging-row]:hover { background: var(--dsh-review-hover); }
+
+      /* 行内动作默认收敛（透明），悬停或键盘聚焦时才浮现。
+       * 但**当前生效**的那一个始终可见：aria-expanded 为 true（变更记录已展开）
+       * 与 data-review-level 为 on（已暂存）都要看得见状态。 */
+      [data-staging-row] [data-staging-row-action],
+      [data-staging-row] [data-staging-history] { opacity: 0; transition: opacity .12s ease; }
+      [data-staging-row]:hover [data-staging-row-action],
+      [data-staging-row]:hover [data-staging-history],
+      [data-staging-row] [data-staging-row-action]:focus-visible,
+      [data-staging-row] [data-staging-history]:focus-visible,
+      [data-staging-row] [data-staging-history][aria-expanded='true'],
+      [data-staging-row] [data-review-level='on'] { opacity: 1; }
+      /* 触摸屏没有 hover：直接全显，否则那些动作永远看不到。 */
+      @media (hover: none) {
+        [data-staging-row] [data-staging-row-action],
+        [data-staging-row] [data-staging-history] { opacity: 1; }
+      }
+
+      /* ---- 分区头部（可折叠的分组）---- */
+      [data-staging-group-head] {
+        display: flex; align-items: center; gap: 6px;
+        height: 30px; padding: 0 8px;
+        border-radius: 6px;
+      }
+      [data-staging-group-head]:hover { background: var(--dsh-review-hover); }
+      [data-staging-group-head] button { border-radius: 4px; }
+      [data-staging-group-head] button:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 1px; }
+
+      /* ---- 控件 ---- */
+      [data-review-input]:focus {
+        outline: none;
+        border-color: color-mix(in srgb, ${ACCENT} 55%, transparent) !important;
+        box-shadow: 0 0 0 3px color-mix(in srgb, ${ACCENT} 14%, transparent);
+      }
+      [data-review-input]::placeholder { color: var(--dsw-alias-label-tertiary); }
+
+      /* 主按钮：唯一一个实心强调色，整屏只有它和另一处"加入 git"用实心。 */
+      [data-review-primary] {
+        display: inline-flex; align-items: center; justify-content: center;
+        height: 26px; padding: 0 14px; box-sizing: border-box;
+        border-radius: 7px;
+        font-family: ${UI_FONT}; font-size: 12.5px; font-weight: 500;
+        transition: background-color .13s ease, border-color .13s ease, color .13s ease;
+      }
+      [data-review-primary]:disabled { cursor: default; }
+      [data-review-primary]:not(:disabled):hover { background: color-mix(in srgb, ${ACCENT} 88%, #000); color: #fff; }
+      [data-review-primary]:not(:disabled):active { background: color-mix(in srgb, ${ACCENT} 78%, #000); }
+
+      /* 次按钮：描边、透明底，悬停才浮出强调色。 */
+      [data-review-secondary] {
+        display: inline-flex; align-items: center; justify-content: center;
+        height: 26px; padding: 0 12px; box-sizing: border-box;
+        border-radius: 7px; border: 1px solid var(--dsh-review-line);
+        background: transparent;
+        font-family: ${UI_FONT}; font-size: 12.5px;
+        transition: background-color .13s ease, border-color .13s ease, color .13s ease;
+      }
+      [data-review-secondary]:disabled { cursor: default; }
+      [data-review-secondary]:not(:disabled):hover {
+        border-color: color-mix(in srgb, ${ACCENT} 45%, transparent);
+        background: color-mix(in srgb, ${ACCENT} 7%, transparent);
+      }
+
+      /* 计数徽标：分区标题右侧那个数字。 */
+      [data-review-count] {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
+        border-radius: 999px;
+        background: var(--dsw-review-count-bg, color-mix(in srgb, var(--dsw-alias-label-tertiary, #8a8f9c) 14%, transparent));
+        color: var(--dsw-alias-label-secondary);
+        font-family: ${UI_FONT}; font-size: 11px; font-weight: 500; line-height: 1;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 未跟踪文件的汇总条：把"有多少、选了几个、要做什么"压成一行。 */
+      [data-review-untracked-bar] {
+        display: flex; align-items: center; gap: 8px;
+        margin: 6px 6px 2px; padding: 5px 8px;
+        border-radius: 8px;
+        background: var(--dsh-review-soft);
+        color: var(--dsw-alias-label-secondary);
+        font-family: ${UI_FONT}; font-size: 11.5px;
+      }
+
+      /* 提交历史：每行之间一条淡线，最后一条不留。 */
+      [data-review-commit] + [data-review-commit] { border-top: 1px solid var(--dsh-review-line); }
+
+      /* 移动/窄视口：抽屉本身是 fixed 全高，窄屏下靠缩进换空间。 */
+      @media (max-width: 560px) {
+        [data-review-header] { padding: 0 6px 0 12px; }
+        [data-review-section-title] { font-size: 11px; }
+      }
     `
 
     /** 稳定插件名，用于诊断。 */
@@ -1532,6 +1689,9 @@ window.__ModuleLoader__.load({
       const { files, added, removed } = summarize(active.result)
       const title = scope === 'workspace' ? t('projectTitle') : t('title')
       const reload = scope === 'workspace' ? workspaceChanges.reload : turn.reload
+      // 当前分支：从**已有的**历史响应里取，不额外打一次 git。
+      const historyResult = history.state.result
+      const branch = typeof historyResult?.branch === 'string' ? historyResult.branch.trim() : ''
 
       return react.createElement(
         'aside',
@@ -1583,20 +1743,30 @@ window.__ModuleLoader__.load({
         }),
         react.createElement(
           'div',
-          {
-            style: {
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '10px 12px 10px 16px',
-              background: 'var(--dsw-alias-bg-module-platform, #f5f6f7)',
-              borderBottom: '1px solid var(--dsw-alias-border-l1, #e6e6ec)',
-              fontSize: '13px',
-              color: 'var(--dsw-alias-label-primary)',
-              flex: '0 0 auto',
-            },
-          },
-          react.createElement('strong', { style: { fontWeight: 600 } }, title),
+          { 'data-review-header': '' },
+          // 标题与分支徽标：抽屉里第一个要回答的问题是"我在哪个分支上提交"。
+          react.createElement(
+            'div',
+            { 'data-review-title': '' },
+            react.createElement('strong', { style: { fontWeight: 600 } }, title),
+            branch === ''
+              ? null
+              : react.createElement(
+                  'span',
+                  { 'data-review-branch': branch, title: branch },
+                  react.createElement(
+                    'svg',
+                    { width: 11, height: 11, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+                    react.createElement('path', {
+                      d: 'M5 3.5a1.6 1.6 0 1 0 0 .01M5 12.5a1.6 1.6 0 1 0 0 .01M11 6.5a1.6 1.6 0 1 0 0 .01M5 5.1v5.8M6.6 4.2h2.9a1.5 1.5 0 0 1 1.5 1.5v.8',
+                      stroke: 'currentColor',
+                      strokeWidth: 1.3,
+                      strokeLinecap: 'round',
+                    }),
+                  ),
+                  branch,
+                ),
+          ),
           react.createElement('span', { 'data-review-count': '' }, String(files.length)),
           react.createElement('span', { style: { flex: 1 } }),
           // 刷新：IDEA 的工具窗左上角也有这个动作；这里放在右侧，靠近"关闭"。
@@ -2171,14 +2341,14 @@ window.__ModuleLoader__.load({
       if (state.phase === 'loading') {
         return react.createElement(
           'div',
-          { 'data-staging-history-panel': path, style: { padding: '6px 2px 6px 40px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } },
+          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } },
           t('loading'),
         )
       }
       if (state.phase === 'error') {
         return react.createElement(
           'div',
-          { 'data-staging-history-panel': path, style: { padding: '6px 2px 6px 40px', fontSize: '11.5px', color: REMOVED, fontFamily: UI_FONT } },
+          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: '11.5px', color: REMOVED, fontFamily: UI_FONT } },
           state.message,
         )
       }
@@ -2188,7 +2358,7 @@ window.__ModuleLoader__.load({
         {
           'data-staging-history-panel': path,
           style: {
-            margin: '2px 2px 6px 40px',
+            margin: '2px 6px 8px 44px',
             padding: '6px 8px',
             borderRadius: '6px',
             border: `1px solid ${BORDER}`,
@@ -2304,7 +2474,13 @@ window.__ModuleLoader__.load({
       const { label, count, collapsed, onToggle, action } = props
       return react.createElement(
         'div',
-        { 'data-staging-group': props.id, style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 2px 3px' } },
+        {
+          // 注意：这里**不带** `data-staging-group`。分组标记只挂在分组容器上
+          // （`{ 'data-staging-group': 'unstaged' }` 那两处），测试按它的取值集合统计
+          // 分组数，多挂一处会让"只有两组"那条断言变成另一种含义。
+          'data-staging-group-head': '',
+          style: { display: 'flex', alignItems: 'center', gap: '6px' },
+        },
         react.createElement(
           'button',
           {
@@ -2318,12 +2494,13 @@ window.__ModuleLoader__.load({
               gap: '6px',
               flex: '1 1 auto',
               minWidth: 0,
+              height: '24px',
               padding: 0,
               border: 'none',
               background: 'transparent',
               color: 'inherit',
               fontFamily: UI_FONT,
-              fontSize: '11.5px',
+              fontSize: '12px',
               fontWeight: 600,
               textAlign: 'left',
               cursor: 'pointer',
@@ -2331,11 +2508,12 @@ window.__ModuleLoader__.load({
           },
           react.createElement(
             'svg',
-            { width: 10, height: 10, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, 'aria-hidden': 'true', style: { flexShrink: 0, transform: collapsed === true ? 'rotate(-90deg)' : 'none' } },
+            { width: 10, height: 10, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, 'aria-hidden': 'true', style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', transition: 'transform .14s ease', transform: collapsed === true ? 'rotate(-90deg)' : 'none' } },
             react.createElement('path', { d: 'M3 6l5 5 5-5', strokeLinecap: 'round', strokeLinejoin: 'round' }),
           ),
           react.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
-          react.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400 } }, String(count)),
+          // 计数用统一的胶囊徽标（[data-review-count]），与分区标题右侧那个是同一套观感。
+          react.createElement('span', { 'data-review-count': '' }, String(count)),
         ),
         action ?? null,
       )
@@ -2680,7 +2858,7 @@ window.__ModuleLoader__.load({
             key: `${side}:${entry.path}`,
             'data-staging-row': entry.path,
             'data-staging-side': side,
-            style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
+            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 18px', borderRadius: '6px', fontSize: '12.5px', fontFamily: UI_FONT },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -2707,6 +2885,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               'data-staging-history': entry.path,
+              'data-review-icon-button': '',
               disabled: busy,
               onClick: () => setHistory((current) => (current === entry.path ? '' : entry.path)),
               title: history === entry.path ? t('hideHistory') : t('fileHistory'),
@@ -2714,37 +2893,56 @@ window.__ModuleLoader__.load({
               'aria-expanded': history === entry.path,
               style: {
                 flexShrink: 0,
-                padding: '0 5px',
+                width: '22px',
+                height: '22px',
+                padding: 0,
                 border: 'none',
                 borderRadius: '4px',
                 background: history === entry.path ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
                 color: history === entry.path ? ACCENT : 'var(--dsw-alias-label-tertiary)',
-                fontFamily: UI_FONT,
-                fontSize: '11px',
-                cursor: busy ? 'default' : 'pointer',
               },
             },
-            t('fileHistory'),
+            // 图标而不是「变更记录」四个字：文件名往往要占满一行，四个字会把路径挤到
+            // 省略号里去。完整含义留在 title / aria-label 上（脚本也读它们）。
+            react.createElement(
+              'svg',
+              { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M8 3.2v9.6M8 3.2a1.6 1.6 0 1 0 0-.01M8 12.8a1.6 1.6 0 1 0 0-.01M8 6.4h3.1M8 9.6H4.9',
+                stroke: 'currentColor',
+                strokeWidth: 1.4,
+                strokeLinecap: 'round',
+              }),
+            ),
           ),
           react.createElement(
             'button',
             {
               type: 'button',
               'data-staging-row-action': side === 'staged' ? 'unstage' : 'stage',
+              'data-review-level': side === 'staged' ? 'on' : 'off',
+              // 参与"悬停才浮现"那条规则（见样式层里的 [data-staging-row]:hover 规则）。
+              'data-review-icon-button': '',
               disabled: busy,
               onClick: () =>
                 void run(side === 'staged' ? 'unstage' : 'stage', { paths: [entry.path] }, side === 'staged' ? t('unstagedNotice', { count: 1 }) : t('stagedNotice', { count: 1 })),
               title: side === 'staged' ? t('unstage') : t('stage'),
+              'aria-label': side === 'staged' ? t('unstage') : t('stage'),
               style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
                 flexShrink: 0,
-                padding: '0 6px',
+                width: '22px',
+                height: '22px',
+                padding: 0,
                 border: 'none',
                 borderRadius: '4px',
                 background: 'transparent',
-                color: 'var(--dsw-alias-label-tertiary)',
+                color: side === 'staged' ? ACCENT : 'var(--dsw-alias-label-tertiary)',
                 fontFamily: UI_FONT,
-                fontSize: '11.5px',
-                cursor: busy ? 'default' : 'pointer',
+                fontSize: '13px',
+                lineHeight: 1,
               },
             },
             side === 'staged' ? '−' : '+',
@@ -2769,7 +2967,7 @@ window.__ModuleLoader__.load({
             key: `untracked:${path}`,
             'data-staging-row': path,
             'data-staging-side': 'untracked',
-            style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 2px 2px 16px', fontSize: '12.5px', fontFamily: UI_FONT },
+            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 22px', borderRadius: '6px', fontSize: '12.5px', fontFamily: UI_FONT },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -2796,6 +2994,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               'data-staging-history': path,
+              'data-review-icon-button': '',
               disabled: busy,
               onClick: () => setHistory((current) => (current === path ? '' : path)),
               title: history === path ? t('hideHistory') : t('fileHistory'),
@@ -2803,27 +3002,37 @@ window.__ModuleLoader__.load({
               'aria-expanded': history === path,
               style: {
                 flexShrink: 0,
-                padding: '0 5px',
+                width: '22px',
+                height: '22px',
+                padding: 0,
                 border: 'none',
                 borderRadius: '4px',
                 background: history === path ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
                 color: history === path ? ACCENT : 'var(--dsw-alias-label-tertiary)',
-                fontFamily: UI_FONT,
-                fontSize: '11px',
-                cursor: busy ? 'default' : 'pointer',
               },
             },
-            t('fileHistory'),
+            react.createElement(
+              'svg',
+              { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M8 3.2v9.6M8 3.2a1.6 1.6 0 1 0 0-.01M8 12.8a1.6 1.6 0 1 0 0-.01M8 6.4h3.1M8 9.6H4.9',
+                stroke: 'currentColor',
+                strokeWidth: 1.4,
+                strokeLinecap: 'round',
+              }),
+            ),
           ),
           react.createElement(
             'button',
             {
               type: 'button',
               'data-staging-row-action': 'stage',
+              'data-review-icon-button': '',
               disabled: busy,
               onClick: () => void run('stage', { paths: [path] }, t('addedNotice', { count: 1 })),
               title: t('addToGit'),
-              style: { flexShrink: 0, padding: '0 6px', border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: '11.5px', cursor: busy ? 'default' : 'pointer' },
+              'aria-label': t('addToGit'),
+              style: { flexShrink: 0, width: '22px', height: '22px', padding: 0, border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontSize: '14px', lineHeight: 1 },
             },
             '+',
           ),
@@ -2838,12 +3047,30 @@ window.__ModuleLoader__.load({
       return react.createElement(
         'div',
         { 'data-staging': '', style: { display: 'flex', flexDirection: 'column', fontFamily: UI_FONT } },
-        // ---- 提交框 ----
+        // ---- 提交卡片 ----
+        //
+        // 做成一张"卡片"而不是一条普通表单：提交是这块面板的主动作，读屏顺序上它必须
+        // 第一个被看到，视觉上也要与下面的文件清单分开（此前三者都是同样的白底 + 细线，
+        // 分不出主次）。
         react.createElement(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: '6px', padding: '2px 2px 8px', borderBottom: `1px solid ${BORDER}` } },
+          {
+            'data-staging-commit-card': '',
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              margin: '2px 2px 10px',
+              padding: '10px',
+              border: `1px solid ${BORDER}`,
+              borderRadius: '10px',
+              background: 'var(--dsw-alias-bg-base, #fff)',
+              boxShadow: '0 1px 2px rgba(16,24,40,.04)',
+            },
+          },
           react.createElement('textarea', {
             'data-staging-message': '',
+            'data-review-input': '',
             value: message,
             rows: 2,
             placeholder: t('commitMessage', { branch: result.branch ?? '' }),
@@ -2863,15 +3090,16 @@ window.__ModuleLoader__.load({
             style: {
               boxSizing: 'border-box',
               width: '100%',
-              padding: '6px 8px',
+              padding: '7px 9px',
               border: `1px solid ${BORDER}`,
-              borderRadius: '7px',
+              borderRadius: '8px',
               background: 'var(--dsw-alias-bg-base, #fff)',
               color: 'inherit',
               fontFamily: UI_FONT,
               fontSize: '12.5px',
-              lineHeight: 1.5,
+              lineHeight: 1.55,
               resize: 'vertical',
+              transition: 'border-color .13s ease, box-shadow .13s ease',
             },
           }),
           react.createElement(
@@ -2882,17 +3110,13 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 'data-staging-commit': '',
+                'data-review-primary': '',
                 disabled: commitDisabled,
                 onClick: () => void submitCommit(commitPaths),
                 style: {
-                  padding: '5px 14px',
                   border: 'none',
-                  borderRadius: '7px',
                   background: commitDisabled ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
                   color: commitDisabled ? 'var(--dsw-alias-label-tertiary)' : '#fff',
-                  fontFamily: UI_FONT,
-                  fontSize: '12.5px',
-                  cursor: commitDisabled ? 'default' : 'pointer',
                 },
               },
               busy
@@ -2907,26 +3131,26 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 'data-staging-commit-push': '',
+                'data-review-secondary': '',
                 disabled: commitDisabled,
                 title: t('commitAndPushHint'),
                 onClick: () => void submitCommit(commitPaths, true),
                 style: {
-                  padding: '5px 14px',
-                  border: `1px solid ${commitDisabled ? BORDER : ACCENT}`,
-                  borderRadius: '7px',
-                  background: 'transparent',
+                  borderColor: commitDisabled ? BORDER : `color-mix(in srgb, ${ACCENT} 45%, transparent)`,
                   color: commitDisabled ? 'var(--dsw-alias-label-tertiary)' : ACCENT,
-                  fontFamily: UI_FONT,
-                  fontSize: '12.5px',
-                  cursor: commitDisabled ? 'default' : 'pointer',
                 },
               },
               t('commitAndPush'),
             ),
             // 为什么禁用／会提交什么，都要说清楚：按钮灰着而不给理由，用户只会反复点它。
+            // 顺带给出快捷键提示：Ctrl+Enter 提交是提交框的惯用键（也已实现），
+            // 但不在界面上写出来就没人会去试。
             react.createElement(
               'span',
-              { 'data-staging-hint': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
+              {
+                'data-staging-hint': '',
+                style: { flex: '1 1 140px', minWidth: 0, fontSize: '11.5px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+              },
               message.trim() === ''
                 ? t('emptyMessage')
                 : commitPaths.length > 0
@@ -2934,6 +3158,11 @@ window.__ModuleLoader__.load({
                   : allTrackedPaths.length === 0
                     ? t('error_nothingToCommit')
                     : t('noSelection'),
+              react.createElement(
+                'span',
+                { title: t('commit'), style: { marginLeft: '6px', padding: '1px 5px', border: '1px solid var(--dsh-review-line)', borderRadius: '4px', fontFamily: CODE_FONT, fontSize: '10.5px', whiteSpace: 'nowrap' } },
+                'Ctrl+↵',
+              ),
             ),
           ),
         ),
@@ -2970,10 +3199,37 @@ window.__ModuleLoader__.load({
             ),
 
         clean
-          ? react.createElement('div', { style: { padding: '16px 2px', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' } }, t('noStagedOrChanged'))
+          ? react.createElement(
+              'div',
+              {
+                'data-review-clean': '',
+                style: {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '26px 12px',
+                  color: 'var(--dsw-alias-label-tertiary)',
+                  fontSize: '12.5px',
+                  textAlign: 'center',
+                },
+              },
+              react.createElement(
+                'svg',
+                { width: 26, height: 26, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', style: { opacity: 0.45 } },
+                react.createElement('path', {
+                  d: 'M4.5 12.5l4.5 4.5 10.5-10.5',
+                  stroke: 'currentColor',
+                  strokeWidth: 1.7,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                }),
+              ),
+              t('noStagedOrChanged'),
+            )
           : react.createElement(
               'div',
-              { style: { paddingTop: '4px' } },
+              { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
               // ---- 更改（已跟踪的改动，**一组**）----
               //
               // 刻意不再拆成"已暂存 / 未暂存"两组：同一个文件两处都有改动（`MM`）时会
@@ -3047,15 +3303,16 @@ window.__ModuleLoader__.load({
                             alignItems: 'center',
                             justifyContent: 'center',
                             flexShrink: 0,
-                            width: '20px',
-                            height: '20px',
+                            width: '22px',
+                            height: '22px',
                             padding: 0,
                             border: 'none',
                             borderRadius: '4px',
                             background: 'transparent',
                             color: allChosen ? ACCENT : 'var(--dsw-alias-label-tertiary)',
                             fontFamily: UI_FONT,
-                            fontSize: '12px',
+                            fontSize: '13px',
+                            lineHeight: 1,
                             cursor: busy ? 'default' : 'pointer',
                           },
                         },
@@ -3064,42 +3321,48 @@ window.__ModuleLoader__.load({
                     }),
                     collapsed.untracked
                       ? null
-                      : react.createElement(
-                          'div',
-                          { 'data-staging-untracked-list': '' },
-                          untrackedPaths.flatMap((path) => {
-                            const row = untrackedRow(path, chosenUntracked.includes(path))
-                            if (history !== path) return [row]
-                            return [
-                              row,
-                              react.createElement(FileHistory, {
-                                key: `history:untracked:${path}`,
-                                t,
-                                workspace,
-                                path,
-                              }),
-                            ]
-                          }),
-                          result.untrackedTruncated === true
-                            ? react.createElement(
-                                'div',
-                                { 'data-staging-untracked-truncated': '', style: { padding: '4px 2px 2px 22px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
-                                t('untrackedTruncated', {
-                                  count: untrackedPaths.length,
-                                  rest: Math.max(0, untrackedCount - untrackedPaths.length),
-                                }),
-                              )
-                            : null,
-                          // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
-                          // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
+                      : [
                           react.createElement(
                             'div',
-                            { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 2px 2px 22px' } },
+                            { key: 'list', 'data-staging-untracked-list': '' },
+                            untrackedPaths.flatMap((path) => {
+                              const row = untrackedRow(path, chosenUntracked.includes(path))
+                              if (history !== path) return [row]
+                              return [
+                                row,
+                                react.createElement(FileHistory, {
+                                  key: `history:untracked:${path}`,
+                                  t,
+                                  workspace,
+                                  path,
+                                }),
+                              ]
+                            }),
+                            result.untrackedTruncated === true
+                              ? react.createElement(
+                                  'div',
+                                  { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
+                                  t('untrackedTruncated', {
+                                    count: untrackedPaths.length,
+                                    rest: Math.max(0, untrackedCount - untrackedPaths.length),
+                                  }),
+                                )
+                              : null,
+                          ),
+                          // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
+                          // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
+                          //
+                          // 做成贴底的一条汇总栏（而不是挤在列表末尾）：文件多的时候"选了
+                          // 几个、点哪个按钮"必须一眼可见，否则要滚到底才知道能干什么。
+                          react.createElement(
+                            'div',
+                            { key: 'bar', 'data-review-untracked-bar': '' },
                             react.createElement(
                               'button',
                               {
                                 type: 'button',
                                 'data-staging-add-chosen': '',
+                                'data-review-primary': '',
                                 disabled: busy || chosen.length === 0,
                                 onClick: () =>
                                   void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
@@ -3109,25 +3372,25 @@ window.__ModuleLoader__.load({
                                     },
                                   ),
                                 style: {
-                                  padding: '4px 12px',
+                                  height: '24px',
+                                  padding: '0 12px',
                                   border: 'none',
-                                  borderRadius: '6px',
                                   background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
                                   color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
-                                  fontFamily: UI_FONT,
-                                  fontSize: '12px',
-                                  cursor: busy || chosen.length === 0 ? 'default' : 'pointer',
                                 },
                               },
                               t('addToGit'),
                             ),
                             react.createElement(
                               'span',
-                              { 'data-staging-chosen-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
+                              {
+                                'data-staging-chosen-count': '',
+                                style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                              },
                               chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
                             ),
                           ),
-                        ),
+                        ],
                   ),
             ),
       )
@@ -3222,16 +3485,16 @@ window.__ModuleLoader__.load({
               t('diffOversized'),
             )
           : null,
-        // 汇总行：IDEA 的工具窗顶部也是"文件数 + 增删行数"，用等宽数字避免抖动。
+        // 分区头：左侧是"改了什么"标题，右侧是**总量**（文件数 + 增删行数）。
+        //
+        // 这是 IDEA 提交面板的头部结构：先给总量，再给清单；总量与逐行数字出自同一份
+        // 数据（见下面各行的 `data-review-stats`），因此不可能对不上。
         react.createElement(
           'div',
-          {
-            'data-review-section-title': '',
-            style: { gap: '8px' },
-          },
+          { 'data-review-section-title': '' },
           t('changesTitle'),
-          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
           react.createElement('span', { style: { flex: 1 } }),
+          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
           // 总变动行数：`+N −M` 是这一屏所有文件的和。
           //
           // 与下面每行的行内数字是同一套来源（`/workspace` 或 `/changes` 的 numstat），
@@ -3241,7 +3504,7 @@ window.__ModuleLoader__.load({
             'span',
             {
               'data-review-total-stats': '',
-              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap' },
+              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
             },
             react.createElement('span', { style: { color: ADDED } }, `+${added}`),
             ' ',
@@ -3259,10 +3522,19 @@ window.__ModuleLoader__.load({
             'div',
             // `data-review-row` 带**路径**而不只是空标记：下面那个暂存标记要靠它才能
             // 对应到具体文件，否则"哪个文件已暂存"在 DOM 上无法核验（脚本与人工都一样）。
-            { key: file.path, 'data-review-row': file.path },
+            { key: file.path, 'data-review-row': file.path, 'data-review-file-row': '' },
             react.createElement(
               'div',
-              { style: { display: 'flex', alignItems: 'stretch', gap: '2px' } },
+              {
+                className: 'dsh-review-file-row',
+                style: {
+                  display: 'flex',
+                  alignItems: 'stretch',
+                  gap: '2px',
+                  borderRadius: '6px',
+                  background: open ? `color-mix(in srgb, ${ACCENT} 6%, transparent)` : 'transparent',
+                },
+              },
               react.createElement(
                 'button',
                 {
@@ -3278,13 +3550,14 @@ window.__ModuleLoader__.load({
                     gap: '8px',
                     flex: '1 1 auto',
                     minWidth: 0,
+                    minHeight: 'var(--dsh-review-row-h, 28px)',
                     textAlign: 'left',
-                    padding: '6px 8px',
+                    padding: '4px 8px',
                     border: '1px solid transparent',
-                    borderRadius: '6px',
+                    borderRadius: '5px',
                     background: open
                       ? 'var(--dsw-alias-interactive-bg-hover-accent, color-mix(in srgb, ' + ACCENT + ' 8%, transparent))'
-                      : 'var(--dsh-review-row-bg, transparent)',
+                      : 'transparent',
                     color: 'var(--dsw-alias-label-primary)',
                     fontSize: '12.5px',
                     fontFamily: UI_FONT,
@@ -4679,6 +4952,11 @@ window.__ModuleLoader__.load({
     // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
     // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
     exports.__fileListForTest = FileList
+    // 抽屉本体也导出给测试：外观层（头栏、提交卡片、分组头、行内动作的悬停规则）都在它
+    // 的 DOM 结构上，隔着两层入口组件（`HeroChangesTrigger` → `ReviewPanel`）断言会让
+    // 测试被无关的状态耦合住（实测踩到过：换一个 hook key 也拿不到干净状态，因为嵌套
+    // 组件的 hook 槽按树中位置归属）。
+    exports.__reviewPanelForTest = ReviewPanel
     // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
     // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
     //
