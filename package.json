@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "private": true,
   "description": "DeepSeek Harness 桌面客户端：内置官方 dsh 运行时与 Node，终端用户无需安装 npm/node，完整复用官方 Web UI，并支持从 npm registry 自动更新运行时。",
   "license": "MIT",
