@@ -1358,11 +1358,10 @@ window.__ModuleLoader__.load({
         }
       }, [workspace, revision])
 
-      if (state.phase === 'loading') return statusBlock(t('loading'))
-      if (state.phase === 'error') return statusBlock(state.message, 'error')
-
       const commit = state.result?.commit
       const files = state.result?.files ?? []
+      // 外壳始终渲染：`data-review-commit-changes` 是"这条提交被展开了"的锚点，
+      // 加载中/出错时也必须带着它，否则脚本与用户都只能靠"文件行出现了没有"来猜。
       return react.createElement(
         'div',
         {
@@ -1378,14 +1377,25 @@ window.__ModuleLoader__.load({
             gap: '6px',
           },
         },
-        react.createElement(CommitSummary, { t, commit, containingBranches: state.result?.containingBranches ?? [] }),
-        react.createElement(
-          'div',
-          { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-          react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', textTransform: 'uppercase' } }, t('changesTitle')),
-          react.createElement('span', { 'data-review-commit-file-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('graphFiles', { count: files.length })),
-        ),
-        react.createElement(CommitFileList, { t, files, workspace, revision }),
+        state.phase === 'loading'
+          ? statusBlock(t('loading'))
+          : state.phase === 'error'
+            ? statusBlock(state.message, 'error')
+            : [
+                react.createElement(CommitSummary, {
+                  key: 'summary',
+                  t,
+                  commit,
+                  containingBranches: state.result?.containingBranches ?? [],
+                }),
+                react.createElement(
+                  'div',
+                  { key: 'title', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                  react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', textTransform: 'uppercase' } }, t('changesTitle')),
+                  react.createElement('span', { 'data-review-commit-file-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('graphFiles', { count: files.length })),
+                ),
+                react.createElement(CommitFileList, { key: 'files', t, files, workspace, revision }),
+              ],
       )
     }
 

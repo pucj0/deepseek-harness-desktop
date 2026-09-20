@@ -1,3 +1,18 @@
+# 1.4.3
+
+本次是 1.4.2 的一处收尾：**详情还没到手时，面板外壳就已经在了**。
+
+## 变更
+
+- **「这条提交被展开了」有了一个稳定的锚点。** 改动面板的 `data-review-commit-changes` 此前只在详情返回**之后**才渲染；加载中是另一个结构，于是"点了没反应"和"正在加载"在界面上、在脚本里都分辨不出来。现在外壳始终渲染（带 `data-review-commit-changes` 与它所对应的提交哈希），加载中/出错态显示在外壳**里面**。
+
+## 校验
+
+- `test-review-overlay-hooks` 从 80 项扩到 **86 项**，新增第 8 节：把 `commit-detail` 的响应挂起，断言加载中就已经有面板外壳、外壳带着正确的提交哈希、还没有文件行；放行后文件行出现，且**没有重复请求**。
+- 其余全部通过：`test-review-graph` 138、`test-gitbar-branches` 153、`test-gitbar-source-panel` 97、`test-review-staging` 102、`test-review-graph-view` 51、`test-graph-layout` 184 + parity 19、`test-review-host` 51、`test-i18n`、`check-plugin-i18n`、`test-plugin-sync`、`test-version`。合计 **881 项断言**。
+
+---
+
 # 1.4.2
 
 本次把「最近提交」做成**可以点开的**：点提交记录看它改了哪些文件，再点文件看具体改了什么。
@@ -17,7 +32,7 @@
 
 ## 校验
 
-- `test-review-overlay-hooks` 从 **40 项扩到 80 项**，新增的 31 项把"点提交 → 看文件 → 点文件 → 看差异"整条链路逐步钉住：
+- `test-review-overlay-hooks` 从 **40 项扩到 80 项**，新增的 40 项把"点提交 → 看文件 → 点文件 → 看差异"整条链路逐步钉住：
   * 不点就不取数据（未展开时 `commit-detail` 请求数为 0）；
   * 点开后出现改动面板、面板对应被点的那次提交、`aria-expanded` 置位；
   * 详情**只取一次**，且请求带上正确的工作区与哈希；

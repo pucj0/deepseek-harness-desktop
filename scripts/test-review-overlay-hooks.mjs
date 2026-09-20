@@ -235,6 +235,13 @@ const COMMIT_FILE = {
   binary: false,
 }
 
+/**
+ * 把 `commit-detail` 的响应挂起，用来观察**加载中**那一帧。
+ * 平时为 `false`（立即返回）；置为 `true` 后返回一个待决 promise，测试自己 resolve。
+ */
+let holdCommitDetail = false
+const heldDetails = []
+
 globalThis.fetch = async (url, init) => {
   fetches.push({ url: String(url), body: init?.body })
   const target = String(url)
@@ -251,6 +258,11 @@ globalThis.fetch = async (url, init) => {
         : target.includes('/history')
           ? HISTORY
           : CHANGES
+  if (holdCommitDetail && target.includes('/commit-detail')) {
+    return await new Promise((resolve) => {
+      heldDetails.push(() => resolve({ ok: true, text: async () => JSON.stringify(payload) }))
+    })
+  }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
 
@@ -624,6 +636,29 @@ check('差异行已渲染', diffRows.length > 0, 'true')
 const addRow = diffRows.find((row) => row.props.children?.[1]?.props?.children === '+')
 check('增行标记在第二个子元素', addRow !== undefined, 'true')
 check('行号在第一个子元素', /\d/.test(JSON.stringify(addRow?.props.children?.[0] ?? null)), 'true')
+
+console.log('')
+console.log('=== 8. 详情还没到手时，面板外壳已经在了 ===')
+// `data-review-commit-changes` 是"这条提交被展开了"的锚点。如果它只在外壳渲染完成
+// 之后才出现，那"点了没反应"和"正在加载"在界面上/脚本里都分辨不出来。
+{
+  const beforeCount = detailCalls().length
+  holdCommitDetail = true
+  check('点得中提交记录', await clickNow('data-review-commit-toggle', 'b'.repeat(40)), 'true')
+  const loadingNodes = await drain()
+  const loadingPanel = rowsOf(loadingNodes, 'data-review-commit-changes')[0]
+  has('加载中就有面板外壳', loadingPanel !== undefined)
+  check('外壳带着被展开的提交', loadingPanel?.props?.['data-review-commit-changes'], 'b'.repeat(40))
+  check('加载中还没有文件行', rowsOf(loadingNodes, 'data-graph-file-row').length, 0)
+  check('加载中发出了详情请求', detailCalls().length - beforeCount, 1)
+  check('细节请求带上第二条提交', JSON.parse(detailCalls().at(-1)?.body).revision, 'b'.repeat(40))
+  // 放行：面板里应当出现文件列表，且不再多发一次请求。
+  for (const release of heldDetails.splice(0)) release()
+  holdCommitDetail = false
+  const loadedNodes = await drain()
+  check('放行后出现文件行', rowsOf(loadedNodes, 'data-graph-file-row').length, 2)
+  check('放行后没有重复请求', detailCalls().length - beforeCount, 1)
+}
 
 console.log('')
 console.log(failures === 0 ? '项目级入口钩子全部通过' : `${failures} 项失败`)
