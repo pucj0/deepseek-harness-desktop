@@ -681,6 +681,7 @@ was verified rather than assumed:
 | `scripts/test-gitbar-branch-perf.mjs` | the process ceiling for branch listing (300 branches must not mean 300 `git` processes) |
 | `scripts/test-gitbar-branch-sync.mjs` | the enrichment contract (`syncExact`) and the boundedness of "only visible rows" |
 | `scripts/test-release-notes.mjs` | a Release body carries only its own version's notes |
+| `scripts/verify-release.mjs` | after publishing, re-checks the **published** body, draft flag and asset list through the GitHub API |
 | `scripts/probe-web.mjs` | boots the runtime headlessly and reports the URL it serves |
 | `scripts/probe-ui.mjs` | drives the live UI over CDP: dump controls, click, evaluate |
 | `scripts/list-slots.mjs`, `scripts/list-slot-kinds.mjs` | enumerate UI extension slots and their kinds |
@@ -749,6 +750,18 @@ script is:
 node scripts/repair-release-notes.mjs          # dry-run by default
 node scripts/repair-release-notes.mjs --apply   # body only; tags and assets untouched, original text backed up first
 ```
+
+After publishing, check the release that actually went out (not the local file) through the GitHub API:
+
+```bash
+node scripts/verify-release.mjs         # checks package.json's current version
+node scripts/verify-release.mjs 1.4.9   # or an explicit version
+```
+
+`test-release-notes.mjs` validates the **local** file, while the incident happened in the
+**published** body — that is the gap `verify-release.mjs` closes: it pulls the release back and
+counts version headings, checks the draft flag, and verifies the asset list (the three platform
+installers plus the three `latest*.yml` update metadata files).
 
 ---
 

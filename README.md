@@ -565,6 +565,7 @@ node scripts/test-gitbar-branch-interaction.mjs # 分支行交互：单击开菜
 node scripts/test-gitbar-branch-sync.mjs      # 补算契约（syncExact）与"只补算可见行"的有界性
 node scripts/test-gitbar-branch-perf.mjs     # 分支列表的子进程上界（300 分支不许起 300 个 git）
 node scripts/test-release-notes.mjs      # Release 正文只含本次版本（防"整份变更日志"事故）
+node scripts/verify-release.mjs          # 发布后用 GitHub API 复核**已发布**的正文/状态/附件
 node scripts/check-plugin-i18n.mjs       # 插件里没有硬编码文案
 ```
 
@@ -615,6 +616,14 @@ node scripts/release.mjs                         # 打标签之前也会校验�
 node scripts/repair-release-notes.mjs          # 默认 dry-run，只报告
 node scripts/repair-release-notes.mjs --apply   # 真的改（只改正文，不动标签与附件；改前备份原文）
 ```
+
+发布完成后用 GitHub API 核对**已发布的那一份**（而不是本地文件）：
+
+```bash
+node scripts/verify-release.mjs 1.4.9   # 正文只有一个版本标题、不是 draft、附件齐全
+```
+
+`test-release-notes.mjs` 校验的是**本地**文件，而事故发生在**已发布**的正文上；`verify-release.mjs` 补的正是这一环：它把 Release 拉回来数版本标题、检查 draft 状态与附件清单（三平台安装包与三份 `latest*.yml`）。不传版本号时校验 `package.json` 的当前版本，因此发布后直接 `node scripts/verify-release.mjs` 即可。
 
 ### 诊断脚本
 
