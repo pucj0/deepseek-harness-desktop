@@ -22,9 +22,20 @@ const currentVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8
 const version = process.argv[2] ?? currentVersion
 const tag = `v${version}`
 const repo = 'pucj0/deepseek-harness-desktop'
-// 「上一版」按补丁号 -1 推出来，用于"正文里混进了上一版"这条断言（写死版本号会在下一版失效）。
+// 「上一版」用于"正文里混进了上一版"这条断言（写死版本号会在下一版失效）。
+//
+// **必须按本项目的版本序列推**：补丁号走 0..9，然后进位到次版本（`1.4.9 → 1.5.0`）。
+// 早先只做 `patch - 1`，于是 `1.5.0` 的"上一版"被算成它自己，校验必然误报
+// "正文里混入了上一版（# 1.5.0）"——一个自指的假警报。
 const parts = version.split('.').map(Number)
-const previous = parts.length === 3 ? `${parts[0]}.${parts[1]}.${Math.max(0, parts[2] - 1)}` : ''
+const previous =
+  parts.length === 3
+    ? parts[2] > 0
+      ? `${parts[0]}.${parts[1]}.${parts[2] - 1}`
+      : parts[1] > 0
+        ? `${parts[0]}.${parts[1] - 1}.9`
+        : ''
+    : ''
 
 /** 从 git 凭据助手取 GitHub token（与 ci-*.mjs 同一套做法，不落盘）。 */
 function githubToken() {
