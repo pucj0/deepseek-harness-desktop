@@ -244,10 +244,12 @@ composer card visually — the background extends behind the card and reuses the
   current branch with a checkmark; switching to a remote branch creates the matching
   tracking branch automatically
 - The first paint of the branch list spawns exactly **one git process** (a single
-  `for-each-ref`); ahead/behind starts from the upstream data it already carries, and only
-  the **currently visible** branches are enriched asynchronously (concurrency capped at 4).
-  Hundreds of branches therefore never mean hundreds of `git rev-list` processes, and the
-  current branch's ahead/behind always comes from `git status`, so it is exact
+  `for-each-ref`); ahead/behind starts from the upstream data it already carries, and exact
+  values are computed asynchronously only for the rows **actually inside the viewport** plus
+  whatever the user selected (concurrency capped at 4; each name is asked for at most once
+  per list, with a total ceiling independent of repo size). Hundreds of branches therefore
+  never mean hundreds of `git rev-list` processes, and the background never walks the whole
+  repository. The current branch's ahead/behind always comes from `git status`, so it is exact
 - The menu flips above or below depending on viewport height, and its width and position
   stay inside the window; only the result list scrolls, the search box stays pinned
 - If uncommitted changes would be overwritten, git refuses the switch — the menu **stays
@@ -289,6 +291,13 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 - The change count on the entry and the file list inside the drawer come from the **same shared
   snapshot** (one poll), so "shows 0 outside, has files inside" cannot happen; `stage /
   unstage / revert / commit` all invalidate that snapshot and refetch once
+- **A failed `Log` render only degrades that one tab.** Every graph field is normalised where it
+  is fetched (`/graph` and `/commit-detail` can omit or mistype fields and nothing malformed ever
+  reaches the render layer), and an error boundary wraps the tab — so a crash shows diagnosable
+  detail (component and field) plus a "Reload Log" button while the drawer, the `Changes` tab and
+  the top-right entry all stay put. The observed symptom used to be the whole drawer *and* the entry
+  vanishing on a `Log` click, which reads as "the panel closed itself" but is really a render-time
+  exception taking the whole slot entry down through the slot-level error boundary.
 - **A file whose only change is its mode (a `chmod`) is not a change.** On Windows, a repo with
   `core.fileMode=true` makes git record a `100755` script as `100644` — a `0/0` "modification"
   with identical content. The host snapshots with `-c core.fileMode=false` and additionally
@@ -578,8 +587,10 @@ was verified rather than assumed:
 | `scripts/test-review-overlay-hooks.mjs` | the project panel's overlay entry does not shadow the standard hooks, and its workspace follows the current session (no Electron needed) |
 | `scripts/test-gitbar-workspace-race.mjs` | switching projects: a late response from the old workspace must never land |
 | `scripts/test-review-workspace-race.mjs` | shared-snapshot and commit-graph races; the entry's number and the drawer's list come from one snapshot |
+| `scripts/test-review-log-tab-crash.mjs` | clicking Log must not take the drawer and the top-right entry down with it (missing host fields + an error boundary) |
 | `scripts/test-gitbar-branch-interaction.mjs` | branch rows: single click opens the menu, double click switches, right click opens the same menu |
 | `scripts/test-gitbar-branch-perf.mjs` | the process ceiling for branch listing (300 branches must not mean 300 `git` processes) |
+| `scripts/test-gitbar-branch-sync.mjs` | the enrichment contract (`syncExact`) and the boundedness of "only visible rows" |
 | `scripts/test-release-notes.mjs` | a Release body carries only its own version's notes |
 | `scripts/probe-web.mjs` | boots the runtime headlessly and reports the URL it serves |
 | `scripts/probe-ui.mjs` | drives the live UI over CDP: dump controls, click, evaluate |

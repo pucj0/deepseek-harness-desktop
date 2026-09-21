@@ -285,7 +285,11 @@ try {
     console.log(`  [measure] /branch/sync（${SYNC_BATCH} 个分支）：${measured.count} 个进程，最高同时 ${measured.maxConcurrent} 个`)
     check('3) 200', sync.status, 200)
     check('   每个请求的分支都有结果', Object.keys(sync.body.sync ?? {}).length, SYNC_BATCH)
-    check('   结果标为精确值', sync.body.sync[names[0]]?.exact, true)
+    // 字段名必须与 `/branches` 一致（`syncExact`）。曾经这里是 `exact`，而客户端条目上是
+    // `syncExact`——合并之后"已精确"永远判不出来，补算会被一轮轮重复触发（直到扫完整个
+    // 仓库）。这条断言就是钉住那个契约的：再出现第二个字段名，这里立刻变红。
+    check('   结果标为精确值（syncExact）', sync.body.sync[names[0]]?.syncExact, true)
+    check('   不再有第二套字段名 exact', Object.hasOwn(sync.body.sync[names[0]] ?? {}, 'exact'), false)
     // 1 次 for-each-ref 解析名字 + 每个名字一次 rev-list。
     checkLe('   进程数 ≤ 名字数 + 1', measured.count, SYNC_BATCH + 1)
     checkLe('   最高并发 ≤ 4', measured.maxConcurrent, 4)

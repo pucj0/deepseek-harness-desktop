@@ -485,9 +485,14 @@ async function listBranches(cwd) {
  * 完整引用与上游，查不到的（已删除、被过滤掉、伪造的）直接跳过。这样即使名字是伪造的，
  * 也不会成为"客户端能指定任意 rev"的入口（见本文件头部的安全约束）。
  *
+ * **字段名与 `/branches` 完全一致**：都叫 `syncExact`。此前这里回的是 `exact`，而客户端
+ * 的条目上是 `syncExact`——合并之后条目上会同时挂着 `exact: true` 与 `syncExact: false`，
+ * 于是"这个分支已经精确过了"永远判不出来，补算请求被一轮轮重复触发（直到把整个仓库的分支
+ * 都算一遍）。**同一个概念只能有一个字段名**，这条比"哪个名字更好"重要得多。
+ *
  * @param cwd - 工作区路径。
  * @param names - 客户端请求的分支短名（本地或远程）。
- * @returns `{ sync: { [name]: { ahead, behind, diverged, upstreamGone, exact } } }`。
+ * @returns `{ sync: { [name]: { ahead, behind, diverged, upstreamGone, syncExact } } }`。
  */
 async function readBranchSync(cwd, names) {
   const wanted = new Set()
@@ -527,7 +532,7 @@ async function readBranchSync(cwd, names) {
       if (index >= targets.length) return
       const [name, target] = targets[index]
       if (target === undefined) {
-        sync[name] = { ahead: 0, behind: 0, diverged: false, upstreamGone: false, exact: true }
+        sync[name] = { ahead: 0, behind: 0, diverged: false, upstreamGone: false, syncExact: true }
         continue
       }
       const result = await readUpstreamCounts(cwd, target.upstream, target.ref, target.track)
@@ -536,7 +541,7 @@ async function readBranchSync(cwd, names) {
         behind: result.behind,
         diverged: result.diverged,
         upstreamGone: result.gone,
-        exact: true,
+        syncExact: true,
       }
     }
   }

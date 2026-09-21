@@ -12,6 +12,7 @@
 //   1. 组件 hook 槽按"位置 + key"归属，且所有渲染入口用同一个起点 key；
 //   2. 副作用挂在嵌套组件上，必须展开整棵树并把每一层的 effect 都跑掉；
 //   3. 查询要读**当前**界面，不能读交互之前的快照。
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -255,18 +256,33 @@ const DETAIL = {
   ],
   containingBranches: ['feature', 'main'],
 }
-const FILE_DIFF = {
+/**
+ * 单个文件的差异：**按提交区分**。
+ *
+ * 故意让内容里带上提交号：两条提交改同一个文件是常态，而"切换提交后显示的其实是上一条
+ * 提交的差异"这种事，只有差异文本能区分时才能被断言钉住（见第 5b 节）。
+ */
+const commitFileDiff = (revision) => ({
   isRepo: true,
   path: 'src/app.ts',
-  diff: ['diff --git a/src/app.ts b/src/app.ts', '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1 +1 @@', '-old', '+new', ''].join('\n'),
+  diff: [
+    'diff --git a/src/app.ts b/src/app.ts',
+    '--- a/src/app.ts',
+    '+++ b/src/app.ts',
+    '@@ -1 +1 @@',
+    '-old',
+    `+new from-${String(revision).slice(0, 8)}`,
+    '',
+  ].join('\n'),
   truncated: false,
   binary: false,
-}
+})
 
 const requests = []
 globalThis.fetch = async (url, init) => {
   const target = String(url)
-  requests.push({ url: target, body: init?.body === undefined ? undefined : JSON.parse(init.body) })
+  const body = init?.body === undefined ? undefined : JSON.parse(init.body)
+  requests.push({ url: target, body })
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   const payload =
     route === 'roots'
@@ -276,7 +292,7 @@ globalThis.fetch = async (url, init) => {
         : route === 'commit-detail'
           ? DETAIL
           : route === 'commit-file'
-            ? FILE_DIFF
+            ? commitFileDiff(body?.revision)
             : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
@@ -511,6 +527,56 @@ console.log('=== 5. 展开一个文件的差异（按需取）===')
   await click(find('data-graph-file-row', 'src/app.ts'))
   check('   再次点击收起', find('data-graph-file-diff') === null, 'true')
   check('   收起不重复请求', requests.filter((r) => r.url.includes('/review/commit-file')).length, 1)
+}
+
+console.log('')
+console.log('=== 5b. 切换提交后，同一路径的文件不得沿用上一条提交的差异 ===')
+// 这是"diff 串提交"的回归：两次提交都改了 `src/app.ts` 时，只按路径给 `CommitFileRow`
+// 做 key 会让 React 认为"还是同一个实例"——展开状态与已取回的差异都留着，于是新提交的
+// 标题下面显示的是上一条提交的差异（路径一样、差异也长得合理，肉眼几乎看不出来）。
+{
+  // 前置：在提交 m 里把 src/app.ts 的差异**展开着**（这样"切到 q"才有东西可串）。
+  await click(find('data-graph-row', 'm'.repeat(40)))
+  await click(find('data-graph-file-row', 'src/app.ts'))
+  const beforeText = textOf(find('data-graph-file-diff'))
+  checkTrue('5b) 前置：m 的差异已展开且属于 m', beforeText.includes(`from-${'m'.repeat(8)}`))
+
+  // 切到提交 q。
+  //
+  // **先把行节点取出来，再触发点击**：取行本身会渲染一帧（那个桩渲染器把"依赖变化"记在
+  // 渲染期，副作用要么被收集、要么被丢掉），因此必须让"改选中"和"渲染这一帧"分开，
+  // 才能精确地看到 React 的真实顺序：渲染（这一帧画什么）→ 提交后跑 effect。
+  const qRow = find('data-graph-row', 'q'.repeat(40))
+  qRow.props.onClick({ stopPropagation() {}, preventDefault() {} })
+  const frame = []
+  const painted = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey, frame)
+  // 这一帧就是"用户点完之后立刻看到的那一帧"：
+  check('   切换提交后的第一帧没有残留差异', painted.some((n) => n.props?.['data-graph-file-diff'] !== undefined), 'false')
+  check('   第一帧也没有上一条提交的文件列表', painted.filter((n) => n.props?.['data-graph-file-row'] !== undefined).length, 0)
+  // 提交之后再跑 effect（与 React 一致），让新提交的详情去取数。
+  for (const effect of frame) effect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await settle()
+  check('   稳定后仍没有残留差异', find('data-graph-file-diff') === null, 'true')
+  check('   文件行是未展开的', find('data-graph-file-row', 'src/app.ts')?.props?.['aria-expanded'], false)
+
+  const before = requests.filter((r) => r.url.includes('/review/commit-file'))
+  await click(find('data-graph-file-row', 'src/app.ts'))
+  const after = requests.filter((r) => r.url.includes('/review/commit-file'))
+  check('   重新展开会重新请求', after.length, before.length + 1)
+  check('   请求带的是新的提交', after[after.length - 1].body.revision, 'q'.repeat(40))
+  const diffText = textOf(find('data-graph-file-diff'))
+  checkTrue('   展示的是新提交的差异', diffText.includes(`from-${'q'.repeat(8)}`))
+  check('   不再出现上一条提交的差异', diffText.includes(`from-${'m'.repeat(8)}`), 'false')
+
+  // 结构性断言：`CommitFileRow` 的 key 必须**带上提交号**。
+  //
+  // 上面那几条断言靠的是"切换提交时详情会重新取数、文件列表整段重挂"，而 key 只按路径是
+  // 另一条独立的隐患：只要某天有人让"旧详情在新详情到达前继续渲染"，React 就会把同一个
+  // 实例判成"props 变了"，展开状态与缓存又回来了。key 是那条路径上的最后一道保险。
+  // 桩渲染器看不到 React 的 key（它只用来分配 hook 槽），因此这里直接断言源码里的写法。
+  const source = readFileSync(join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'client.js'), 'utf8')
+  checkTrue('   CommitFileRow 的 key 带提交号', source.includes('key: `${revision}:${file.path}`'))
 }
 
 console.log('')

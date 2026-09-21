@@ -167,12 +167,20 @@ const branch = (name, extra) => ({
 })
 const STATUS_A = { isRepo: true, branch: 'alpha', detached: false, upstream: '', ahead: 0, behind: 0, changedFiles: 1, untrackedFiles: 0, upstreamGone: false, merging: false, rebasing: false, head: 'a'.repeat(40) }
 const STATUS_B = { ...STATUS_A, branch: 'beta', changedFiles: 7 }
-const BRANCHES_A = { branches: [branch('alpha', { current: true }), branch('a-feature')], counts: { local: 2, remote: 0 } }
+// A 里带一个远程分支：面板的"抓取全部远端"图标要 `remotes.length > 0` 才渲染，而第 6 节
+// 需要一个**不关闭面板**的写操作来作废 branches 请求（checkout 成功会关面板）。
+const BRANCHES_A = {
+  branches: [branch('alpha', { current: true }), branch('a-feature'), branch('origin/alpha', { isRemote: true, remote: 'origin' })],
+  counts: { local: 2, remote: 1 },
+}
 const BRANCHES_B = { branches: [branch('beta', { current: true }), branch('b-feature')], counts: { local: 2, remote: 0 } }
+const REMOTES = [{ name: 'origin', url: 'https://example.invalid/repo.git' }]
 
 /** 挂起的请求：`{ route, cwd, resolve }`。 */
 const pending = []
 const requests = []
+/** 附加到 `/status` 上的字段（第 6 节用它造出"合并进行中"从而露出中止入口）。 */
+let statusExtra = {}
 /** 让某条路由的响应先挂起（返回 true 表示"这次请求被挂起了"）。 */
 let hold = () => false
 
@@ -191,18 +199,18 @@ globalThis.fetch = async (url) => {
   const cwd = target.searchParams.get('cwd') ?? ''
   const payload =
     route === 'status'
-      ? cwd === B
-        ? STATUS_B
-        : STATUS_A
+      ? { ...(cwd === B ? STATUS_B : STATUS_A), ...statusExtra }
       : route === 'branches'
         ? cwd === B
           ? BRANCHES_B
           : BRANCHES_A
         : route === 'remotes'
-          ? { remotes: [] }
+          ? { remotes: REMOTES }
           : route === 'branch/sync'
             ? { sync: {} }
-            : { isRepo: true, ...(cwd === B ? STATUS_B : STATUS_A) }
+            // 走到这里的都是写操作：host 回的是最新状态 + `branchesStale`（分支列表由客户端
+            // 异步重取，见 runWrite 的说明）。第 6 节就靠这个标记触发"真的重发一次 branches"。
+            : { isRepo: true, ...(cwd === B ? STATUS_B : STATUS_A), branchesStale: true }
   requests.push({ route, cwd })
   if (hold(route, cwd)) {
     return await new Promise((resolve) => {
@@ -457,6 +465,65 @@ console.log('=== 5. 写操作（checkout）的收尾不许写进新工作区 ===
     findAll('data-desktop-branch-option', nodes).every((n) => n.props.disabled !== true),
     'true',
   )
+}
+
+console.log('')
+console.log('=== 6. 写操作作废旧 branches 请求后，必须真的重发一次 ===')
+// 这一节是"single-flight 与写抢占打架"的回归：
+//   旧的 branches 请求还在飞 → 写操作抢占 branches 分片 → host 回 branchesStale →
+//   客户端调 loadBranches()。此时如果 single-flight 复用了**那条已经作废的**在途请求，
+//   调用方 await 完会发现 `accept` 为假：既没有发新请求，也没有关 loading——
+//   界面永远停在"正在加载分支…"，列表永远是旧的。
+{
+  rootKey = `race${mountSeq++}`
+  hold = () => false
+  // 造出"合并进行中"：面板会露出「中止合并」入口，它是**不关闭面板**的写操作
+  // （推送/新建等对话框在成功后会关面板，那样后面的断言就没得看了）。
+  statusExtra = { merging: true }
+  sessionWorkspace = A
+  await settle()
+  find('data-desktop-branch-trigger').props.onClick()
+  await settle()
+  const branchesOf = () => requests.filter((r) => r.route === 'branches' && r.cwd === A).length
+  const baseline = branchesOf()
+
+  // 手动刷新一次并把它**挂起**：这就是"旧的、还在飞的"那一次。
+  hold = (route, cwd) => route === 'branches' && cwd === A
+  find('data-desktop-sc-icon', 'refresh').props.onClick({ stopPropagation() {}, preventDefault() {} })
+  await settle(2)
+  const inFlight = branchesOf()
+  check('6) 前置：刷新请求在飞', inFlight, baseline + 1)
+  check('   面板处于加载中', textOf(find('data-desktop-branch-menu')).includes('loadingBranches'), 'true')
+
+  // 写操作：点「中止合并」。进度区块与快捷操作都在列表**之外**，因此 loading 时也点得到
+  // （列表里的行与"抓取全部远端"图标此时都被加载态替代了）。
+  const progress = find('data-desktop-sc-progress')
+  checkTrue('   有中止入口', progress !== null)
+  collectHostNodes(progress, 'probe').find((node) => node.props?.type === 'button').props.onClick({ stopPropagation() {}, preventDefault() {} })
+  await settle(2)
+  checkTrue('   写操作确实发出了', requests.some((r) => r.route === 'op/abort' && r.cwd === A))
+  check('   写操作之后真的又发了一次 branches', branchesOf(), inFlight + 1)
+  check('   确实有两条 branches 请求叠在一起', pending.filter((p) => p.route === 'branches' && p.cwd === A).length, 2)
+
+  // 放行**旧**的那一条（先入队的那个），给它一份"陈旧列表"：不许被采用，也不许关 loading。
+  release('branches', A, { branches: [branch('stale-one', { current: true })], counts: { local: 1, remote: 0 } })
+  await settle()
+  check(
+    '   旧列表没有被采用',
+    findAll('data-desktop-branch-option').some((n) => n.props['data-desktop-branch-name'] === 'stale-one'),
+    'false',
+  )
+  check('   旧请求没有关掉新请求的 loading', textOf(find('data-desktop-branch-menu')).includes('loadingBranches'), 'true')
+
+  // 放行**新**的那一条：loading 关闭，列表换成新数据。
+  release('branches', A, { branches: [branch('fresh-one'), branch('fresh-two')], counts: { local: 2, remote: 0 } })
+  await settle()
+  const names = [...new Set(findAll('data-desktop-branch-option').map((n) => n.props['data-desktop-branch-name']))]
+  check('   新列表已生效', names.join(','), 'fresh-one,fresh-two')
+  check('   loading 已关闭', textOf(find('data-desktop-branch-menu')).includes('loadingBranches'), 'false')
+  // 复原状态，避免影响后续（这一节是最后一个，但保持测试之间不互相污染的习惯）。
+  statusExtra = {}
+  hold = () => false
 }
 
 console.log('')

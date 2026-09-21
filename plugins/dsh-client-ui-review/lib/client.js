@@ -675,6 +675,11 @@ window.__ModuleLoader__.load({
       graphInBranches: '在 {count} 个分支中：{names}',
       graphNoFiles: '这条提交没有改动任何文件（空提交）。',
       graphHideGraph: '收起提交图',
+      // ---- Log 页签的渲染失败降级 ----
+      logCrashedTitle: '提交图渲染出错，Log 页签暂时不可用',
+      logCrashedHint: '抽屉与右上角的入口都还在：切回"更改"页签可以继续暂存与提交。修好之后点下面的按钮重试。',
+      logReload: '重新加载 Log',
+      logErrorDetail: '错误详情（组件与字段）',
       // ---- 暂存与提交（更改区块）----
       stagedTitle: '已暂存',
       unstagedTitle: '更改',
@@ -796,6 +801,11 @@ window.__ModuleLoader__.load({
       graphInBranches: 'In {count} branches: {names}',
       graphNoFiles: 'This commit changed no files (empty commit).',
       graphHideGraph: 'Hide commit graph',
+      // ---- Log tab render failure fallback ----
+      logCrashedTitle: 'The commit graph failed to render; the Log tab is unavailable',
+      logCrashedHint: 'The drawer and the top-right entry are still here: switch back to Changes to keep staging and committing. Retry with the button below once the cause is fixed.',
+      logReload: 'Reload Log',
+      logErrorDetail: 'Error detail (component and field)',
       // ---- Staging and committing (the Changes section) ----
       stagedTitle: 'Staged',
       unstagedTitle: 'Changes',
@@ -1055,6 +1065,10 @@ window.__ModuleLoader__.load({
       const isCurrent = (ticket) =>
         ticket.generation === generation && Object.is(ticket.workspace, workspace)
 
+      /** 这是该请求所写分片的最新一次请求吗？（当前代 + 最新号） */
+      const isLatest = (ticket) =>
+        isCurrent(ticket) && ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
+
       return {
         sync(next) {
           if (Object.is(next, workspace)) return false
@@ -1070,17 +1084,19 @@ window.__ModuleLoader__.load({
           return generation
         },
         isCurrent,
-        accept(ticket) {
-          if (!isCurrent(ticket)) return false
-          return ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
-        },
+        accept: isLatest,
         run(kind, task, options) {
           const slices = Array.isArray(options?.slices) ? options.slices : [kind]
           const coalesce = options?.coalesce === true
           const key = `${generation}\u0000${kind}`
           if (coalesce) {
             const hit = inflight.get(key)
-            if (hit !== undefined) return hit
+            // **只复用仍然有效的在途请求**：一旦它的分片被更晚的请求（例如"重新加载"
+            // 抢占 `graph`）拿走，这个条目就已经作废；把它交回调用方，调用方 await 完会
+            // 发现 `accept` 为假，于是既不重发、也不关 loading（界面就卡在加载态）。
+            // 与 gitbar 那份孪生实现保持同一条规则。
+            if (hit !== undefined && isLatest(hit.ticket)) return hit
+            if (hit !== undefined) inflight.delete(key)
           }
           const ticket = { workspace, generation, id: (nextId += 1), kind, slices }
           for (const slice of slices) latestOfSlice.set(slice, ticket.id)
@@ -1529,10 +1545,13 @@ window.__ModuleLoader__.load({
      * @returns `{ kind, oldLine, newLine, text }` 数组；kind 为 meta/context/add/del。
      */
     function parseDiffRows(diff) {
+      // `diff.split('\n')` 在 host 给回非字符串（例如被截断成对象、或 `null`）时直接抛
+      // `split is not a function`。差异面板在抽屉里，一次抛就把整块面板带走。
+      const text = typeof diff === 'string' ? diff : diff === undefined || diff === null ? '' : String(diff)
       const rows = []
       let oldLine = 0
       let newLine = 0
-      for (const raw of diff.split('\n')) {
+      for (const raw of text.split('\n')) {
         // 文件头与索引行：不作为代码行显示，避免与空行混淆。
         if (/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename )/u.test(raw)) {
           rows.push({ kind: 'meta', text: raw })
@@ -2089,7 +2108,16 @@ window.__ModuleLoader__.load({
                     // **复用**提交图，不重写一套：Log 页签要的"分支树 / 提交列表 / 详情"
                     // 三栏与主区域的提交图是同一个视图，差别只在容器宽度与是否带外框。
                     // `refreshToken` 让"提交成功"这类外部事件能把它顶一页新的回来。
-                    react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
+                    //
+                    // 外面这层错误边界是**必须**的：提交图的渲染依赖 host 回来的字段
+                    // （`parents`/`refs`/`commits`…），字段一旦缺了就是渲染期 TypeError，
+                    // 而 React 在没有边界时会把整棵子树卸掉——现象是"点了 Log，抽屉和右上角
+                    // 入口一起消失"，看起来像面板被关掉了，实际是一次崩溃。
+                    react.createElement(
+                      LogErrorBoundary,
+                      { t, workspace: workspacePath },
+                      react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
+                    ),
                   )
                 : react.createElement(
                     'div',
@@ -2950,6 +2978,8 @@ window.__ModuleLoader__.load({
         async (paths, push) => {
           const text = message.trim()
           if (text === '') return
+          // 记下这次提交属于哪个工作区：提交是异步的，期间用户可能切到另一个项目。
+          const mine = workspace
           const selected = Array.isArray(paths) ? paths : []
           const ok = await run('commit', {
             message: text,
@@ -2957,6 +2987,9 @@ window.__ModuleLoader__.load({
             ...(push === true ? { push: true } : {}),
           })
           if (ok === undefined) return
+          // 已经换了项目：提交确实成功了（在旧项目里），但这几个 setState 属于**新项目**的
+          // 草稿与勾选，不能拿旧项目的结果去清空它们（用户会发现自己刚打了一半的信息没了）。
+          if (workspaceRef.current !== mine) return
           setMessage('')
           // 提交成功后清掉"排除"记录：被排除的文件已经提交过了（或已不在列表里），
           // 留着会让下一次提交莫名其妙地漏掉同名的新改动。
@@ -4328,20 +4361,168 @@ window.__ModuleLoader__.load({
     /** 提交图上的取色：与泳道无关的常规色。 */
     const GRAPH_DIM = 'var(--dsw-alias-label-tertiary, #9aa0a6)'
 
+    /** 把任意值规范成字符串（渲染层不许出现 `undefined.slice` 这类崩溃）。 */
+    function asText(value) {
+      if (typeof value === 'string') return value
+      if (value === undefined || value === null) return ''
+      return String(value)
+    }
+
+    /** 把任意值规范成数组（host 少给/给错一个字段不该把整块界面带走）。 */
+    function asArray(value) {
+      return Array.isArray(value) ? value : []
+    }
+
+    /**
+     * 规范化一条 ref（分支/标签徽标）。
+     * @param raw - host 给的原始值。
+     * @returns `{ name, kind, isHead }`，或 null（不可渲染）。
+     */
+    function normalizeRef(raw) {
+      if (raw === null || typeof raw !== 'object') {
+        // host 曾经在别处把 `%D` 的**原文**（`HEAD -> main, origin/main`）直接放进来过：
+        // 字符串是 iterable，`for...of` 不报错、逐字符渲染出一堆垃圾；而 `.slice().map()`
+        // 会直接抛 `map is not a function`。统一在这里挡掉。
+        return null
+      }
+      const name = asText(raw.name).trim()
+      if (name === '') return null
+      return { name, kind: asText(raw.kind), isHead: raw.isHead === true }
+    }
+
+    /**
+     * 取一条提交的可渲染 ref 列表。
+     *
+     * 渲染层里到处写的是 `commit.refs ?? []`——它只挡 `null`/`undefined`，挡不住"host 给了
+     * 一个字符串"：字符串有 `.length`、也是 iterable，于是 `slice(0,3).map(...)` 直接抛
+     * `map is not a function`。所有读 refs 的地方都走这里。
+     *
+     * @param commit - 一条提交（可能来自未规范化的老路径）。
+     * @returns `{ name, kind, isHead }[]`。
+     */
+    function refListOf(commit) {
+      return asArray(commit?.refs)
+        .map(normalizeRef)
+        .filter((ref) => ref !== null)
+    }
+
+    /**
+     * 字符串前缀（短哈希、日期取前 10 位都用它）。
+     *
+     * 渲染层原来写的是 `row.hash.slice(0, 8)` / `(commit.committedAt ?? '').slice(0, 10)`：
+     * 后者只挡了 null/undefined，host 若给的是数字时间戳就直接抛 `slice is not a function`。
+     * 统一走 `asText` 再切，形状不对只会显示得难看，不会把界面带走。
+     */
+    function textSlice(value, length) {
+      return asText(value).slice(0, length)
+    }
+
+    /** 这条提交有没有父提交。根提交没有，`parents` 形状不对时也当没有。 */
+    function hasParents(commit) {
+      const parents = commit?.parents
+      return Array.isArray(parents) && parents.length > 0
+    }
+
+    /**
+     * 规范化一条提交。
+     *
+     * **这是 host 数据进入渲染层的唯一入口**（见 fetchGraph 与 normalizeCommitDetail）。
+     * 渲染层里有一批"看起来天经地义"的写法——`commit.parents.length`、
+     * `(commit.refs ?? []).slice(0,3).map(...)`、`commit.committedAt.slice(0,10)`——只要
+     * host 少给一个字段（版本不一致、路由被改、响应被截断），它们就是 TypeError。而 React
+     * 没有错误边界时会把**整棵树**卸掉：抽屉和右上角入口一起消失，看起来像"面板被关掉了"。
+     *
+     * 因此这里把每个字段都收敛到渲染层假定的形状：
+     *   * `parents` / `refs` 一定是数组；
+     *   * `hash`/`short`/`subject`/`author`/`committedAt` 等一定是字符串；
+     *   * 没有 `hash` 的条目直接丢弃（它没法当 key，也画不出可点的行）。
+     *
+     * @param raw - host 返回的一条提交。
+     * @returns 规范化后的提交，或 null（不可渲染）。
+     */
+    function normalizeCommit(raw) {
+      if (raw === null || typeof raw !== 'object') return null
+      const hash = asText(raw.hash).trim()
+      if (hash === '') return null
+      return {
+        hash,
+        // `%h` 缺失时用哈希前缀兜底：短哈希只是展示用，缺了不该让整行消失。
+        short: asText(raw.short).trim() || hash.slice(0, 7),
+        parents: asArray(raw.parents)
+          .map((parent) => asText(parent).trim())
+          .filter((parent) => parent !== ''),
+        author: asText(raw.author),
+        email: asText(raw.email),
+        authoredAt: asText(raw.authoredAt),
+        committedAt: asText(raw.committedAt),
+        subject: asText(raw.subject),
+        body: asText(raw.body),
+        refs: asArray(raw.refs).map(normalizeRef).filter((ref) => ref !== null),
+      }
+    }
+
+    /**
+     * 规范化 `/graph` 的一页。
+     * @param payload - host 的响应。
+     * @returns `{ isRepo, commits, hasMore, branch }`。
+     */
+    function normalizeGraphPage(payload) {
+      return {
+        isRepo: payload?.isRepo !== false,
+        branch: asText(payload?.branch),
+        commits: asArray(payload?.commits).map(normalizeCommit).filter((commit) => commit !== null),
+        hasMore: payload?.hasMore === true,
+      }
+    }
+
+    /**
+     * 规范化 `/commit-detail`。
+     *
+     * 详情除了 commit 本身还带 `files` 与 `containingBranches`，两者都直接进渲染层；
+     * 任何一个不是数组都会让右侧详情崩掉（而它在抽屉里，同样会带走整块面板）。
+     *
+     * @param payload - host 的响应。
+     * @returns `{ isRepo, commit, files, containingBranches }`。
+     */
+    function normalizeCommitDetail(payload) {
+      return {
+        isRepo: payload?.isRepo !== false,
+        commit: normalizeCommit(payload?.commit) ?? undefined,
+        files: asArray(payload?.files).filter((file) => file !== null && typeof file === 'object'),
+        containingBranches: asArray(payload?.containingBranches).map((name) => asText(name)).filter((name) => name !== ''),
+      }
+    }
+
+    /**
+     * 拉一次提交详情（**已规范化**）。
+     *
+     * 与 `fetchGraph` 一样，这里是 host 详情数据进入渲染层的唯一入口：`files` 不是数组时
+     * `CommitFileList` 会在 `files.length` 上抛，`commit` 缺字段会让 `CommitSummary` 抛，
+     * 而它们都在抽屉里——一次 TypeError 就把整个抽屉和右上角入口一起卸掉。
+     *
+     * @param workspace - 工作区路径。
+     * @param revision - 提交哈希。
+     * @returns 规范化后的详情。
+     */
+    async function fetchCommitDetail(workspace, revision) {
+      return normalizeCommitDetail(await call('commit-detail', { workspace, revision }))
+    }
+
     /**
      * 拉一页提交历史。
      *
      * @param workspace - 工作区路径。
      * @param options - `{ skip, ref }`。
-     * @returns host 的响应。
+     * @returns host 的响应（**已规范化**）。
      */
     async function fetchGraph(workspace, options) {
-      return call('graph', {
+      const payload = await call('graph', {
         workspace,
         limit: GRAPH_PAGE_SIZE,
         skip: options?.skip ?? 0,
         ...(options?.ref === undefined || options.ref === '' ? {} : { ref: options.ref }),
       })
+      return normalizeGraphPage(payload)
     }
 
     /**
@@ -4362,7 +4543,7 @@ window.__ModuleLoader__.load({
       const tags = []
       const seen = new Set()
       for (const commit of commits) {
-        for (const entry of commit.refs ?? []) {
+        for (const entry of refListOf(commit)) {
           const key = `${entry.kind}:${entry.name}`
           if (seen.has(key)) continue
           seen.add(key)
@@ -4393,7 +4574,7 @@ window.__ModuleLoader__.load({
                     key: `${key}:${row.name}`,
                     'data-graph-tree-row': row.name,
                     onClick: () => onPickRef(row.name),
-                    title: `${row.name}\n${row.hash.slice(0, 8)} ${row.subject}`,
+                    title: `${row.name}\n${textSlice(row.hash, 8)} ${row.subject}`,
                     style: {
                       display: 'block',
                       boxSizing: 'border-box',
@@ -4468,7 +4649,7 @@ window.__ModuleLoader__.load({
           const bottom = GRAPH_ROW_HEIGHT
           const mid = GRAPH_ROW_HEIGHT / 2
           // 根提交（或第一父提交落在窗口外）只有点、没有向下的线：`parents` 为空时不画。
-          const hasDown = commit.parents.length > 0
+          const hasDown = hasParents(commit)
           const d =
             x1 === x2
               ? `M ${x1} ${top} L ${x2} ${hasDown ? bottom : mid}`
@@ -4529,7 +4710,7 @@ window.__ModuleLoader__.load({
               }),
             ),
             // 分支/标签徽标。只显示前三个，多的收成一个计数——一排标签会把消息挤没。
-            ...(commit.refs ?? []).slice(0, 3).map((entry, index) =>
+            ...refListOf(commit).slice(0, 3).map((entry, index) =>
               react.createElement(
                 'span',
                 {
@@ -4572,7 +4753,7 @@ window.__ModuleLoader__.load({
             react.createElement(
               'span',
               { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } },
-              (commit.committedAt ?? '').slice(0, 10),
+              textSlice(commit.committedAt, 10),
             ),
           ),
         )
@@ -4615,7 +4796,7 @@ window.__ModuleLoader__.load({
         let alive = true
         void (async () => {
           try {
-            const result = await call('commit-detail', { workspace, revision })
+            const result = await fetchCommitDetail(workspace, revision)
             if (alive) setFetched(result)
           } catch {
             // 取不到摘要不算失败：下面的文件列表会自己显示它的错误。
@@ -4646,7 +4827,7 @@ window.__ModuleLoader__.load({
           { style: { fontSize: '11.5px', color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
           react.createElement('span', { style: { fontFamily: CODE_FONT } }, commit.short ?? ''),
           react.createElement('span', null, `${commit.author ?? ''} <${commit.email ?? ''}>`),
-          react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, (commit.committedAt ?? '').replace('T', ' ').slice(0, 16)),
+          react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, asText(commit.committedAt).replace('T', ' ').slice(0, 16)),
         ),
         containing.length > 0
           ? react.createElement(
@@ -4680,7 +4861,14 @@ window.__ModuleLoader__.load({
           ? react.createElement('div', { style: { padding: '8px 6px', fontSize: '12px', color: GRAPH_DIM } }, t('graphNoFiles'))
           : files.map((file) =>
               react.createElement(CommitFileRow, {
-                key: file.path,
+                // **key 必须带上 commit**，不能只有路径。
+                //
+                // 两次提交改动同一个文件是常态（`src/app.js` 在 A、B 里都改了），而只按路径
+                // 做 key 时 React 会把"切换到 B"当成同一个实例的 props 变化：实例内部的
+                // `open` 与已取回的 diff 都留着，于是 B 的详情里显示的是 **A 的差异**——
+                // 界面上完全看不出来（路径一样、差异长得也合理），是最容易骗过眼睛的一种错。
+                // 带上 revision 之后，切换提交就是换实例：展开状态与缓存一并丢弃。
+                key: `${revision}:${file.path}`,
                 t,
                 file,
                 workspace,
@@ -4698,22 +4886,30 @@ window.__ModuleLoader__.load({
      */
     function GraphCommitDetail(props) {
       const { t, workspace, revision } = props
-      const [state, setState] = react.useState({ phase: 'idle' })
+      /**
+       * 已取回的那一份详情**属于哪一次提交**。
+       *
+       * 只存 `{ phase, result }` 的话，"点另一条提交"之后、effect 把状态改成 loading 之前，
+       * 会有一次渲染拿着**上一条提交**的 `result`——文件列表与展开状态都还在，于是新提交的
+       * 标题下面短暂显示着上一条提交的差异（同一路径时几乎看不出来）。把 revision 记进状态，
+       * 渲染时只认"属于当前 revision"的那一份，旧数据在切换的那一帧就当不存在。
+       */
+      const [state, setState] = react.useState({ revision: '', phase: 'idle' })
 
       react.useEffect(() => {
         if (revision === '') {
-          setState({ phase: 'idle' })
+          setState({ revision: '', phase: 'idle' })
           return undefined
         }
         let alive = true
-        setState({ phase: 'loading' })
+        setState({ revision, phase: 'loading' })
         void (async () => {
           try {
-            const result = await call('commit-detail', { workspace, revision })
-            if (alive) setState({ phase: 'ready', result })
+            const result = await fetchCommitDetail(workspace, revision)
+            if (alive) setState({ revision, phase: 'ready', result })
           } catch (cause) {
             const error = cause instanceof Error ? cause : new Error(String(cause))
-            if (alive) setState({ phase: 'error', message: error.detail ?? error.message })
+            if (alive) setState({ revision, phase: 'error', message: error.detail ?? error.message })
           }
         })()
         return () => {
@@ -4728,12 +4924,14 @@ window.__ModuleLoader__.load({
           t('graphSelectCommit'),
         )
       }
-      if (state.phase === 'loading') return statusBlock(t('loading'))
-      if (state.phase === 'error') return statusBlock(state.message, 'error')
+      // 不是当前提交的那一份一律按"加载中"对待（见 state.revision 的说明）。
+      const current = state.revision === revision ? state : { phase: 'loading' }
+      if (current.phase === 'loading' || current.phase === 'idle') return statusBlock(t('loading'))
+      if (current.phase === 'error') return statusBlock(current.message, 'error')
 
-      const commit = state.result?.commit
-      const files = state.result?.files ?? []
-      const containingBranches = state.result?.containingBranches ?? []
+      const commit = current.result?.commit
+      const files = current.result?.files ?? []
+      const containingBranches = current.result?.containingBranches ?? []
 
       return react.createElement(
         'div',
@@ -4770,6 +4968,15 @@ window.__ModuleLoader__.load({
       const { t, file, workspace, revision } = props
       const [open, setOpen] = react.useState(false)
       const [state, setState] = react.useState({ phase: 'idle' })
+      /**
+       * 本次展开所属的提交。
+       *
+       * 与 key 一起构成"这个 diff 属于哪一次提交"的完整身份：key 保证切提交时换实例，
+       * 这里的令牌保证**迟到的响应**不会写进来（例如点了文件、请求还在飞时用户切了提交，
+       * 旧响应落地就会把上一条提交的差异画到这一条下面）。序号式令牌还顺手挡住了
+       * "展开→收起→再展开"两次请求的乱序返回。
+       */
+      const token = react.useRef(0)
       const status = file.status?.[0] ?? '?'
       const color = STATUS_COLORS[status] ?? GRAPH_DIM
       const { dir, base } = splitPath(file.path)
@@ -4778,12 +4985,15 @@ window.__ModuleLoader__.load({
         const next = !open
         setOpen(next)
         if (!next || state.phase === 'ready') return
+        const mine = (token.current += 1)
         setState({ phase: 'loading' })
         void (async () => {
           try {
             const result = await call('commit-file', { workspace, revision, path: file.path })
+            if (token.current !== mine) return
             setState({ phase: 'ready', result })
           } catch (cause) {
+            if (token.current !== mine) return
             const error = cause instanceof Error ? cause : new Error(String(cause))
             setState({ phase: 'error', message: error.detail ?? error.message })
           }
@@ -4961,6 +5171,191 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 记录一次 Log 页签里的渲染失败。
+     *
+     * 关键是**不要把它藏起来**：以前没有错误边界，一次渲染期的 TypeError 会让 React 卸载
+     * 整棵 `HeroChangesTrigger` 子树——用户看到的是"点了 Log，抽屉和右上角入口一起消失了"，
+     * 完全看不出发生了什么。加了边界之后异常不会再把面板带走，但也因此更容易被"吞掉"，
+     * 所以这里把组件名、字段、堆栈一并落到 console 与 `window.__dshDesktopReviewLogError`
+     * （脚本与用户报障都能直接读到），界面上也原样显示。
+     *
+     * @param error - 抛出的值。
+     * @param componentStack - React 给的组件栈（指出是哪个组件炸的）。
+     * @param workspace - 当前工作区，用于区分是哪个项目的数据。
+     * @returns 诊断详情（同时挂到 window 上）。
+     */
+    function reportLogError(error, componentStack, workspace) {
+      const detail = {
+        scope: 'dsh-client-ui-review:log',
+        message: error instanceof Error ? error.message : String(error),
+        // 没有 Error 对象时也留一条可读的栈，方便定位是哪一帧的数据。
+        stack: error instanceof Error ? String(error.stack ?? '') : '',
+        componentStack: typeof componentStack === 'string' ? componentStack : '',
+        workspace: typeof workspace === 'string' ? workspace : '',
+        at: new Date().toISOString(),
+      }
+      try {
+        // 这条是给开发者看的诊断日志（组件栈、字段、工作区都在里面）：翻成别的语言对排查
+        // 没有帮助，因此显式豁免本地化检查；界面上的降级文案走 t()。
+        const crashTag = '[dsh-review:log] 提交图渲染失败' // i18n-allow
+        // eslint-disable-next-line no-console -- 故意保留：这是唯一的现场证据。
+        console.error(crashTag, detail.message, {
+          componentStack: detail.componentStack,
+          workspace: detail.workspace,
+          stack: detail.stack,
+        })
+      } catch {
+        // console 不可用（例如宿主接管了它）不影响降级渲染。
+      }
+      try {
+        window.__dshDesktopReviewLogError = detail
+      } catch {
+        // 非浏览器环境。
+      }
+      return detail
+    }
+
+    /**
+     * 构造 Log 页签的错误边界。
+     *
+     * 必须是**类组件**：React 只有 `getDerivedStateFromError`/`componentDidCatch` 这一条
+     * 捕获路径，没有任何 hook 能做同样的事。位置也很关键——它包在 Log 页签的**内容**外面，
+     * 而不是包在整个抽屉外面：包在外面的话，图一出错整个 `ReviewPanel`（含 Changes 页签、
+     * 暂存区、提交框）都会被换成错误页，而用户其实完全可以切回 Changes 继续干活。
+     *
+     * 为什么写成工厂而不是直接 `class extends react.Component`：真实渲染器给的 React
+     * 一定有 `Component`（官方渲染器自己的 `SlotErrorBoundary` 就是这么写的），但本仓库
+     * 有一批测试桩只给 `require('react')` 递了**部分实现**——在那里 `extends undefined`
+     * 会在模块加载期抛错，整块插件都装不上。拿不到基类时退化成"透传组件"：插件照常工作，
+     * 只是这一层不再捕获（真实环境不走这条分支）。
+     *
+     * @returns 边界组件（类组件，或退化后的透传函数组件）。
+     */
+    function createLogErrorBoundary() {
+      const Base = typeof react.Component === 'function' ? react.Component : null
+      if (Base === null) {
+        const Passthrough = function LogErrorBoundary(props) {
+          return props?.children ?? null
+        }
+        Passthrough.displayName = 'LogErrorBoundary'
+        return Passthrough
+      }
+      return class LogErrorBoundary extends Base {
+        constructor(props) {
+          super(props)
+          this.state = { error: null, detail: null, nonce: 0 }
+          this.onRetry = this.onRetry.bind(this)
+        }
+
+        /** 渲染期抛出的异常：记下来，下一次渲染走降级分支。 */
+        static getDerivedStateFromError(error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) }
+        }
+
+        /** 渲染之后 React 把组件栈送过来，这时才拿得到"是哪个组件炸的"。 */
+        componentDidCatch(error, info) {
+          this.setState({
+            detail: reportLogError(error, info?.componentStack, this.props?.workspace),
+          })
+        }
+
+        /** "重新加载 Log"：清掉错误，让子树重新挂载、重新取数据。 */
+        onRetry() {
+          this.setState((prev) => ({ error: null, detail: null, nonce: prev.nonce + 1 }))
+        }
+
+        /**
+         * @returns 正常情况下是包着 children 的容器；出错时是带诊断信息的降级页。
+         */
+        render() {
+          const t = typeof this.props?.t === 'function' ? this.props.t : (key) => key
+          if (this.state.error !== null) {
+            const detail = this.state.detail
+            const message = this.state.error.message
+            const stack = this.state.error.stack ?? ''
+            return react.createElement(
+              'div',
+              {
+                'data-graph-error': '',
+                role: 'alert',
+                style: {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  padding: '16px',
+                  fontFamily: UI_FONT,
+                  fontSize: '12.5px',
+                  color: 'var(--dsw-alias-label-primary, #202124)',
+                  overflowY: 'auto',
+                  minHeight: 0,
+                },
+              },
+              react.createElement('div', { style: { fontWeight: 600, color: REMOVED } }, t('logCrashedTitle')),
+              react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary, #5f6368)' } }, t('logCrashedHint')),
+              // 诊断信息原样显示（不是"出错了"三个字）：用户复制这一段就能定位到组件与字段。
+              react.createElement(
+                'pre',
+                {
+                  'data-graph-error-detail': '',
+                  style: {
+                    margin: 0,
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    background: 'var(--dsw-alias-bg-module-platform, #f0f1f3)',
+                    color: 'inherit',
+                    fontFamily: CODE_FONT,
+                    fontSize: '11.5px',
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                    maxHeight: '40%',
+                    overflowY: 'auto',
+                  },
+                },
+                `${t('logErrorDetail')}\n${message}${detail?.componentStack ? `\n\n${detail.componentStack.trim()}` : ''}${stack ? `\n\n${stack}` : ''}`,
+              ),
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  'data-graph-error-retry': '',
+                  onClick: this.onRetry,
+                  style: {
+                    alignSelf: 'flex-start',
+                    padding: '5px 12px',
+                    borderRadius: '6px',
+                    border: `1px solid ${BORDER}`,
+                    background: 'transparent',
+                    color: ACCENT,
+                    fontFamily: UI_FONT,
+                    fontSize: '12.5px',
+                    cursor: 'pointer',
+                  },
+                },
+                t('logReload'),
+              ),
+            )
+          }
+          // 不清 key、也不缓存子树：React 捕获渲染期异常时会**卸载**抛错的那棵子树，
+          // 因此重试时 children 是全新挂载的实例，`CommitGraphView` 自己的状态与数据都会
+          // 重新来过（这正是"重新加载 Log"该有的语义）。
+          return react.createElement(
+            'div',
+            {
+              'data-graph-boundary': '',
+              // 重试次数：既是诊断信息，也让"点了重试到底有没有重新挂载"可被断言。
+              'data-log-retry': String(this.state.nonce),
+              style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 },
+            },
+            this.props?.children,
+          )
+        }
+      }
+    }
+
+    /** Log 页签用的边界实例（见 createLogErrorBoundary）。 */
+    const LogErrorBoundary = createLogErrorBoundary()
+
+    /**
      * 提交图：三栏视图（分支树 / 提交列表 / 提交详情）。
      *
      * **纯展示 + 数据组件**：工作区与文案都由 props 给（`{ t, workspace, refreshToken }`）。
@@ -5093,13 +5488,19 @@ window.__ModuleLoader__.load({
        *   2. `slices: ['graph']` —— 重新加载会**抢占**这一片状态，因此一个更早发出的
        *      `loadMore` 不会在这一页之后追加（否则会把两个筛选条件的提交混在一起）；
        *   3. `coalesce` —— 同一条件并发只会有一个请求在飞（点两次刷新不会发两次）。
+       *
+       * **`refreshToken` 必须进合并键**：它代表"外部事件要求重新拉一页"（提交成功、
+       * 暂存后刷新）。不带上它的话，提交那一刻若正好有一个提交**之前**发出的 `/graph`
+       * 还在飞，这次刷新会被合并到那个旧请求上——提交刚成功，历史里却没有刚才那条提交，
+       * 而提交图**不轮询**，界面会一直停在旧历史上直到用户手动刷新。带上之后刷新是**另一个**
+       * 请求：它抢占 `graph` 分片，旧响应回来时 `accept` 为假、被丢弃，新的那一页落地。
        */
       const reload = react.useCallback(
         async (refValue) => {
           if (workspace === undefined) return
           const filterRef = typeof refValue === 'string' ? refValue : ''
           const { ticket, promise } = gate.run(
-            `graph:${filterRef}`,
+            `graph:${refreshToken}:${filterRef}`,
             () => fetchGraph(workspace, { ref: filterRef }),
             { coalesce: true, slices: ['graph'] },
           )
@@ -5119,7 +5520,7 @@ window.__ModuleLoader__.load({
           }
           update({ phase: 'ready', commits: result.commits ?? [], hasMore: result.hasMore === true })
         },
-        [gate, workspace, generation, update],
+        [gate, workspace, generation, update, refreshToken],
       )
 
       react.useEffect(() => {
@@ -5412,8 +5813,6 @@ window.__ModuleLoader__.load({
             ),
       )
     }
-
-    /**
 
     /**
      * 侧栏里的提交图图标。
@@ -5819,6 +6218,17 @@ window.__ModuleLoader__.load({
     // Log 页签与主区域共用的那个视图，都需要能被单独驱动。
     exports.__workspaceGateForTest = createWorkspaceGate
     exports.__commitGraphViewForTest = CommitGraphView
+    // Log 页签的错误边界也导出：它是"图炸了不能把抽屉和右上角入口一起带走"这条要求的
+    // 唯一落点，测试要能直接驱动它（抛一个错进去、断言降级页与重试）。
+    exports.__logErrorBoundaryForTest = LogErrorBoundary
+    // 规范化层导出给测试：host 数据缺字段/给错类型是这次崩溃的根因，`normalizeCommit` /
+    // `normalizeGraphPage` / `normalizeCommitDetail` 是唯一入口，必须能被直接断言。
+    exports.__graphNormalizeForTest = {
+      commit: normalizeCommit,
+      ref: normalizeRef,
+      page: normalizeGraphPage,
+      detail: normalizeCommitDetail,
+    }
     // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
     // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
     exports.__fileListForTest = FileList

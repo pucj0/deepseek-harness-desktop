@@ -283,10 +283,70 @@ window.__ModuleLoader__.load({
     /**
      * 一次为多少个分支补算精确的领先/落后。
      *
-     * 只对**屏幕上真的能看见**的分支发这个请求（分组、搜索过滤之后的行），因此这个数字
-     * 是"一屏行数"的量级而不是"分支总数"的量级——300 个分支的仓库也只补算这些。
+     * 只对**屏幕上真的能看见**的分支发这个请求（视口交叉判定，见 collectVisibleBranchNames），
+     * 因此这个数字是"一屏行数"的量级而不是"分支总数"的量级——300 个分支的仓库也只补算这些。
      */
     const SYNC_BATCH = 32
+
+    /**
+     * 一次面板会话里**自动**（视口）补算的名字总数上限。
+     *
+     * 这是与仓库规模无关的常数上限：即使出现"候选集合每轮都变"这种异常循环，自动补算也
+     * 扫不完整个仓库（2000 个分支的仓库同样封顶 512 次 `rev-list`）。用户主动选中的分支
+     * 不受它限制（那是每次点击一个名字的动作），而且每个名字每份列表只请求一次。
+     */
+    const SYNC_AUTO_BUDGET = 512
+
+    /**
+     * 拿不到 DOM 时，"一屏"按多少行算（见 collectVisibleBranchNames）。
+     *
+     * 它只是一个固定大小的窗口，**不是**"过滤后的整张列表"——后者正是"打开面板后把整个
+     * 仓库算一遍"的入口。
+     */
+    const VISIBLE_FALLBACK_ROWS = 12
+
+    /**
+     * 从渲染出来的分支行里挑出**真正与滚动容器相交**的那些名字。
+     *
+     * 为什么要用 DOM 相交而不是"搜索过滤之后的行"：过滤后的集合在 300/2000 分支的仓库里
+     * 几乎是全仓库（没有搜索词时就是全部），拿它当补算候选就等于"后台把所有分支都算一遍"。
+     * 真正可见的行数只与**面板高度**有关，与仓库有多少分支无关。
+     *
+     * 判定方式刻意用 `getBoundingClientRect()` 的区间相交，而不是自己算
+     * `scrollTop / 行高`：行高来自样式（`min-height` + 内边距），分区标题也占高度，
+     * 自己算必然要维护一份"布局常量"，样式一改就悄悄算错。
+     *
+     * 两个防御：
+     *   * 行按 DOM 顺序遍历（也就是视觉顺序），一旦某行完全落在容器下方就**停止**——
+     *     再往下只会更靠下，因此长列表也不会被整段扫一遍；
+     *   * 拿不到 DOM（桩渲染 / SSR / 无布局）时退化成固定大小的窗口 `VISIBLE_FALLBACK_ROWS`。
+     *
+     * @param node - 滚动容器（`null` 表示拿不到 DOM）。
+     * @param fallbackNames - 过滤后的分支名字（按渲染顺序），仅用于退化路径。
+     * @returns 可见分支名（去重、保持渲染顺序）。
+     */
+    function collectVisibleBranchNames(node, fallbackNames) {
+      const fallback = () => fallbackNames.slice(0, VISIBLE_FALLBACK_ROWS).map((entry) => entry.name)
+      if (node === null || typeof node !== 'object' || typeof node.querySelectorAll !== 'function') return fallback()
+      const box = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+      if (box === null || typeof box.height !== 'number' || box.height <= 0) return fallback()
+
+      const names = []
+      const seen = new Set()
+      for (const row of node.querySelectorAll('[data-desktop-branch-option]')) {
+        const rect = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+        if (rect === null) continue
+        // 视口上方：还没到可见区，继续。
+        if (rect.bottom <= box.top) continue
+        // 视口下方：DOM 顺序就是视觉顺序，后面的只会更靠下。
+        if (rect.top >= box.bottom) break
+        const name = typeof row.getAttribute === 'function' ? row.getAttribute('data-desktop-branch-name') : null
+        if (typeof name !== 'string' || name === '' || seen.has(name)) continue
+        seen.add(name)
+        names.push(name)
+      }
+      return names
+    }
 
     /**
      * 工作区世代闸门（workspace generation gate）。
@@ -325,6 +385,10 @@ window.__ModuleLoader__.load({
       const isCurrent = (ticket) =>
         ticket.generation === generation && Object.is(ticket.workspace, workspace)
 
+      /** 这是该请求所写分片的最新一次请求吗？（当前代 + 最新号） */
+      const isLatest = (ticket) =>
+        isCurrent(ticket) && ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
+
       return {
         /** 记录当前工作区；变了就换代。返回是否发生了换代。 */
         sync(next) {
@@ -344,10 +408,7 @@ window.__ModuleLoader__.load({
         /** 这次响应还属于当前工作区/当前代吗？ */
         isCurrent,
         /** 这是该请求所写分片的最新一次请求吗？（当前代 + 最新号） */
-        accept(ticket) {
-          if (!isCurrent(ticket)) return false
-          return ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
-        },
+        accept: isLatest,
         /**
          * 发起一次请求。**永远不 reject**：成功/失败都以 `{ ok, value | cause, ticket }`
          * 的形状返回，调用方只需判一次 `accept`，不必再包一层 try/catch——那层 catch
@@ -365,7 +426,13 @@ window.__ModuleLoader__.load({
           const key = `${generation}\u0000${kind}`
           if (coalesce) {
             const hit = inflight.get(key)
-            if (hit !== undefined) return hit
+            // **只复用仍然有效的在途请求。** 写操作会抢占 `branches` 分片，那时这个在途
+            // 请求的票据已经作废：把它交回调用方，调用方 await 完会发现 `accept` 为假，
+            // 于是既不发新请求、也不清 loading——界面就永远停在"正在加载分支…"，
+            // 而陈旧列表一直挂着（实测复现：写操作完成后分支列表再也不刷新）。
+            // 作废的条目直接丢掉，让下面真的发起新请求。
+            if (hit !== undefined && isLatest(hit.ticket)) return hit
+            if (hit !== undefined) inflight.delete(key)
           }
           const ticket = { workspace, generation, id: (nextId += 1), kind, slices }
           for (const slice of slices) latestOfSlice.set(slice, ticket.id)
@@ -694,6 +761,36 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = react.useState('')
       const [open, setOpen] = react.useState(false)
       /**
+       * 视口内真正可见的分支名（由 SourcePanel 用 DOM 相交报上来，见
+       * collectVisibleBranchNames）。补算只从这里 + 选中项取候选。
+       */
+      const [viewportNames, setViewportNames] = react.useState([])
+      /**
+       * 这一份分支列表里**已经请求过补算**的名字。
+       *
+       * 它就是"不许自动连续补算"的那道闸门：`syncExact` 一变，候选集合就会变；如果只靠
+       * "还没精确过的都算候选"，第一批完成会自动带出下一批，直到扫完整个仓库。锁存之后
+       * 每个名字每份列表只请求一次，因此"算完一批"不会再触发下一批。
+       */
+      const syncRequested = react.useRef(new Set())
+      /** 自动（视口）补算已经用掉的名字数（见 SYNC_AUTO_BUDGET）。 */
+      const syncBudget = react.useRef(0)
+      /** 锁存与预算所属的代际；换代即清零。 */
+      const syncGeneration = react.useRef(-1)
+      if (syncGeneration.current !== generation) {
+        // 在 render 期清零，保证本帧算出的候选就已经是新代际的（与 gate.sync 同一思路）。
+        syncGeneration.current = generation
+        syncRequested.current = new Set()
+        syncBudget.current = 0
+        if (viewportNames.length !== 0) setViewportNames([])
+      }
+
+      /** 面板报上来的可见行：内容不变就保持同一个数组，避免无谓的重渲染。 */
+      const onVisible = react.useCallback((names) => {
+        setViewportNames((prev) => (prev.length === names.length && prev.every((name, index) => name === names[index]) ? prev : names))
+      }, [])
+
+      /**
        * 单击选中的分支（IDEA 风格：单击只选中并开菜单，不 checkout）。
        *
        * 与"当前分支"是两件事：选中是**操作对象**，当前是**仓库状态**。
@@ -780,6 +877,10 @@ window.__ModuleLoader__.load({
         // host 侧返回的是对象数组：`{ name, isRemote, current, upstream, ahead, behind… }`。
         // 兼容旧的纯字符串形式，避免 host/client 版本不一致时列表整片消失。
         const raw = Array.isArray(outcome.value?.branches) ? outcome.value.branches : []
+        // 新的一份列表到手：解锁补算锁存，让**当前可见**的行重新补一次精确值。
+        // 这仍然是"每次列表刷新至多一批"（刷新只能由打开面板、手动刷新、写操作触发），
+        // 因此不会退化成后台连续扫全仓库。
+        syncRequested.current = new Set()
         patch(ticket, {
           branchesLoading: false,
           branches: raw.map((item) =>
@@ -844,7 +945,9 @@ window.__ModuleLoader__.load({
           // 工作区已经换了：这次写操作的收尾（包括 busy）一律不写进新的那一份。
           if (!gate.isCurrent(ticket)) return undefined
           if (!outcome.ok) {
-            patch(ticket, { busy: false, error: describeError(outcome.cause) })
+            // 失败信息也只由**最新**那次写操作负责：两次写叠在一起时，较早那次的失败
+            // 不该把更晚那次的 busy 关掉、也不该顶掉它的错误提示（那是用户正在等的结果）。
+            if (gate.accept(ticket)) patch(ticket, { busy: false, error: describeError(outcome.cause) })
             return undefined
           }
           const result = outcome.value
@@ -1078,28 +1181,75 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * 为**当前可见**的分支补算精确的领先/落后。
+       * 为**真正看得见**的分支补算精确的领先/落后。
        *
        * 首屏用的是 for-each-ref 的 `%(upstream:track)`（见 host 侧 listBranches），它通常
-       * 正确，但在本地跟踪引用缺失/过期时会安静地给 0/0。因此这里对可见行按需补算：
-       *   * 只发**可见**的名字（分组、搜索过滤之后的结果），并且上限 SYNC_BATCH；
-       *   * 只发有上游、且还没精确过的；
-       *   * 完全不阻塞列表出现——列表先画出来，数字后到。
+       * 正确，但在本地跟踪引用缺失/过期时会安静地给 0/0。因此这里对可见行按需补算。
        *
-       * 依赖 `syncKey` 而不是 `visible` 数组本身：数组每次渲染都是新对象，用它当依赖会
-       * 变成"每渲染一次发一次请求"。
+       * **候选只有三个来源**（这一条是这次修的重点）：
+       *   1. 视口内真正可见的行——由 `SourcePanel` 用 DOM 交叉判定后报上来
+       *      （`data-desktop-branch` 的滚动容器 ∩ 每一行），**不是**"搜索过滤后的整张列表"；
+       *   2. 用户单击/右键选中的那一行（可能在视口外——那是用户的主动意图）；
+       *   3. 当前分支不需要：它的领先/落后取自 `/status`（见 withCurrentSync），已经是精确的。
+       *
+       * 为什么不能拿"过滤后的列表"当候选：那个集合在 300/2000 分支的仓库里几乎是全仓库，
+       * 而补算一旦完成会把条目标成 `syncExact`，`syncExact` 又进入候选集合的依赖——于是
+       * "第一批 32 个完成 → 候选变成下一批 32 个 → 再发一次"，自动地一轮轮把整个仓库算完。
+       * 现在的两道闸门让这件事不可能发生：
+       *   * **一次性锁存**：同一份分支列表（generation + 列表内容）里，每个名字只请求一次
+       *     （`syncedRef`），因此"算完一批"不会自动带出下一批；换一份列表（刷新/写操作后）
+       *     才重新允许——那仍然是用户动作驱动的、每份列表至多一批。
+       *   * **总预算**：同一个工作区（跨多次开关面板累计）里，自动（视口）补算的名字数上限
+       *     `SYNC_AUTO_BUDGET`。它是与仓库规模无关的常数上限，异常循环也扫不完整个仓库；
+       *     用户主动选中的分支不受预算限制（每次点击只多一个名字）。
+       *
+       * 依赖 `syncKey` 而不是 `viewportNames` 数组本身：数组每次渲染都是新对象，用它当依赖
+       * 会变成"每渲染一次发一次请求"。
        */
-      const syncKey = visible
-        .filter((entry) => entry.upstream !== '' && entry.syncExact !== true)
-        .slice(0, SYNC_BATCH)
-        .map((entry) => entry.name)
-        .join('\u0000')
+      const branchByName = react.useMemo(() => {
+        const map = new Map()
+        for (const entry of branches) map.set(entry.name, entry)
+        return map
+      }, [branches])
+
+      const candidates = []
+      let autoSpent = 0
+      for (const [name, isAuto] of [
+        // 视口内的行：自动来源，受预算约束。
+        ...viewportNames.map((name) => [name, true]),
+        // 选中的行：用户动作，不受预算约束（但同样只请求一次）。
+        ...(selectedBranch === '' ? [] : [[selectedBranch, false]]),
+      ]) {
+        if (candidates.length >= SYNC_BATCH) break
+        if (isAuto && syncBudget.current >= SYNC_AUTO_BUDGET) break
+        const entry = branchByName.get(name)
+        // 没有上游、当前分支（/status 已给精确值）、已经精确过的、以及这一份列表里已经
+        // 请求过的，都不再补算。
+        if (entry === undefined || entry.current === true) continue
+        if (entry.upstream === '' || entry.syncExact === true) continue
+        if (syncRequested.current.has(name)) continue
+        syncRequested.current.add(name)
+        if (isAuto) {
+          syncBudget.current += 1
+          autoSpent += 1
+        }
+        candidates.push(name)
+      }
+      const syncKey = candidates.join('\u0000')
+      if (autoSpent > 0) {
+        // 诊断用：脚本与排查时能直接看到"这一次打开面板一共自动补算了多少"。
+        if (typeof window !== 'undefined') window.__dshDesktopGitbarSync = { budget: syncBudget.current, limit: SYNC_AUTO_BUDGET }
+      }
       react.useEffect(() => {
         if (!open || syncKey === '') return undefined
         const names = syncKey.split('\u0000')
-        const { ticket, promise } = gate.run('branch/sync', () => call('branch/sync', { cwd: workspace, query: { names: names.join(',') } }), { coalesce: true })
+        // kind 里带上名字集合：single-flight 的键必须包含**参数**。否则"视口换了、上一批
+        // 还在飞"时第二次调用会复用到第一批的票据，那一批名字就永远不会被补算（而它们已经
+        // 被锁存记下了，于是这一份列表里再也不会补）。
+        const { ticket, promise } = gate.run(`branch/sync:${syncKey}`, () => call('branch/sync', { cwd: workspace, query: { names: names.join(',') } }), { coalesce: true })
         if (!gate.isCurrent(ticket)) return undefined
         void promise.then((outcome) => {
+          // 换代 / 被更晚的请求取代 → 丢弃；失败也不清锁存（不重试同名字，避免又变成循环）。
           if (!gate.accept(ticket) || !outcome.ok) return
           const sync = outcome.value?.sync ?? {}
           setState((prev) => {
@@ -1197,6 +1347,8 @@ window.__ModuleLoader__.load({
               setQuery,
               anchor,
               remotes,
+              /** 视口内可见的行（补算精确领先/落后的候选，见 collectVisibleBranchNames）。 */
+              onVisible,
               /** 单击选中的分支（与"当前分支"不同，见 selectedBranch 的说明）。 */
               selected: selectedBranch,
               onRefresh: () => void Promise.all([refresh(), loadBranches(), loadRemotes()]),
@@ -1283,8 +1435,54 @@ window.__ModuleLoader__.load({
     function SourcePanel(props) {
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
-        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort,
+        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible,
       } = props
+
+      /**
+       * 滚动容器：用来判定"哪些行真的在视口里"（见 collectVisibleBranchNames）。
+       *
+       * 报上去的名字只用于补算精确的领先/落后，因此这里宁可少报（视口判定失败就退化成
+       * 一屏大小的固定窗口）也不能多报——多报等于后台把整个仓库的分支都算一遍。
+       */
+      const listRef = react.useRef(null)
+      /**
+       * 当前渲染出来的行（按名字）。用 ref 保存最新一份、用**名字串**当 effect 依赖：
+       * `visible` 每次渲染都是新数组，直接放进依赖会让"报告可见行"这个副作用每渲染一次都跑，
+       * 而它内部要对行做 `getBoundingClientRect()`（读布局）。名字没变就说明该报告的集合没变，
+       * 没必要再去读一遍 DOM。
+       */
+      const visibleRef = react.useRef(visible)
+      visibleRef.current = visible
+      const visibleKey = visible.map((entry) => entry.name).join('\u0000')
+      const reportVisible = react.useCallback(() => {
+        if (typeof onVisible !== 'function') return
+        onVisible(collectVisibleBranchNames(listRef.current, visibleRef.current))
+      }, [onVisible, visibleKey])
+      react.useEffect(() => {
+        reportVisible()
+        const node = listRef.current
+        if (node === null || typeof node.addEventListener !== 'function') return undefined
+        // 滚动/改尺寸都会换出可见集合：用 rAF 合帧，滚动过程中不会每帧都去读一遍布局。
+        let frame = 0
+        const schedule = () => {
+          if (typeof requestAnimationFrame === 'function') {
+            if (frame !== 0) return
+            frame = requestAnimationFrame(() => {
+              frame = 0
+              reportVisible()
+            })
+            return
+          }
+          reportVisible()
+        }
+        node.addEventListener('scroll', schedule, { passive: true })
+        window.addEventListener('resize', schedule)
+        return () => {
+          if (frame !== 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
+          node.removeEventListener('scroll', schedule)
+          window.removeEventListener('resize', schedule)
+        }
+      }, [reportVisible])
 
       /** 一行快捷操作。 */
       const action = (key, glyph, label, onClick, extra) =>
@@ -1364,6 +1562,10 @@ window.__ModuleLoader__.load({
             'data-desktop-branch-option': '',
             'data-desktop-branch-name': entry.name,
             'data-desktop-branch-selected': isSelected ? 'true' : undefined,
+            // 这一行的领先/落后是不是**精确值**（见 host 的 `/branch/sync`：字段名与
+            // `/branches` 一致，都叫 syncExact）。留成 DOM 标记是为了让"补算之后真的被标成
+            // 精确"这件事可断言——它同时决定了补算不会再被重复触发。
+            'data-desktop-branch-sync-exact': entry.syncExact === true ? 'true' : 'false',
             'aria-current': entry.current ? 'true' : undefined,
             // 当前分支**不禁用整行**：单击仍然要能打开它的操作菜单（新建分支、新建标签…），
             // 只有那些"对自己没有意义"的动作在菜单里被禁用（见 BranchContextMenu）。
@@ -1739,9 +1941,15 @@ window.__ModuleLoader__.load({
             ),
 
         // 只滚动结果列表，搜索框与操作区始终留在顶部。
+        // 这个 div 就是"视口"的基准：补算精确领先/落后时，只有与它相交的行才算可见。
         react.createElement(
           'div',
-          { style: { minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', paddingTop: '2px' }, 'aria-busy': loading || busy },
+          {
+            ref: listRef,
+            'data-desktop-branch-list': '',
+            style: { minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', paddingTop: '2px' },
+            'aria-busy': loading || busy,
+          },
           loading || visible.length === 0
             ? react.createElement(
                 'div',
@@ -2356,6 +2564,12 @@ window.__ModuleLoader__.load({
 
     exports.name = name
     exports.apply = apply
+    // ---- 只给测试用的钩子 ------------------------------------------------------
+    //
+    // "哪些行真的在视口里"是这次修复的核心判定（它决定补算候选，进而决定会不会退化成
+    // 后台扫全仓库），而它需要真实 DOM 才能整体跑到。把这个纯函数导出来，测试就能用一棵
+    // 带矩形坐标的**假 DOM 树**直接断言"只挑相交的行、到视口下方就停"。
+    exports.__visibleBranchNamesForTest = collectVisibleBranchNames
     // 必须声明 inject：cordis 的服务是懒解析的，不声明就直接读 `ctx.slots` 会抛
     // "cannot get property \"slots\" without inject"，而且这个错误会让**整个界面**
     // 渲染失败（不只是本插件）——排查时页面是全白的，误导性很强。
