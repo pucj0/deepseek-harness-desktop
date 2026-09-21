@@ -176,6 +176,26 @@ let writeError = null
 /** 记录每一次请求的 `{ route, body, url }`，供"发到哪条路由、带了什么"的断言使用。 */
 const requests = []
 
+/** 假的"新增文件"统一差异：内容里带路径，因此"谁的差异画在谁下面"可以直接从文本上看出来。 */
+const UNTRACKED_DIFF = (path) =>
+  [
+    `diff --git a/${path} b/${path}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${path}`,
+    '@@ -0,0 +1,2 @@',
+    `+hello from ${path}`,
+    '+second line',
+  ].join('\n')
+
+// ---- 「AI 补充提交信息」的夹具 ----
+/** `/commit-message` 的默认成功响应。 */
+let aiResponse = { isRepo: true, message: 'fix(review): 修复未跟踪文件差异查看\n\n- 改走按需差异', subject: 'fix(review): 修复未跟踪文件差异查看', bullets: ['改走按需差异'] }
+/** 非 null 时 `/commit-message` 返回这个失败（`{ code, detail }`）。 */
+let aiError = null
+/** 非 null 时 `/commit-message` 会挂起，直到测试调用它放行。 */
+let aiHold = null
+
 /**
  * 未跟踪文件假数据：`file-history` 也要有个响应，否则点开变更记录会拿到 `{ isRepo: true }`
  * 而没有 `commits`，界面显示空列表——那样就分不清"没有历史"与"请求没发出去"。
@@ -199,7 +219,39 @@ const fetchBase = async (url, init) => {
   // 而真实界面是对的。
   if (route === 'workspace') return { ok: true, text: async () => JSON.stringify(workspaceResponse()) }
   if (route === 'file-history') return { ok: true, text: async () => JSON.stringify(FILE_HISTORY) }
+  // 按需差异。项目级快照（`/workspace`）是**元数据级**的，不带任何统一差异，因此每个
+  // 文件展开时都必须单独来要一次——未跟踪文件也一样（host 侧走
+  // `git diff --no-index /dev/null <path>`，所以 `untracked: true` 是有意义的入参）。
+  if (route === 'workspace-file') {
+    const path = String(body?.path ?? '')
+    return {
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          workspace: body?.workspace,
+          path,
+          revision: body?.revision ?? '',
+          untracked: body?.untracked === true,
+          diff: UNTRACKED_DIFF(path),
+          truncated: false,
+        }),
+    }
+  }
   if (route === 'untracked') return { ok: true, text: async () => JSON.stringify({ isRepo: true, paths: [], total: 0, truncated: false }) }
+  // 「AI 补充提交信息」。夹具可以控制它：成功给一段文本、失败给一个稳定 code、
+  // 或者**挂起**（用来验证"生成期间切工作区/重新生成时，迟到结果不许写入"）。
+  if (route === 'commit-message') {
+    if (aiHold !== null) {
+      return await new Promise((resolve) => {
+        aiHold = () => resolve({ ok: true, text: async () => JSON.stringify(aiResponse) })
+      })
+    }
+    if (aiError !== null) {
+      const failure = aiError
+      return { ok: false, text: async () => JSON.stringify(failure) }
+    }
+    return { ok: true, text: async () => JSON.stringify(aiResponse) }
+  }
   posts.push({ route, body })
   if (writeError !== null) {
     const failure = writeError
@@ -274,9 +326,12 @@ const mountProps = {
   /**
    * 快照用 **getter** 传：组件每次渲染都从共享 store 现读一次，因此"写操作之后 store 重取
    * 了新快照"这件事会像真实界面一样反映到下一次渲染里（静态对象做不到这一点）。
+   *
+   * 读的是 `mountProps.workspace` 而非常量 `WORKSPACE`：切项目那一段会改这个字段，
+   * 快照必须跟着它走，否则测的就不是真实行为。
    */
   get snapshot() {
-    return snapshotStore.get(WORKSPACE)
+    return snapshotStore.get(mountProps.workspace)
   },
 }
 
@@ -772,6 +827,191 @@ console.log('=== 10. 文件列表：总变动行数 + 暂存标记 ===')
     hosts.filter((n) => n.props?.['data-review-stats'] !== undefined).length,
     files.length,
   )
+}
+
+console.log('')
+console.log('=== 11. 未跟踪文件的按需差异（点开不许报错）===')
+{
+  // 用户报的问题：在 Changes 里点一个**未跟踪**文件，直接报错。
+  //
+  // 根因是 v1.4.7 把"整页统一差异"改成按需取（`/workspace-file` + `LazyFileDiff`）时，
+  // 删掉了 `StagingSection` 里的 `byFile`（它是整页差异 `splitByFile` 的产物），
+  // 但未跟踪分支仍在传 `diff: byFile.get(path) ?? ''` —— 于是点击立刻
+  // `ReferenceError: byFile is not defined`，整个面板被错误边界接住。
+  //
+  // 因此这一段钉三件事，缺一不可：
+  //   1. 点击**不抛错**（这是回归本体：旧写法的报错发生在渲染期，会直接冒出来）；
+  //   2. 请求形状对（路由、path、revision、`untracked: true`），且**只发一次**；
+  //   3. 界面上真的出现了那份差异的内容（"没报错但什么都没画"同样是坏的）。
+  await mount()
+  const before = requests.filter((r) => r.route === 'workspace-file').length
+  const toggle = find('data-staging-diff-toggle', 'untracked-1.txt')
+  checkTrue('11) 未跟踪行有展开按钮', toggle !== null)
+
+  let threw = null
+  try {
+    await click(toggle)
+  } catch (cause) {
+    threw = cause
+  }
+  check('   点击不抛错（回归：byFile is not defined）', threw === null ? 'ok' : String(threw?.message ?? threw), 'ok')
+
+  const calls = requests.filter((r) => r.route === 'workspace-file')
+  check('   只发了一次按需差异请求', calls.length - before, 1)
+  check('   请求带的是这个未跟踪文件', calls[calls.length - 1]?.body?.path, 'untracked-1.txt')
+  checkTrue('   请求标记 untracked', calls[calls.length - 1]?.body?.untracked === true)
+  check('   请求带上了 HEAD 作为基线', calls[calls.length - 1]?.body?.revision, 'a'.repeat(40))
+  checkTrue('   界面上画出了新增内容', viewText().includes('hello from untracked-1.txt'))
+
+  // 收起再展开必须走缓存：缓存键是 workspace + HEAD + path，同一份内容不该再问一次 host。
+  await click(find('data-staging-diff-toggle', 'untracked-1.txt'))
+  checkTrue('   收起后差异消失', viewText().includes('hello from untracked-1.txt') === false)
+  await click(find('data-staging-diff-toggle', 'untracked-1.txt'))
+  check('   收起再展开不再发请求（走缓存）', requests.filter((r) => r.route === 'workspace-file').length - before, 1)
+
+  // 换一个 workspace：缓存键里有 workspace，旧项目的差异**不允许**被复用。
+  const otherWorkspace = 'F:\\code\\projB'
+  const otherStore = snapshotStore
+  const savedProps = mountProps.workspace
+  mountProps.workspace = otherWorkspace
+  rootKey = `staging-other-${mountSeq++}`
+  otherStore.set(otherWorkspace, { ...SNAPSHOT, head: 'b'.repeat(40) })
+  await settle()
+  await click(find('data-staging-diff-toggle', 'untracked-1.txt'))
+  const afterSwitch = requests.filter((r) => r.route === 'workspace-file')
+  check('   切项目后重新取差异', afterSwitch.length - before, 2)
+  check('   新请求带的是新 workspace', afterSwitch[afterSwitch.length - 1]?.body?.workspace, otherWorkspace)
+  check('   新请求带的是新 HEAD', afterSwitch[afterSwitch.length - 1]?.body?.revision, 'b'.repeat(40))
+  mountProps.workspace = savedProps
+}
+
+console.log('')
+console.log('=== 12. AI 一键补充提交信息（item 9）===')
+{
+  // 需求要点（逐条对应下面的断言）：
+  //   * 输入**只来自 commitPaths**（勾选的那批），不是整个工作区；
+  //   * 生成中按钮禁用 + loading；
+  //   * 输入框为空 → 直接填入；
+  //   * 已有用户输入 → **不许静默覆盖**，给"替换/追加/取消"三选一；
+  //   * 生成期间切工作区/改勾选 → 旧结果不得写入；
+  //   * 失败 → 保留原文本 + 非阻塞提示。
+  const aiButtons = () => findAll('data-staging-ai')
+  const aiRequest = () => requests.filter((r) => r.route === 'commit-message').at(-1)
+  const textarea = () => find('data-staging-message')
+
+  await mount()
+  check('12) 有「AI 补充」按钮', aiButtons().length, 1)
+  check('   按钮文案是 AI 补充', textOf(aiButtons()[0]), 'aiCommit')
+
+  // 输入框为空 → 直接填入，且请求体**只带勾选的文件**。
+  const before = requests.filter((r) => r.route === 'commit-message').length
+  await click(find('data-staging-ai'))
+  check('   发了一次 commit-message 请求', requests.filter((r) => r.route === 'commit-message').length - before, 1)
+  const body = aiRequest()?.body
+  check('   请求带上工作区', body?.workspace, WORKSPACE)
+  // 默认勾选 = 全部已跟踪改动（new-staged.txt / both.txt / unstaged.txt），未跟踪默认不勾。
+  check('   只带已勾选的已跟踪文件', (body?.files ?? []).map((f) => f.path).sort().join(','), 'both.txt,new-staged.txt,unstaged.txt')
+  check('   未勾选的未跟踪文件不在请求里', (body?.files ?? []).some((f) => f.path.startsWith('untracked-')), 'false')
+  check('   带上状态与增删行数', JSON.stringify(body?.files?.find((f) => f.path === 'both.txt')), JSON.stringify({ path: 'both.txt', status: 'M', added: 3, removed: 3 }))
+  check('   填入输入框', textarea()?.props?.value, aiResponse.message)
+  checkTrue('   给出非阻塞说明', viewText().includes('aiCommitFilled'))
+
+  // 生成中：按钮禁用 + loading 文案（防连点）。
+  await mount()
+  aiHold = () => undefined
+  const heldBefore = requests.filter((r) => r.route === 'commit-message').length
+  const pending = click(find('data-staging-ai'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await settle()
+  check('   生成中按钮禁用', findAll('data-staging-ai')[0]?.props?.disabled, true)
+  check('   生成中显示 loading 文案', textOf(findAll('data-staging-ai')[0] ?? null), 'aiCommitBusy')
+  check('   生成中标记 aria-busy', findAll('data-staging-ai')[0]?.props?.['aria-busy'], true)
+  check('   生成中再点不会多发请求', (() => {
+    findAll('data-staging-ai')[0]?.props?.onClick?.()
+    return requests.filter((r) => r.route === 'commit-message').length
+  })(), heldBefore + 1)
+  aiHold()
+  await pending
+  await settle()
+  aiHold = null
+
+  // 已有用户输入 → 不覆盖，先问。
+  await mount()
+  const userText = 'wip: 我打到一半的提交信息'
+  find('data-staging-message').props.onChange({ target: { value: userText } })
+  await settle()
+  await click(find('data-staging-ai'))
+  check('   已有输入时不被覆盖', textarea()?.props?.value, userText)
+  check('   出现三选一提示', findAll('data-staging-ai-notice')[0]?.props?.['data-staging-ai-notice'], 'ask')
+  checkTrue('   提示里带上 AI 建议的标题', viewText().includes('aiCommitSuggested'))
+  check('   有替换按钮', find('data-staging-ai-replace') !== null, 'true')
+  check('   有追加按钮', find('data-staging-ai-append') !== null, 'true')
+  check('   有取消按钮', find('data-staging-ai-cancel') !== null, 'true')
+  // 追加：保留用户原文，AI 的内容接到后面。
+  await click(find('data-staging-ai-append'))
+  check('   追加保留原文并接上建议', textarea()?.props?.value, `${userText}\n\n${aiResponse.message}`)
+  // 选过之后"询问"必须消失（三个按钮不再挂着），但会换成一句"已填入"的说明。
+  check('   选过之后不再询问', find('data-staging-ai-replace'), null)
+  check('   选过之后给出已填入说明', findAll('data-staging-ai-notice')[0]?.props?.['data-staging-ai-notice'], 'notice')
+
+  // 替换：整体换成建议。
+  find('data-staging-message').props.onChange({ target: { value: userText } })
+  await settle()
+  await click(find('data-staging-ai'))
+  await click(find('data-staging-ai-replace'))
+  check('   替换成 AI 建议', textarea()?.props?.value, aiResponse.message)
+
+  // 取消：原文一字不动。
+  find('data-staging-message').props.onChange({ target: { value: userText } })
+  await settle()
+  await click(find('data-staging-ai'))
+  await click(find('data-staging-ai-cancel'))
+  check('   取消后原文不动', textarea()?.props?.value, userText)
+
+  // 失败：保留原文本 + 非阻塞提示（AI 不可用不该看起来像面板坏了）。
+  aiError = { error: '宿主缺少生成提交信息所需的正式能力', code: 'aiUnavailable', detail: 'MISSING_CREDENTIAL: 当前模型未登录' }
+  await click(find('data-staging-ai'))
+  check('   失败后原文保留', textarea()?.props?.value, userText)
+  checkTrue('   失败提示非阻塞地显示出来', viewText().includes('aiCommitFailed'))
+  const failedNotice = findAll('data-staging-ai-notice')[0]
+  check('   失败提示不是"询问"态', failedNotice?.props?.['data-staging-ai-notice'], 'notice')
+  // 失败之后必须能再试（闸门要放开），否则"AI 失败一次就再也点不动"。
+  check('   失败后按钮不再禁用', findAll('data-staging-ai')[0]?.props?.disabled, false)
+  const retryBefore = requests.filter((r) => r.route === 'commit-message').length
+  await click(find('data-staging-ai'))
+  check('   失败后可以重试（再发一次请求）', requests.filter((r) => r.route === 'commit-message').length - retryBefore, 1)
+  check('   重试仍失败时原文依旧保留', textarea()?.props?.value, userText)
+  aiError = null
+
+  // 未勾选任何文件：按钮禁用 + 点了给一句说明（不是打一次空请求）。
+  await mount()
+  find('data-staging-file-pick', 'new-staged.txt').props.onChange({ target: { checked: false } })
+  find('data-staging-file-pick', 'both.txt').props.onChange({ target: { checked: false } })
+  find('data-staging-file-pick', 'unstaged.txt').props.onChange({ target: { checked: false } })
+  await settle()
+  check('   没有勾选时按钮禁用', findAll('data-staging-ai')[0]?.props?.disabled, true)
+
+  // ---- 迟到结果不许写入：生成期间换工作区 ----
+  await mount()
+  const aiBefore = requests.filter((r) => r.route === 'commit-message').length
+  aiHold = () => undefined
+  const late = click(find('data-staging-ai'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await settle()
+  // 换工作区（组件会清空 AI 状态并让令牌作废）。
+  const savedWorkspace = mountProps.workspace
+  mountProps.workspace = 'F:\\code\\projB'
+  snapshotStore.set('F:\\code\\projB', { ...SNAPSHOT, head: 'c'.repeat(40), files: FILES })
+  rootKey = `staging-ai-other-${mountSeq++}`
+  await settle()
+  aiHold()
+  await late
+  await settle()
+  check('   切项目后旧结果没有写进新的输入框', find('data-staging-message')?.props?.value, '')
+  check('   切项目后没有 AI 提示残留', find('data-staging-ai-notice'), null)
+  mountProps.workspace = savedWorkspace
+  aiHold = null
+  check('   期间只发过一次请求', requests.filter((r) => r.route === 'commit-message').length - aiBefore, 1)
 }
 
 console.log('')

@@ -221,6 +221,8 @@ check('客户端 bundle 内容一致', sourceText === targetText && sourceText !
 // 只有打包安装后的用户会遇到"文件不存在"。
 for (const extra of [
   join('lib', 'graph-layout.js'),
+  // host 侧新增的模块：`lib/index.js` 是静态 import 它的，缺了就是插件加载失败。
+  join('lib', 'commit-message.js'),
 ]) {
   const from = read(join(ROOT, 'plugins', 'dsh-client-ui-review', extra))
   const to = read(join(realTarget, 'node_modules', 'dsh-client-ui-review', extra))

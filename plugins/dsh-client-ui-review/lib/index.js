@@ -17,6 +17,20 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
+import { collectCommitContext, createCommitMessageGenerator } from './commit-message.js'
+
+// 「AI 补充提交信息」的其余部分（上限、提示词构造、输出规范化、失败翻译）从 host 侧
+// 原样再导出一份：它们是纯函数，`scripts/test-review-commit-message.mjs` 直接断言，
+// 不必起服务器。客户端 bundle 用不到它们（那里只有一条 `/commit-message` 请求）。
+export {
+  COMMIT_MESSAGE_LIMITS,
+  COMMIT_MESSAGE_TIMEOUT_CODE,
+  buildCommitMessagePrompt,
+  collectCommitContext,
+  createCommitMessageGenerator,
+  describeLlmFailure,
+  normalizeCommitMessage,
+} from './commit-message.js'
 
 /** 插件名，用于诊断与 effect 标签。 */
 export const name = 'review'
@@ -1113,7 +1127,14 @@ async function readWorkspaceFileDiff(cwd, revision, path, untracked) {
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
-function createReviewHandler() {
+function createReviewHandler(ctx) {
+  // AI 补充提交信息走宿主正式能力（`ctx.llm` + `ctx.agentDefaultModel`，见
+  // lib/commit-message.js）。**服务在调用时才解析**：宿主没有模型 provider 时面板照样能开。
+  const commitMessageGenerator =
+    ctx === undefined ? undefined : createCommitMessageGenerator(ctx)
+  const onCommitMessage =
+    commitMessageGenerator === undefined ? undefined : (context) => commitMessageGenerator.generateCommitMessage(context)
+
   return async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://localhost')
@@ -1356,6 +1377,80 @@ function createReviewHandler() {
             return
           }
           throw error
+        }
+        return
+      }
+
+      // ---- AI 一键补充提交信息 ----------------------------------------------
+      //
+      // 输入**只来自客户端勾选的那批路径**（`commitPaths`）：不是"整个工作区"。这一条是
+      // 权限与成本两方面的硬要求——用户没勾的文件不该出现在提示词里，而大仓库的整树 diff
+      // 也不是一条辅助请求能承受的。
+      //
+      // 生成走宿主正式能力（见 lib/commit-message.js 的说明），失败时给**稳定的 code**，
+      // 由界面显示成一句非阻塞提示；这里绝不 500（那会让界面以为插件坏了）。
+      if (url.pathname === `${ROUTE_PREFIX}/commit-message`) {
+        if (request.method !== 'POST') {
+          response.setHeader('allow', 'POST')
+          sendJson(response, 405, { error: 'method not allowed' })
+          return
+        }
+        if (typeof onCommitMessage !== 'function') {
+          sendJson(response, 501, { error: 'ai unavailable', code: 'aiUnavailable', detail: '宿主没有装载 AI 补充能力' })
+          return
+        }
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const requested = Array.isArray(payload.files) ? payload.files : []
+        if (requested.length === 0) {
+          sendJson(response, 400, { error: 'files is required', code: 'noFiles' })
+          return
+        }
+        // 形状校验：路径只能是仓库内的相对路径（与还原同一套规则）。**逐个校验而不是
+        // 只校验前 N 个**——上限之外的那些根本不该被接受。
+        const files = []
+        for (const item of requested) {
+          const path = typeof item === 'string' ? item : item?.path
+          if (typeof path !== 'string' || !SAFE_PATH_PATTERN.test(path)) {
+            sendJson(response, 400, { error: `unsafe path: ${String(path).slice(0, 80)}`, code: 'unsafePath' })
+            return
+          }
+          files.push({
+            path: normalizePath(path),
+            status: typeof item?.status === 'string' ? item.status.slice(0, 4) : '',
+            added: Number.isFinite(item?.added) ? item.added : undefined,
+            removed: Number.isFinite(item?.removed) ? item.removed : undefined,
+            untracked: item?.untracked === true,
+          })
+        }
+        const revision = REVISION_PATTERN.test(String(payload.revision ?? '')) ? payload.revision : 'HEAD'
+        const context = await collectCommitContext({
+          branch: payload.branch,
+          files,
+          readDiff: (path, untracked) => readWorkspaceFileDiff(workspace, revision, path, untracked),
+        })
+        try {
+          const result = await onCommitMessage(context)
+          sendJson(response, 200, {
+            isRepo: true,
+            message: result.message,
+            subject: result.subject,
+            bullets: result.bullets,
+            model: result.model,
+            stats: result.promptStats,
+          })
+        } catch (error) {
+          const code = typeof error?.code === 'string' ? error.code : 'aiFailed'
+          // 能力缺失是 501（"宿主没这个能力"），调用失败是 502（"有这个能力但这次没成"）。
+          const status = code === 'aiUnavailable' ? 501 : 502
+          sendJson(response, status, {
+            error: String(error?.message ?? error).slice(0, 300),
+            code,
+            detail: String(error?.message ?? error).slice(0, 500),
+            ...(Array.isArray(error?.missing) ? { missing: error.missing } : {}),
+          })
         }
         return
       }
@@ -1831,12 +1926,13 @@ export function apply(ctx) {
   // 先按版本清理临时索引：旧索引里的 stat 缓存会让它继续沿用修好之前的记录。
   ensureIndexVersion()
 
-  const handler = createReviewHandler()
+  const handler = createReviewHandler(ctx)
   for (const path of [
     `${ROUTE_PREFIX}/baseline`,
     `${ROUTE_PREFIX}/changes`,
     `${ROUTE_PREFIX}/workspace`,
     `${ROUTE_PREFIX}/workspace-file`,
+    `${ROUTE_PREFIX}/commit-message`,
     `${ROUTE_PREFIX}/revert`,
     `${ROUTE_PREFIX}/history`,
     `${ROUTE_PREFIX}/roots`,

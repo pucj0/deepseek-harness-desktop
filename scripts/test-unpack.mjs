@@ -86,6 +86,13 @@ try {
     existsSync(join(first.dir, 'runtime', 'node_modules', 'dsh-client-ui-review', 'lib', 'graph-layout.js')),
     'true',
   )
+  // host 侧新增的模块同样必须在包里：`lib/index.js` 是**静态 import** 它的，缺了就是
+  // 插件加载失败（整个 git 面板消失），而不是"某个功能不好用"。
+  check(
+    '插件附属文件随包（commit-message.js）',
+    existsSync(join(first.dir, 'runtime', 'node_modules', 'dsh-client-ui-review', 'lib', 'commit-message.js')),
+    'true',
+  )
 
   // 2) 二次调用应复用，不再解包
   const againStarted = Date.now()

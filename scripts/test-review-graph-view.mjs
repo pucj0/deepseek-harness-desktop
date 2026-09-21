@@ -279,16 +279,35 @@ const commitFileDiff = (revision) => ({
 })
 
 const requests = []
+/**
+ * 分页夹具：非 null 时 `/graph` 由它按 `skip` 出数据（见第 9 节）。
+ *
+ * 默认 `null` 表示"永远返回 GRAPH 那一页、且 hasMore:false"，因此前面几节的断言完全不受
+ * 影响；只有需要"真的有下一页"的那一节才把它装上。
+ */
+let graphPages = null
+/**
+ * 分页"挂起"闸门：非 null 时 `/graph` 的**非首屏**请求会停在这里，直到测试调用它放行。
+ *
+ * 用来断言"加载下一页期间界面不白屏"——那件事只有在请求**在飞**的那一帧才看得到，
+ * 立即 resolve 的夹具根本测不到（这正是"分页要不要整页 loading"最容易漏测的地方）。
+ */
+let graphHoldMore = null
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
   requests.push({ url: target, body })
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
+  if (route === 'graph' && graphHoldMore !== null && (body?.skip ?? 0) > 0) {
+    await new Promise((resolve) => {
+      graphHoldMore = () => resolve()
+    })
+  }
   const payload =
     route === 'roots'
       ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
       : route === 'graph'
-        ? GRAPH
+        ? (graphPages === null ? GRAPH : graphPages(body?.skip ?? 0, body?.ref ?? ''))
         : route === 'commit-detail'
           ? DETAIL
           : route === 'commit-file'
@@ -457,6 +476,24 @@ checkTrue('   含 main 徽标', refTexts.includes('main'))
 checkTrue('   含 feature 徽标', refTexts.includes('feature'))
 checkTrue('   含 origin/feature 徽标', refTexts.includes('origin/feature'))
 checkTrue('   含标签 v0.1.0', refTexts.includes('v0.1.0'))
+
+// ---- 中栏每一行的文本（需求第 3、6 节的落点）------------------------------------
+//
+// 逐行断言两件事：**不显示哈希**、**时间到秒**。中栏与右栏是两处独立的渲染，只测右栏会
+// 漏掉中栏退化成 `textSlice(..., 10)`（那正是改造前的写法）。
+{
+  const rowTexts = findAll('data-graph-row').map((n) => textOf(n))
+  check('   每条提交一行文本', rowTexts.length, 4)
+  const first = rowTexts[0]
+  checkTrue('   首行带提交标题', first.includes('merge feature into main'))
+  // 秒：`2026-01-04T10:00:00+08:00` → `2026-01-04 10:00:00`。
+  checkTrue('   首行时间精确到秒', first.includes('2026-01-04 10:00:00'))
+  // 哈希：短哈希与完整哈希都不许出现（否定断言用**真的存在过**的值，否则等于没测）。
+  check('   首行不显示短哈希', first.includes('mmmmmmm'), 'false')
+  check('   首行不显示完整哈希', first.includes('m'.repeat(40)), 'false')
+  check('   每行都不显示短哈希', rowTexts.some((text) => /[0-9a-f]{7}/i.test(text)), 'false')
+  check('   每行都不显示完整哈希', rowTexts.some((text) => text.includes('m'.repeat(40)) || text.includes('p'.repeat(40))), 'false')
+}
 // 合并提交那行必须有一条 merge 边。
 checkTrue('   有 merge 边', findAll('data-graph-edge').some((n) => n.props['data-graph-edge'] === 'merge'))
 // 请求落到了正确的路由与参数上。
@@ -473,7 +510,14 @@ await click(find('data-graph-row', 'm'.repeat(40)))
 check('   选中后右栏出现详情', find('data-graph-detail') !== null, 'true')
 const detailText = viewText()
 checkTrue('   显示提交标题', detailText.includes('merge feature into main'))
-checkTrue('   显示短哈希', detailText.includes('mmmmmmm'))
+// **不显示哈希**（需求第 3 节）。断言"没显示"必须拿一个**真的出现过**的短哈希去否定它，
+// 否则这条断言在实现把哈希画出来时依然是绿的（用不存在的字符串做否定等于什么都没测）。
+// 中栏那一行的哈希列也被去掉了，因此整棵树的文本里都不该出现它。
+check('   右栏/中栏都不显示短哈希', detailText.includes('mmmmmmm'), 'false')
+check('   完整哈希也不显示', detailText.includes('m'.repeat(40)), 'false')
+// 时间精确到**秒**（需求第 6 节）：`2026-01-04T10:00:00+08:00` → `2026-01-04 10:00:00`，
+// 且**不做时区换算**（直接取 ISO 字符串本身的年月日时分秒）。
+checkTrue('   时间显示到秒（不做时区换算）', detailText.includes('2026-01-04 10:00:00'))
 // "在 N 个分支中"：插值必须真的发生（见 mountProps 的 t）。
 checkTrue('   显示所在分支（已插值）', detailText.includes('graphInBranches') && !detailText.includes('{count}'))
 // 分支名**确实渲染出来了**：直接读那个节点的文本（`data-graph-containing` 只在这条信息
@@ -628,6 +672,232 @@ console.log('=== 7. 空仓库与错误态 ===')
   await mount()
   checkTrue('   出错时显示 git 原文', viewText().includes('raw git words'))
   globalThis.fetch = originalFetch
+}
+
+console.log('')
+console.log('=== 8. 工具栏计数：说的是"提交"（item 4）===')
+{
+  await mount()
+  const count = find('data-graph-count')
+  checkTrue('8) 工具栏有计数节点', count !== null)
+  // 这个数字 = 已加载且经搜索过滤后的提交数。它曾经借用 `graphFiles`（"{count} 个文件"），
+  // 而提交图顶部的数字说的显然是提交，不是文件。
+  //
+  // 注意：这里的 `t` 是桩，它拿到的**是文案键**（真正的模板在插件字典里），因此"用了哪个键"
+  // 直接看文本、"计数是多少"看 `params`（下面用 tCalls 断言）。
+  check('   用 graphCommits 这个键', textOf(count), 'graphCommits')
+  check('   不再借用"个文件"那个键', textOf(count).includes('graphFiles'), 'false')
+  check('   计数 = 已加载的提交数', tCalls.filter((c) => c.key === 'graphCommits').pop()?.params?.count, 4)
+  check('   没有更深历史时不加"继续滚动加载"', find('data-graph-count').props['data-graph-has-more'], 'false')
+
+  // 搜索后计数跟着变小——它是"列表里现在有几条"，不是仓库总数。
+  find('data-graph-search').props.onChange({ target: { value: 'feature work' } })
+  await settle()
+  check('   过滤后计数跟着变小', tCalls.filter((c) => c.key === 'graphCommits').pop()?.params?.count, 1)
+  find('data-graph-search').props.onChange({ target: { value: '' } })
+  await settle()
+}
+
+console.log('')
+console.log('=== 9. 滚到底自动加载下一页（item 5）===')
+{
+  // 两页夹具：第一页 4 条 + hasMore，第二页 3 条 + 到底。
+  const page1 = GRAPH.commits
+  const page2 = [
+    { ...GRAPH.commits[3], hash: 'x'.repeat(40), short: 'xxxxxxx', subject: 'older one', refs: [] },
+    { ...GRAPH.commits[3], hash: 'y'.repeat(40), short: 'yyyyyyy', subject: 'older two', refs: [] },
+    { ...GRAPH.commits[3], hash: 'z'.repeat(40), short: 'zzzzzzz', subject: 'older three', refs: [] },
+  ]
+  const calls = []
+  graphPages = (skip) => {
+    calls.push(skip)
+    if (skip === 0) return { ...GRAPH, hasMore: true, commits: page1 }
+    return { ...GRAPH, hasMore: false, commits: page2 }
+  }
+  await mount()
+  const before = calls.length
+  check('9) 第一页 hasMore 时计数带"继续滚动加载"', textOf(find('data-graph-count')), 'graphCommitsMore')
+  check('   计数仍是 4', tCalls.filter((c) => c.key === 'graphCommitsMore').pop()?.params?.count, 4)
+  check('   有"加载更多"按钮兜底', find('data-graph-more') !== null, 'true')
+
+  /**
+   * 造一个"已经滚到底"的滚动事件。
+   *
+   * 几何数字要同时满足两件事：距底 100px（< 阈值 320px，触发加载）并且**滚动位置不能超过
+   * 内容高度**——`GraphCommitList` 是按 `scrollTop` 做窗口化的，`scrollTop` 给到 4000 而
+   * 内容只有 7 行时会一行都渲染不出来（那是正确的窗口化行为，但会让断言测错东西）。
+   */
+  const scrollToBottom = () => {
+    find('data-graph-scroll').props.onScroll({ target: { scrollTop: 0, clientHeight: 600, scrollHeight: 700 } })
+  }
+  /** 离底还远：剩余 4000px。 */
+  const scrollToMiddle = () => {
+    find('data-graph-scroll').props.onScroll({ target: { scrollTop: 0, clientHeight: 600, scrollHeight: 4600 } })
+  }
+
+  // 离底还远：不许发请求。
+  scrollToMiddle()
+  await settle()
+  check('   离底还远不加载', calls.length - before, 0)
+
+  // 滚到底：**同一帧连按两次**只能发一次（这就是"不能重复触发"的实测形态：
+  // 两次调用读到的是同一份未更新的 state，只有同步的 in-flight 闸门挡得住）。
+  scrollToBottom()
+  scrollToBottom()
+  await settle()
+  check('   滚到底只发一次 skip=4', calls.slice(before).join(','), '4')
+  check('   列表追加到 7 条', findAll('data-graph-row').length, 7)
+  check('   加载完 hasMore=false，计数不再带提示', textOf(find('data-graph-count')), 'graphCommits')
+  check('   计数变成 7', tCalls.filter((c) => c.key === 'graphCommits').pop()?.params?.count, 7)
+  check('   到底后按钮消失', find('data-graph-more'), null)
+
+  // 到底之后再滚：hasMore=false，一次都不许再发。
+  const settled = calls.length
+  scrollToBottom()
+  scrollToBottom()
+  await settle()
+  check('   hasMore=false 后不再请求', calls.length - settled, 0)
+
+  // 左栏数据源不被分页改动：第二页里的新提交**不许**出现在左栏。
+  const treeText = viewText('data-graph-tree')
+  check('   左栏没有被分页扩展', treeText.includes('older one'), 'false')
+  graphPages = null
+}
+
+console.log('')
+console.log('=== 9b. 分页在飞的那一帧：列表不白屏，底部只说"正在加载更多…"（item 5）===')
+{
+  // 需求：已经有提交时**不许整页 loading**。这件事只有在请求真的在飞时才能断言，因此这里
+  // 把第二页**挂起**，检查那一帧的界面。
+  const page1 = GRAPH.commits
+  const page2 = [{ ...GRAPH.commits[3], hash: 'w'.repeat(40), short: 'wwwwwww', subject: 'older page two', refs: [] }]
+  graphPages = (skip) => (skip === 0 ? { ...GRAPH, hasMore: true, commits: page1 } : { ...GRAPH, hasMore: false, commits: page2 })
+  graphHoldMore = () => undefined
+  await mount()
+  check('9b) 首屏在手上有 4 条', findAll('data-graph-row').length, 4)
+
+  // 触发分页（不 await：请求停在闸门里）。
+  find('data-graph-scroll').props.onScroll({ target: { scrollTop: 0, clientHeight: 600, scrollHeight: 700 } })
+  await settle()
+  const during = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey)
+  const duringText = (attr) =>
+    during.filter((node) => node.props?.[attr] !== undefined).map((node) => textOf(node)).join(' ')
+  // 1) 三栏与列表**原地保留**（不是被整页 loading 换掉）。
+  check('   分页在飞时三栏仍在', during.filter((n) => n.props?.['data-graph-pane'] !== undefined).length, 3)
+  check('   已有的 4 条仍然渲染', findAll('data-graph-row').length, 4)
+  check('   没有退化成整页 loading', /\bgraphLoading\b/.test(duringText('data-graph-view')), 'false')
+  // 2) 底部只多一行"正在加载更多…"，按钮让位（避免"点了没反应"）。
+  check('   底部显示正在加载更多', duringText('data-graph-loading-more'), 'graphLoadingMore')
+  check('   加载中不显示"加载更多"按钮', find('data-graph-more'), null)
+  // 3) 放行后回到常态。
+  graphHoldMore()
+  await settle()
+  check('   放行后追加成 5 条', findAll('data-graph-row').length, 5)
+  check('   放行后"正在加载更多"消失', find('data-graph-loading-more'), null)
+  graphHoldMore = null
+  graphPages = null
+}
+
+console.log('')
+console.log('=== 9c. 分页失败：非阻塞提示 + 保留按钮重试（item 5）===')
+{
+  const originalFetch = globalThis.fetch
+  let failNext = false
+  globalThis.fetch = async (url, init) => {
+    const target = String(url)
+    const body = init?.body === undefined ? undefined : JSON.parse(init.body)
+    // 只在"第二页"上失败：首屏必须正常，否则测的是错误页而不是分页重试。
+    if (String(target).includes('/review/graph') && (body?.skip ?? 0) > 0 && failNext) {
+      requests.push({ url: target, body })
+      return { ok: false, text: async () => JSON.stringify({ error: 'boom', detail: 'raw git words' }) }
+    }
+    return originalFetch(url, init)
+  }
+  let skipCalls = 0
+  graphPages = (skip) => {
+    if (skip > 0) skipCalls += 1
+    return skip === 0 ? { ...GRAPH, hasMore: true, commits: GRAPH.commits } : { ...GRAPH, hasMore: false, commits: [] }
+  }
+  await mount()
+  failNext = true
+  find('data-graph-scroll').props.onScroll({ target: { scrollTop: 0, clientHeight: 600, scrollHeight: 700 } })
+  await settle()
+  const failed = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey)
+  const failedText = failed.filter((n) => n.props?.['data-graph-more-error'] !== undefined).map((n) => textOf(n)).join(' ')
+  checkTrue('9c) 分页失败给出提示', failedText.includes('raw git words'))
+  check('   列表一条不少（失败只影响这一页）', findAll('data-graph-row').length, 4)
+  check('   失败后按钮回来了（可以重试）', find('data-graph-more') !== null, 'true')
+  // 重试：这次让它成功。
+  failNext = false
+  const beforeRetry = skipCalls
+  await click(find('data-graph-more'))
+  check('   重试确实又发了一次', skipCalls - beforeRetry, 1)
+  check('   重试成功后错误提示消失', find('data-graph-more-error'), null)
+  graphPages = null
+  globalThis.fetch = originalFetch
+}
+
+console.log('')
+console.log('=== 9d. 字号 token 的设计值集合没有被悄悄改小（item 7）===')
+{
+  // 需求明确："不要简单把 12.5→11 拍死"。改成 `uiPx(N)` 之后，**每个位置的设计值必须与
+  // 改造前逐一相同**——否则这次重构就顺手改了视觉，而那正是用户禁止的。
+  //
+  // 样式表在模块初始化时就把 `uiPx(N)` 展开成了 `calc(var(--dsh-ui-px-14, 14px) * N / 14)`，
+  // 因此这里从展开后的文本里把 N 抽回来（这也顺带钉住了派生形式本身）。
+  const css = loaded.__reviewStylesForTest
+  checkTrue('9d) 导出了样式文本以便核对设计值', typeof css === 'string' && css !== '')
+  const derive = /calc\(var\(--dsh-ui-px-14, 14px\) \* (\d+(?:\.\d+)?) \/ 14\)/g
+  const fromCss = [...String(css).matchAll(derive)].map((m) => Number(m[1]))
+  check('   样式表里没有裸 px 字号', /font-size:\s*\d+(?:\.\d+)?px/.test(String(css)), false)
+  checkTrue('   样式表里的字号都走派生式', fromCss.length > 0)
+  check('   样式侧设计值集合与改造前一致', [...new Set(fromCss)].sort((a, b) => a - b).join(','), '11,11.5,12.5,13,17')
+
+  // 内联字号同理：右栏摘要（12.5）、元信息（11.5）、详情标题（11）、差异正文（12）等。
+  const inlineSizes = new Set()
+  for (const nodes of [collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey)]) {
+    for (const node of nodes) {
+      const value = node.props?.style?.fontSize
+      if (typeof value !== 'string') continue
+      checkTrue('   内联字号不是裸 px', !/^\d+(?:\.\d+)?px$/.test(value))
+      const match = derive.exec(value)
+      derive.lastIndex = 0
+      if (match !== null) inlineSizes.add(Number(match[1]))
+    }
+  }
+  checkTrue('   拿到若干内联设计值', inlineSizes.size > 0)
+  // 右栏三处关键字号必须在其中：提交标题 12.5、元信息/文件行 11.5、差异正文 12。
+  checkTrue('   提交标题仍是 12.5', inlineSizes.has(12.5))
+  checkTrue('   元信息/文件行仍是 11.5', inlineSizes.has(11.5))
+  checkTrue('   差异正文仍是 12', inlineSizes.has(12))
+}
+
+console.log('')
+console.log('=== 10. formatCommitTime：精确到秒、畸形输入不抛错（item 6）===')
+{
+  const fmt = loaded.__graphNormalizeForTest.commitTime
+  checkTrue('10) 导出了 formatCommitTime', typeof fmt === 'function')
+  // git 的 `%cI` 已经是提交所在时区的本地时间，因此只做"去掉 T、去掉时区"，
+  // **绝不走 `new Date()`**（那会把时间换算到运行环境时区，同一提交在不同机器上不一样）。
+  check('   ISO 带时区', fmt('2026-09-21T15:42:18+08:00'), '2026-09-21 15:42:18')
+  check('   ISO 带 Z', fmt('2026-09-21T15:42:18Z'), '2026-09-21 15:42:18')
+  check('   毫秒也吃掉', fmt('2026-09-21T15:42:18.512+08:00'), '2026-09-21 15:42:18')
+  check('   已经是空格分隔', fmt('2026-09-21 15:42:18'), '2026-09-21 15:42:18')
+  check('   只到分钟也保留', fmt('2026-09-21T15:42'), '2026-09-21')
+  check('   只有日期', fmt('2026-09-21'), '2026-09-21')
+  // 畸形输入：安全降级，绝不抛错（这个函数跑在每一行上，抛一次就是整棵树被 React 卸掉）。
+  check('   空串', fmt(''), '')
+  check('   undefined', fmt(undefined), '')
+  check('   null', fmt(null), '')
+  // 数字时间戳不做本地化换算（那需要时区语义，猜错就是显示一个错的时刻），直接判空；
+  // 对象更不能变成 `[object Object]` 挂在时间列上。
+  check('   数字（host 给时间戳）', fmt(1758440538000), '')
+  check('   对象', fmt({ at: 1 }), '')
+  check('   数组', fmt([1, 2]), '')
+  check('   布尔', fmt(true), '')
+  check('   NaN', fmt(Number.NaN), '')
+  check('   本地化文本原样返回', fmt('3 天前'), '3 天前')
+  check('   前后空白被去掉', fmt('  2026-09-21T15:42:18  '), '2026-09-21 15:42:18')
 }
 
 console.log('')

@@ -514,31 +514,67 @@ check('手柄有本地化说明', typeof resizer?.props?.['aria-label'], 'string
 // 键盘调整：ArrowLeft 变宽、ArrowRight 变窄、Home 复位（不依赖鼠标事件）。
 const widthOf = (tree) => Number.parseInt(String(tree.props.style.width), 10)
 const startWidth = widthOf(drawer.tree)
-// 默认宽度是**视口的 50%**（本桩的 innerWidth 是 1400 → 700），与 IDEA 的 Git 工具窗
-// 默认占半屏一致。此前是写死的 480px —— 那个值在 1366 的笔记本上占 35%、在 2560 的
-// 显示器上只占 19%，同一块面板在两种屏上是完全不同的东西。
-check('宽度默认为视口的 50%', startWidth, Math.round(1400 * 0.5))
+// 默认宽度是**视口的 80%**（本桩的 innerWidth 是 1400 → 1120）。
+//
+// 从 50% 提到 80%（需求第 1 节的第一条）：50% 下"文件列表 + 差异"两栏都太窄，逐行差异几乎
+// 每行都要横向滚动。同时**像素上限 1600 已删除**——它与"默认 80%"直接冲突（2560 的屏幕算
+// 出来 2048 会被夹回 1600 = 62%）。这两件事必须一起改，否则宽屏上默认值就是错的。
+check('宽度默认为视口的 80%', startWidth, Math.round(1400 * 0.8))
+// 宽屏也必须真的拿到 80%，而不是被某个固定像素数卡住。
+//
+// 注意：桩把 localStorage 挂在 `window` 上（不是 `globalThis`），因此必须走
+// `globalThis.window.localStorage`——写成 `globalThis.localStorage` 会静默变成空操作
+// （可选链把它吞掉），断言随即变成"什么都没测"。
+const panelStorage = globalThis.window.localStorage
+check('2560 的屏幕默认 2048（不被像素上限夹住）', (() => {
+  const saved = globalThis.window.innerWidth
+  globalThis.window.innerWidth = 2560
+  // 直接重挂面板：默认宽度是"读不到持久化值"时算出来的，因此先把持久化清掉。
+  panelStorage.removeItem('dsh.review.panelWidth')
+  const tree = render(panelElement.type, panelElement.props, 'panel-width-wide').tree
+  globalThis.window.innerWidth = saved
+  return widthOf(tree)
+})(), Math.round(2560 * 0.8))
+
+// 有持久化宽度时**优先用持久化的值**，而不是每次都回到 80%。
+check('持久化宽度优先', (() => {
+  const saved = globalThis.window.innerWidth
+  globalThis.window.innerWidth = 1920
+  panelStorage.setItem('dsh.review.panelWidth', '1100')
+  const tree = render(panelElement.type, panelElement.props, 'panel-width-persist').tree
+  globalThis.window.innerWidth = saved
+  panelStorage.removeItem('dsh.review.panelWidth')
+  return widthOf(tree)
+})(), 1100)
 
 const press = (key) => {
   let prevented = false
   resizer.props.onKeyDown({ key, preventDefault: () => { prevented = true } })
   return { prevented, tree: render(panelElement.type, panelElement.props, 'panel').tree }
 }
+// 默认值**贴着上限**（80% 既是默认也是最大），因此"变宽"必须先变窄一步——
+// 直接按 ArrowLeft 会被夹住，那是正确行为而不是缺陷。
+const narrowed = press('ArrowRight')
+check('ArrowRight 之后变窄', widthOf(narrowed.tree) < startWidth, 'true')
 const left = press('ArrowLeft')
 check('ArrowLeft 被处理', left.prevented, 'true')
-check('ArrowLeft 之后变宽', widthOf(left.tree) > startWidth, 'true')
-const right = press('ArrowRight')
-check('ArrowRight 之后变窄', widthOf(right.tree) < widthOf(left.tree), 'true')
+check('ArrowLeft 之后变宽（相对刚变窄的那一步）', widthOf(left.tree) > widthOf(narrowed.tree), 'true')
 const home = press('Home')
 check('Home 复位到默认宽度', widthOf(home.tree), startWidth)
 
 // 鼠标拖动：按下手柄 → 向左移动 120px → 松开，宽度应增加 120。
+//
+// 起点必须先离上限**超过 120px**，否则往左拖会被夹在上限上（差值是 24 而不是 120），
+// 那条断言就变成在测"夹取"而不是"拖动"。6 步 × 24px = 144px。
+let beforeDrag = null
+for (let i = 0; i < 6; i += 1) beforeDrag = press('ArrowRight')
+check('拖前已离上限足够远', startWidth - widthOf(beforeDrag.tree), 144)
 const dragStart = { clientX: 1000, button: 0, preventDefault() {} }
 resizer.props.onMouseDown(dragStart)
 check('拖动期间标记了 body', globalThis.document.body?.dataset?.reviewDragging, '1')
 globalThis.document.emit('mousemove', { clientX: 880 })
 const dragged = render(panelElement.type, panelElement.props, 'panel').tree
-check('向左拖动 120px 后变宽 120', widthOf(dragged) - startWidth, 120)
+check('向左拖动 120px 后变宽 120', widthOf(dragged) - widthOf(beforeDrag.tree), 120)
 globalThis.document.emit('mouseup', {})
 check('松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDragging, undefined)
 
@@ -550,6 +586,129 @@ check('松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDr
   const widened = render(panelElement.type, panelElement.props, 'panel').tree
   check('向左猛拖后停在视口的 80%', widthOf(widened), Math.round(1400 * 0.8))
   globalThis.document.emit('mouseup', {})
+}
+
+console.log('')
+console.log('=== 5b. 点击抽屉外部关闭（item 2）===')
+{
+  // 需求：点抽屉外任何**普通**区域都要关闭，且不能误关（内部 / resize handle / 抽屉里的
+  // 弹窗 / 分支菜单 / 右上角入口都不许被当成"外部"）。
+  //
+  // 这里能离线测的部分：关闭方向（点普通区域、Escape）、以及"分支菜单与入口被豁免"这两条
+  // 豁免。抽屉**内部**（`rootRef.contains`）依赖真实 DOM 的 ref，只能在 CDP 里测
+  // （见 scripts/test-drawer-dismiss.mjs）。
+  const panelStore = loaded.__panelStoreForTest
+  const dismissKey = 'panel-dismiss'
+  const isOpen = () => render(panelElement.type, panelElement.props, dismissKey).tree !== null
+  /** 把开关重新置为打开，并把外部点击监听重新挂上（关掉时 effect 会摘掉它们）。 */
+  const reopen = () => {
+    panelStore.set(true)
+    for (const effect of render(panelElement.type, panelElement.props, dismissKey).effects) effect()
+  }
+
+  reopen()
+  check('5b) 抽屉初始是打开的', isOpen(), 'true')
+
+  // 分支菜单（gitbar 渲染在 body 级、不在抽屉子树里）里的 mousedown 必须被豁免。
+  globalThis.document.emit('mousedown', {
+    target: { closest: (selector) => (selector.includes('data-desktop-sc-menu') ? { selector } : null) },
+  })
+  check('   点分支菜单内部 → 不关闭', isOpen(), 'true')
+  // 抽屉里的原生 dialog 同样豁免。
+  globalThis.document.emit('mousedown', {
+    target: { closest: (selector) => (selector.includes('dialog[open]') ? { selector } : null) },
+  })
+  check('   点抽屉里的 dialog → 不关闭', isOpen(), 'true')
+
+  // 入口按钮：它不在抽屉里，但必须由它自己 toggle（否则捕获阶段的 mousedown 先关、它的
+  // onClick 再开，用户看到的是"闪一下"）。
+  const savedQuery = globalThis.document.querySelector
+  const trigger = { contains: (node) => node === 'inside-trigger' }
+  globalThis.document.querySelector = (selector) => (selector === '[data-review-trigger="1"]' ? trigger : null)
+  globalThis.document.emit('mousedown', { target: 'inside-trigger' })
+  check('   点右上角入口 → 不关闭（由它自己 toggle，避免先关再开闪一下）', isOpen(), 'true')
+  globalThis.document.querySelector = savedQuery
+
+  // 点普通外部区域（没有 closest 的最小对象）→ 关闭。
+  globalThis.document.emit('mousedown', { target: {} })
+  check('   点普通外部区域 → 关闭', isOpen(), 'false')
+
+  // 没有 target 的事件不许把监听器打崩（`typeof undefined.closest` 会先取属性再 typeof，
+  // 直接抛 TypeError —— 那是一次程序化派发的事件就把抽屉带走）。
+  let threw = null
+  try {
+    reopen()
+    globalThis.document.emit('mousedown', {})
+  } catch (cause) {
+    threw = cause
+  }
+  check('   没有 target 的 mousedown 不抛错', threw === null ? 'ok' : String(threw?.message ?? threw), 'ok')
+  check('   没有 target 也算外部 → 关闭', isOpen(), 'false')
+
+  // Escape 仍然关闭（键盘用户的退出方式）。
+  reopen()
+  check('   Escape 前是打开的', isOpen(), 'true')
+  globalThis.document.emit('keydown', { key: 'Escape' })
+  check('   Escape → 关闭', isOpen(), 'false')
+  // 关掉之后监听要摘掉（否则"关了还在监听"会变成隐藏的状态泄漏）。
+  const before = domListeners.get('mousedown')?.size ?? 0
+  reopen()
+  const after = domListeners.get('mousedown')?.size ?? 0
+  check('   重新打开会重新挂上监听', after > before, 'true')
+}
+
+console.log('')
+console.log('=== 5c. 提交信息输入框：4 行 + 最小高度（item 8）===')
+{
+  // 输入框在 Changes 页签里，而页签内容要等快照请求回来才渲染——因此必须像 renderPanel
+  // 一样跑几轮"渲染 + 执行副作用 + 等一个 tick"。
+  // **必须用 `collectHostNodes` 而不是 `walk`**：`walk` 只遍历元素树、不展开函数组件，
+  // 而提交卡片所在的 `StagingSection` 正是嵌套函数组件——用 `walk` 只能看到那个
+  // `<StagingSection>` 元素本身，断言会误判成"输入框没渲染"。
+  const textareaKey = 'panel'
+  const drainPanel = async () => {
+    let nodes = []
+    for (let pass = 0; pass < 4; pass += 1) {
+      const queued = []
+      const out = render(panelElement.type, panelElement.props, textareaKey)
+      queued.push(...out.effects)
+      nodes = collectHostNodes(out.tree, queued)
+      for (const effect of queued) effect()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    return nodes
+  }
+  const nodes = await drainPanel()
+  const message = nodes.find((node) => node.props?.['data-staging-message'] !== undefined)
+  check('5c) 找到提交信息输入框', message !== undefined, 'true')
+  check('   rows 从 2 提到 4', message?.props?.rows, 4)
+  check('   有最小高度（拖小之后仍然够用）', message?.props?.style?.minHeight, '90px')
+  check('   仍然允许纵向拖拽', message?.props?.style?.resize, 'vertical')
+  // Ctrl+Enter 仍然提交：这条不能在"把框加大"的改动里被弄丢。
+  let prevented = false
+  message?.props?.onKeyDown?.({ key: 'Enter', ctrlKey: true, stopPropagation() {}, preventDefault() { prevented = true } })
+  check('   Ctrl+Enter 仍被处理', prevented, 'true')
+
+  console.log('')
+  console.log('=== 5d. 字号跟随 UI typography token（item 7）===')
+  // 抽屉里所有字号都必须从 `--dsh-ui-px-14` 派生（见客户端里 uiPx 的说明）：
+  // 那个变量由"设置 → UI 字号"插件维护，基准 14 下 `calc(base * N / 14)` 就是 N px，
+  // 因此这次改造不改变默认外观，字号 12 / 18 时整块同步缩放。
+  const css = styledBlocks.map((node) => String(node.textContent ?? '')).join('\n')
+  check('5d) 注入了样式块', styledBlocks.length > 0, 'true')
+  check('   差异头部字号走 uiPx 派生', css.includes('font-size: calc(var(--dsh-ui-px-14, 14px) * 11.5 / 14)'), true)
+  check('   分区标题字号走 uiPx 派生', css.includes('font-size: calc(var(--dsh-ui-px-14, 14px) * 11 / 14)'), true)
+  // 裸 px 字号一个都不许剩：剩下的那些就是"不跟随设置"的角落。
+  const bare = [...css.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)].map((m) => m[1])
+  check('   样式里没有裸 px 字号（说明全部走 token）', bare.join(','), '')
+
+  // 内联样式同理：右栏摘要、详情、文件行、差异正文都得是 uiPx 表达式。
+  const inlineSizes = (await drainPanel())
+    .map((node) => node.props?.style?.fontSize)
+    .filter((value) => typeof value === 'string')
+  check('   抽屉里有内联字号', inlineSizes.length > 0, true)
+  const bareInline = inlineSizes.filter((value) => !value.startsWith('calc('))
+  check('   内联字号里没有裸 px', bareInline.join(','), '')
 }
 
 console.log('')
@@ -612,6 +771,22 @@ console.log('=== 6b. 提交区固定在底部，不随文件列表滚走 ===')
   check('   提交区排在最后（order 3）', String(card?.props?.style?.order), '3')
   check('   提交区不参与收缩', String(card?.props?.style?.flexShrink), '0')
   check('   根是纵向 flex', staging?.props?.style?.flexDirection, 'column')
+
+  // ---- 输入框从 2 行长到 4 行（+90px 最小高度）之后，按钮**仍然不会掉出可视区** ----
+  //
+  // 结构上必须成立的两件事：
+  //   1. 提交区里那个 textarea 用的是 `minHeight` 而**不是** `height`：4 行是默认高度，
+  //      用户还能往下拖大，因此"高度只会增"这件事不能靠固定高度假装；
+  //   2. 滚动区允许被压缩（`flex: 1 1 auto` + `minHeight: 0`）：输入框变高时被挤掉的必须
+  //      是**文件列表**的可视高度，而不是把提交区推出容器（那正是"按钮跑到屏幕外"的形态）。
+  // 另外提交区必须**不在**滚动区里——在里就会被一起滚走。
+  const message = settledNodes.find((n) => n.props?.['data-staging-message'] !== undefined)
+  check('   输入框在提交区里', card !== undefined && message !== undefined, 'true')
+  check('   输入框高度是 minHeight 而不是 height', message?.props?.style?.height, undefined)
+  check('   最小高度够放 4 行', message?.props?.style?.minHeight, '90px')
+  check('   滚动区可被压缩（flex-basis auto）', String(scroll?.props?.style?.flex), '1 1 auto')
+  check('   滚动区允许收缩到 0（minHeight 0）', String(scroll?.props?.style?.minHeight), '0')
+  check('   提交区不在滚动区里', scroll !== undefined && card !== undefined ? scroll !== card : false, true)
 }
 console.log('')
 console.log('=== 6c. 头栏计数就是快照里的文件数 ===')
@@ -696,8 +871,12 @@ check('   选中行被标记', rowsOf(stepNodes, 'data-graph-row').find((n) => n
 // 元信息：标题/哈希/作者/所在分支（`data-graph-containing` 只在分支信息存在时才渲染）。
 const summaryText = textOf(rowsOf(stepNodes, 'data-commit-summary')[0] ?? null)
 has('   显示提交标题', summaryText.includes('second commit'))
-has('   显示短哈希', summaryText.includes('aaaaaaa'))
+// **不显示哈希**（需求第 3 节）。否定断言必须拿一个真的出现过、且**只**出现在摘要里的短
+// 哈希：`data-commit-summary` 这个节点里原本渲染的就是右栏摘要，去掉之后它必须消失。
+check('   摘要里不再显示短哈希', summaryText.includes('aaaaaaa'), 'false')
 has('   显示作者与邮箱', summaryText.includes('tester') && summaryText.includes('t@example.com'))
+// 时间精确到秒（需求第 6 节）：摘要里的这一格必须带 `HH:mm:ss`。
+has('   时间精确到秒', /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(summaryText))
 const containingNode = rowsOf(stepNodes, 'data-graph-containing')[0]
 has('   渲染了所在分支这一行', containingNode !== undefined)
 check('   分支行的文案键', containingNode?.props?.children, 'graphInBranches')

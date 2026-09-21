@@ -358,6 +358,163 @@ console.log('=== E. 点分支：左栏完整、不白屏、滚动位置保持 ==
   }
 }
 
+// ---- F. 抽屉默认宽度 80% + 点外部关闭 -------------------------------------------
+//
+// 两件事都在真渲染器下才有意义：宽度取决于真实视口（`window.innerWidth`），
+// 点外部取决于真实的 `mousedown` 事件与真实的 DOM 包含关系（`rootRef.contains`）。
+console.log('')
+console.log('=== F. 抽屉默认宽度 80%，点外部关闭且入口仍在 ===')
+{
+  // 清掉持久化宽度并重载，拿到"默认宽度"这一帧。重载后入口与抽屉都会复位。
+  await evaluate(`localStorage.removeItem('dsh.review.panelWidth'), localStorage.removeItem('dsh.review.panelOpen'), true`)
+  await evaluate(`location.reload(), true`)
+  await sleep(9000)
+  const opened = await ensureDrawer()
+  has('F) 抽屉已打开', opened)
+  const measured = JSON.parse(
+    await evaluate(`(() => {
+      const panel = document.querySelector('[data-desktop-review-surface]');
+      const r = panel.getBoundingClientRect();
+      return JSON.stringify({ width: Math.round(r.width), viewport: window.innerWidth });
+    })()`),
+  )
+  // 允许 ±2px 的取整差（`Math.round` 与浏览器布局各取一次整）。
+  check('   默认宽度是视口的 80%', Math.abs(measured.width - Math.round(measured.viewport * 0.8)) <= 2, true)
+  console.log(`   视口 ${measured.viewport} → 抽屉 ${measured.width}（80% 是 ${Math.round(measured.viewport * 0.8)}）`)
+
+  // 点抽屉外部（页面最左侧的空白/正文区）→ 关闭。用真实的 mousedown，走的是捕获阶段的监听。
+  const closed = await evaluate(`(() => {
+    const target = document.elementFromPoint(40, Math.round(window.innerHeight / 2)) || document.body;
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    return true;
+  })()`)
+  has('   派发了外部 mousedown', closed === true)
+  await sleep(700)
+  has('   点外部后抽屉已关闭', (await evaluate(`document.querySelector('[data-desktop-review-surface]') === null`)) === true)
+  has('   右上角入口仍在（不是"面板被卸载"）', (await evaluate(`document.querySelector('[data-review-trigger-button]') !== null`)) === true)
+  check('   这一段没有 React error', reactErrors().length, 0)
+  await ensureDrawer()
+}
+
+// ---- G. Log：无哈希、计数说"提交"、时间到秒、滚动自动分页 -----------------------
+console.log('')
+console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
+{
+  await click('[data-review-tab="log"]')
+  has('G) 提交图已渲染', await waitFor(`document.querySelector('[data-graph]') !== null || document.querySelector('[data-graph-view]') !== null`, 10000))
+  const read = async () =>
+    JSON.parse(
+      await evaluate(`(() => {
+        const rows = [...document.querySelectorAll('[data-graph-row]')];
+        const firstRow = rows[0] ? rows[0].innerText.replace(/\\s+/g, ' ').trim() : '';
+        const count = document.querySelector('[data-graph-count]');
+        const scroll = document.querySelector('[data-graph-scroll]');
+        return JSON.stringify({
+          rowCount: rows.length,
+          firstRow,
+          countText: count ? count.textContent : '',
+          hasMore: count ? count.getAttribute('data-graph-has-more') : null,
+          graphFilesUsed: count ? /个文件|files/.test(count.textContent) : false,
+          scrollHeight: scroll ? scroll.scrollHeight : 0,
+          clientHeight: scroll ? scroll.clientHeight : 0,
+        });
+      })()`),
+    )
+  console.log(`   ${read.rowCount} 行；计数「${read.countText}」；首行「${read.firstRow.slice(0, 90)}」`)
+  has('   计数说的是"提交"而不是"文件"', read.graphFilesUsed === false)
+  // 时间精确到秒：首行必须带 HH:mm:ss。
+  check('   首行时间精确到秒', /\d{2}:\d{2}:\d{2}/.test(read.firstRow), true)
+  // 不显示哈希：首行里不该出现 7 位以上的十六进制串（分支名/标签里也不会有）。
+  check('   首行没有短哈希', /\b[0-9a-f]{7,40}\b/.test(read.firstRow), false)
+
+  // 滚动到底若干次：分页必须自动发生，且**不重复**（skip 单调递增由行数增长体现）。
+  const counts = [read.rowCount]
+  for (let i = 0; i < 4; i += 1) {
+    await evaluate(`(() => { const el = document.querySelector('[data-graph-scroll]'); if (el) el.scrollTop = el.scrollHeight; return true })()`)
+    await sleep(1800)
+    const now = await read()
+    counts.push(now.rowCount)
+    if (now.hasMore === 'false') break
+  }
+  console.log(`   滚动后的行数序列: ${counts.join(' → ')}`)
+  check('   滚动让行数单调不减', counts.every((n, i) => i === 0 || n >= counts[i - 1]), true)
+  check('   这一段没有 React error', reactErrors().length, 0)
+}
+
+// ---- H. Changes：未跟踪文件按需差异 + AI 补充不覆盖已有输入 ---------------------
+console.log('')
+console.log('=== H. 未跟踪文件差异 + AI 补充不覆盖已有输入 ===')
+{
+  await click('[data-review-tab="changes"]')
+  await sleep(1200)
+  // 未跟踪文件在同一次快照里带着 `untracked: true`，点它的路径名展开差异。
+  const untracked = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-staging-row][data-staging-side="untracked"]')][0];
+    if (!row) return null;
+    const toggle = row.querySelector('[data-staging-diff-toggle]');
+    if (!toggle) return null;
+    toggle.click();
+    return row.getAttribute('data-staging-row');
+  })()`)
+  if (untracked === null) {
+    console.log('   没有未跟踪文件，跳过"未跟踪差异"（需要一个有未跟踪文件的仓库）')
+  } else {
+    await sleep(1800)
+    const diff = JSON.parse(
+      await evaluate(`(() => {
+        const path = ${JSON.stringify(untracked)};
+        const containers = [...document.querySelectorAll('[data-review-diff-path]')].map((n) => n.getAttribute('data-review-diff-path'));
+        const rows = document.querySelectorAll('[data-review-diff-row]').length;
+        return JSON.stringify({ path, containers, rows });
+      })()`),
+    )
+    has('H) 未跟踪文件展开后出现了差异容器', diff.containers.includes(untracked))
+    has('   差异里有内容（不是空块）', diff.rows > 0)
+    // 这一条是本轮的高优先修复：旧实现在这里抛 `byFile is not defined`，被错误边界接住，
+    // 表现是"点未跟踪文件整个面板报错"。
+    check('   点未跟踪文件没有 React error / 引用错误', reactErrors().length, 0)
+    check('   也没有 byFile 之类的引用错误', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
+  }
+
+  // AI 补充：先在输入框里打一半，生成后**不许被覆盖**（要么保持原样，要么出现三选一）。
+  const aiState = await evaluate(`(() => {
+    const box = document.querySelector('[data-staging-message]');
+    const button = document.querySelector('[data-staging-ai]');
+    if (!box || !button) return JSON.stringify({ ok: false, why: box ? 'no-button' : 'no-box' });
+    const user = 'wip: 我打到一半';
+    // React 受控输入必须走原生 setter 才能让 onChange 收到（直接改 value 不会触发）。
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(box, user);
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    return JSON.stringify({ ok: true, user, disabled: button.disabled === true });
+  })()`)
+  const ai = JSON.parse(aiState)
+  if (ai.ok !== true) {
+    console.log(`   AI 补充：跳过（${ai.why}）`)
+  } else {
+    await sleep(400)
+    await click('[data-staging-ai]')
+    await sleep(2500)
+    const after = JSON.parse(
+      await evaluate(`(() => {
+        const box = document.querySelector('[data-staging-message]');
+        return JSON.stringify({
+          value: box ? box.value : null,
+          ask: document.querySelector('[data-staging-ai-notice]')?.getAttribute('data-staging-ai-notice') ?? null,
+        });
+      })()`),
+    )
+    if (after.value === ai.user) {
+      has('   已有一半输入时没有被静默覆盖', true)
+    } else {
+      // 另一种可接受的形态：模型已返回、界面在问"替换/追加/取消"。
+      check('   已有输入时改成询问（三选一）', after.ask, 'ask')
+      console.log('   （模型返回了建议，界面在询问是否替换）')
+    }
+    check('   这一段没有 React error', reactErrors().length, 0)
+  }
+}
+
 // ---- 总结 ------------------------------------------------------------------------
 console.log('')
 console.log('=== 页面错误汇总 ===')

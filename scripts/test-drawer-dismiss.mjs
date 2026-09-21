@@ -105,6 +105,82 @@ console.log('=== 点击入口按钮：应是"打开"而不是一闪一关 ===')
 const finalOpen = await openDrawer()
 check('点入口后抽屉保持打开', finalOpen)
 
+console.log('')
+console.log('=== 分支菜单 / 入口按钮：不许被当成"外部" ===')
+{
+  // 需求：抽屉**占 80% 宽**，而分支右键菜单由 gitbar 渲染在 body 级（`position: fixed`），
+  // 不在抽屉的 DOM 子树里。如果它被当成"外部"，用户一点菜单项抽屉就会消失——菜单还在、
+  // 抽屉没了，看起来像两件事互相打架。这里用真实的 mousedown/mouseup/click 走一遍。
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`)
+  await wait(500)
+  const reopened = await openDrawer()
+  check('前置：抽屉已重新打开', reopened)
+
+  // 打开分支来源面板（composer 上方的工具条），并右键一行打开菜单。
+  const menuOpened = await evaluate(`
+    (() => {
+      const chip = [...document.querySelectorAll('button')].find((el) => (el.getAttribute('title') || '').startsWith('Git:'));
+      if (!chip) return 'no-chip';
+      chip.click();
+      return 'clicked';
+    })()
+  `)
+  await wait(900)
+  const rowInfo = await evaluate(`
+    (() => {
+      const panel = document.querySelector('[data-desktop-branch-menu]');
+      if (!panel) return JSON.stringify({ ok: false, why: 'no-panel' });
+      const rows = [...panel.querySelectorAll('[data-desktop-branch-option]')];
+      const row = rows[0];
+      if (!row) return JSON.stringify({ ok: false, why: 'no-row' });
+      const r = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: r.left + 10, clientY: r.top + 8 }));
+      return JSON.stringify({ ok: true, name: row.getAttribute('data-desktop-branch-name') });
+    })()
+  `)
+  const row = JSON.parse(rowInfo)
+  if (row.ok !== true) {
+    console.log(`  SKIP  分支菜单：${row.why}（chip=${menuOpened}）`)
+  } else {
+    await wait(700)
+    const menuShown = await evaluate(`document.querySelector('[data-desktop-sc-menu]') !== null`)
+    check('分支右键菜单已打开', menuShown)
+    // 在菜单项上按下鼠标：**抽屉必须留着**（菜单自己是"内部"的一种延伸）。
+    const clickedInsideMenu = await evaluate(`
+      (() => {
+        const menu = document.querySelector('[data-desktop-sc-menu]');
+        if (!menu) return false;
+        const item = menu.querySelector('[data-desktop-sc-menuitem]') || menu.firstElementChild;
+        if (!item) return false;
+        item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        return true;
+      })()
+    `)
+    check('可在菜单里按下鼠标', clickedInsideMenu)
+    await wait(700)
+    check('点分支菜单内部后抽屉仍打开', (await evaluate(`Boolean(${DRAWER})`)) === true)
+
+    // 点右上角入口：只 toggle 一次——捕获阶段的 mousedown 不能先关再开（那会闪一下）。
+    await evaluate(`
+      (() => {
+        const el = ${TRIGGER};
+        if (!el) return false;
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        el.click();
+        return true;
+      })()
+    `)
+    await wait(900)
+    check('点入口后抽屉被关闭（toggle 生效且只生效一次）', (await evaluate(`Boolean(${DRAWER})`)) === false)
+    check('入口按钮本身仍在', (await evaluate(`Boolean(${TRIGGER})`)) === true)
+  }
+
+  // 收尾：关掉分支面板，避免影响后续手工操作。
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`)
+  await wait(400)
+}
+
 socket.close()
 console.log('')
 console.log(failures === 0 ? '抽屉关闭行为全部通过' : `${failures} 项失败`)

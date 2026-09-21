@@ -432,8 +432,17 @@ console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动左
 }
 
 console.log('')
-console.log('=== 6. 未过滤分页会顺势扩展左栏（这是特性，不是污染）===')
+console.log('=== 6. 未过滤分页也只追加中栏：左栏永远只反映第一页 ===')
 {
+  // 这一节的行为在需求里被**明确改过**，因此这里钉的是新契约而不是旧行为。
+  //
+  // 旧行为：未过滤（ref === ''）时把并入的第二页一起写进 `treeCommits`，于是左栏会随着
+  // "加载更多"多出更深历史里的分支（feature/c）。它的代价是左栏内容会在**滚动**这种
+  // 与左栏无关的动作里自己变化，而且左栏那句"加载更多"提示永远亮着却并不是用户点出来的。
+  //
+  // 新契约（需求第 5 节）：**任何分页都不得修改 `treeCommits`**。左栏数据源固定为
+  // "未过滤的第一页"，因此这里既不多出 feature/c，左栏也不发生任何变化；中栏照常追加。
+  // 取舍：更深历史里的分支不再出现，彻底方案是 host 侧提供 refs 快照（见 README）。
   has('6) 取消过滤（再点 develop）', await clickTree('develop'))
   await drain()
   has('   点得中「加载更多」', await (async () => {
@@ -446,7 +455,7 @@ console.log('=== 6. 未过滤分页会顺势扩展左栏（这是特性，不是
   })())
   const nodes = await drain()
   dump('after-drain-9', nodes)
-  check('   左栏多出未过滤第二页里的 feature/c', treeRows(nodes).join(','), `${FULL_TREE},feature/c`)
+  check('   左栏没有多出无过滤第二页里的 feature/c', treeRows(nodes).join(','), FULL_TREE)
   check('   中栏也追加了那一条', middleRows(nodes).join(','), 'a1,a2,a3,a4,a5,a6,a7')
 }
 

@@ -30,6 +30,39 @@ window.__ModuleLoader__.load({
     // 提交流水图那一块的三栏需要描边色（原有的组件各自内联写死了颜色，迁移到常量上
     // 只为新增部分服务，不去动已有渲染，以免顺手改坏已经在跑的界面）。
     const BORDER = 'var(--dsw-alias-border-l1, #eceef2)'
+
+    /**
+     * UI 字号基准。
+     *
+     * 桌面"设置 → UI 字号"（插件 `dsh-client-ui-typography`）在 `documentElement` 上维护
+     * 一组 `--dsh-ui-px-<N>` 变量：它把界面里纯 `font-size: Npx` 的声明重写成
+     * `var(--dsh-ui-px-N, Npx)`，并在字号变化时把这些变量重算为
+     * `round(N * size / 14)`。也就是说"跟随 UI 字号"的正确做法是**引用它的变量**。
+     *
+     * 为什么用 14 这个基准、而不是直接写 `var(--dsh-ui-px-12_5, 12.5px)`：只有
+     * `--dsh-ui-px-14` 是**一定存在**的——那个插件自己的样式表里就有一条 `font-size:14px`
+     * 的规则，它必然注册 14 这个 token。别的 token（11、11.5、12.5……）要靠它的
+     * MutationObserver 扫到我们这个插件的样式才会被注册；那是"顺带生效"，不能当作前提。
+     * 从这里派生则任何加载顺序、任何字号下都成立，插件没装时 fallback 就是 14px（原样）。
+     */
+    const UI_FONT_PX_BASE = 'var(--dsh-ui-px-14, 14px)'
+
+    /**
+     * 把一个"按基准字号 14px 设计"的字号换算成跟随 UI 字号的长度。
+     *
+     * 基准字号（14）下 `uiPx(N)` 与原值**逐像素相同**，因此这次改造不改变默认外观；
+     * 字号调到 12 / 18 时整块同步缩放。
+     *
+     * 必须是 `calc()` 而不是直接引用 `--dsh-ui-px-N`：`calc(...)` 不会被那个插件的
+     * 适配正则再次改写（它只认纯 `Npx`），所以这里的效果是**稳定且可预期的**。
+     *
+     * @param px - 设计稿（基准 14px）下的像素值。
+     * @returns CSS 长度表达式。
+     */
+    function uiPx(px) {
+      return `calc(${UI_FONT_PX_BASE} * ${px} / 14)`
+    }
+
     const styles = `
       [data-desktop-review-surface] button:focus-visible, [data-desktop-review]:focus-visible,
       [data-review-trigger] > button:focus-visible {
@@ -107,7 +140,8 @@ window.__ModuleLoader__.load({
       [data-review-status] {
         flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
         min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px;
-        font-family: ${UI_FONT}; font-size: 11px; font-weight: 600; line-height: 1;
+        /* 字号走 uiPx()（= 跟随设置里的 UI 字号，见它的说明）。下面所有 font-size 同理。 */
+        font-family: ${UI_FONT}; font-size: ${uiPx(11)}; font-weight: 600; line-height: 1;
       }
       /* 路径里的目录部分压暗，文件名留亮——IDEA 的改动列表就是这个层次。 */
       [data-review-path-dir] { color: var(--dsw-alias-label-tertiary); }
@@ -125,7 +159,7 @@ window.__ModuleLoader__.load({
         padding: 5px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1, #eceef2);
         background: var(--dsw-alias-bg-module-platform, #f3f3f5);
         color: var(--dsw-alias-label-secondary);
-        font-family: ${UI_FONT}; font-size: 11.5px;
+        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};
       }
       [data-review-diff-row] { min-height: 18px; }
       [data-review-diff-row]:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
@@ -179,7 +213,7 @@ window.__ModuleLoader__.load({
       }
       [data-review-title] {
         display: flex; align-items: baseline; gap: 7px; min-width: 0;
-        font-size: 13px; font-weight: 600; letter-spacing: .01em;
+        font-size: ${uiPx(13)}; font-weight: 600; letter-spacing: .01em;
         color: var(--dsw-alias-label-primary);
       }
       /* 分支徽标：整个抽屉里"我现在在哪个分支"是第一个要回答的问题。 */
@@ -188,7 +222,7 @@ window.__ModuleLoader__.load({
         max-width: 190px; padding: 1px 7px; border-radius: 999px;
         background: color-mix(in srgb, ${ACCENT} 9%, transparent);
         color: ${ACCENT};
-        font-family: ${CODE_FONT}; font-size: 11.5px; font-weight: 500; line-height: 17px;
+        font-family: ${CODE_FONT}; font-size: ${uiPx(11.5)}; font-weight: 500; line-height: ${uiPx(17)};
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
 
@@ -198,7 +232,7 @@ window.__ModuleLoader__.load({
         [data-review-section-title] {
           display: flex; align-items: center; gap: 7px;
           margin: 0; padding: 10px 2px 5px;
-          font-family: ${UI_FONT}; font-size: 11.5px; font-weight: 600;
+          font-family: ${UI_FONT}; font-size: ${uiPx(11.5)}; font-weight: 600;
           letter-spacing: .02em;
           color: var(--dsw-alias-label-secondary);
         }
@@ -249,7 +283,7 @@ window.__ModuleLoader__.load({
         display: inline-flex; align-items: center; justify-content: center;
         height: 26px; padding: 0 14px; box-sizing: border-box;
         border-radius: 7px;
-        font-family: ${UI_FONT}; font-size: 12.5px; font-weight: 500;
+        font-family: ${UI_FONT}; font-size: ${uiPx(12.5)}; font-weight: 500;
         transition: background-color .13s ease, border-color .13s ease, color .13s ease;
       }
       [data-review-primary]:disabled { cursor: default; }
@@ -262,7 +296,7 @@ window.__ModuleLoader__.load({
         height: 26px; padding: 0 12px; box-sizing: border-box;
         border-radius: 7px; border: 1px solid var(--dsh-review-line);
         background: transparent;
-        font-family: ${UI_FONT}; font-size: 12.5px;
+        font-family: ${UI_FONT}; font-size: ${uiPx(12.5)};
         transition: background-color .13s ease, border-color .13s ease, color .13s ease;
       }
       [data-review-secondary]:disabled { cursor: default; }
@@ -278,7 +312,7 @@ window.__ModuleLoader__.load({
         border-radius: 999px;
         background: var(--dsw-review-count-bg, color-mix(in srgb, var(--dsw-alias-label-tertiary, #8a8f9c) 14%, transparent));
         color: var(--dsw-alias-label-secondary);
-        font-family: ${UI_FONT}; font-size: 11px; font-weight: 500; line-height: 1;
+        font-family: ${UI_FONT}; font-size: ${uiPx(11)}; font-weight: 500; line-height: 1;
         font-variant-numeric: tabular-nums;
       }
 
@@ -289,7 +323,7 @@ window.__ModuleLoader__.load({
         border-radius: 8px;
         background: var(--dsh-review-soft);
         color: var(--dsw-alias-label-secondary);
-        font-family: ${UI_FONT}; font-size: 11.5px;
+        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};
       }
 
       /* Log 页签工具条里的搜索框：焦点环与占位符颜色（内联样式写不出伪类）。 */
@@ -298,7 +332,7 @@ window.__ModuleLoader__.load({
       /* 移动/窄视口：抽屉本身是 fixed 全高，窄屏下靠缩进换空间。 */
       @media (max-width: 560px) {
         [data-review-header] { padding: 0 6px 0 12px; }
-        [data-review-section-title] { font-size: 11px; }
+        [data-review-section-title] { font-size: ${uiPx(11)}; }
       }
     `
 
@@ -332,9 +366,14 @@ window.__ModuleLoader__.load({
     /** 抽屉宽度的持久化键。 */
     const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'
 
-    /** 抽屉宽度：下限，以及超宽屏上的像素上限（比例上限见 panelWidthMax）。 */
+    /**
+     * 抽屉宽度的下限。
+     *
+     * **刻意没有像素上限**：比例上限（视口 80%）本身就是"不能把主界面吃掉"的保护，
+     * 再叠一个固定像素数会让宽屏上的 80% 变成一句空话——2560 的屏幕算出来 2048，
+     * 却被 `PANEL_WIDTH_MAX = 1600` 夹回 62%。这里曾经有那个常量，已删除。
+     */
     const PANEL_WIDTH_MIN = 320
-    const PANEL_WIDTH_MAX = 1600
 
     /** 键盘调整宽度时的步长（方向键）。 */
     const PANEL_WIDTH_STEP = 24
@@ -665,6 +704,10 @@ window.__ModuleLoader__.load({
       graphTags: '标签',
       graphNoCommits: '这个仓库还没有任何提交。',
       graphLoadMore: '加载更多',
+      graphLoadingMore: '正在加载更多…',
+      // 左栏（分支树）的一句事实说明：它来自**最近加载的那一页**提交，更深历史里的分支
+      // 不会自动补进来（分页只追加中栏，见 loadMore）。
+      graphTreePartial: '分支来自已加载的提交；更早历史里的分支可能未列出。',
       graphLoading: '正在读取提交历史…',
       graphRefreshing: '正在加载…',
       graphRefreshFailed: '刷新失败：{detail}',
@@ -674,6 +717,13 @@ window.__ModuleLoader__.load({
       graphDetailTitle: '提交详情',
       graphSelectCommit: '从左侧选一条提交查看改动。',
       graphFiles: '{count} 个文件',
+      // 提交图顶部的计数说的是"**已经加载出来**的提交数"，不是仓库总数——提交是分页取的
+      // （滚到底会继续加载），所以用"文件"那个键是错的（早先就是错用 `graphFiles`）。
+      // 计数与列表里的行数同源（都来自 `visibleCommits`，已过搜索过滤），因此不会出现
+      // "显示 50 条、写着 12 个"这种自相矛盾。
+      graphCommits: '{count} 个提交',
+      // 还有更深的提交没加载时挂在计数后面，说明"这个数字会变大"，避免被误读成总数。
+      graphCommitsMore: '{count} 个提交 · 继续滚动加载',
       graphInBranches: '在 {count} 个分支中：{names}',
       graphNoFiles: '这条提交没有改动任何文件（空提交）。',
       graphHideGraph: '收起提交图',
@@ -714,6 +764,22 @@ window.__ModuleLoader__.load({
       commitSelected: '提交选中 {count} 个',
       commitAndPush: '提交并推送',
       commitAndPushHint: '提交后推送当前分支到它的上游',
+      // ---- AI 补充提交信息 ----
+      //
+      // 文案刻意说明"根据已勾选的文件"：这正是它与"让模型看一眼整个仓库"的区别，
+      // 用户需要知道输入的范围（不然会以为 AI 看到了别的改动）。
+      aiCommit: '✨ AI 补充',
+      aiCommitBusy: '✨ 生成中…',
+      aiCommitHint: '根据已勾选的文件生成提交信息',
+      aiCommitNoFiles: '先勾选要提交的文件。',
+      aiCommitFilled: '已按勾选的文件填入提交信息（可以直接改）。',
+      aiCommitEmpty: '模型没有返回可用文本，请重试。',
+      aiCommitFailed: 'AI 补充失败：{detail}',
+      aiCommitAskReplace: '输入框里已有内容，要用 AI 的建议吗？',
+      aiCommitReplace: '替换',
+      aiCommitAppend: '追加',
+      aiCommitCancel: '取消',
+      aiCommitSuggested: 'AI 建议：{subject}',
       pushing: '推送中…',
       pushedNotice: '已提交并推送：{subject}',
       pushFailedNotice: '已提交，但推送失败：{detail}',
@@ -800,6 +866,10 @@ window.__ModuleLoader__.load({
       graphTags: 'Tags',
       graphNoCommits: 'This repository has no commits yet.',
       graphLoadMore: 'Load more',
+      graphLoadingMore: 'Loading more…',
+      // A statement of fact, not an affordance: the branch tree is built from the loaded
+      // page of commits, and paging only appends to the middle column.
+      graphTreePartial: 'Branches come from the loaded commits; earlier branches may be missing.',
       graphLoading: 'Reading commit history…',
       graphRefreshing: 'Loading…',
       graphRefreshFailed: 'Refresh failed: {detail}',
@@ -809,6 +879,13 @@ window.__ModuleLoader__.load({
       graphDetailTitle: 'Commit details',
       graphSelectCommit: 'Select a commit on the left to see its changes.',
       graphFiles: '{count} files',
+      // The count in the commit-graph toolbar is the number of commits **loaded so far**,
+      // not the repository total: commits are paged in as you scroll. Sharing `graphFiles`
+      // here was simply the wrong noun.
+      graphCommits: '{count} commits',
+      // Appended while deeper history is still available, so the number cannot be misread
+      // as a total.
+      graphCommitsMore: '{count} commits · scroll for more',
       graphInBranches: 'In {count} branches: {names}',
       graphNoFiles: 'This commit changed no files (empty commit).',
       graphHideGraph: 'Hide commit graph',
@@ -853,6 +930,21 @@ window.__ModuleLoader__.load({
       commitSelected: 'Commit {count} selected',
       commitAndPush: 'Commit and push',
       commitAndPushHint: 'Commit, then push the current branch to its upstream',
+      // ---- AI commit message ----
+      // The wording names the input scope ("the files you picked"): that is exactly what
+      // separates this from "let the model look at the whole repository".
+      aiCommit: '✨ AI draft',
+      aiCommitBusy: '✨ Drafting…',
+      aiCommitHint: 'Draft the message from the files you picked',
+      aiCommitNoFiles: 'Pick the files to commit first.',
+      aiCommitFilled: 'Filled in a message from the files you picked (edit it freely).',
+      aiCommitEmpty: 'The model returned no usable text. Please try again.',
+      aiCommitFailed: 'AI draft failed: {detail}',
+      aiCommitAskReplace: 'The box already has text — use the AI suggestion?',
+      aiCommitReplace: 'Replace',
+      aiCommitAppend: 'Append',
+      aiCommitCancel: 'Cancel',
+      aiCommitSuggested: 'AI suggestion: {subject}',
       pushing: 'Pushing…',
       pushedNotice: 'Committed and pushed: {subject}',
       pushFailedNotice: 'Committed, but the push failed: {detail}',
@@ -990,25 +1082,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 默认宽度：视口的 **50%**。
+     * 默认宽度：视口的 **80%**。
      *
      * 用比例而不是像素：这块抽屉要装下"文件列表 + 逐行差异"，像素宽度在 1366 的笔记本
-     * 和 2560 的显示器上是完全不同的两件事。50% 与 IDEA 的 Git 工具窗默认占半屏一致。
+     * 和 2560 的显示器上是完全不同的两件事。
+     *
+     * 从 50% 提到 80%：50% 下"文件列表 + 差异"两栏都太窄，逐行差异几乎每行都要横向滚动，
+     * 用户于是每次都要先把抽屉拖宽——默认值应该是可用的值，而不是每次都要调的值。
+     * 80% 仍然留出左侧主界面可见（知道自己在哪个项目、侧栏内容还在），与"点外部就关"的
+     * 行为一起构成"宽但不遮挡"的默认体验。
      */
     function panelWidthDefault() {
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      return clampPanelWidth(Math.round(viewport * 0.5))
+      return clampPanelWidth(Math.round(viewport * 0.8))
     }
 
     /**
-     * 当前允许的最大宽度：视口的 **80%**。
+     * 当前允许的最大宽度：视口的 **80%**，且**不设像素上限**。
      *
-     * 也保留一个像素上限，避免在超宽屏上抽屉宽到失去"侧栏"的意义（80% 的 5120 是 4096px，
-     * 那时用户真正想要的是把窗口摆成两栏，而不是一个占满的抽屉）。
+     * 这里曾经是 `min(1600, viewport * 0.8)`。那个 1600 与"默认 80%"是直接冲突的：
+     * 视口 2560 时默认值算出来是 2048，却被夹回 1600（只有 62%），于是"宽屏上默认不是
+     * 80%"变成一条只在宽屏上出现的怪现象。像素上限没有真正的保护对象——真正需要保护的是
+     * "左侧主界面不能被完全吃掉"，而那正好就是 80% 这个比例本身（留 20%）。
      */
     function panelWidthMax() {
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      return Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, Math.round(viewport * 0.8)))
+      return Math.max(PANEL_WIDTH_MIN, Math.round(viewport * 0.8))
     }
 
     /**
@@ -1906,39 +2005,56 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
-       * 点击外部或按 Escape 关闭抽屉。
+       * 点击外部任意普通区域关闭抽屉；Escape 也关闭。
        *
-       * **两种 scope 的语义不同，必须分开**：
-       *   * 项目级的抽屉是 **IDEA 的 Git 工具窗**，不是 popover：点左侧项目、点聊天正文、
-       *     点主界面任何别处都**不该**把它关掉（用户切项目时正希望它开着、并跟着切过去）。
-       *     只有三种方式关闭：X 按钮、Escape、再点一次右上角入口。
-       *     以前它对两种 scope 一视同仁地"点外部就关"，于是"点一下项目 B，抽屉先消失、
-       *     再点入口打开才看到 B"——用户以为面板坏了。
-       *   * 会话内的标签沿用 popover 语义（点外部关闭）：它挂在右侧栏里，靠外部点击收起
-       *     是既有交互。
+       * 需求（本版）：**两种 scope 一视同仁**——点左侧项目列表、点聊天正文、点任何空白
+       * 都关闭。上一版曾经让项目级抽屉豁免（`scope !== 'workspace'`），理由是"它是 IDEA 的
+       * Git 工具窗、不是 popover"；实际使用下来"点外面不关"比"点一下项目就关了"更烦：
+       * 抽屉占 80% 宽，用户想回到主界面必须先精确找到 X 或再点一次入口。
        *
-       * Escape 两种 scope 都保留（键盘用户必须有一个不依赖精确点击的退出方式）。
+       * 反向的坑是**误关**（点内部、点入口时不该关），因此豁免必须逐条列清楚：
+       *   * 抽屉内部（`rootRef` 包含）——包括抽屉里的浮层、下拉、dialog：它们都渲染在
+       *     抽屉的 DOM 子树里，`contains` 天然覆盖，不需要各自再登记一次；
+       *   * resize handle —— 也在抽屉子树里，同上；
+       *   * 入口按钮 —— 它**不在**抽屉子树里。这里必须豁免，否则捕获阶段的 mousedown 会
+       *     先把它关掉，紧接着按钮自己的 onClick 又打开，用户看到的是"闪一下、打不开"。
+       *     入口由它自己 toggle，因此这里只负责"不要替它关"。
+       *
+       * 监听挂在**捕获阶段**（`true`）：抽屉内部有些组件会 `stopPropagation`，冒泡阶段
+       * 会漏掉"点在这些组件上"的事件——漏掉的后果是点它们不关，而不是误关，但这会让
+       * "点外部就关"变得时灵时不灵。
        */
       react.useEffect(() => {
         if (!open) return undefined
-        const closesOnOutside = scope !== 'workspace'
         const onPointerDown = (event) => {
           const node = rootRef.current
           if (node !== null && node.contains(event.target)) return
+          // 入口按钮：由它自己的 toggle 处理（它先关再开会闪，见上面的说明）。
           const trigger = document.querySelector('[data-review-trigger="1"]')
           if (trigger !== null && trigger.contains(event.target)) return
+          // 抽屉内部弹出来的菜单/对话框：有的**不**在抽屉子树里（分支菜单由 gitbar 插件
+          // 渲染在 body 级别、用 `position: fixed` 定位），因此按它们**已有的稳定标记**
+          // 再豁免一层。用现成标记而不是新造一个：新标记需要另一个插件配合才能生效，
+          // 而这两个属性已经在 gitbar 的测试里被当作锚点了。
+          // `!= null` 而不是 `!== null`：合成事件、程序化派发的 mousedown 可能根本没有
+          // `target`，而 `typeof undefined.closest` 会**先取属性再 typeof**，直接抛 TypeError
+          // ——那是一次点外部就把整个抽屉带走。
+          const target = event.target
+          if (target != null && typeof target.closest === 'function') {
+            if (target.closest('[data-desktop-sc-menu], [data-desktop-branch-menu], dialog[open]') !== null) return
+          }
           panelStore.set(false)
         }
         const onKeyDown = (event) => {
           if (event.key === 'Escape') panelStore.set(false)
         }
-        if (closesOnOutside) document.addEventListener('mousedown', onPointerDown, true)
+        document.addEventListener('mousedown', onPointerDown, true)
         document.addEventListener('keydown', onKeyDown)
         return () => {
-          if (closesOnOutside) document.removeEventListener('mousedown', onPointerDown, true)
+          document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open, scope])
+      }, [open])
 
       // 两种语义分别取数据：
       //   * 会话内的"本轮改动"仍然走 `/changes`（它的基线是这一轮开始时的快照，与项目级
@@ -2037,7 +2153,7 @@ window.__ModuleLoader__.load({
               background: 'transparent',
               color: tab === key ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
               fontFamily: UI_FONT,
-              fontSize: '12.5px',
+              fontSize: uiPx(12.5),
               fontWeight: tab === key ? 600 : 400,
               cursor: 'pointer',
             },
@@ -2626,7 +2742,7 @@ window.__ModuleLoader__.load({
             border: '1px solid var(--dsw-alias-border-l1, #eceef2)',
             background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
             color: hasChanges || open ? ACCENT : 'var(--dsw-alias-label-secondary)',
-            fontSize: '12px',
+            fontSize: uiPx(12),
             fontFamily: UI_FONT,
             fontWeight: 500,
             whiteSpace: 'nowrap',
@@ -2698,7 +2814,7 @@ window.__ModuleLoader__.load({
               color: 'var(--dsw-alias-label-primary)',
               boxShadow: '0 16px 48px rgba(0,0,0,.45)',
               padding: '16px 18px',
-              fontSize: '13px',
+              fontSize: uiPx(13),
               lineHeight: '1.6',
             },
           },
@@ -2714,7 +2830,7 @@ window.__ModuleLoader__.load({
             'div',
             {
               style: {
-                fontSize: '12px',
+                fontSize: uiPx(12),
                 fontFamily: CODE_FONT,
                 padding: '6px 8px',
                 borderRadius: '6px',
@@ -2792,7 +2908,7 @@ window.__ModuleLoader__.load({
             padding: '28px 16px',
             textAlign: 'center',
             color: error ? REMOVED : 'var(--dsw-alias-label-tertiary)',
-            fontSize: '12px',
+            fontSize: uiPx(12),
             lineHeight: 1.6,
             fontFamily: UI_FONT,
           },
@@ -2844,14 +2960,14 @@ window.__ModuleLoader__.load({
       if (state.phase === 'loading') {
         return react.createElement(
           'div',
-          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } },
+          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } },
           t('loading'),
         )
       }
       if (state.phase === 'error') {
         return react.createElement(
           'div',
-          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: '11.5px', color: REMOVED, fontFamily: UI_FONT } },
+          { 'data-staging-history-panel': path, style: { padding: '5px 8px 5px 44px', fontSize: uiPx(11.5), color: REMOVED, fontFamily: UI_FONT } },
           state.message,
         )
       }
@@ -2871,11 +2987,11 @@ window.__ModuleLoader__.load({
         },
         react.createElement(
           'div',
-          { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', marginBottom: '4px' } },
+          { style: { fontSize: uiPx(11), fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', marginBottom: '4px' } },
           t('fileHistoryTitle'),
         ),
         commits.length === 0
-          ? react.createElement('div', { style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryEmpty'))
+          ? react.createElement('div', { style: { fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryEmpty'))
           : commits.map((commit) =>
               react.createElement(
                 'div',
@@ -2883,7 +2999,7 @@ window.__ModuleLoader__.load({
                   key: commit.hash,
                   'data-staging-history-row': commit.hash,
                   title: `${commit.hash}\n${commit.author} · ${commit.date}`,
-                  style: { display: 'flex', gap: '8px', alignItems: 'baseline', padding: '2px 0', fontSize: '11.5px', lineHeight: 1.5 },
+                  style: { display: 'flex', gap: '8px', alignItems: 'baseline', padding: '2px 0', fontSize: uiPx(11.5), lineHeight: 1.5 },
                 },
                 // 短哈希用等宽 + 色块，扫读时能与提交标题分开。
                 react.createElement(
@@ -2896,7 +3012,7 @@ window.__ModuleLoader__.load({
               ),
             ),
         commits.length >= 20
-          ? react.createElement('div', { style: { marginTop: '3px', fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryMore', { count: 20 }))
+          ? react.createElement('div', { style: { marginTop: '3px', fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryMore', { count: 20 }))
           : null,
       )
     }
@@ -2957,7 +3073,7 @@ window.__ModuleLoader__.load({
             textAlign: 'center',
             padding: '0 3px',
             borderRadius: '4px',
-            fontSize: '11px',
+            fontSize: uiPx(11),
             lineHeight: '16px',
             color: meta.color,
             background: `color-mix(in srgb, ${meta.color} 14%, transparent)`,
@@ -3003,7 +3119,7 @@ window.__ModuleLoader__.load({
               background: 'transparent',
               color: 'inherit',
               fontFamily: UI_FONT,
-              fontSize: '12px',
+              fontSize: uiPx(12),
               fontWeight: 600,
               textAlign: 'left',
               cursor: 'pointer',
@@ -3109,6 +3225,37 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = react.useState(false)
       const [trouble, setTrouble] = react.useState(null)
       const [notice, setNotice] = react.useState('')
+      /** 「AI 补充」正在生成。生成期间按钮必须禁用 + 显示 loading（防连点）。 */
+      const [aiBusy, setAiBusy] = react.useState(false)
+      /** 「AI 补充」的说明/失败提示（**非阻塞**：不改动输入框里的文本）。 */
+      const [aiNotice, setAiNotice] = react.useState('')
+      /**
+       * 模型给出的建议，**只在输入框已经有用户自己的文本时**才用它。
+       *
+       * 为什么不直接写进输入框：用户可能已经打了半句，AI 的结果一覆盖就是"我写的东西被吃了"
+       * ——这种丢失是不可撤销的（没有草稿历史）。因此已有输入时一律让用户选
+       * 替换 / 追加 / 取消 三选一。
+       */
+      const [aiSuggestion, setAiSuggestion] = react.useState(null)
+      /**
+       * 「AI 补充」的请求令牌。
+       *
+       * 迟到的响应必须丢掉，否则会出现"结果来自上一次/上一个项目"：
+       *   * 又点了一次生成 → 旧的那次还在飞；
+       *   * 生成期间切换了工作区；
+       *   * 生成期间改了勾选（`commitPaths` 变了）——那时结果对应的已经不是用户要提交的东西。
+       * 前两条用令牌 + `workspaceRef`，第三条用选择指纹（见 `generateCommitMessage`）。
+       */
+      const aiToken = react.useRef(0)
+      const aiFingerprint = react.useRef('')
+      /**
+       * 同步的"正在飞"闸门。
+       *
+       * 只靠 `aiBusy` 挡不住**同一帧里的两次点击**：两次调用读到的都是更新前的
+       * `aiBusy === false`，于是会打出两条请求（浏览器里按钮的 `disabled` 能挡住真实点击，
+       * 但程序化派发、以及"点了才渲染"的那一帧挡不住）。ref 是同步的，因此是真正的一次。
+       */
+      const aiInFlight = react.useRef(false)
       const onCommitted = typeof props?.onCommitted === 'function' ? props.onCommitted : () => undefined
 
       /**
@@ -3132,6 +3279,14 @@ window.__ModuleLoader__.load({
         setTrouble(null)
         setNotice('')
         setBusy(false)
+        // AI 的状态同样清掉，并且**让仍在飞的那次请求作废**（否则它回来时会把上一个项目
+        // 的提交信息写进新项目的输入框）。
+        aiToken.current += 1
+        aiFingerprint.current = ''
+        aiInFlight.current = false
+        setAiBusy(false)
+        setAiNotice('')
+        setAiSuggestion(null)
       }, [workspace])
 
       /**
@@ -3373,6 +3528,104 @@ window.__ModuleLoader__.load({
       const commitDisabled = busy || message.trim() === '' || commitPaths.length === 0
 
       /**
+       * 「AI 补充提交信息」。
+       *
+       * **输入只来自 `commitPaths`**（用户勾选的那批），不是整个工作区：host 拿到这批路径后
+       * 用 `/workspace-file` 的同一套逻辑按需取差异，并对文件数 / 单文件字符数 / 总字符数
+       * 三层设限（见 host 侧 lib/commit-message.js）。因此既不会把整个仓库塞进上下文，
+       * 也不会把用户没勾的文件发出去。
+       *
+       * 生成走宿主正式能力（`ctx.llm` + `ctx.agentDefaultModel`），因此**复用当前登录与
+       * 模型配置**——插件里没有 API Key，也没有自己的 provider。
+       */
+      const generateCommitMessage = react.useCallback(async () => {
+        if (aiInFlight.current) return
+        const mine = workspace
+        const paths = commitPaths
+        if (paths.length === 0) {
+          setAiNotice(t('aiCommitNoFiles'))
+          return
+        }
+        // 选择指纹：工作区 + 基线 + **这次到底提交哪些文件**。任何一项变了，结果都作废。
+        const fingerprint = `${mine}\u0000${snapshot?.head ?? ''}\u0000${paths.join('\u0000')}`
+        const mineToken = (aiToken.current += 1)
+        aiFingerprint.current = fingerprint
+        aiInFlight.current = true
+        setAiBusy(true)
+        setAiNotice('')
+        setAiSuggestion(null)
+        try {
+          // 形状也带上：没有差异的文件（二进制、读不到）至少还有状态与增删行数可用。
+          const payloadFiles = paths.map((path) => {
+            const entry = files.find((item) => item.path === path)
+            return {
+              path,
+              status: typeof entry?.status === 'string' ? entry.status : '',
+              ...(Number.isFinite(entry?.added) ? { added: entry.added } : {}),
+              ...(Number.isFinite(entry?.removed) ? { removed: entry.removed } : {}),
+              ...(entry?.untracked === true ? { untracked: true } : {}),
+            }
+          })
+          const result = await call('commit-message', {
+            workspace: mine,
+            files: payloadFiles,
+            branch: snapshot?.branch ?? '',
+            ...(typeof props.revision === 'string' && props.revision !== '' ? { revision: props.revision } : {}),
+          })
+          // ---- 迟到的一律丢弃 ----
+          if (aiToken.current !== mineToken) return
+          if (workspaceRef.current !== mine) return
+          if (aiFingerprint.current !== fingerprint) return
+          const text = typeof result?.message === 'string' ? result.message.trim() : ''
+          if (text === '') {
+            setAiNotice(t('aiCommitEmpty'))
+            return
+          }
+          // 输入框是空的 → 直接填入（这正是"一键补充"要的）。
+          if (message.trim() === '') {
+            setMessage(text)
+            setAiNotice(t('aiCommitFilled'))
+            return
+          }
+          // 已经有用户输入 → **绝不静默覆盖**。
+          setAiSuggestion({ text, subject: typeof result?.subject === 'string' ? result.subject : '' })
+        } catch (cause) {
+          if (aiToken.current !== mineToken) return
+          if (workspaceRef.current !== mine) return
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          const detail = String(error.detail ?? error.message ?? error).slice(0, 200)
+          // 失败**保留原文本**，只给一句非阻塞提示（AI 不可用不该看起来像面板坏了）。
+          setAiNotice(t('aiCommitFailed', { detail }))
+        } finally {
+          if (aiToken.current === mineToken) {
+            aiInFlight.current = false
+            if (workspaceRef.current === mine) setAiBusy(false)
+          }
+        }
+      }, [aiInFlight, commitPaths, files, message, props.revision, snapshot?.branch, snapshot?.head, t, workspace])
+
+      /** 采用 / 放弃 AI 的建议。取消时也必须把令牌推进，避免它被误用。 */
+      const applyAiSuggestion = react.useCallback(
+        (mode) => {
+          const suggestion = aiSuggestion
+          setAiSuggestion(null)
+          if (suggestion === null || mode === 'cancel') {
+            if (mode === 'cancel') aiToken.current += 1
+            return
+          }
+          if (mode === 'append') {
+            const base = message.trimEnd()
+            setMessage(`${base}\n\n${suggestion.text}`)
+            setAiNotice(t('aiCommitFilled'))
+            return
+          }
+          setMessage(suggestion.text)
+          setAiNotice(t('aiCommitFilled'))
+        },
+        [aiSuggestion, message, t],
+      )
+
+      /**
        * 一行已跟踪的文件（已暂存组或更改组）。
        *
        * 三个交互都是 IDEA 里有的：
@@ -3391,7 +3644,7 @@ window.__ModuleLoader__.load({
             key: `${side}:${entry.path}`,
             'data-staging-row': entry.path,
             'data-staging-side': side,
-            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 18px', borderRadius: '6px', fontSize: '12.5px', fontFamily: UI_FONT },
+            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 18px', borderRadius: '6px', fontSize: uiPx(12.5), fontFamily: UI_FONT },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -3429,7 +3682,7 @@ window.__ModuleLoader__.load({
                 background: diffOpen === entry.path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
                 color: 'inherit',
                 fontFamily: CODE_FONT,
-                fontSize: '12.5px',
+                fontSize: uiPx(12.5),
                 textAlign: 'left',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -3501,7 +3754,7 @@ window.__ModuleLoader__.load({
                 background: 'transparent',
                 color: side === 'staged' ? ACCENT : 'var(--dsw-alias-label-tertiary)',
                 fontFamily: UI_FONT,
-                fontSize: '13px',
+                fontSize: uiPx(13),
                 lineHeight: 1,
               },
             },
@@ -3567,7 +3820,7 @@ window.__ModuleLoader__.load({
             key: `untracked:${path}`,
             'data-staging-row': path,
             'data-staging-side': 'untracked',
-            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 22px', borderRadius: '6px', fontSize: '12.5px', fontFamily: UI_FONT },
+            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 22px', borderRadius: '6px', fontSize: uiPx(12.5), fontFamily: UI_FONT },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -3601,7 +3854,7 @@ window.__ModuleLoader__.load({
                 background: diffOpen === path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
                 color: 'inherit',
                 fontFamily: CODE_FONT,
-                fontSize: '12.5px',
+                fontSize: uiPx(12.5),
                 textAlign: 'left',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -3657,7 +3910,7 @@ window.__ModuleLoader__.load({
               onClick: () => void run('stage', { paths: [path] }, t('addedNotice', { count: 1 })),
               title: t('addToGit'),
               'aria-label': t('addToGit'),
-              style: { flexShrink: 0, width: '22px', height: '22px', padding: 0, border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontSize: '14px', lineHeight: 1 },
+              style: { flexShrink: 0, width: '22px', height: '22px', padding: 0, border: 'none', borderRadius: '4px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(14), lineHeight: 1 },
             },
             '+',
           ),
@@ -3704,7 +3957,7 @@ window.__ModuleLoader__.load({
             'span',
             {
               'data-review-total-stats': '',
-              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
+              style: { fontWeight: 400, fontSize: uiPx(11.5), fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
             },
             react.createElement('span', { style: { color: ADDED } }, `+${files.reduce((sum, file) => sum + (file.added ?? 0), 0)}`),
             ' ',
@@ -3735,7 +3988,9 @@ window.__ModuleLoader__.load({
             'data-staging-message': '',
             'data-review-input': '',
             value: message,
-            rows: 2,
+            // 4 行（原来 2 行）：提交信息里通常要写"标题 + 一段说明"，2 行只够看到标题，
+            // 用户写着写着就得先手动把框拉大——默认高度应该是能写完一条正常提交信息的高度。
+            rows: 4,
             // 提交信息的占位文案里带上当前分支：分支取自**这份快照自己**（与文件列表同一次
             // 请求），因此不会出现"文件是新的、分支是旧的"。
             placeholder: t('commitMessage', { branch: snapshot?.branch ?? '' }),
@@ -3755,14 +4010,18 @@ window.__ModuleLoader__.load({
             style: {
               boxSizing: 'border-box',
               width: '100%',
+              // `rows: 4` 只是初始行数，`minHeight` 才是"用户把框拖小之后仍然够用"的保证
+              // （textarea 的 resize 可以把高度拉到只剩一行）。两行文字 + 内边距 ≈ 90px。
+              minHeight: '90px',
               padding: '7px 9px',
               border: `1px solid ${BORDER}`,
               borderRadius: '8px',
               background: 'var(--dsw-alias-bg-base, #fff)',
               color: 'inherit',
               fontFamily: UI_FONT,
-              fontSize: '12.5px',
+              fontSize: uiPx(12.5),
               lineHeight: 1.55,
+              // 仍然允许纵向拖拽：4 行是"够用"的默认值，不是上限。
               resize: 'vertical',
               transition: 'border-color .13s ease, box-shadow .13s ease',
             },
@@ -3807,6 +4066,27 @@ window.__ModuleLoader__.load({
               },
               t('commitAndPush'),
             ),
+            // 「AI 补充」：按**已勾选的文件**生成一条提交信息。
+            //
+            // 位置在提交按钮旁边，因为它的产出正是提交按钮要的输入。生成期间禁用 + loading，
+            // 因此连点不会打出多条请求。
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-ai': '',
+                'data-review-secondary': '',
+                disabled: aiBusy || commitPaths.length === 0,
+                title: commitPaths.length === 0 ? t('aiCommitNoFiles') : t('aiCommitHint'),
+                'aria-label': t('aiCommit'),
+                'aria-busy': aiBusy,
+                onClick: () => void generateCommitMessage(),
+                style: {
+                  color: aiBusy || commitPaths.length === 0 ? 'var(--dsw-alias-label-tertiary)' : ACCENT,
+                },
+              },
+              aiBusy ? t('aiCommitBusy') : t('aiCommit'),
+            ),
             // 为什么禁用／会提交什么，都要说清楚：按钮灰着而不给理由，用户只会反复点它。
             // 顺带给出快捷键提示：Ctrl+Enter 提交是提交框的惯用键（也已实现），
             // 但不在界面上写出来就没人会去试。
@@ -3814,7 +4094,7 @@ window.__ModuleLoader__.load({
               'span',
               {
                 'data-staging-hint': '',
-                style: { flex: '1 1 140px', minWidth: 0, fontSize: '11.5px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+                style: { flex: '1 1 140px', minWidth: 0, fontSize: uiPx(11.5), lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
               },
               message.trim() === ''
                 ? t('emptyMessage')
@@ -3825,7 +4105,7 @@ window.__ModuleLoader__.load({
                     : t('noSelection'),
               react.createElement(
                 'span',
-                { title: t('commit'), style: { marginLeft: '6px', padding: '1px 5px', border: '1px solid var(--dsh-review-line)', borderRadius: '4px', fontFamily: CODE_FONT, fontSize: '10.5px', whiteSpace: 'nowrap' } },
+                { title: t('commit'), style: { marginLeft: '6px', padding: '1px 5px', border: '1px solid var(--dsh-review-line)', borderRadius: '4px', fontFamily: CODE_FONT, fontSize: uiPx(10.5), whiteSpace: 'nowrap' } },
                 'Ctrl+↵',
               ),
             ),
@@ -3848,22 +4128,96 @@ window.__ModuleLoader__.load({
                   background: `color-mix(in srgb, ${REMOVED} 6%, transparent)`,
                   border: `1px solid color-mix(in srgb, ${REMOVED} 20%, transparent)`,
                   color: REMOVED,
-                  fontSize: '12px',
+                  fontSize: uiPx(12),
                   lineHeight: 1.5,
                 },
               },
               react.createElement('div', null, trouble.key === '' ? t('error_unknownReview') : t(trouble.key)),
               trouble.detail === ''
                 ? null
-                : react.createElement('div', { style: { marginTop: '4px', paddingTop: '4px', borderTop: '1px solid color-mix(in srgb, currentColor 20%, transparent)', fontFamily: CODE_FONT, fontSize: '11.5px', whiteSpace: 'pre-wrap' } }, trouble.detail),
+                : react.createElement('div', { style: { marginTop: '4px', paddingTop: '4px', borderTop: '1px solid color-mix(in srgb, currentColor 20%, transparent)', fontFamily: CODE_FONT, fontSize: uiPx(11.5), whiteSpace: 'pre-wrap' } }, trouble.detail),
             ),
 
         notice === ''
           ? null
           : react.createElement(
               'div',
-              { 'data-staging-notice': '', style: { order: 2, flexShrink: 0, margin: '8px 2px 0', padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ADDED} 7%, transparent)`, border: `1px solid color-mix(in srgb, ${ADDED} 20%, transparent)`, color: ADDED, fontSize: '12px' } },
+              { 'data-staging-notice': '', style: { order: 2, flexShrink: 0, margin: '8px 2px 0', padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ADDED} 7%, transparent)`, border: `1px solid color-mix(in srgb, ${ADDED} 20%, transparent)`, color: ADDED, fontSize: uiPx(12) } },
               notice,
+            ),
+
+        // ---- AI 补充：提示 + "替换/追加/取消"三选一 ----
+        //
+        // 已经有了用户自己的输入时，建议**必须**经过这一步才写入输入框：静默覆盖用户
+        // 打了半天的字是不可撤销的（见 aiSuggestion 的说明）。
+        aiNotice === '' && aiSuggestion === null
+          ? null
+          : react.createElement(
+              'div',
+              {
+                'data-staging-ai-notice': aiSuggestion === null ? 'notice' : 'ask',
+                role: 'status',
+                style: {
+                  order: 2,
+                  flexShrink: 0,
+                  margin: '8px 2px 0',
+                  padding: '6px 9px',
+                  borderRadius: '6px',
+                  background: 'var(--dsh-review-soft, var(--dsw-alias-bg-module-platform, #f4f5f8))',
+                  border: `1px solid ${BORDER}`,
+                  color: 'var(--dsw-alias-label-secondary)',
+                  fontSize: uiPx(11.5),
+                  lineHeight: 1.5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                },
+              },
+              react.createElement(
+                'span',
+                { style: { flex: '1 1 160px', minWidth: 0 } },
+                aiSuggestion === null
+                  ? aiNotice
+                  : `${t('aiCommitAskReplace')} ${t('aiCommitSuggested', { subject: aiSuggestion.subject })}`,
+              ),
+              aiSuggestion === null
+                ? null
+                : [
+                    react.createElement(
+                      'button',
+                      {
+                        key: 'replace',
+                        type: 'button',
+                        'data-staging-ai-replace': '',
+                        'data-review-secondary': '',
+                        onClick: () => applyAiSuggestion('replace'),
+                      },
+                      t('aiCommitReplace'),
+                    ),
+                    react.createElement(
+                      'button',
+                      {
+                        key: 'append',
+                        type: 'button',
+                        'data-staging-ai-append': '',
+                        'data-review-secondary': '',
+                        onClick: () => applyAiSuggestion('append'),
+                      },
+                      t('aiCommitAppend'),
+                    ),
+                    react.createElement(
+                      'button',
+                      {
+                        key: 'cancel',
+                        type: 'button',
+                        'data-staging-ai-cancel': '',
+                        'data-review-secondary': '',
+                        onClick: () => applyAiSuggestion('cancel'),
+                      },
+                      t('aiCommitCancel'),
+                    ),
+                  ],
             ),
 
         clean
@@ -3881,7 +4235,7 @@ window.__ModuleLoader__.load({
                   gap: '6px',
                   padding: '26px 12px',
                   color: 'var(--dsw-alias-label-tertiary)',
-                  fontSize: '12.5px',
+                  fontSize: uiPx(12.5),
                   textAlign: 'center',
                 },
               },
@@ -4017,7 +4371,7 @@ window.__ModuleLoader__.load({
                             background: 'transparent',
                             color: allChosen ? ACCENT : 'var(--dsw-alias-label-tertiary)',
                             fontFamily: UI_FONT,
-                            fontSize: '13px',
+                            fontSize: uiPx(13),
                             lineHeight: 1,
                             cursor: busy ? 'default' : 'pointer',
                           },
@@ -4035,12 +4389,25 @@ window.__ModuleLoader__.load({
                               const row = untrackedRow(path, chosenUntracked.includes(path))
                               const nodes = [row]
                               // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
+                              //
+                              // 走 `LazyFileDiff` 而不是 `FileDiff`：项目级快照是元数据级的，
+                              // 不带任何统一差异，未跟踪文件的差异由 host 用
+                              // `git diff --no-index /dev/null <path>` 按需给出（见 /workspace-file
+                              // 与 LazyFileDiff 的说明）。**这里曾经传 `byFile.get(path)`**——那是
+                              // 按需差异改造时删掉的整页拆分产物，于是点击直接
+                              // `ReferenceError: byFile is not defined`。不要重建 `byFile`。
                               if (diffOpen === path) {
-                                nodes.push(react.createElement(FileDiff, {
+                                nodes.push(react.createElement(LazyFileDiff, {
                                   key: `diff:untracked:${path}`,
                                   t,
-                                  file: files.find((entry) => entry.path === path) ?? { path, status: 'A' },
-                                  diff: byFile.get(path) ?? '',
+                                  // 用 files 里的真实条目（它带 untracked/status 等 host 事实）；
+                                  // 找不到时兜底成一个"新增且未跟踪"的最小条目，而不是让渲染层
+                                  // 拿到 undefined。
+                                  file: files.find((entry) => entry.path === path)
+                                    ?? { path, status: 'A', index: '?', worktree: '?', staged: false, unstaged: false, untracked: true },
+                                  workspace,
+                                  // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
+                                  revision: props.revision ?? snapshot?.head ?? '',
                                   margin: '0 0 6px 8px',
                                 }))
                               }
@@ -4062,7 +4429,7 @@ window.__ModuleLoader__.load({
                             untrackedCount > UNTRACKED_RENDER_LIMIT
                               ? react.createElement(
                                   'div',
-                                  { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
+                                  { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
                                   t('untrackedTruncated', {
                                     count: UNTRACKED_RENDER_LIMIT,
                                     rest: untrackedCount - UNTRACKED_RENDER_LIMIT,
@@ -4287,14 +4654,14 @@ window.__ModuleLoader__.load({
         typeof props?.note === 'string' && props.note !== ''
           ? react.createElement(
               'div',
-              { 'data-review-diff-note': '', style: { padding: '6px 10px', color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: '11.5px' } },
+              { 'data-review-diff-note': '', style: { padding: '6px 10px', color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: uiPx(11.5) } },
               props.note,
             )
           : null,
         isBinaryDiff(diff)
           ? react.createElement(
               'div',
-              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: '12px' } },
+              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: uiPx(12) } },
               t('binaryDiff'),
             )
           : react.createElement(
@@ -4302,7 +4669,7 @@ window.__ModuleLoader__.load({
               {
                 style: {
                   // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
-                  fontSize: '12px',
+                  fontSize: uiPx(12),
                   lineHeight: 1.55,
                   fontFamily: CODE_FONT,
                   fontVariantLigatures: 'none',
@@ -4426,7 +4793,7 @@ window.__ModuleLoader__.load({
                   background: `color-mix(in srgb, ${REMOVED} 6%, transparent)`,
                   border: `1px solid color-mix(in srgb, ${REMOVED} 22%, transparent)`,
                   color: REMOVED,
-                  fontSize: '12px',
+                  fontSize: uiPx(12),
                   lineHeight: 1.6,
                 },
               },
@@ -4452,7 +4819,7 @@ window.__ModuleLoader__.load({
             'span',
             {
               'data-review-total-stats': '',
-              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
+              style: { fontWeight: 400, fontSize: uiPx(11.5), fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
             },
             react.createElement('span', { style: { color: ADDED } }, `+${added}`),
             ' ',
@@ -4511,7 +4878,7 @@ window.__ModuleLoader__.load({
                       ? 'var(--dsw-alias-interactive-bg-hover-accent, color-mix(in srgb, ' + ACCENT + ' 8%, transparent))'
                       : 'transparent',
                     color: 'var(--dsw-alias-label-primary)',
-                    fontSize: '12.5px',
+                    fontSize: uiPx(12.5),
                     fontFamily: UI_FONT,
                     lineHeight: 1.45,
                     cursor: 'pointer',
@@ -4572,7 +4939,7 @@ window.__ModuleLoader__.load({
                   'span',
                   {
                     'data-review-stats': '',
-                    style: { whiteSpace: 'nowrap', fontSize: '11.5px', flexShrink: 0, fontFamily: CODE_FONT },
+                    style: { whiteSpace: 'nowrap', fontSize: uiPx(11.5), flexShrink: 0, fontFamily: CODE_FONT },
                   },
                   // 行数未知（未跟踪文件，且还没点开过）时给 `·` 而不是 `+0 −0`：后者会被读成
                   // "这个文件没有增删"，而事实是"还没算过"（点开就补上）。
@@ -4600,7 +4967,7 @@ window.__ModuleLoader__.load({
                       {
                         'data-review-staged': 'untracked',
                         title: t('untrackedTitle'),
-                        style: { flexShrink: 0, fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
+                        style: { flexShrink: 0, fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary)' },
                       },
                       '?',
                     )
@@ -4613,7 +4980,7 @@ window.__ModuleLoader__.load({
                           flexShrink: 0,
                           padding: '0 4px',
                           borderRadius: '4px',
-                          fontSize: '11px',
+                          fontSize: uiPx(11),
                           lineHeight: '15px',
                           color: file.staged === true ? ADDED : 'var(--dsw-alias-label-tertiary)',
                           background:
@@ -4664,7 +5031,7 @@ window.__ModuleLoader__.load({
                   style: { flex: '0 0 auto', alignSelf: 'center' },
                 },
                 working
-                  ? react.createElement('span', { style: { fontSize: '11px' } }, '…')
+                  ? react.createElement('span', { style: { fontSize: uiPx(11) } }, '…')
                   : react.createElement(
                       'svg',
                       { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
@@ -4694,7 +5061,7 @@ window.__ModuleLoader__.load({
           )
         }),
         result?.truncated === true
-          ? react.createElement('div', { style: { marginTop: '6px', color: '#c9a0a0', fontSize: '11.5px' } }, t('truncated'))
+          ? react.createElement('div', { style: { marginTop: '6px', color: '#c9a0a0', fontSize: uiPx(11.5) } }, t('truncated'))
           : null,
         // 确认弹窗：还原是写操作，必须让用户明确决定。
         confirming === ''
@@ -4743,7 +5110,7 @@ window.__ModuleLoader__.load({
     /** 侧边栏标签的标题。 */
     function ReviewTabTitle(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      return react.createElement('span', { style: { fontSize: '12px', fontFamily: UI_FONT } }, t('title'))
+      return react.createElement('span', { style: { fontSize: uiPx(12), fontFamily: UI_FONT } }, t('title'))
     }
 
     // =========================================================================
@@ -4762,6 +5129,13 @@ window.__ModuleLoader__.load({
 
     /** 一屏最多渲染多少行（超出靠滚动占位撑开）。 */
     const GRAPH_WINDOW = 40
+
+    /**
+     * 滚动到距底多少像素内就自动追加下一页。
+     *
+     * 见 `onScroll`：320px 在需求要求的 200~400px 之间。
+     */
+    const GRAPH_LOAD_MORE_THRESHOLD = 320
 
     /**
      * 每个 ref 首屏缓存的条数上限（最近使用的留下）。
@@ -4874,6 +5248,38 @@ window.__ModuleLoader__.load({
      */
     function textSlice(value, length) {
       return asText(value).slice(0, length)
+    }
+
+    /**
+     * 把一条提交时间渲染成 `YYYY-MM-DD HH:mm:ss`。
+     *
+     * git 的 `%cI` 给的是严格 ISO-8601（`2026-09-21T15:42:18+08:00`），**它自己就已经是
+     * 提交者所在时区的本地时间**。因此这里只做"把 `T` 换成空格、截掉时区后缀"，绝不走
+     * `new Date(...)`：那会把时间换算到运行环境的时区，于是同一条提交在不同机器上显示
+     * 不同的时间（提交时间是个历史事实，不是"现在几点"）。秒一定要留着——同一个分支上
+     * 连续两次提交经常在同一分钟里完成，只显示到分钟就分不出先后。
+     *
+     * 形状不对时安全降级**到空串**：宁可这一格空着，也不能抛错——这个函数跑在提交图的
+     * **每一行**上，一次抛错就是整棵树被 React 卸掉（抽屉和右上角入口一起消失）。
+     *
+     * @param value - host 给的提交时间（期望是 ISO 字符串）。
+     * @returns `YYYY-MM-DD HH:mm:ss`；非字符串或空串返回 `''`，认不出的形状返回原样文本。
+     */
+    function formatCommitTime(value) {
+      // 只认真实字符串：数字时间戳（host 万一把 `%ct` 的秒数直接丢过来）**不做**本地化换算
+      // ——那需要时区语义，而提交时间是个历史事实，猜错时区就是显示一个错的时刻。
+      // 对象被 `String()` 变成 `[object Object]` 挂在时间列上比空着更糟，因此直接判空。
+      if (typeof value !== 'string') return ''
+      const text = value.trim()
+      if (text === '') return ''
+      // 先按 ISO 切：日期与时间之间是 `T`（也容忍已经被换过一次的写法）。
+      const match = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/.exec(text)
+      if (match !== null) return `${match[1]} ${match[2]}`
+      // 只有日期（`2026-09-21`）或只有时间：原样返回，不要拼出半截时间。
+      const dateOnly = /^(\d{4}-\d{2}-\d{2})/.exec(text)
+      if (dateOnly !== null) return dateOnly[1]
+      // 其它形状（相对时间、本地化文本……）：不假装认识它，原样显示。
+      return text
     }
 
     /** 这条提交有没有父提交。根提交没有，`parents` 形状不对时也当没有。 */
@@ -5025,11 +5431,11 @@ window.__ModuleLoader__.load({
           { key, 'data-graph-tree-section': key },
           react.createElement(
             'div',
-            { style: { padding: '10px 10px 4px', fontSize: '11px', fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } },
+            { style: { padding: '10px 10px 4px', fontSize: uiPx(11), fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } },
             label,
           ),
           rows.length === 0
-            ? react.createElement('div', { style: { padding: '2px 10px 6px', fontSize: '12px', color: GRAPH_DIM } }, '—')
+            ? react.createElement('div', { style: { padding: '2px 10px 6px', fontSize: uiPx(12), color: GRAPH_DIM } }, '—')
             : rows.map((row) =>
                 react.createElement(
                   'button',
@@ -5053,7 +5459,7 @@ window.__ModuleLoader__.load({
                       background: selectedRef === row.name ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
                       color: selectedRef === row.name ? ACCENT : 'inherit',
                       fontFamily: UI_FONT,
-                      fontSize: '12.5px',
+                      fontSize: uiPx(12.5),
                       textAlign: 'left',
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
@@ -5073,11 +5479,14 @@ window.__ModuleLoader__.load({
         section('local', t('graphLocal'), local),
         section('remote', t('graphRemote'), remote),
         section('tags', t('graphTags'), tags),
+        // 左栏**不是**"点这里加载更多"：它的数据源是未过滤的第一页（`treeCommits`），
+        // 分页只追加中栏（见 `loadMore`）。因此这里说的必须是一句**事实说明**，
+        // 而不是一个按不动的"加载更多"（早先就是这个歧义）。
         hasMore
           ? react.createElement(
               'div',
-              { style: { padding: '8px 10px', fontSize: '11.5px', color: GRAPH_DIM } },
-              t('graphLoadMore'),
+              { 'data-graph-tree-partial': '', style: { padding: '8px 10px', fontSize: uiPx(11.5), color: GRAPH_DIM, lineHeight: 1.5 } },
+              t('graphTreePartial'),
             )
           : null,
       )
@@ -5155,7 +5564,7 @@ window.__ModuleLoader__.load({
                 background: isSelected ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
                 cursor: 'pointer',
                 fontFamily: UI_FONT,
-                fontSize: '12.5px',
+                fontSize: uiPx(12.5),
               },
             },
             react.createElement(
@@ -5188,7 +5597,7 @@ window.__ModuleLoader__.load({
                     flexShrink: 0,
                     padding: '0 5px',
                     borderRadius: '4px',
-                    fontSize: '11px',
+                    fontSize: uiPx(11),
                     lineHeight: '16px',
                     background: entry.isHead === true
                       ? `color-mix(in srgb, ${ACCENT} 18%, transparent)`
@@ -5208,20 +5617,19 @@ window.__ModuleLoader__.load({
               { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
               commit.subject,
             ),
+            // **不显示哈希**：这一列对"看提交图"这件事没有信息量（用户是在认标题、作者、
+            // 时间，不是在抄 SHA），却固定吃掉几十像素，正好压在标题那一列上。`commit.hash`
+            // 仍然内部保留——React key、选中身份、详情请求、布局、缓存键全都依赖它，
+            // 去掉的只是这一处**视觉**输出。
             react.createElement(
               'span',
-              { style: { flexShrink: 0, color: GRAPH_DIM, fontFamily: CODE_FONT, fontSize: '11.5px' } },
-              commit.short,
-            ),
-            react.createElement(
-              'span',
-              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: '11.5px', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: uiPx(11.5), maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
               commit.author,
             ),
             react.createElement(
               'span',
-              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } },
-              textSlice(commit.committedAt, 10),
+              { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: uiPx(11.5), fontVariantNumeric: 'tabular-nums' } },
+              formatCommitTime(commit.committedAt),
             ),
           ),
         )
@@ -5289,18 +5697,19 @@ window.__ModuleLoader__.load({
           'data-commit-summary': commit.hash ?? '',
           style: { display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: UI_FONT },
         },
-        react.createElement('div', { style: { fontSize: '12.5px', fontWeight: 600, overflowWrap: 'anywhere' } }, commit.subject ?? ''),
+        react.createElement('div', { style: { fontSize: uiPx(12.5), fontWeight: 600, overflowWrap: 'anywhere' } }, commit.subject ?? ''),
         react.createElement(
           'div',
-          { style: { fontSize: '11.5px', color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
-          react.createElement('span', { style: { fontFamily: CODE_FONT } }, commit.short ?? ''),
+          { style: { fontSize: uiPx(11.5), color: GRAPH_DIM, display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+          // 与提交图每一行一致：**不显示哈希**（信息量为零、还要占位），时间精确到秒
+          // （同一分钟里的连续提交必须分得出先后）。
           react.createElement('span', null, `${commit.author ?? ''} <${commit.email ?? ''}>`),
-          react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, asText(commit.committedAt).replace('T', ' ').slice(0, 16)),
+          react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, formatCommitTime(commit.committedAt)),
         ),
         containing.length > 0
           ? react.createElement(
               'div',
-              { 'data-graph-containing': '', style: { fontSize: '11.5px', color: ACCENT } },
+              { 'data-graph-containing': '', style: { fontSize: uiPx(11.5), color: ACCENT } },
               t('graphInBranches', { count: containing.length, names: containing.join(', ') }),
             )
           : null,
@@ -5308,7 +5717,7 @@ window.__ModuleLoader__.load({
           ? null
           : react.createElement(
               'div',
-              { style: { fontSize: '12px', color: 'inherit', whiteSpace: 'pre-wrap', maxHeight: '120px', overflowY: 'auto' } },
+              { style: { fontSize: uiPx(12), color: 'inherit', whiteSpace: 'pre-wrap', maxHeight: '120px', overflowY: 'auto' } },
               commit.body,
             ),
       )
@@ -5326,7 +5735,7 @@ window.__ModuleLoader__.load({
         'div',
         { 'data-graph-files': '', style: { display: 'flex', flexDirection: 'column' } },
         files.length === 0
-          ? react.createElement('div', { style: { padding: '8px 6px', fontSize: '12px', color: GRAPH_DIM } }, t('graphNoFiles'))
+          ? react.createElement('div', { style: { padding: '8px 6px', fontSize: uiPx(12), color: GRAPH_DIM } }, t('graphNoFiles'))
           : files.map((file) =>
               react.createElement(CommitFileRow, {
                 // **key 必须带上 commit**，不能只有路径。
@@ -5388,7 +5797,7 @@ window.__ModuleLoader__.load({
       if (revision === '') {
         return react.createElement(
           'div',
-          { style: { padding: '16px', fontSize: '12.5px', color: GRAPH_DIM, fontFamily: UI_FONT } },
+          { style: { padding: '16px', fontSize: uiPx(12.5), color: GRAPH_DIM, fontFamily: UI_FONT } },
           t('graphSelectCommit'),
         )
       }
@@ -5412,8 +5821,8 @@ window.__ModuleLoader__.load({
         react.createElement(
           'div',
           { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px 4px', flexShrink: 0 } },
-          react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } }, t('changesTitle')),
-          react.createElement('span', { 'data-graph-file-count': '', style: { fontSize: '11.5px', color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
+          react.createElement('span', { style: { fontSize: uiPx(11), fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } }, t('changesTitle')),
+          react.createElement('span', { 'data-graph-file-count': '', style: { fontSize: uiPx(11.5), color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
         ),
         react.createElement(
           'div',
@@ -5491,14 +5900,14 @@ window.__ModuleLoader__.load({
               background: 'transparent',
               color: 'inherit',
               fontFamily: UI_FONT,
-              fontSize: '12.5px',
+              fontSize: uiPx(12.5),
               textAlign: 'left',
               cursor: 'pointer',
             },
           },
           react.createElement(
             'span',
-            { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', fontSize: '11px', color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
+            { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', fontSize: uiPx(11), color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
             status,
           ),
           dir === ''
@@ -5507,7 +5916,7 @@ window.__ModuleLoader__.load({
           react.createElement('span', { style: { flex: '0 0 auto', fontWeight: 500 } }, base),
           react.createElement(
             'span',
-            { style: { flex: '1 1 auto', textAlign: 'right', fontFamily: CODE_FONT, fontSize: '11.5px', color: GRAPH_DIM, fontVariantNumeric: 'tabular-nums' } },
+            { style: { flex: '1 1 auto', textAlign: 'right', fontFamily: CODE_FONT, fontSize: uiPx(11.5), color: GRAPH_DIM, fontVariantNumeric: 'tabular-nums' } },
             `${file.added ?? '·'} +  ${file.removed ?? '·'} −`,
           ),
         ),
@@ -5787,7 +6196,7 @@ window.__ModuleLoader__.load({
                   gap: '8px',
                   padding: '16px',
                   fontFamily: UI_FONT,
-                  fontSize: '12.5px',
+                  fontSize: uiPx(12.5),
                   color: 'var(--dsw-alias-label-primary, #202124)',
                   overflowY: 'auto',
                   minHeight: 0,
@@ -5807,7 +6216,7 @@ window.__ModuleLoader__.load({
                     background: 'var(--dsw-alias-bg-module-platform, #f0f1f3)',
                     color: 'inherit',
                     fontFamily: CODE_FONT,
-                    fontSize: '11.5px',
+                    fontSize: uiPx(11.5),
                     whiteSpace: 'pre-wrap',
                     overflowWrap: 'anywhere',
                     maxHeight: '40%',
@@ -5830,7 +6239,7 @@ window.__ModuleLoader__.load({
                     background: 'transparent',
                     color: ACCENT,
                     fontFamily: UI_FONT,
-                    fontSize: '12.5px',
+                    fontSize: uiPx(12.5),
                     cursor: 'pointer',
                   },
                 },
@@ -5935,7 +6344,7 @@ window.__ModuleLoader__.load({
                     background: 'transparent',
                     color: accent === true ? ACCENT : 'inherit',
                     fontFamily: UI_FONT,
-                    fontSize: '12.5px',
+                    fontSize: uiPx(12.5),
                     cursor: 'pointer',
                   },
                 },
@@ -5964,7 +6373,7 @@ window.__ModuleLoader__.load({
                   background: 'var(--dsw-alias-bg-base, #fff)',
                   color: 'var(--dsw-alias-label-primary, #202124)',
                   fontFamily: UI_FONT,
-                  fontSize: '12.5px',
+                  fontSize: uiPx(12.5),
                   boxShadow: '0 12px 36px rgba(0,0,0,.12)',
                 },
               },
@@ -5981,7 +6390,7 @@ window.__ModuleLoader__.load({
                     background: 'var(--dsw-alias-bg-module-platform, #f0f1f3)',
                     color: 'inherit',
                     fontFamily: CODE_FONT,
-                    fontSize: '11.5px',
+                    fontSize: uiPx(11.5),
                     whiteSpace: 'pre-wrap',
                     overflowWrap: 'anywhere',
                     maxHeight: '220px',
@@ -6094,6 +6503,12 @@ window.__ModuleLoader__.load({
         treeCommits: [],
         hasMore: false,
         treeHasMore: false,
+        // 分页（"加载更多"）自己的两个状态，与整页 `phase` / `refreshing` **刻意分开**：
+        // 追加下一页绝不能把界面变回整页 loading（那会在滚到底时白屏一下），也不该复用
+        // `refreshing`（那个字段的含义是"手上这份是上一次的结果，马上换掉"，与"往后面接
+        // 一段"是两件事，混用会让列表被压暗）。
+        loadingMore: false,
+        loadMoreError: '',
         error: '',
         refreshError: '',
         ref: '',
@@ -6108,6 +6523,8 @@ window.__ModuleLoader__.load({
         treeCommits: [],
         hasMore: false,
         treeHasMore: false,
+        loadingMore: false,
+        loadMoreError: '',
         error: '',
         refreshError: '',
         ref: '',
@@ -6204,10 +6621,13 @@ window.__ModuleLoader__.load({
           )
           if (!gate.isCurrent(ticket)) return
           if (gate.accept(ticket)) {
+            // 重新拉第一页要**把分页状态一起归零**：旧的那一页已经在路上，它回来时
+            // `prev.ref` 可能还相等（同一个 ref 手动刷新），不归零就会出现"刷新之后
+            // 底部还写着正在加载更多"。
             update((prev) =>
               prev.commits.length > 0
-                ? { refreshing: true, error: '', refreshError: '' }
-                : { phase: 'loading', refreshing: false, error: '', refreshError: '' },
+                ? { refreshing: true, loadingMore: false, loadMoreError: '', error: '', refreshError: '' }
+                : { phase: 'loading', refreshing: false, loadingMore: false, loadMoreError: '', error: '', refreshError: '' },
             )
           }
           const outcome = await promise
@@ -6240,6 +6660,8 @@ window.__ModuleLoader__.load({
           update((prev) => ({
             phase: 'ready',
             refreshing: false,
+            loadingMore: false,
+            loadMoreError: '',
             error: '',
             refreshError: '',
             ref: filterRef,
@@ -6264,46 +6686,66 @@ window.__ModuleLoader__.load({
       /**
        * 追加下一页。
        *
-       * 两条硬规则：
-       *   * 追加只写 `commits`（中栏）。**过滤状态下的分页绝不触碰 `treeCommits`**——
-       *     否则"加载 develop 的下一页"会让左栏的分支一会儿多一会儿少；
-       *     未过滤（`ref === ''`）时两者本来就是同一份序列，因此一起追加，左栏才会随着
-       *     "加载更多"看到更深历史里的分支（这是特性，不是污染）。
+       * 三条硬规则：
+       *   * 追加**只写 `commits`（中栏）**。`treeCommits`（左栏分支树）永远只由未过滤的
+       *     第一页写入——分页绝不能碰它。早先未过滤时会把并入的下一页一起写进 `treeCommits`
+       *     （本意是"让左栏看到更深历史里的分支"），但那条路有个更坏的后果：左栏的"加载
+       *     更多"提示会永远亮着、而它每次都不是用户点出来的，于是左栏内容会在滚动中悄悄
+       *     变化。现在左栏的语义被钉死为"最近 N 条提交里出现的 ref"，要完整分支列表得靠
+       *     host 侧的 refs 快照（见 `graphTreePartial` 的说明）。
        *   * `prev.ref` 与本次请求的 ref 不一致时直接丢弃：用户已经切到别的 ref 了。
+       *   * 同一 `ref + skip` 只允许一个请求在飞（`moreInFlight`）。只靠 state 挡不住：两次
+       *     滚动事件在同一帧里读到的都是更新前的 `hasMore`/`commits.length`，会各发一次
+       *     相同的请求。用 ref 是同步的，因此是真正的一次。
        */
+      const moreInFlight = react.useRef('')
       const loadMore = react.useCallback(async () => {
         if (workspace === undefined || fresh.hasMore !== true || fresh.refreshing === true) return
+        if (fresh.loadingMore === true) return
         const skip = fresh.commits.length
         const filterRef = fresh.ref
+        const flightKey = `${filterRef}\u0000${skip}`
+        if (moreInFlight.current === flightKey) return
+        moreInFlight.current = flightKey
         const { ticket, promise } = gate.run(
           `graph-more:${skip}:${filterRef}`,
           () => fetchGraph(workspace, { skip, ref: filterRef }),
           // 与 reload 共用 `graph` 分片：新一轮加载一旦开始，这一页就作废。
           { slices: ['graph'] },
         )
-        if (!gate.accept(ticket)) return
-        const outcome = await promise
-        if (!gate.accept(ticket)) return
-        if (!outcome.ok) {
-          const error = outcome.cause
-          const message = String(error?.detail ?? error?.message ?? error)
-          update((prev) => (prev.commits.length > 0 ? { refreshing: false, refreshError: message } : { phase: 'error', error: message }))
+        if (!gate.accept(ticket)) {
+          if (moreInFlight.current === flightKey) moreInFlight.current = ''
           return
         }
-        const more = outcome.value?.commits ?? []
-        update((prev) => {
-          // 期间用户换了 ref：这一页属于上一个条件，丢弃。
-          if (prev.ref !== filterRef) return {}
-          const merged = [...prev.commits, ...more]
-          return {
-            commits: merged,
-            hasMore: outcome.value?.hasMore === true,
-            refreshing: false,
-            refreshError: '',
-            ...(filterRef === '' ? { treeCommits: merged, treeHasMore: outcome.value?.hasMore === true } : {}),
+        update((prev) => (prev.ref === filterRef ? { loadingMore: true, loadMoreError: '' } : {}))
+        try {
+          const outcome = await promise
+          if (!gate.accept(ticket)) return
+          if (!outcome.ok) {
+            const error = outcome.cause
+            const message = String(error?.detail ?? error?.message ?? error)
+            // 分页失败**不动已有的列表**：只是这一页没接上。错误挂在底部（带重试按钮），
+            // 手上的提交一条都不少。
+            update((prev) => (prev.ref === filterRef ? { loadingMore: false, loadMoreError: message } : {}))
+            return
           }
-        })
-      }, [gate, workspace, update, fresh.commits.length, fresh.hasMore, fresh.ref, fresh.refreshing])
+          const more = outcome.value?.commits ?? []
+          update((prev) => {
+            // 期间用户换了 ref：这一页属于上一个条件，丢弃。
+            if (prev.ref !== filterRef) return {}
+            return {
+              commits: [...prev.commits, ...more],
+              hasMore: outcome.value?.hasMore === true,
+              loadingMore: false,
+              loadMoreError: '',
+              // 注意：**这里没有 `treeCommits`**。分页不写左栏（见上面的说明）。
+            }
+          })
+        } finally {
+          // 无论成功、失败还是被抢占，都要把闸门放开——否则一次意外就永久卡住分页。
+          if (moreInFlight.current === flightKey) moreInFlight.current = ''
+        }
+      }, [gate, workspace, update, fresh.commits.length, fresh.hasMore, fresh.ref, fresh.loadingMore, fresh.refreshing])
 
       /**
        * 点击左栏的一个 ref（分支/标签/HEAD）。
@@ -6329,6 +6771,8 @@ window.__ModuleLoader__.load({
             commits: cached.commits,
             hasMore: cached.hasMore,
             refreshing: true,
+            loadingMore: false,
+            loadMoreError: '',
             error: '',
             refreshError: '',
             ...(prev.selected !== '' && !cached.commits.some((commit) => commit.hash === prev.selected) ? { selected: '' } : {}),
@@ -6352,10 +6796,25 @@ window.__ModuleLoader__.load({
       // 重渲染。不 memo 的话每一帧都要重算一遍泳道，滚动会明显掉帧。
       const layout = react.useMemo(() => layoutGraph(visibleCommits), [visibleCommits])
 
-      const onScroll = react.useCallback((event) => {
-        setScrollTop(event.target.scrollTop)
-        setViewport(event.target.clientHeight)
-      }, [])
+      /**
+       * 距底多少像素内就自动追加下一页。
+       *
+       * 320px 落在需求给的 200~400px 区间里：小到"用户确实滚到了底"，大到——行高 22px 的
+       * 情况下——大约还有 14 行没露出来时就提前发请求，因此正常情况下用户看不到"到底了
+       * 还要等"。触发必须幂等：滚动事件每帧都会来，靠 `loadMore` 内部的
+       * `loadingMore` / `moreInFlight` 挡住重复请求，这里只负责"够近了就叫一次"。
+       */
+      const onScroll = react.useCallback(
+        (event) => {
+          const target = event.target
+          setScrollTop(target.scrollTop)
+          setViewport(target.clientHeight)
+          const remaining = (target.scrollHeight ?? 0) - target.scrollTop - target.clientHeight
+          if (remaining > GRAPH_LOAD_MORE_THRESHOLD) return
+          void loadMore()
+        },
+        [loadMore],
+      )
 
       /**
        * 整页状态只在**手上没有可展示数据**时才出现。
@@ -6487,11 +6946,21 @@ window.__ModuleLoader__.load({
                 padding: '5px 8px',
                 borderBottom: `1px solid ${BORDER}`,
                 flexShrink: 0,
-                fontSize: '12px',
+                fontSize: uiPx(12),
               },
             },
             react.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, t('graphTitle')),
-            react.createElement('span', { 'data-graph-count': '', style: { color: GRAPH_DIM, flexShrink: 0 } }, t('graphFiles', { count: visibleCommits.length })),
+            // 计数 = **中栏当前已加载且经搜索过滤后**的提交数，与列表行数同源。用
+            // `graphCommits` 而不是 `graphFiles`：提交图顶部的数字说的是提交，"个文件"
+            // 是另一件事（那是右栏详情里的文件数）。`hasMore` 时缀一句"继续滚动加载"，
+            // 免得这个数字被当成仓库的提交总数。
+            react.createElement(
+              'span',
+              { 'data-graph-count': '', 'data-graph-has-more': fresh.hasMore === true ? 'true' : 'false', style: { color: GRAPH_DIM, flexShrink: 0 } },
+              fresh.hasMore === true
+                ? t('graphCommitsMore', { count: visibleCommits.length })
+                : t('graphCommits', { count: visibleCommits.length }),
+            ),
             // 后台刷新（换 ref / 手动刷新）：**不卸界面**，只在工具栏上给一个小提示，
             // 列表本身压暗一点表示"这一份是上一次的结果，马上换"。
             fresh.refreshing === true
@@ -6500,7 +6969,7 @@ window.__ModuleLoader__.load({
                   {
                     'data-graph-refreshing': '',
                     role: 'status',
-                    style: { color: GRAPH_DIM, fontSize: '11.5px', flexShrink: 0 },
+                    style: { color: GRAPH_DIM, fontSize: uiPx(11.5), flexShrink: 0 },
                   },
                   t('graphRefreshing'),
                 )
@@ -6510,7 +6979,7 @@ window.__ModuleLoader__.load({
               ? null
               : react.createElement(
                   'span',
-                  { 'data-graph-refresh-error': '', role: 'alert', style: { color: REMOVED, fontSize: '11.5px', flexShrink: 0, maxWidth: '18em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.refreshError },
+                  { 'data-graph-refresh-error': '', role: 'alert', style: { color: REMOVED, fontSize: uiPx(11.5), flexShrink: 0, maxWidth: '18em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.refreshError },
                   t('graphRefreshFailed', { detail: fresh.refreshError }),
                 ),
             fresh.ref === ''
@@ -6528,7 +6997,7 @@ window.__ModuleLoader__.load({
                       background: 'transparent',
                       color: ACCENT,
                       fontFamily: UI_FONT,
-                      fontSize: '11.5px',
+                      fontSize: uiPx(11.5),
                       cursor: 'pointer',
                       flexShrink: 0,
                     },
@@ -6558,11 +7027,11 @@ window.__ModuleLoader__.load({
                 background: 'transparent',
                 color: 'inherit',
                 fontFamily: UI_FONT,
-                fontSize: '11.5px',
+                fontSize: uiPx(11.5),
               },
             }),
             layout.truncated
-              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: '11.5px', flexShrink: 0 } }, t('graphTruncatedLanes'))
+              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: uiPx(11.5), flexShrink: 0 } }, t('graphTruncatedLanes'))
               : null,
             // 收起/展开两侧分栏：窄窗口下唯一能保住"中间那栏还能读"的办法。
             iconButton('tree', t('graphCollapseTree'), () => togglePane('tree'), toolIcon('M2.5 3.5h11M2.5 8h11M2.5 12.5h11'), collapsed.tree),
@@ -6598,32 +7067,73 @@ window.__ModuleLoader__.load({
                   scrollTop,
                   viewportHeight: viewport,
                 }),
-            fresh.hasMore
+            // ---- 列表底部：分页状态 ----
+            //
+            // 三种状态互斥，且**都不动上面的列表**（这是"滚动加载不许白屏"的直接体现）：
+            //   * 正在加载下一页 → 只加一行"正在加载更多…"；
+            //   * 上一页失败 → 一行错误 + 一个重试按钮（按钮兼作"加载更多"）；
+            //   * 还有更多 → "加载更多"按钮（自动加载没触发时的兜底入口，也是失败重试）。
+            fresh.loadingMore === true
               ? react.createElement(
                   'div',
-                  { style: { padding: '8px 12px' } },
-                  react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      'data-graph-more': '',
-                      onClick: () => void loadMore(),
-                      style: {
-                        width: '100%',
-                        padding: '6px',
-                        borderRadius: '6px',
-                        border: `1px solid ${BORDER}`,
-                        background: 'transparent',
-                        color: 'inherit',
-                        fontFamily: UI_FONT,
-                        fontSize: '12.5px',
-                        cursor: 'pointer',
-                      },
-                    },
-                    t('graphLoadMore'),
-                  ),
+                  { 'data-graph-loading-more': '', role: 'status', style: { padding: '8px 12px', fontSize: uiPx(11.5), color: GRAPH_DIM, textAlign: 'center' } },
+                  t('graphLoadingMore'),
                 )
               : null,
+            fresh.loadingMore === true
+              ? null
+              : fresh.loadMoreError === ''
+                ? (fresh.hasMore === true
+                    ? react.createElement(
+                        'div',
+                        { style: { padding: '8px 12px' } },
+                        react.createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            'data-graph-more': '',
+                            onClick: () => void loadMore(),
+                            style: {
+                              width: '100%',
+                              padding: '6px',
+                              borderRadius: '6px',
+                              border: `1px solid ${BORDER}`,
+                              background: 'transparent',
+                              color: 'inherit',
+                              fontFamily: UI_FONT,
+                              fontSize: uiPx(12.5),
+                              cursor: 'pointer',
+                            },
+                          },
+                          t('graphLoadMore'),
+                        ),
+                      )
+                    : null)
+                : react.createElement(
+                    'div',
+                    { 'data-graph-more-error': '', style: { padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '8px' } },
+                    react.createElement('span', { role: 'alert', style: { flex: '1 1 auto', minWidth: 0, color: REMOVED, fontSize: uiPx(11.5), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.loadMoreError }, fresh.loadMoreError),
+                    react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-graph-more': '',
+                        onClick: () => void loadMore(),
+                        style: {
+                          flexShrink: 0,
+                          padding: '4px 10px',
+                          borderRadius: '6px',
+                          border: `1px solid ${BORDER}`,
+                          background: 'transparent',
+                          color: 'inherit',
+                          fontFamily: UI_FONT,
+                          fontSize: uiPx(12.5),
+                          cursor: 'pointer',
+                        },
+                      },
+                      t('graphLoadMore'),
+                    ),
+                  ),
           ),
         ),
         collapsed.detail ? null : splitter('detail', detailWidth, setDetailWidth),
@@ -6781,7 +7291,7 @@ window.__ModuleLoader__.load({
             border: `1px solid ${trouble === '' ? 'var(--dsw-alias-border-l1, #eceef2)' : '#6b3b3b'}`,
             background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
             color: trouble === '' ? (hasChanges ? ACCENT : 'var(--dsw-alias-label-secondary)') : 'var(--dsw-alias-state-error-primary, #d44747)',
-            fontSize: '12px',
+            fontSize: uiPx(12),
             fontFamily: UI_FONT,
             fontWeight: 500,
             whiteSpace: 'nowrap',
@@ -7017,6 +7527,10 @@ window.__ModuleLoader__.load({
     // 因此把这两个引用挂到导出上。它们不是公开 API，也不被 `apply` 使用；命名带
     // `ForTest` 后缀，避免被误当成插件契约的一部分。
     exports.__graphLayoutForTest = layoutGraph
+    // 注入的样式表文本也导出给测试：字号全部改成 `uiPx(N)` 之后，"**每个位置的设计值
+    // 与改造前逐一相同**"这件事只有把文本拿出来数才能钉住（需求明确禁止"顺手把 12.5
+    // 改成 11"）。它是纯字符串，没有任何副作用。
+    exports.__reviewStylesForTest = styles
     exports.__graphColorCountForTest = GRAPH_COLOR_COUNT
     exports.__graphLaneMaxForTest = GRAPH_LANE_MAX
     // 暂存区块的两个内部件同样只给测试用：`classifyEntry` 是"一个文件属于哪一组"的
@@ -7057,6 +7571,10 @@ window.__ModuleLoader__.load({
       ref: normalizeRef,
       page: normalizeGraphPage,
       detail: normalizeCommitDetail,
+      // 时间格式化：它跑在提交图的**每一行**上（一次抛错就是整棵树被卸掉），
+      // 而 host 给的 committedAt 形状并不可控（缺失、数字、本地化文本……），
+      // 因此必须能被直接按各种畸形输入断言。
+      commitTime: formatCommitTime,
     }
     // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
     // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
@@ -7066,6 +7584,10 @@ window.__ModuleLoader__.load({
     // 测试被无关的状态耦合住（实测踩到过：换一个 hook key 也拿不到干净状态，因为嵌套
     // 组件的 hook 槽按树中位置归属）。
     exports.__reviewPanelForTest = ReviewPanel
+    // 常驻开关（模块级 store）也导出：抽屉的关闭方式（点外部 / Escape / 入口自身 toggle）
+    // 全部以它为状态源，而"关掉之后要靠它才能再打开"——不导出的话离线测试只能测一次关闭，
+    // 后面几条豁免断言就没有干净的初态可用。
+    exports.__panelStoreForTest = panelStore
     // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
     // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
     //

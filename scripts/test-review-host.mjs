@@ -387,6 +387,48 @@ try {
   rmSync(lockPath, { force: true })
   res = await call('/dsh-desktop/review/changes', { workspace, sessionId: session, metadataOnly: true })
   check('   清掉锁后恢复正常 -> 200', res.status, 200)
+  // ---- 12. AI 补充提交信息的**路由层**契约 --------------------------------
+  //
+  // 这一节只钉"路由本身是好的"，不钉模型输出（那取决于 provider，且这个测试实例用的是
+  // 临时 HOME、没有凭据）。因此断言的是：
+  //   * 入参校验照常（空 files → 400，越界路径 → 400）——**这是安全边界，必须挡住**；
+  //   * 生成失败时返回**结构化 code**而不是 500：500 会让界面以为插件坏了，
+  //     而"没登录模型"是完全正常的一种状态。
+  console.log('')
+  console.log('=== 12. AI 补充提交信息（路由契约）===')
+  {
+    res = await call('/dsh-desktop/review/commit-message', { workspace, files: [] })
+    check('12) 空 files -> 400', res.status, 400)
+    check('   code 是 noFiles', (await res.json()).code, 'noFiles')
+
+    res = await call('/dsh-desktop/review/commit-message', { workspace, files: ['../outside.txt'] })
+    check('   越界路径 -> 400', res.status, 400)
+    check('   code 是 unsafePath', (await res.json()).code, 'unsafePath')
+
+    // 合法入参：要么成功（宿主装好并能调通模型），要么是**有 code 的** 501/502。
+    // 两种都算通过——"没装模型 provider" 是合法部署形态。
+    res = await call('/dsh-desktop/review/commit-message', {
+      workspace,
+      branch: 'main',
+      files: [{ path: 'modify.txt', status: 'M', added: 1, removed: 1 }],
+    })
+    const payload = await res.json()
+    check('   合法入参不会是 500', res.status !== 500, true)
+    check('   合法入参要么成功要么带稳定 code', res.status === 200 || typeof payload.code === 'string', true)
+    if (res.status !== 200) {
+      console.log(`  [info] 本实例的 AI 不可用：${res.status} ${payload.code} — ${String(payload.detail ?? '').slice(0, 120)}`)
+    } else {
+      check('   成功时带 message', typeof payload.message, 'string')
+      check('   成功时带 subject', typeof payload.subject, 'string')
+    }
+
+    // GET 不允许（与其他写路由同一约定）。工作区校验在路由之前，因此 GET 也要带上
+    // 合法的 workspace 参数，否则先被 400 挡住——那测的就不是"方法限制"了。
+    const getResponse = await fetch(
+      `${base}/dsh-desktop/review/commit-message?workspace=${encodeURIComponent(workspace)}`,
+    )
+    check('   GET -> 405', getResponse.status, 405)
+  }
 } catch (error) {
   failures += 1
   console.error('测试异常:', String(error.message).slice(0, 400))

@@ -275,19 +275,22 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 
 - Follows the **current conversation's** workspace: switching conversations and starting a new
   one both move it; the panel itself has no workspace picker and never shows an absolute path
-- **Resizable**: drag the left edge (double-click to reset; focus it and use ←/→, or Home to
-  reset). The width is remembered per app
+- **The default width is 80% of the viewport** (1920 → 1536, 2560 → 2048), with no fixed pixel
+  ceiling — the 80% ratio *is* the ceiling (it keeps 20% of the shell visible). A persisted width
+  wins over the default. **Resizable**: drag the left edge (double-click to reset to 80%; focus it
+  and use ←/→, or Home to reset). The width is remembered per app
 - Two tabs at the top, like IDEA's Git tool window:
   - `Changes`: **Staged / Changes / Unversioned** groups (all filtered from one snapshot, so a
     group's count always equals the rows listed), click a file for an inline diff with line
     numbers and add/remove backgrounds, and per-row stage / unstage / revert / file history.
-    The message box and **Commit / Commit and Push** are pinned to the bottom and never scroll
-    away with a long file list
+    The message box (4 rows tall, vertically resizable) and **✨ AI draft / Commit / Commit and
+    Push** are pinned to the bottom and never scroll away with a long file list
   - `Log`: **branch tree / commit graph / commit details**, three panes. A single click on a
     commit only changes the selection and shows its details (and changed files) on the right —
     no inline expansion; click a changed file for that commit's diff of it. The two splitters
     are draggable and remembered, narrow windows can collapse the tree or the details, and the
-    toolbar has refresh and search
+    toolbar has refresh, a `{count} commits` counter (suffixed with "scroll for more" while deeper
+    history exists) and search
     - **The left tree and the middle list have separate data sources.** The tree
       (`HEAD / Local / Remote / Tags`) is built from the **unfiltered** commits
       (`treeCommits`, written only by the "all branches" response); the middle list is what
@@ -300,8 +303,20 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
       loading state is reserved for the first load, when there is nothing to show yet.
     - Each ref's first page is cached (module level, capped at 12 entries, keyed by workspace), so
       `develop → master → develop` is visible **in the same frame** and revalidates in the
-      background. Paging appends to the middle list only; unfiltered paging also extends the tree
-      (that is how refs from deeper history appear), while **filtered paging never touches it**.
+      background.
+    - **Scrolling within 320px of the bottom loads the next page** (it stops once `hasMore` is
+      false, and only one request per `ref + skip` can be in flight, so continuous scrolling or
+      repeated clicks never duplicate it). While a page is loading the footer shows
+      "Loading more…"; the **Load more** button stays as the retry affordance. **Paging only ever
+      appends to the middle list** — `treeCommits` is written solely by the unfiltered first page,
+      so the tree never changes under the user while they scroll (the footnote in the tree says
+      exactly that: branches come from the loaded commits, earlier ones may be missing).
+    - Commit rows **do not show a hash** (a SHA adds nothing to reading a graph and costs a fixed
+      column; `hash` is still kept internally for React keys, selection identity, detail requests,
+      layout and cache keys). A row reads `[lanes] [branch/tag] subject author 2026-09-21
+      15:42:18`; times go through `formatCommitTime`, which is **accurate to the second** and takes
+      the date and time straight out of the ISO string without any timezone conversion (a commit
+      time is a historical fact; `new Date()` would render the same commit differently per machine).
 - The change count on the entry and the file list inside the drawer come from the **same shared
   snapshot** (one poll), so "shows 0 outside, has files inside" cannot happen; `stage /
   unstage / revert / commit` all invalidate that snapshot and refetch once
@@ -323,9 +338,33 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   the panel says "Switching project…" and **never** falls back to the previous session's (or the
   shell's) directory. Every hook is called unconditionally and before any phase guard
   (`check-react-rules.mjs` pins this statically), so a project switch cannot trip React #310.
-- **The project Git drawer is not a popover.** Clicking a project on the left, the chat body, or
-  anywhere else in the shell does **not** close it — only the X button, Escape, or the top-right
-  entry again. The in-session review tab keeps the click-outside behaviour.
+- **Clicking anywhere ordinary outside the drawer closes it**: the chat body, the left-hand lists,
+  empty space — and so do Escape and the X. The handful of things that must *not* be mistaken for
+  "outside" are exempted one by one: the drawer's own subtree (including its overlays and confirm
+  dialogs, via `contains`), the branch context menu and branch panel (rendered at body level by
+  gitbar; exempted by the stable markers they already carry), and the top-right entry button —
+  which **has to** be exempt, because a capture-phase `mousedown` would close the drawer and the
+  button's own `onClick` would immediately reopen it, i.e. the user sees a flicker and no panel.
+  The entry toggles itself.
+- **“✨ AI draft” writes a commit message from the files you picked.** The input is exactly
+  `commitPaths` (the checked files, not the whole workspace) and the host caps it three ways —
+  30 files, 3000 characters per file, 30000 characters total — degrading oversized files to
+  "status + line counts" instead of stuffing the repository into the context. Generation goes
+  through the host's official capability — `ctx.llm.stream()` (`@deepseek-ai/dsh-llm`, the same
+  path the agent loop and session titles use) plus `ctx.agentDefaultModel.currentSelection()`
+  (**reusing your current login and model configuration**); there is **no API key, no hard-coded
+  endpoint and no new provider inside the plugin**, and a host without the capability answers
+  `aiUnavailable` naming the missing service. Behaviour: the button is disabled with a loading
+  label while generating; an empty box is filled directly; **existing user text is never silently
+  overwritten** — you get Replace / Append / Cancel instead; switching projects or changing the
+  selection mid-flight discards the late response (request token + workspace + selection
+  fingerprint); a failure keeps your text and only adds a non-blocking note.
+- **Font sizes follow Settings → UI font size**: every size inside the drawer derives from
+  `--dsh-ui-px-14` (`calc(var(--dsh-ui-px-14, 14px) * N / 14)`), which is pixel-identical at the
+  14px default and scales the commit details, changed-file list, diff body and line counts together
+  at 12 / 18. 14 is the base precisely because that token is guaranteed to exist (it comes from the
+  typography plugin's own stylesheet) rather than depending on that plugin happening to observe
+  this plugin's styles.
 - **Per-file diffs are lazy.** `/workspace` is a **metadata-level** snapshot
   (`status --porcelain=v2` once for files plus index state, `diff --numstat HEAD` for line counts)
   with **no** repository-wide unified diff; clicking a file calls `/workspace-file`, which diffs
@@ -333,7 +372,10 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   `workspace + HEAD + path`, so switching projects or committing invalidates it, and late
   responses are guarded by both a token and the key. Measured on a repo with 6,639
   changed/untracked paths: polling went from 10 git processes / 6.3 s to **2 processes / 0.32 s**,
-  and the 38.7 MB repository-wide diff is no longer produced at all.
+  and the 38.7 MB repository-wide diff is no longer produced at all. **Untracked files take the
+  very same lazy path** (`LazyFileDiff` plus `untracked: true`) and no longer reference any
+  "split the whole page" artefact — which is exactly what produced
+  `byFile is not defined` when clicking an untracked file.
 - **A file whose only change is its mode (a `chmod`) is not a change.** On Windows, a repo with
   `core.fileMode=true` makes git record a `100755` script as `100644` — a `0/0` "modification"
   with identical content. The host snapshots with `-c core.fileMode=false` and additionally
@@ -627,7 +669,12 @@ was verified rather than assumed:
 | `scripts/test-review-graph-branch-filter.mjs` | the Log branch tree is decoupled from the filtered commit list: clicking a ref never shrinks the tree, never blanks the panes, and out-of-order responses never overwrite |
 | `scripts/test-review-project-git.mjs` | the project-switch state machine: the hook count must never change, the entry never disappears, "switching project…", panel-level crash isolation |
 | `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
+| `scripts/test-review-commit-message.mjs` | the AI commit-message draft: the three context caps, the prompt is data, output normalisation, and naming the missing host service |
+| `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, lazy diffs for untracked files, and the AI-draft interaction |
+| `scripts/test-review-graph-view.mjs` | the three-pane commit graph: the counter, second-accurate times, scroll-triggered paging, and no hash column |
+| `scripts/test-review-drawer-style.mjs` | the drawer's appearance layer: its data markers and style contract stay intact |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |
+| `scripts/mutation-check.mjs` | mutation check: every fix in this round is reverted to its old form and the matching assertion has to go red |
 | `scripts/measure-workspace-snapshot.mjs` | real measurements of the project snapshot: git processes and wall time, before vs after |
 | `scripts/test-project-git-smoke.mjs` | **real Electron/CDP smoke test** (needs an instance started with `--remote-debugging-port=9333`) |
 | `scripts/test-gitbar-branch-interaction.mjs` | branch rows: single click opens the menu, double click switches, right click opens the same menu |
@@ -662,7 +709,21 @@ was verified rather than assumed:
 >   node scripts/test-project-git-smoke.mjs       # DSH_CDP_PORT overrides the port
 >   ```
 >
->   It looks for two sessions/projects to drive A→B→A (`DSH_SMOKE_SESSIONS="ProjectA title|ProjectB title"` names them explicitly).
+>   It looks for two sessions/projects to drive A→B→A (`DSH_SMOKE_SESSIONS="ProjectA title|ProjectB title"` names them explicitly). It currently covers A–H:
+>
+>   | Case | What it pins |
+>   |---|---|
+>   | A | the entry and the drawer survive a project switch, with no React error |
+>   | B | clicking `Log` never trips #290 and the graph really renders |
+>   | C | `Log / Changes / switch project` five times: neither the entry nor the drawer may disappear |
+>   | D | a fast `A→B→A`: everything shown belongs to A, and the header count equals the drawer's row count |
+>   | E | after clicking a branch the tree is complete, no pane blanks, and the tree's scroll position survives |
+>   | F | the drawer defaults to 80% of the viewport; clicking outside closes it **while the top-right entry stays** |
+>   | G | the `Log` counter says "commits" (not files), times are second-accurate, rows carry no hash, and scrolling really pages |
+>   | H | an untracked file opens its diff with **no `is not defined` / ReferenceError**, and a half-typed message is not overwritten by the AI draft |
+>
+>   `scripts/test-drawer-dismiss.mjs` (also CDP-driven) covers click-outside / click-inside / Escape /
+>   no-flicker on the entry, plus **clicking inside the branch menu must not close the drawer**.
 
 ### Release notes
 
