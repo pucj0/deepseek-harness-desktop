@@ -63,11 +63,23 @@ const react = {
   },
   useEffect(fn, deps) {
     const slot = renderIndex++
-    const prev = hookSlots[slot]
+    const slots = hookSlots
+    const prev = slots[slot]
     const changed = prev === undefined || deps === undefined || prev.deps === undefined || deps.some((d, i) => !Object.is(d, prev.deps[i]))
     if (changed) {
-      hookSlots[slot] = { deps }
-      effectQueue.push(fn)
+      // **必须跑上一个 cleanup**：真实 React 在依赖变化时会先清理再重跑。这个桩原来把返回的
+      // 清理函数直接丢了，于是"在 effect 里挂 document 监听"的组件每渲染一次就多留一个监听
+      // ——断言"关闭 Preview 后监听被摘掉"会因此假红（看到 7 个残留），而那是桩的错。
+      if (typeof prev?.cleanup === 'function') effectQueue.push(prev.cleanup)
+      slots[slot] = { deps }
+      // 包一层是为了把 `fn` 的返回值（cleanup）记回槽位，供下一次依赖变化时清理。
+      effectQueue.push(() => {
+        const cleanup = fn()
+        const current = slots[slot]
+        if (current !== undefined && current.deps === deps) {
+          current.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+        }
+      })
     }
   },
   useSyncExternalStore(subscribe, getSnapshot) {
@@ -129,22 +141,61 @@ const makeSelectorHook = (read) => (selector) =>
 const domListeners = new Map()
 globalThis.document = {
   head: { appendChild() {} },
-  body: {},
-  addEventListener(type, handler) {
+  body: { dataset: {} },
+  addEventListener(type, handler, options) {
     if (!domListeners.has(type)) domListeners.set(type, new Set())
-    domListeners.get(type).add(handler)
+    // 记下 capture：Diff Preview 的 Escape 处理必须挂在捕获阶段（否则抽屉的冒泡监听会先把
+    // 整个抽屉关掉）。这条"挂在哪个阶段"本身就是被测行为的一部分，因此要能断言。
+    domListeners.get(type).add({ handler, capture: options === true })
   },
   removeEventListener(type, handler) {
-    domListeners.get(type)?.delete(handler)
+    const set = domListeners.get(type)
+    if (set === undefined) return
+    for (const entry of set) if (entry.handler === handler) set.delete(entry)
+  },
+  /**
+   * 派发一个事件：先跑捕获阶段的监听，再跑冒泡阶段（与真实 DOM 的顺序一致）。
+   *
+   * `stopPropagation` 在这里被替换成"标记 + 不再往下走"：组件调它表达的意思正是
+   * "这次按键不要传给抽屉的监听"，而这正是 Diff Preview 的 Escape 要被断言的行为。
+   */
+  emit(type, event) {
+    const set = domListeners.get(type)
+    if (set === undefined) return
+    if (event !== null && typeof event === 'object') {
+      Object.defineProperty(event, 'stopPropagation', {
+        configurable: true,
+        writable: true,
+        value: () => {
+          event.__stopped = true
+        },
+      })
+    }
+    for (const entry of [...set]) if (entry.capture) entry.handler(event)
+    for (const entry of [...set]) {
+      if (entry.capture || event?.__stopped === true) continue
+      entry.handler(event)
+    }
   },
   querySelector: () => null,
   createElement: () => ({ dataset: {}, style: {}, textContent: '', remove() {} }),
   documentElement: {},
 }
+/**
+ * 内存版 localStorage。
+ *
+ * 原来是"getItem 恒为 null、setItem 空实现"的桩——那样**任何持久化断言都测不出来**
+ * （写了也读不到）。Diff Preview 的高度持久化是这一版的明确要求，因此这里必须能真的存取。
+ */
+const localStore = new Map()
 globalThis.window = {
   innerWidth: 1400,
   innerHeight: 900,
-  localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  localStorage: {
+    getItem: (key) => (localStore.has(key) ? localStore.get(key) : null),
+    setItem: (key, value) => localStore.set(key, String(value)),
+    removeItem: (key) => localStore.delete(key),
+  },
   addEventListener() {},
   removeEventListener() {},
   __ModuleLoader__: {
@@ -293,6 +344,32 @@ let graphPages = null
  * 立即 resolve 的夹具根本测不到（这正是"分页要不要整页 loading"最容易漏测的地方）。
  */
 let graphHoldMore = null
+/**
+ * 单文件差异的"挂起"闸门（按 path 登记放行函数）。
+ *
+ * 用来钉住"快速点 A 再点 B，A 的迟到响应不许覆盖 B"——那件事只有让 A **真的在飞**才测得到。
+ * 立即 resolve 的夹具下两条响应都按顺序落地，什么顺序问题都暴露不出来。
+ */
+const commitFileHolds = new Map()
+/** 单文件差异的内容按 path 区分，才能断言"现在显示的是 B 而不是 A"。 */
+const commitFileDiffFor = (path, revision) => ({
+  isRepo: true,
+  path,
+  diff: [
+    `diff --git a/${path} b/${path}`,
+    'index 1111111..2222222 100644',
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -1,2 +1,3 @@',
+    ' context line',
+    `+added by ${String(path)}`,
+    `+from-${String(revision).slice(0, 8)}`,
+    '-old line',
+    '',
+  ].join('\n'),
+  truncated: false,
+  binary: false,
+})
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
@@ -303,6 +380,11 @@ globalThis.fetch = async (url, init) => {
       graphHoldMore = () => resolve()
     })
   }
+  if (route === 'commit-file' && commitFileHolds.has(body?.path)) {
+    await new Promise((resolve) => {
+      commitFileHolds.set(body?.path, () => resolve())
+    })
+  }
   const payload =
     route === 'roots'
       ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
@@ -311,7 +393,7 @@ globalThis.fetch = async (url, init) => {
         : route === 'commit-detail'
           ? DETAIL
           : route === 'commit-file'
-            ? commitFileDiff(body?.revision)
+            ? commitFileDiffFor(body?.path, body?.revision)
             : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
@@ -555,72 +637,120 @@ check('   请求了 commit-detail 路由', detailRequest !== undefined, 'true')
 check('   带上该提交的哈希', detailRequest?.body?.revision, 'm'.repeat(40))
 
 console.log('')
-console.log('=== 5. 展开一个文件的差异（按需取）===')
+console.log('=== 5. 点击改动文件 → 底部 Diff Preview（右栏不再内联展开）===')
 {
   const before = requests.filter((r) => r.url.includes('/review/commit-file')).length
-  check('5) 展开前没有请求过差异', before, 0)
+  check('5) 点击前没有请求过差异', before, 0)
+  // 需求第 1 条：右栏**不存在**内联的文件差异子树。
+  check('   右栏没有内联差异容器', find('data-graph-file-diff'), null)
+  check('   右栏里也没有任何差异行', collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey).some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+  // 未点之前底部没有 Preview。
+  check('   未点文件时没有 Diff Preview', find('data-graph-diff-preview'), null)
+
   await click(find('data-graph-file-row', 'src/app.ts'))
-  check('   展开后出现差异容器', find('data-graph-file-diff') !== null, 'true')
+  check('   出现 Diff Preview', find('data-graph-diff-preview') !== null, 'true')
+  // Preview 横跨"提交图 + 详情"：它在 main 区里，**不在** detail 栏里。
+  {
+    const preview = find('data-graph-diff-preview')
+    const insideDetail = collectHostNodes(find('data-graph-pane', 'detail') ?? { props: {} }, 'probe').some(
+      (n) => n.props?.['data-graph-diff-preview'] !== undefined,
+    )
+    check('   Preview 不在右栏里', insideDetail, 'false')
+    check('   Preview 所在栏标记为 diff', find('data-graph-pane', 'diff') !== null, 'true')
+    check('   Preview 有头部 toolbar', preview !== null && find('data-graph-diff-header') !== null, 'true')
+    check('   头部带增删统计', findAll('data-graph-diff-stats').length, 1)
+    check('   头部有关闭按钮', find('data-graph-diff-close') !== null, 'true')
+  }
   const after = requests.filter((r) => r.url.includes('/review/commit-file')).length
-  check('   展开后才请求差异', after, 1)
-  const fileRequest = requests.find((r) => r.url.includes('/review/commit-file'))
+  check('   点击后才请求差异', after - before, 1)
+  const fileRequest = requests.filter((r) => r.url.includes('/review/commit-file'))[0]
+  check('   请求带工作区', fileRequest.body.workspace, 'F:\\code\\projA')
   check('   请求带路径', fileRequest.body.path, 'src/app.ts')
   check('   请求带提交', fileRequest.body.revision, 'm'.repeat(40))
-  checkTrue('   差异内容已渲染', textOf(find('data-graph-file-diff')).includes('new'))
-  // 再点一次收起，且**不再重复请求**（差异已经取过）。
+  // 只取这一个文件：请求体里没有"整条提交的全部文件"这种东西。
+  check('   只请求这一个文件（不带文件清单）', Object.keys(fileRequest.body).sort().join(','), 'path,revision,workspace')
+  checkTrue('   差异内容已渲染', viewText().includes(`added by src/app.ts`))
+
+  // 选中的文件行必须有背景色标记（右栏与 Preview 是两个区域，没有标记就分不清对应关系）。
+  check('   选中的文件行被标记', find('data-graph-file-row', 'src/app.ts')?.props?.['aria-selected'], 'true')
+  check('   选中行的 data 标记', find('data-graph-file-row', 'src/app.ts')?.props?.['data-graph-file-selected'], 'true')
+  check('   未选中的行没有标记', find('data-graph-file-row', 'docs/readme.md')?.props?.['data-graph-file-selected'], 'false')
+
+  // 再点同一个文件：**保持选中且不重复请求**。
   await click(find('data-graph-file-row', 'src/app.ts'))
-  check('   再次点击收起', find('data-graph-file-diff') === null, 'true')
-  check('   收起不重复请求', requests.filter((r) => r.url.includes('/review/commit-file')).length, 1)
+  check('   再次点击仍保持 Preview', find('data-graph-diff-preview') !== null, 'true')
+  check('   再次点击不重复请求', requests.filter((r) => r.url.includes('/review/commit-file')).length, after)
+  check('   选中标记仍在', find('data-graph-file-row', 'src/app.ts')?.props?.['aria-selected'], 'true')
 }
 
 console.log('')
-console.log('=== 5b. 切换提交后，同一路径的文件不得沿用上一条提交的差异 ===')
-// 这是"diff 串提交"的回归：两次提交都改了 `src/app.ts` 时，只按路径给 `CommitFileRow`
-// 做 key 会让 React 认为"还是同一个实例"——展开状态与已取回的差异都留着，于是新提交的
-// 标题下面显示的是上一条提交的差异（路径一样、差异也长得合理，肉眼几乎看不出来）。
+console.log('=== 5a. 快速切换文件：A 的迟到响应不许覆盖 B ===')
 {
-  // 前置：在提交 m 里把 src/app.ts 的差异**展开着**（这样"切到 q"才有东西可串）。
-  await click(find('data-graph-row', 'm'.repeat(40)))
+  // 让 src/app.ts 的响应**挂起**（模拟慢请求），点 B（快）之后再放行 A。
   await click(find('data-graph-file-row', 'src/app.ts'))
-  const beforeText = textOf(find('data-graph-file-diff'))
-  checkTrue('5b) 前置：m 的差异已展开且属于 m', beforeText.includes(`from-${'m'.repeat(8)}`))
+  await settle()
+  const beforeSwitch = requests.filter((r) => r.url.includes('/review/commit-file')).length
+  commitFileHolds.set('src/app.ts', () => undefined)
+  // A 已在缓存里（上一节点过），因此换一个还没取过的文件来制造"在飞"。
+  // 这里先把缓存里那份用掉：点 docs/readme.md 之前挂起它。
+  commitFileHolds.delete('src/app.ts')
+  commitFileHolds.set('docs/readme.md', () => undefined)
+  const pendingB = click(find('data-graph-file-row', 'docs/readme.md'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await settle()
+  check('5a) 切换后 Preview 显示新文件', find('data-graph-file-row', 'docs/readme.md')?.props?.['aria-selected'], 'true')
+  check('   B 的请求发出', requests.filter((r) => r.url.includes('/review/commit-file')).length - beforeSwitch, 1)
+  // 放行 B，再放行一个**更早**的 A（此刻 A 已经不在界面上）。
+  const releaseB = commitFileHolds.get('docs/readme.md')
+  commitFileHolds.delete('docs/readme.md')
+  releaseB()
+  await pendingB
+  await settle()
+  checkTrue('   B 的差异显示出来', viewText().includes('added by docs/readme.md'))
+  check('   B 的内容里没有 A', viewText().includes('added by src/app.ts'), 'false')
+}
 
-  // 切到提交 q。
-  //
-  // **先把行节点取出来，再触发点击**：取行本身会渲染一帧（那个桩渲染器把"依赖变化"记在
-  // 渲染期，副作用要么被收集、要么被丢掉），因此必须让"改选中"和"渲染这一帧"分开，
-  // 才能精确地看到 React 的真实顺序：渲染（这一帧画什么）→ 提交后跑 effect。
+console.log('')
+console.log('=== 5b. 关闭 Preview ≠ 丢掉选中；切提交必须清空 Preview ===')
+{
+  // 前面已经选着 docs/readme.md。关闭 → 上半部三栏不受影响，选中仍在。
+  await click(find('data-graph-diff-close'))
+  check('5b) 关闭后 Preview 消失', find('data-graph-diff-preview'), null)
+  check('   上半部三栏仍在', find('data-graph-pane', 'list') !== null && find('data-graph-pane', 'detail') !== null, 'true')
+  check('   文件行仍保持选中', find('data-graph-file-row', 'docs/readme.md')?.props?.['aria-selected'], 'true')
+  // 再点同一个文件 → Preview 原样回来，且**不再请求**（缓存 + asked 集合）。
+  const beforeReopen = requests.filter((r) => r.url.includes('/review/commit-file')).length
+  await click(find('data-graph-file-row', 'docs/readme.md'))
+  check('   再点同一文件 Preview 重新出现', find('data-graph-diff-preview') !== null, 'true')
+  check('   重开不再请求（走缓存）', requests.filter((r) => r.url.includes('/review/commit-file')).length, beforeReopen)
+  checkTrue('   重开后内容仍是这个文件', viewText().includes('added by docs/readme.md'))
+
+  // 切提交：Preview 必须消失，不能继续显示上一条提交的 diff。
   const qRow = find('data-graph-row', 'q'.repeat(40))
   qRow.props.onClick({ stopPropagation() {}, preventDefault() {} })
   const frame = []
   const painted = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey, frame)
-  // 这一帧就是"用户点完之后立刻看到的那一帧"：
-  check('   切换提交后的第一帧没有残留差异', painted.some((n) => n.props?.['data-graph-file-diff'] !== undefined), 'false')
-  check('   第一帧也没有上一条提交的文件列表', painted.filter((n) => n.props?.['data-graph-file-row'] !== undefined).length, 0)
-  // 提交之后再跑 effect（与 React 一致），让新提交的详情去取数。
+  check('   切提交那一帧就没有 Preview', painted.some((n) => n.props?.['data-graph-diff-preview'] !== undefined), 'false')
+  check('   那一帧也没有上一条提交的文件列表', painted.filter((n) => n.props?.['data-graph-file-row'] !== undefined).length, 0)
   for (const effect of frame) effect()
   await new Promise((resolve) => setTimeout(resolve, 0))
   await settle()
-  check('   稳定后仍没有残留差异', find('data-graph-file-diff') === null, 'true')
-  check('   文件行是未展开的', find('data-graph-file-row', 'src/app.ts')?.props?.['aria-expanded'], false)
+  check('   稳定后仍没有 Preview', find('data-graph-diff-preview'), null)
+  check('   没有旧提交的差异文本', viewText().includes('from-' + 'm'.repeat(8)), 'false')
 
-  const before = requests.filter((r) => r.url.includes('/review/commit-file'))
+  // 新提交里点同一个路径：**必须重新请求**（缓存键含 revision，因此不会命中旧提交那份）。
+  const before = requests.filter((r) => r.url.includes('/review/commit-file')).length
   await click(find('data-graph-file-row', 'src/app.ts'))
   const after = requests.filter((r) => r.url.includes('/review/commit-file'))
-  check('   重新展开会重新请求', after.length, before.length + 1)
-  check('   请求带的是新的提交', after[after.length - 1].body.revision, 'q'.repeat(40))
-  const diffText = textOf(find('data-graph-file-diff'))
-  checkTrue('   展示的是新提交的差异', diffText.includes(`from-${'q'.repeat(8)}`))
-  check('   不再出现上一条提交的差异', diffText.includes(`from-${'m'.repeat(8)}`), 'false')
+  check('   新提交里重新请求', after.length, before + 1)
+  check('   请求带的是新提交', after[after.length - 1].body.revision, 'q'.repeat(40))
+  checkTrue('   展示的是新提交的差异', viewText().includes(`from-${'q'.repeat(8)}`))
+  check('   不再出现上一条提交的差异', viewText().includes(`from-${'m'.repeat(8)}`), 'false')
 
-  // 结构性断言：`CommitFileRow` 的 key 必须**带上提交号**。
-  //
-  // 上面那几条断言靠的是"切换提交时详情会重新取数、文件列表整段重挂"，而 key 只按路径是
-  // 另一条独立的隐患：只要某天有人让"旧详情在新详情到达前继续渲染"，React 就会把同一个
-  // 实例判成"props 变了"，展开状态与缓存又回来了。key 是那条路径上的最后一道保险。
-  // 桩渲染器看不到 React 的 key（它只用来分配 hook 槽），因此这里直接断言源码里的写法。
+  // `CommitFileRow` 的 key 必须带提交号（桩看不到 React 的 key，因此直接断言源码）。
   const source = readFileSync(join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'client.js'), 'utf8')
   checkTrue('   CommitFileRow 的 key 带提交号', source.includes('key: `${revision}:${file.path}`'))
+  checkTrue('   Preview 的 key 也带 revision + path', source.includes('key: `preview:${previewFile.revision}:${previewFile.path}`'))
 }
 
 console.log('')
@@ -870,6 +1000,153 @@ console.log('=== 9d. 字号 token 的设计值集合没有被悄悄改小（item
   checkTrue('   提交标题仍是 12.5', inlineSizes.has(12.5))
   checkTrue('   元信息/文件行仍是 11.5', inlineSizes.has(11.5))
   checkTrue('   差异正文仍是 12', inlineSizes.has(12))
+}
+
+console.log('')
+console.log('=== 11. Diff Preview：高度拖动/持久化、Escape、工具栏开关、窄窗口退化 ===')
+{
+  await mount()
+  await click(find('data-graph-row', 'm'.repeat(40)))
+  await click(find('data-graph-file-row', 'src/app.ts'))
+
+  // ---- 11a. 默认高度是容器百分比，而不是写死的 px ----
+  const pane = () => find('data-graph-pane', 'diff')
+  check('11) 默认高度标记为 default', pane()?.props?.['data-graph-diff-height'], 'default')
+  check('   默认 flex 是百分比（38%~45% 区间内）', String(pane()?.props?.style?.flex), '0 0 40%')
+
+  // ---- 11b. 拖动 splitter：高度改变并持久化 ----
+  //
+  // 桩里没有布局，因此 `getBoundingClientRect` 由这里注入：容器高 800、Preview 当前 320。
+  const splitter = find('data-graph-splitter', 'diff')
+  check('   有水平 splitter', splitter !== null, 'true')
+  check('   splitter 声明为水平 separator', `${splitter?.props?.role}/${splitter?.props?.['aria-orientation']}`, 'separator/horizontal')
+  const mainNode = find('data-graph-main')
+  // 直接给两个 ref 目标注入测量：`measureDiff` 读的是 `mainRef` / `previewRef`。
+  mainNode.props.ref.current = { getBoundingClientRect: () => ({ height: 800 }) }
+  pane().props.ref.current = { getBoundingClientRect: () => ({ height: 320 }) }
+
+  splitter.props.onMouseDown({ clientX: 0, clientY: 500, button: 0, preventDefault() {} })
+  check('   拖动期间标记了 body', globalThis.document.body?.dataset?.reviewDragging, '1')
+  // 往上拖 80px → 变高 80（320 + 80 = 400）。
+  globalThis.document.emit('mousemove', { clientY: 420 })
+  check('   往上拖变高', pane()?.props?.['data-graph-diff-height'], '400')
+  globalThis.document.emit('mouseup', {})
+  check('   松手后清掉拖动标记', globalThis.document.body?.dataset?.reviewDragging, undefined)
+  check('   松手后高度已持久化', localStore.get('dsh.review.graphDiffHeight'), '400')
+
+  // ---- 11c. 双击 splitter 复位 ----
+  find('data-graph-splitter', 'diff').props.onDoubleClick({})
+  check('   双击后回到默认高度', pane()?.props?.['data-graph-diff-height'], 'default')
+  check('   持久化记录被清掉', localStore.has('dsh.review.graphDiffHeight'), 'false')
+
+  // ---- 11d. Escape 关闭 Preview（且不影响上半部三栏）----
+  //
+  // 先模拟"抽屉自己的 Escape 监听"（冒泡阶段）：它必须**不**被触发。
+  let drawerEscape = 0
+  const drawerHandler = () => {
+    drawerEscape += 1
+  }
+  globalThis.document.addEventListener('keydown', drawerHandler)
+  // 1) 输入框里的 Escape 属于输入框自己：Preview 不该抢，抽屉照常收到。
+  globalThis.document.emit('keydown', { key: 'Escape', target: { tagName: 'INPUT' } })
+  check('   输入框里的 Escape 不被 Preview 抢走', drawerEscape, 1)
+  check('   Preview 仍然开着', find('data-graph-diff-preview') !== null, 'true')
+  // 2) 普通 Escape：Preview 先关，且**不再传给抽屉**（否则用户想收代码区，结果整个抽屉没了）。
+  globalThis.document.emit('keydown', { key: 'Escape', target: null })
+  check('   Escape 关掉了 Preview', find('data-graph-diff-preview'), null)
+  check('   Escape 没有传到抽屉（stopPropagation 生效）', drawerEscape, 1)
+  check('   上半部三栏不受影响', find('data-graph-pane', 'list') !== null && find('data-graph-pane', 'detail') !== null, 'true')
+  globalThis.document.removeEventListener('keydown', drawerHandler)
+
+  // ---- 11e. 工具栏按钮显示/隐藏，再点文件即恢复 ----
+  check('   工具栏有 Diff Preview 开关', find('data-graph-tool', 'diff') !== null, 'true')
+  await click(find('data-graph-tool', 'diff'))
+  check('   再按开关又显示出来', find('data-graph-diff-preview') !== null, 'true')
+  const beforeToggle = requests.filter((r) => r.url.includes('/review/commit-file')).length
+  await click(find('data-graph-tool', 'diff'))
+  check('   按开关可以收起', find('data-graph-diff-preview'), null)
+  check('   收起不需要重新请求', requests.filter((r) => r.url.includes('/review/commit-file')).length, beforeToggle)
+  await click(find('data-graph-file-row', 'src/app.ts'))
+  check('   再点文件立即恢复', find('data-graph-diff-preview') !== null, 'true')
+
+  // ---- 11f. 差异正文的排版契约 ----
+  {
+    const detailNodes = collectHostNodes(find('data-graph-detail') ?? { props: {} }, 'probe')
+    const body = find('data-review-diff-body')
+    check('   有差异正文容器', body !== null, 'true')
+    // 横向滚动**只在容器这一层**：每一行自己不许滚（否则窄栏里到处是滚动条）。
+    check('   容器自己横向滚动', body?.props?.style?.overflowX, 'auto')
+    const codeSpans = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-code'] !== undefined)
+    checkTrue('   有代码单元格', codeSpans.length > 0)
+    check('   代码不折行（white-space: pre）', codeSpans[0]?.props?.style?.whiteSpace, 'pre')
+    check('   代码单元格自己不滚动', codeSpans[0]?.props?.style?.overflowX, undefined)
+    // 行号栏：固定宽度 + 右对齐 + 不可选 + 单独底色 + 右侧描边。
+    const gutters = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-gutter'] !== undefined)
+    checkTrue('   有行号栏', gutters.length > 0)
+    check('   行号栏固定宽度（不参与收缩）', String(gutters[0]?.props?.style?.flex).startsWith('0 0 '), 'true')
+    check('   行号栏不可选中', gutters[0]?.props?.style?.userSelect, 'none')
+    checkTrue('   行号栏有右侧描边', typeof gutters[0]?.props?.style?.borderRight === 'string' && gutters[0].props.style.borderRight.includes('1px'))
+    checkTrue('   行号栏有单独底色', typeof gutters[0]?.props?.style?.background === 'string' && gutters[0].props.style.background !== 'transparent')
+    // 行高收紧到 1.45。
+    const rows = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-row'] !== undefined)
+    checkTrue('   有差异行', rows.length > 0)
+    check('   行高 1.45', rows[0]?.props?.style?.lineHeight, 1.45)
+    // 需求第 9 条：右栏文件列表不会因为看 diff 变成超长滚动页。
+    check('   右栏里没有差异行', detailNodes.some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+    check('   右栏里没有差异正文容器', detailNodes.some((n) => n.props?.['data-review-diff-body'] !== undefined), 'false')
+  }
+
+  // ---- 11g. 文件头被折叠成一条，hunk 头单独一行 ----
+  {
+    const body = find('data-review-diff-body')
+    const nodes = collectHostNodes(body ?? { props: {} }, 'probe')
+    const header = nodes.filter((n) => n.props?.['data-review-diff-fileheader'] !== undefined)
+    check('   折叠后的文件头只有一条', header.length, 1)
+    checkTrue('   文件头文案是 "File changed"', textOf(header[0] ?? null).includes('File changed'))
+    checkTrue('   原始头部行仍在 title 里（可追溯）', String(header[0]?.props?.title ?? '').includes('diff --git'))
+    const kinds = nodes.filter((n) => n.props?.['data-review-diff-kind'] !== undefined).map((n) => n.props['data-review-diff-kind'])
+    check('   没有把 diff --git / index / --- / +++ 当成代码行', kinds.filter((k) => k === 'meta').length, 0)
+    checkTrue('   有 hunk 行', kinds.includes('hunk'))
+    const hunkRow = nodes.find((n) => n.props?.['data-review-diff-kind'] === 'hunk')
+    checkTrue('   hunk 头有独立底色', String(hunkRow?.props?.style?.background ?? 'transparent') !== 'transparent')
+    const hunkCode = collectHostNodes(hunkRow ?? { props: {} }, 'probe').find((n) => n.props?.['data-review-diff-code'] !== undefined)
+    checkTrue('   hunk 头用更小的字号', String(hunkCode?.props?.style?.fontSize ?? '').includes('10.5'))
+  }
+
+  // ---- 11h. 视觉弱化：正文不用饱和绿，只有标记与行号栏用 ----
+  {
+    const body = find('data-review-diff-body')
+    const nodes = collectHostNodes(body ?? { props: {} }, 'probe')
+    const addRow = nodes.find((n) => n.props?.['data-review-diff-kind'] === 'add')
+    const addCode = collectHostNodes(addRow ?? { props: {} }, 'probe').find((n) => n.props?.['data-review-diff-code'] !== undefined)
+    // 正文颜色必须与普通代码一致（不再整行染绿）。
+    check('   新增行正文用普通文字色', addCode?.props?.style?.color, 'var(--dsw-alias-label-primary, #202124)')
+    // 底色是"很浅的混色"而不是 rgba 的实色。
+    checkTrue('   新增行底色是很浅的绿色混色', String(addRow?.props?.style?.background ?? '').includes('color-mix'))
+    checkTrue('   新增行底色混色比例很低', / 9%| 10%/.test(String(addRow?.props?.style?.background ?? '')))
+    // 增删标记用饱和色。
+    const marker = collectHostNodes(addRow ?? { props: {} }, 'probe').find((n) => n.props?.children === '+')
+    checkTrue('   加号用饱和绿色', String(marker?.props?.style?.color ?? '').startsWith('#'))
+  }
+
+  // ---- 11i. 窄窗口：可以收起 branch tree 与 detail，但图形与 Preview 仍在 ----
+  if (find('data-graph-diff-preview') === null) await click(find('data-graph-file-row', 'src/app.ts'))
+  const collapseTree = findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'tree')
+  const collapseDetail = findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'detail')
+  if (collapseTree !== undefined && collapseDetail !== undefined) {
+    if (find('data-graph-pane', 'tree') !== null) await click(collapseTree)
+    if (find('data-graph-pane', 'detail') !== null) await click(collapseDetail)
+    check('   收起后没有左栏', find('data-graph-pane', 'tree'), null)
+    check('   收起后没有右栏', find('data-graph-pane', 'detail'), null)
+    check('   中栏仍在（提交图优先保留）', find('data-graph-pane', 'list') !== null, 'true')
+    check('   Diff Preview 仍在（优先保留）', find('data-graph-diff-preview') !== null, 'true')
+    // 恢复：不影响后续断言（下一次 mount 会重新读折叠状态，因此这里必须还原持久化值）。
+    await click(findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'tree'))
+    await click(findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'detail'))
+    check('   恢复后左右两栏回来了', find('data-graph-pane', 'tree') !== null && find('data-graph-pane', 'detail') !== null, 'true')
+  } else {
+    console.log('   SKIP  收起按钮：未找到')
+  }
 }
 
 console.log('')

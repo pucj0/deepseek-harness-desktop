@@ -209,6 +209,16 @@ const textOf = (node) => {
 }
 const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
 const allText = (nodes) => nodes.map((n) => textOf(n)).join(' ')
+/**
+ * 某个容器**整棵子树**的文本。
+ *
+ * `textOf` 只递归 `props.children`，不展开函数组件——而差异正文现在是一个独立组件
+ * （`DiffBody`，它在差异行之上又多了一层"横向滚动容器"）。因此这里必须走
+ * `collectHostNodes`（它会把函数组件就地展开），否则断言会误判成"差异没渲染"。
+ * @param node - 容器节点。
+ * @returns 子树里所有宿主节点的文本。
+ */
+const subtreeText = (node) => (node === null || node === undefined ? '' : collectHostNodes(node).map((n) => textOf(n)).join(' '))
 
 const makeSelectorHook = (read) => (selector) => react.useSyncExternalStore(() => () => {}, () => selector(read()))
 
@@ -294,7 +304,7 @@ console.log('=== 2. 点开一个文件：只取它、带上 HEAD、渲染出来 
   check('   请求路径正确', fileReqs()[0]?.body?.path, 'a.txt')
   check('   带 HEAD 作为基线', fileReqs()[0]?.body?.revision, HEAD)
   check('   该行标记为展开', rowsOf(nodes, 'data-staging-diff-toggle').find((n) => n.props['data-staging-diff-toggle'] === 'a.txt')?.props?.['aria-expanded'], 'true')
-  has('   差异渲染出来', textOf(rowsOf(nodes, 'data-review-diff')[0] ?? null).includes('new a.txt'))
+  has('   差异渲染出来', subtreeText(rowsOf(nodes, 'data-review-diff')[0] ?? null).includes('new a.txt'))
   has('   行上的增删数字由差异补上', textOf(nodes).includes('+1'))
 }
 
@@ -308,7 +318,7 @@ console.log('=== 3. 折叠不发请求；再展开走缓存 ===')
   has('   再展开', await clickNow('data-staging-diff-toggle', 'a.txt'))
   const reopened = await drain()
   check('   缓存命中，仍只有一次请求', fileReqs().length, 1)
-  has('   差异仍然显示', textOf(rowsOf(reopened, 'data-review-diff')[0] ?? null).includes('new a.txt'))
+  has('   差异仍然显示', subtreeText(rowsOf(reopened, 'data-review-diff')[0] ?? null).includes('new a.txt'))
 }
 
 console.log('')

@@ -441,6 +441,75 @@ console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
   check('   这一段没有 React error', reactErrors().length, 0)
 }
 
+// ---- G2. Log：点改动文件 → 底部 Diff Preview（不再内联在窄右栏里）--------------
+console.log('')
+console.log('=== G2. Diff Preview：右栏不内联 diff、代码区不折行、能关能恢复 ===')
+{
+  // 选一条提交（第一条），右栏出现改动文件清单。
+  await evaluate(`(() => { const row = document.querySelector('[data-graph-row]'); if (row) row.click(); return true })()`)
+  await sleep(1800)
+  const fileRow = await evaluate(`(() => {
+    const row = document.querySelector('[data-graph-file-row]');
+    if (!row) return null;
+    row.click();
+    return row.getAttribute('data-graph-file-row');
+  })()`)
+  if (fileRow === null) {
+    console.log('   SKIP  这条提交没有改动文件（或详情还没到）')
+  } else {
+    await sleep(2000)
+    const read = async () =>
+      JSON.parse(
+        await evaluate(`(() => {
+          const preview = document.querySelector('[data-graph-diff-preview]');
+          const detail = document.querySelector('[data-graph-detail]');
+          const body = document.querySelector('[data-review-diff-body]');
+          const code = document.querySelector('[data-review-diff-code]');
+          const gutter = document.querySelector('[data-review-diff-gutter]');
+          const header = document.querySelector('[data-review-diff-fileheader]');
+          const pane = document.querySelector('[data-graph-pane="diff"]');
+          return JSON.stringify({
+            hasPreview: preview !== null,
+            previewInDetail: detail !== null && detail.querySelector('[data-graph-diff-preview]') !== null,
+            diffRowsInDetail: detail ? detail.querySelectorAll('[data-review-diff-row]').length : -1,
+            diffRowsInPreview: preview ? preview.querySelectorAll('[data-review-diff-row]').length : -1,
+            whiteSpace: code ? getComputedStyle(code).whiteSpace : '',
+            overflowX: body ? getComputedStyle(body).overflowX : '',
+            gutterUserSelect: gutter ? getComputedStyle(gutter).userSelect : '',
+            hasHeader: header !== null,
+            headerText: header ? header.innerText.trim() : '',
+            heightMode: pane ? pane.getAttribute('data-graph-diff-height') : null,
+            flex: pane ? pane.style.flex : '',
+          });
+        })()`),
+      )
+    const first = await read()
+    console.log(`   Preview=${first.hasPreview} 右栏内差异行=${first.diffRowsInDetail} Preview 内差异行=${first.diffRowsInPreview} 高度=${first.flex}`)
+    has('G2) 出现 Diff Preview', first.hasPreview)
+    // 这一条是本次重构的核心约束：完整 diff 不许再出现在右栏里。
+    check('   右栏里没有内联差异行', first.diffRowsInDetail, 0)
+    check('   Preview 不在右栏里', first.previewInDetail, false)
+    has('   Preview 里有差异行', first.diffRowsInPreview > 0)
+    check('   代码不折行（white-space: pre）', first.whiteSpace, 'pre')
+    check('   横向滚动在容器上', first.overflowX, 'auto')
+    check('   行号栏不可选中', first.gutterUserSelect, 'none')
+    has('   文件头被折叠成一条', first.hasHeader && /File changed|New file|Deleted file|Renamed file/.test(first.headerText))
+    check('   默认高度是百分比', first.flex, '0 0 40%')
+    check('   这一段没有 React error / ReferenceError', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
+
+    // 关闭 → 上半部三栏不受影响；再点同一文件 → 立即恢复。
+    const closed = await evaluate(`(() => { const el = document.querySelector('[data-graph-diff-close]'); if (!el) return false; el.click(); return true })()`)
+    has('   点得中关闭按钮', closed === true)
+    await sleep(900)
+    check('   关闭后 Preview 消失', await evaluate(`document.querySelector('[data-graph-diff-preview]') === null`), true)
+    check('   关闭后三栏仍在', await evaluate(`document.querySelectorAll('[data-graph-pane]').length >= 2`), true)
+    await evaluate(`(() => { const row = [...document.querySelectorAll('[data-graph-file-row]')].find((n) => n.getAttribute('data-graph-file-row') === ${JSON.stringify(fileRow)}); if (row) row.click(); return true })()`)
+    await sleep(1500)
+    check('   再点同一文件 Preview 立即恢复', await evaluate(`document.querySelector('[data-graph-diff-preview]') !== null`), true)
+    check('   这一段没有 React error', reactErrors().length, 0)
+  }
+}
+
 // ---- H. Changes：未跟踪文件按需差异 + AI 补充不覆盖已有输入 ---------------------
 console.log('')
 console.log('=== H. 未跟踪文件差异 + AI 补充不覆盖已有输入 ===')

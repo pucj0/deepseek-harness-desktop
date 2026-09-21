@@ -287,10 +287,35 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
     Push** are pinned to the bottom and never scroll away with a long file list
   - `Log`: **branch tree / commit graph / commit details**, three panes. A single click on a
     commit only changes the selection and shows its details (and changed files) on the right —
-    no inline expansion; click a changed file for that commit's diff of it. The two splitters
+    no inline expansion. The two splitters
     are draggable and remembered, narrow windows can collapse the tree or the details, and the
     toolbar has refresh, a `{count} commits` counter (suffixed with "scroll for more" while deeper
     history exists) and search
+    - **The code diff lives in the Diff Preview below, not in the right pane.** The detail pane
+      holds only "metadata + the changed-file list" (340px by default, draggable up to
+      `min(600, 40% of viewport)`); clicking a file just hands it to the wide pane that **spans the
+      commit graph and the details**. That is what gives long Go / Java lines real width, instead of
+      cramming line numbers, add/remove columns and code into a 320–420px column where every line
+      needed horizontal scrolling. The Preview defaults to **40%** of the Log's usable height
+      (drag the splitter, double-click it to reset, remembered in `dsh.review.graphDiffHeight`);
+      `×`, Escape and a toolbar button all hide it, and clicking the same file again restores it
+      without refetching. When the window is narrow the graph and the Preview are kept and the tree
+      / details panes can be collapsed.
+    - Each diff row is a fixed three-part structure: `old line | new line | +/− | code`. The gutter
+      has a fixed width, right-aligned numbers, its own background and a right border, and is
+      unselectable; the **code is `white-space: pre` and never wraps**, so horizontal scrolling
+      happens on the Preview's body container only (no per-row scrollbars); line height is 1.45.
+    - Visually the rule is "**add/remove is a background, the code is the content**": added and
+      removed lines get only a ~9% green/red tint while the text keeps the normal code colour, and
+      the saturated colours are reserved for the `+` / `−` markers and the gutter. git's
+      `diff --git` / `index` / `--- a/…` / `+++ b/…` header is collapsed into a single
+      `File changed` row (the raw lines stay in its `title`), and `@@ … @@` hunk headers get their
+      own row, a smaller size and a faint blue background — what a reader wants is where and what
+      changed, not patch metadata.
+    - Font sizes are **layered by purpose** instead of mechanically reusing the UI size: commit
+      title 12.5, secondary metadata 11.5, changed-file rows 11.5, **diff body 11**, line numbers
+      and hunk headers 10.5. All of them still derive from `uiPx()`, so Settings → UI font size at
+      12 / 18 scales everything proportionally.
     - **The left tree and the middle list have separate data sources.** The tree
       (`HEAD / Local / Remote / Tags`) is built from the **unfiltered** commits
       (`treeCommits`, written only by the "all branches" response); the middle list is what

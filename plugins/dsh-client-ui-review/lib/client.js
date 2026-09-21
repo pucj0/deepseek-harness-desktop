@@ -63,6 +63,46 @@ window.__ModuleLoader__.load({
       return `calc(${UI_FONT_PX_BASE} * ${px} / 14)`
     }
 
+    /**
+     * 语义字号 token。
+     *
+     * 为什么需要一层语义名字，而不是到处写 `uiPx(11.5)`：**代码差异与普通 UI 文本不是同一种
+     * 字号层级**。以前右栏把 unified diff 内联展开在 320~420px 的栏里，diff 正文沿用了
+     * 普通 UI 的 12px，与行号、增删标记、路径挤在一起——看起来"能读"，实际上每一行都要横向
+     * 滚动，Go / Java 的长代码几乎不可读。
+     *
+     * 现在按**用途**分层，并且全部仍然从 `uiPx()` 派生（因此"设置 → UI 字号"调到 12 / 18
+     * 时所有层级同比变化，不会有人忘记接进去）：
+     *
+     *   * `title`     —— 提交标题（层级最高，最需要一眼读到）
+     *   * `normal`    —— 普通 UI 文本（按钮、列表主文本）
+     *   * `meta`      —— 次级信息（作者、时间、计数、状态徽标）
+     *   * `fileRow`   —— 改动文件列表的一行（比 meta 大一档，因为路径是要点的目标）
+     *   * `code`      —— 差异正文（等宽，比 UI 文本小一档：一屏放得下更多代码）
+     *   * `codeMeta`  —— 差异里的行号、hunk 头、折叠后的文件头（最小一档，退到背景里）
+     *
+     * 基准 14px 下的取值刻意压着需求给的区间：标题 12.5、metadata 11.5、文件行 11.5、
+     * 正文 11、行号 10.5、diff 头 11。
+     */
+    const reviewFont = {
+      title: uiPx(12.5),
+      normal: uiPx(12),
+      meta: uiPx(11.5),
+      fileRow: uiPx(11.5),
+      code: uiPx(11),
+      codeMeta: uiPx(10.5),
+    }
+
+    /** 差异视图的行高与行号栏宽度也在同一套体系里派生（窄栏下"挤"主要来自这两处）。 */
+    const reviewMetrics = {
+      /** 行号栏宽度：两个三位数行号 + 内边距。 */
+      gutterWidth: uiPx(52),
+      /** 单行最小高度（`line-height` 之外再给一点，免得点选时抖）。 */
+      rowMinHeight: uiPx(17),
+      /** 差异行高倍数：1.45 比原来的 1.55 紧凑一档，但还没有挤到影响扫读。 */
+      codeLineHeight: 1.45,
+    }
+
     const styles = `
       [data-desktop-review-surface] button:focus-visible, [data-desktop-review]:focus-visible,
       [data-review-trigger] > button:focus-visible {
@@ -717,6 +757,14 @@ window.__ModuleLoader__.load({
       graphDetailTitle: '提交详情',
       graphSelectCommit: '从左侧选一条提交查看改动。',
       graphFiles: '{count} 个文件',
+      // 右栏"改动文件"分区的标题：完整 diff 已经移到下面的 Diff Preview，因此这里说的是
+      // "有哪些文件改了"，而不是"这里是代码"。
+      graphChangedFiles: '改动文件',
+      // ---- Diff Preview（横跨提交图 + 详情的那块代码区）----
+      graphToggleDiff: '显示/隐藏 Diff Preview',
+      graphDiffClose: '收起 Diff Preview',
+      graphDiffResize: '拖动调整 Diff Preview 高度（双击复位）',
+      graphDiffHint: '从右侧点一个改动文件，在这里看它的差异。',
       // 提交图顶部的计数说的是"**已经加载出来**的提交数"，不是仓库总数——提交是分页取的
       // （滚到底会继续加载），所以用"文件"那个键是错的（早先就是错用 `graphFiles`）。
       // 计数与列表里的行数同源（都来自 `visibleCommits`，已过搜索过滤），因此不会出现
@@ -879,6 +927,14 @@ window.__ModuleLoader__.load({
       graphDetailTitle: 'Commit details',
       graphSelectCommit: 'Select a commit on the left to see its changes.',
       graphFiles: '{count} files',
+      // The detail pane's section title: the full diff now lives in the Diff Preview below, so
+      // this heading describes "which files changed", not "here is the code".
+      graphChangedFiles: 'Changed files',
+      // ---- Diff Preview (the code area spanning graph + details) ----
+      graphToggleDiff: 'Show or hide the Diff Preview',
+      graphDiffClose: 'Hide the Diff Preview',
+      graphDiffResize: 'Drag to resize the Diff Preview (double-click to reset)',
+      graphDiffHint: 'Pick a changed file on the right to see its diff here.',
       // The count in the commit-graph toolbar is the number of commits **loaded so far**,
       // not the repository total: commits are paged in as you scroll. Sharing `graphFiles`
       // here was simply the wrong noun.
@@ -1654,33 +1710,51 @@ window.__ModuleLoader__.load({
      * **必须分浅色与深色两套**：此前只有一套为深色底设计的配色（浅绿/浅红的文字），
      * 一旦界面是浅色主题，浅色文字叠在浅色底上就完全糊成一片——这正是"变动记录看不清"
      * 的根因。深浅两套都保证文字与底色的对比度足够。
+     *
+     * 这一版把**正文颜色与增删色解耦**（实际观感反馈："绿色新增区面积很大、文字也很绿，
+     * 视觉非常重"）：新增/删除行只用**很浅的底色**（7~10% 混色），正文一律用普通代码文字色，
+     * 只有 `+` / `−` 标记与行号栏才用饱和的绿/红。这样一屏里几十行新增不会变成一大块绿色，
+     * 而"哪几行是增删"仍然一眼可见。
+     *
      * @param dark - 当前是否为深色主题。
      * @returns 各类行的配色。
      */
     function diffPalette(dark) {
       return dark
         ? {
+            text: 'var(--dsw-alias-label-primary, #e6e6e6)',
             context: 'var(--dsw-alias-label-secondary)',
-            // 增删行用"低饱和底色 + 高对比文字"，而不是把文字本身染成浅绿/浅红。
-            addBg: 'rgba(63,185,110,.15)',
-            addFg: '#a8e6c0',
-            delBg: 'rgba(220,90,90,.15)',
-            delFg: '#f0b9b9',
+            // 底色只做"极浅的提示"，不抢正文；饱和色留给 marker 与行号栏。
+            addBg: `color-mix(in srgb, ${ADDED} 10%, transparent)`,
+            delBg: `color-mix(in srgb, ${REMOVED} 10%, transparent)`,
+            addGutter: `color-mix(in srgb, ${ADDED} 18%, transparent)`,
+            delGutter: `color-mix(in srgb, ${REMOVED} 18%, transparent)`,
+            addMark: '#7fd6a0',
+            delMark: '#f0a0a0',
             hunk: '#8fb8ff',
+            hunkBg: 'rgba(120,160,255,.10)',
             meta: 'var(--dsw-alias-label-tertiary)',
+            metaBg: 'rgba(255,255,255,.03)',
             gutter: 'rgba(255,255,255,.04)',
             gutterFg: 'var(--dsw-alias-label-tertiary)',
+            gutterLine: 'rgba(255,255,255,.08)',
           }
         : {
+            text: 'var(--dsw-alias-label-primary, #202124)',
             context: 'var(--dsw-alias-label-primary)',
-            addBg: 'rgba(46,160,67,.14)',
-            addFg: '#0b6b2a',
-            delBg: 'rgba(207,60,60,.13)',
-            delFg: '#a02525',
+            addBg: `color-mix(in srgb, ${ADDED} 9%, transparent)`,
+            delBg: `color-mix(in srgb, ${REMOVED} 9%, transparent)`,
+            addGutter: `color-mix(in srgb, ${ADDED} 16%, transparent)`,
+            delGutter: `color-mix(in srgb, ${REMOVED} 16%, transparent)`,
+            addMark: '#16833a',
+            delMark: '#c0392b',
             hunk: '#2f5aa8',
+            hunkBg: 'rgba(47,90,168,.07)',
             meta: 'var(--dsw-alias-label-tertiary)',
+            metaBg: 'rgba(0,0,0,.025)',
             gutter: 'rgba(0,0,0,.04)',
             gutterFg: 'var(--dsw-alias-label-tertiary)',
+            gutterLine: 'rgba(0,0,0,.07)',
           }
     }
 
@@ -1713,8 +1787,15 @@ window.__ModuleLoader__.load({
      *
      * 行号是"看清改动"的关键：只有增删标记而没有位置，很难判断改在文件的哪一处。
      * 解析 `@@ -a,b +c,d @@` 得到两侧的起始行号，然后逐行推进。
+     *
+     * **开头那段 git 文件头会被折叠成一条**（`diff --git` / `index` / `--- a/…` / `+++ b/…` /
+     * `new file mode` …）。普通用户要看的是"改在哪儿、改了什么"，而这几行是 patch 元数据：
+     * 占掉四行高度、包含两个几乎相同的路径，读起来只有噪音。折叠后保留一行
+     * `kind: 'fileheader'`（原始文本放在 `meta` 里，靠 title 仍可看到），并且只在**第一个
+     * hunk 之前**折叠——万一 diff 由多段拼成，中间的头部行不会被误吞。
+     *
      * @param diff - 单个文件的统一差异文本。
-     * @returns `{ kind, oldLine, newLine, text }` 数组；kind 为 meta/context/add/del。
+     * @returns `{ kind, oldLine, newLine, text, meta? }` 数组；kind 为 fileheader/hunk/context/add/del/meta。
      */
     function parseDiffRows(diff) {
       // `diff.split('\n')` 在 host 给回非字符串（例如被截断成对象、或 `null`）时直接抛
@@ -1723,14 +1804,41 @@ window.__ModuleLoader__.load({
       const rows = []
       let oldLine = 0
       let newLine = 0
+      /** 还没遇到第一个 hunk：这一段里的 git 文件头可以安全地折叠掉。 */
+      let headerOpen = true
+      /** 已被折叠进 fileheader 行的原始文本（诊断与 title 用）。 */
+      let headerLines = []
+      let headerKind = ''
+      const flushHeader = () => {
+        if (headerLines.length === 0) return
+        rows.push({
+          kind: 'fileheader',
+          text: headerKind === 'new' ? 'New file' : headerKind === 'deleted' ? 'Deleted file' : headerKind === 'rename' ? 'Renamed file' : 'File changed',
+          meta: headerLines.join('\n'),
+        })
+        headerLines = []
+      }
       for (const raw of text.split('\n')) {
-        // 文件头与索引行：不作为代码行显示，避免与空行混淆。
-        if (/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename )/u.test(raw)) {
+        const isHeader = /^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|old mode|new mode|similarity index|rename from|rename to|copy from|copy to)/u.test(raw)
+        if (isHeader) {
+          if (headerOpen) {
+            headerLines.push(raw)
+            if (/^new file mode/u.test(raw)) headerKind = 'new'
+            else if (/^deleted file mode/u.test(raw)) headerKind = 'deleted'
+            else if (/^rename /u.test(raw)) headerKind = 'rename'
+            continue
+          }
+          // 第一个 hunk 之后出现的头部行（多段 diff 拼接）：保留原样，不当代码行。
           rows.push({ kind: 'meta', text: raw })
           continue
         }
         const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(raw)
         if (hunk !== null) {
+          // 第一个 hunk 出现：把攒下的文件头先落成一行，之后 headerOpen 关闭。
+          if (headerOpen) {
+            flushHeader()
+            headerOpen = false
+          }
           oldLine = Number(hunk[1])
           newLine = Number(hunk[2])
           rows.push({ kind: 'hunk', text: raw })
@@ -1759,12 +1867,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 渲染差异：行号 + 增删着色，参照 IDE/Codex 的差异视图。
+     * 渲染差异：行号栏 + 增删标记 + 代码正文。
      *
-     * 设计取舍：
-     *   * 行号固定宽度、右对齐，便于纵向扫读；
-     *   * 增删只用底色区分，文字保持高对比——把文字染成浅绿/浅红在浅色主题下会糊掉；
-     *   * 长行用 `pre-wrap` + `overflowWrap` 折行，不把容器撑宽。
+     * 固定的三段结构（顺序是**契约**：`scripts/test-diff-readability.mjs` 与
+     * `test-review-overlay-hooks.mjs` 都按 `children[0]` = 行号栏、`children[1]` = 增删标记来
+     * 断言，因此子元素顺序不能改）：
+     *
+     *   `old line | new line | marker | code`
+     *
+     * 设计取舍（这一版按实机观感重排）：
+     *   * **行号栏固定宽度、右对齐、单独底色、右侧一条描边**，并 `userSelect: none`——三段
+     *     各自有边界，扫读时不会串到一起；
+     *   * **正文 `white-space: pre`，绝不折行**：折行的差异会变成"窄长代码块"，长行被切成
+     *     好几截，缩进与括号配对全乱。横向溢出交给**外层容器**统一 `overflow-x: auto`，
+     *     不让每一行各自产生滚动条；
+     *   * 增删只用**很浅的底色**，正文用普通代码文字色；饱和的绿/红只给 `+` / `−` 与行号栏。
+     *
      * @param diff - 单个文件的统一差异文本。
      * @returns React 元素数组。
      */
@@ -1772,61 +1890,105 @@ window.__ModuleLoader__.load({
       const palette = diffPalette(isDarkTheme())
       const rows = parseDiffRows(diff)
       return rows.map((row, index) => {
-        const background =
-          row.kind === 'add' ? palette.addBg : row.kind === 'del' ? palette.delBg : 'transparent'
-        const fg =
-          row.kind === 'add'
-            ? palette.addFg
-            : row.kind === 'del'
-              ? palette.delFg
-              : row.kind === 'hunk'
-                ? palette.hunk
-                : row.kind === 'meta'
-                  ? palette.meta
-                  : palette.context
-        const marker = row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' '
+        // 折叠后的 git 文件头：单独一条，退到背景里（见 parseDiffRows 的说明）。
+        if (row.kind === 'fileheader') {
+          return react.createElement(
+            'div',
+            {
+              key: index,
+              'data-review-diff-row': '',
+              'data-review-diff-fileheader': '',
+              title: row.meta,
+              style: {
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '4px 8px',
+                background: palette.metaBg,
+                color: palette.meta,
+                fontFamily: CODE_FONT,
+                fontSize: reviewFont.codeMeta,
+                lineHeight: reviewMetrics.codeLineHeight,
+                whiteSpace: 'pre',
+              },
+            },
+            react.createElement('span', { style: { minWidth: reviewMetrics.gutterWidth, flex: '0 0 auto' } }, ''),
+            react.createElement('span', { style: { flex: '0 0 auto', width: '1em', textAlign: 'center', opacity: 0.6 } }, '·'),
+            react.createElement('span', null, row.text),
+          )
+        }
+        const isAdd = row.kind === 'add'
+        const isDel = row.kind === 'del'
+        const isHunk = row.kind === 'hunk'
+        const isMeta = row.kind === 'meta'
+        const background = isAdd ? palette.addBg : isDel ? palette.delBg : isHunk ? palette.hunkBg : isMeta ? palette.metaBg : 'transparent'
+        // hunk 头与 meta 行整行用不同字号/颜色，**不要和普通代码行长得一样**。
+        const codeStyle = isHunk || isMeta
+          ? { color: isHunk ? palette.hunk : palette.meta, fontSize: reviewFont.codeMeta }
+          : { color: palette.text }
+        const marker = isAdd ? '+' : isDel ? '−' : ' '
         return react.createElement(
           'div',
           {
             key: index,
-            // 差异行是"可读性"测试的取样对象（见 scripts/test-diff-readability.mjs）：
-            // 它按 `children[0]` 是行号、`children[1]` 是增删标记来断言，所以下面的
-            // 子元素顺序不能改。
             'data-review-diff-row': '',
+            'data-review-diff-kind': row.kind,
             style: {
               display: 'flex',
-              gap: '10px',
+              alignItems: 'stretch',
               background,
-              color: fg,
-              lineHeight: '1.55',
+              color: palette.text,
+              fontFamily: CODE_FONT,
+              fontSize: reviewFont.code,
+              lineHeight: reviewMetrics.codeLineHeight,
+              minHeight: reviewMetrics.rowMinHeight,
+              ...(isHunk || isMeta ? { padding: '4px 8px' } : {}),
             },
           },
-          // 行号栏：删除行只显示旧行号，新增行只显示新行号，上下文行两侧都有。
+          // 行号栏：固定宽度、右对齐、单独背景 + 右侧描边；删除行只显示旧行号，新增行只显示
+          // 新行号，上下文行两侧都有。增删行的行号栏带一点饱和底色，是"哪几行变了"的主信号。
+          react.createElement(
+            'span',
+            {
+              'data-review-diff-gutter': '',
+              style: {
+                flex: `0 0 ${reviewMetrics.gutterWidth}`,
+                boxSizing: 'border-box',
+                display: 'flex',
+                gap: '4px',
+                padding: '0 6px',
+                background: isAdd ? palette.addGutter : isDel ? palette.delGutter : palette.gutter,
+                color: palette.gutterFg,
+                textAlign: 'right',
+                userSelect: 'none',
+                borderRight: `1px solid ${palette.gutterLine}`,
+                fontVariantNumeric: 'tabular-nums',
+                fontSize: reviewFont.codeMeta,
+              },
+            },
+            react.createElement('span', { style: { flex: '1 1 0', textAlign: 'right' } }, row.oldLine === undefined ? '' : String(row.oldLine)),
+            react.createElement('span', { style: { flex: '1 1 0', textAlign: 'right' } }, row.newLine === undefined ? '' : String(row.newLine)),
+          ),
           react.createElement(
             'span',
             {
               style: {
                 flex: '0 0 auto',
-                display: 'flex',
-                gap: '6px',
-                padding: '0 6px',
-                background: palette.gutter,
-                color: palette.gutterFg,
-                textAlign: 'right',
-                userSelect: 'none',
+                width: '1.4em',
+                textAlign: 'center',
+                color: isAdd ? palette.addMark : isDel ? palette.delMark : 'transparent',
+                fontWeight: isAdd || isDel ? 600 : 400,
               },
             },
-            react.createElement('span', { style: { minWidth: '32px' } }, row.oldLine === undefined ? '' : String(row.oldLine)),
-            react.createElement('span', { style: { minWidth: '32px' } }, row.newLine === undefined ? '' : String(row.newLine)),
+            isHunk || isMeta ? '' : marker,
           ),
           react.createElement(
             'span',
-            { style: { flex: '0 0 auto', width: '8px', textAlign: 'center', opacity: 0.7 } },
-            row.kind === 'hunk' || row.kind === 'meta' ? '' : marker,
-          ),
-          react.createElement(
-            'span',
-            { style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+            {
+              // 正文：**不折行**。`pre` 保留缩进与制表符，横向滚动由外层统一负责。
+              'data-review-diff-code': '',
+              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre', paddingRight: '12px', ...codeStyle },
+            },
             row.text === '' ? ' ' : row.text,
           ),
         )
@@ -4543,6 +4705,47 @@ window.__ModuleLoader__.load({
      }
 
      /**
+      * **某次提交里某个文件**的差异缓存（键：workspace + revision + path）。
+      *
+      * 与上面那份是两条独立的数据源、不能合并：一条讲"工作区相对 HEAD 改了什么"，另一条讲
+      * "历史里某次提交改了什么"，两者即使路径相同也完全是两份内容。
+      *
+      * 之所以要模块级缓存：Diff Preview 在"关闭再打开同一文件""在 Changes / Log 之间来回"
+      * 时会重新挂载，实例内的缓存那样就没了——而用户对"我刚看过这个文件"的期待是**立刻**
+      * 显示，不是再等一次请求。这也是"再次点击同一文件不要反复请求"的落点。
+      */
+     const COMMIT_DIFF_CACHE_MAX = 48
+     const commitDiffCache = new Map()
+
+     /**
+      * 读提交差异缓存；命中时移到队尾（最近使用）。
+      * @param key - 缓存键。
+      * @returns 缓存的响应，或 undefined。
+      */
+     function readCommitDiffCache(key) {
+       if (!commitDiffCache.has(key)) return undefined
+       const value = commitDiffCache.get(key)
+       commitDiffCache.delete(key)
+       commitDiffCache.set(key, value)
+       return value
+     }
+
+     /**
+      * 写提交差异缓存（超出上限时淘汰最旧的一条）。
+      * 与工作区那份同一套有界策略：一份差异最多 512 KB，不设上限就是无界内存增长。
+      * @param key - 缓存键。
+      * @param value - host 的响应。
+      */
+     function writeCommitDiffCache(key, value) {
+       commitDiffCache.set(key, value)
+       while (commitDiffCache.size > COMMIT_DIFF_CACHE_MAX) {
+         const oldest = commitDiffCache.keys().next()
+         if (oldest.done === true) break
+         commitDiffCache.delete(oldest.value)
+       }
+     }
+
+     /**
       * **按需**取一个文件的逐行差异（项目级更改页签用）。
       *
       * 存在的理由：全仓库统一差异在真实仓库里是 45.9 MB / 数秒，而用户一次只看一两个
@@ -4661,24 +4864,41 @@ window.__ModuleLoader__.load({
         isBinaryDiff(diff)
           ? react.createElement(
               'div',
-              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: uiPx(12) } },
+              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: reviewFont.meta } },
               t('binaryDiff'),
             )
-          : react.createElement(
-              'div',
-              {
-                style: {
-                  // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
-                  fontSize: uiPx(12),
-                  lineHeight: 1.55,
-                  fontFamily: CODE_FONT,
-                  fontVariantLigatures: 'none',
-                  // 横向溢出才滚动；纵向交给外层容器，避免嵌套滚动条。
-                  overflowX: 'auto',
-                },
-              },
-              renderDiff(diff),
-            ),
+          : react.createElement(DiffBody, { diff }),
+      )
+    }
+
+    /**
+     * 差异正文的容器。
+     *
+     * **横向滚动只在这一层**（`overflowX: auto`），因此：
+     *   * 每一行自己不会产生滚动条（那会让窄栏里的代码看起来"到处都是滚动条"）；
+     *   * 正文可以安全地 `white-space: pre` 不折行——长行的溢出由这里统一吸收；
+     *   * 行号栏与正文在同一个滚动容器里，横向滚动时一起移动（否则行号会与代码错位）。
+     * 纵向不在这里滚：由外层（Changes 的滚动区 / Diff Preview 的 body）负责，避免嵌套。
+     *
+     * @param props - `{ diff }`。
+     * @returns React 元素。
+     */
+    function DiffBody(props) {
+      return react.createElement(
+        'div',
+        {
+          'data-review-diff-body': '',
+          style: {
+            // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
+            fontFamily: CODE_FONT,
+            fontSize: reviewFont.code,
+            lineHeight: reviewMetrics.codeLineHeight,
+            fontVariantLigatures: 'none',
+            overflowX: 'auto',
+            overflowY: 'hidden',
+          },
+        },
+        renderDiff(props?.diff),
       )
     }
 
@@ -5724,32 +5944,34 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 一次提交改动的文件列表：容器 + 每条文件一行（点开才取差异）。
+     * 一次提交改动的文件列表：容器 + 每条文件一行。
      *
-     * @param props - `{ t, files, workspace, revision }`。
+     * **行里不再展开差异**（这一版的核心改动）：完整的 unified diff 曾经直接 inline 塞进
+     * 右侧 320~420px 的详情栏，结果代码区太窄、行号/增删列/正文互相挤压、Go / Java 的长代码
+     * 几乎不可读。现在点击只做一件事——把 `{ revision, path }` 交给上层的 Diff Preview，
+     * 由那个横跨"提交图 + 详情"的宽栏去渲染代码。因此这一列永远保持紧凑。
+     *
+     * @param props - `{ t, files, revision, selectedPath, onSelectFile }`。
      * @returns React 元素。
      */
     function CommitFileList(props) {
-      const { t, files, workspace, revision } = props
+      const { t, files, revision, selectedPath } = props
+      const onSelectFile = typeof props?.onSelectFile === 'function' ? props.onSelectFile : () => undefined
       return react.createElement(
         'div',
         { 'data-graph-files': '', style: { display: 'flex', flexDirection: 'column' } },
         files.length === 0
-          ? react.createElement('div', { style: { padding: '8px 6px', fontSize: uiPx(12), color: GRAPH_DIM } }, t('graphNoFiles'))
+          ? react.createElement('div', { style: { padding: '8px 6px', fontSize: reviewFont.normal, color: GRAPH_DIM } }, t('graphNoFiles'))
           : files.map((file) =>
               react.createElement(CommitFileRow, {
-                // **key 必须带上 commit**，不能只有路径。
-                //
-                // 两次提交改动同一个文件是常态（`src/app.js` 在 A、B 里都改了），而只按路径
-                // 做 key 时 React 会把"切换到 B"当成同一个实例的 props 变化：实例内部的
-                // `open` 与已取回的 diff 都留着，于是 B 的详情里显示的是 **A 的差异**——
-                // 界面上完全看不出来（路径一样、差异长得也合理），是最容易骗过眼睛的一种错。
-                // 带上 revision 之后，切换提交就是换实例：展开状态与缓存一并丢弃。
+                // key 带 revision + path：切换提交时换实例，选中态与任何内部状态都不会被
+                // 复用（两次提交改同一个文件是常态，只按路径做 key 会让 React 认为"还是同一个"）。
                 key: `${revision}:${file.path}`,
                 t,
                 file,
-                workspace,
                 revision,
+                selected: selectedPath === file.path,
+                onSelect: onSelectFile,
               }),
             ),
       )
@@ -5797,7 +6019,7 @@ window.__ModuleLoader__.load({
       if (revision === '') {
         return react.createElement(
           'div',
-          { style: { padding: '16px', fontSize: uiPx(12.5), color: GRAPH_DIM, fontFamily: UI_FONT } },
+          { style: { padding: '16px', fontSize: reviewFont.title, color: GRAPH_DIM, fontFamily: UI_FONT } },
           t('graphSelectCommit'),
         )
       }
@@ -5810,6 +6032,7 @@ window.__ModuleLoader__.load({
       const files = current.result?.files ?? []
       const containingBranches = current.result?.containingBranches ?? []
 
+      // 右栏**只负责元信息 + 改动文件清单**，不承担代码展示（差异在下面的 Diff Preview）。
       return react.createElement(
         'div',
         { 'data-graph-detail': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: UI_FONT } },
@@ -5821,129 +6044,281 @@ window.__ModuleLoader__.load({
         react.createElement(
           'div',
           { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px 4px', flexShrink: 0 } },
-          react.createElement('span', { style: { fontSize: uiPx(11), fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } }, t('changesTitle')),
-          react.createElement('span', { 'data-graph-file-count': '', style: { fontSize: uiPx(11.5), color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
+          react.createElement('span', { style: { fontSize: reviewFont.meta, fontWeight: 600, color: GRAPH_DIM, letterSpacing: '.02em' } }, t('graphChangedFiles')),
+          react.createElement('span', { 'data-graph-file-count': '', style: { fontSize: reviewFont.meta, color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
         ),
         react.createElement(
           'div',
           { style: { minHeight: 0, overflowY: 'auto', padding: '0 6px 10px' } },
-          react.createElement(CommitFileList, { t, files, workspace, revision }),
+          react.createElement(CommitFileList, {
+            t,
+            files,
+            revision,
+            selectedPath: props?.selectedPath ?? '',
+            onSelectFile: props?.onSelectFile,
+          }),
         ),
       )
     }
 
     /**
-     * 提交详情里的一条文件，点开才去取它的差异。
+     * 提交详情里的一条改动文件。
      *
-     * 按需取而不是随详情一起取：一次提交可能改几百个文件，把全部 diff 一次拉回来会让
-     * 打开详情变慢，而用户通常只看其中一两个。
+     * 点击**只上报选中**（`{ revision, path, status, added, removed }`），不在这里取也不在这里
+     * 渲染差异——差异由横跨"提交图 + 详情"的 Diff Preview 负责（见它的说明）。因此：
+     *   * 这一列永远紧凑，不会因为展开 diff 变成一条超长滚动页；
+     *   * "点开才取"的原则不变，只是取数的落点从这一行移到了 Preview；
+     *   * 再次点击同一文件只是保持选中，不会重复请求（Preview 侧有 workspace+revision+path
+     *     的模块级缓存，也有 in-flight 去重）。
      *
-     * @param props - `{ t, file, workspace, revision }`。
+     * @param props - `{ t, file, revision, selected, onSelect }`。
      * @returns React 元素。
      */
     function CommitFileRow(props) {
-      const { t, file, workspace, revision } = props
-      const [open, setOpen] = react.useState(false)
-      const [state, setState] = react.useState({ phase: 'idle' })
-      /**
-       * 本次展开所属的提交。
-       *
-       * 与 key 一起构成"这个 diff 属于哪一次提交"的完整身份：key 保证切提交时换实例，
-       * 这里的令牌保证**迟到的响应**不会写进来（例如点了文件、请求还在飞时用户切了提交，
-       * 旧响应落地就会把上一条提交的差异画到这一条下面）。序号式令牌还顺手挡住了
-       * "展开→收起→再展开"两次请求的乱序返回。
-       */
-      const token = react.useRef(0)
+      const { t, file, revision } = props
+      const selected = props?.selected === true
+      const onSelect = typeof props?.onSelect === 'function' ? props.onSelect : () => undefined
       const status = file.status?.[0] ?? '?'
       const color = STATUS_COLORS[status] ?? GRAPH_DIM
       const { dir, base } = splitPath(file.path)
 
-      const toggle = () => {
-        const next = !open
-        setOpen(next)
-        if (!next || state.phase === 'ready') return
-        const mine = (token.current += 1)
-        setState({ phase: 'loading' })
-        void (async () => {
-          try {
-            const result = await call('commit-file', { workspace, revision, path: file.path })
-            if (token.current !== mine) return
-            setState({ phase: 'ready', result })
-          } catch (cause) {
-            if (token.current !== mine) return
-            const error = cause instanceof Error ? cause : new Error(String(cause))
-            setState({ phase: 'error', message: error.detail ?? error.message })
-          }
-        })()
-      }
-
       return react.createElement(
         'div',
-        { 'data-graph-file': file.path },
+        { 'data-graph-file': file.path, style: { display: 'flex', flexDirection: 'column' } },
         react.createElement(
           'button',
           {
             type: 'button',
             'data-graph-file-row': file.path,
-            'aria-expanded': open,
-            onClick: toggle,
+            // `aria-selected` 而不是 `aria-expanded`：这里不再是"展开/收起"，而是"当前在
+            // 下面的 Preview 里看哪一个文件"——语义变了，无障碍标注必须跟着变。
+            'aria-selected': selected,
+            'data-graph-file-selected': selected ? 'true' : 'false',
+            title: file.path,
+            onClick: () =>
+              onSelect({
+                revision,
+                path: file.path,
+                status,
+                ...(Number.isFinite(file?.added) ? { added: file.added } : {}),
+                ...(Number.isFinite(file?.removed) ? { removed: file.removed } : {}),
+              }),
             style: {
               display: 'flex',
               alignItems: 'center',
               gap: '7px',
               boxSizing: 'border-box',
               width: '100%',
-              minHeight: '26px',
-              padding: '3px 6px',
+              minHeight: '24px',
+              padding: '2px 6px',
               border: 'none',
               borderRadius: '5px',
-              background: 'transparent',
-              color: 'inherit',
+              // 选中行给一层底色：右栏与 Preview 是两个区域，没有这层底色就分不清
+              // "下面那块代码是哪个文件的"。
+              background: selected ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+              color: selected ? ACCENT : 'inherit',
               fontFamily: UI_FONT,
-              fontSize: uiPx(12.5),
+              fontSize: reviewFont.fileRow,
               textAlign: 'left',
               cursor: 'pointer',
             },
           },
           react.createElement(
             'span',
-            { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', fontSize: uiPx(11), color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
+            { style: { flexShrink: 0, padding: '0 4px', borderRadius: '4px', fontSize: reviewFont.codeMeta, color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
             status,
           ),
+          // 目录压暗、文件名突出：长路径里真正要认的是文件名（与 Diff Preview 的头部同一套）。
           dir === ''
             ? null
             : react.createElement('span', { style: { flexShrink: 1, minWidth: 0, color: GRAPH_DIM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl' } }, `\u200e${dir}/`),
-          react.createElement('span', { style: { flex: '0 0 auto', fontWeight: 500 } }, base),
+          react.createElement('span', { style: { flex: '0 0 auto', fontWeight: selected ? 600 : 500 } }, base),
+          react.createElement('span', { style: { flex: '1 1 auto', minWidth: '6px' } }),
           react.createElement(
             'span',
-            { style: { flex: '1 1 auto', textAlign: 'right', fontFamily: CODE_FONT, fontSize: uiPx(11.5), color: GRAPH_DIM, fontVariantNumeric: 'tabular-nums' } },
-            `${file.added ?? '·'} +  ${file.removed ?? '·'} −`,
+            { style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, color: GRAPH_DIM, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } },
+            react.createElement('span', { style: { color: ADDED } }, `+${file.added ?? '·'}`),
+            ' ',
+            react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? '·'}`),
           ),
         ),
-        open
-          ? react.createElement(
-              'div',
-              { 'data-graph-file-diff': '' },
-              state.phase === 'loading'
-                ? statusBlock(t('loading'))
-                : state.phase === 'error'
-                  ? statusBlock(state.message, 'error')
-                  : state.result?.binary === true
-                    ? statusBlock(t('binaryDiff'))
-                    : renderDiff(state.result?.diff ?? ''),
-            )
-          : null,
+      )
+    }
+
+    /**
+     * 横跨"提交图 + 详情"的 Diff Preview。
+     *
+     * 存在的理由是**宽度**：右侧详情栏只有 320~420px，而 unified diff 需要横向空间（行号 +
+     * 增删标记 + 一整行 Go / Java 代码）。把 diff 内联在那个窄栏里的结果是每行都要横向滚动、
+     * 代码区被挤成一条——所以它被移到 Log 主区域底部这一条**跨栏**的位置。
+     *
+     * 取数与竞态：
+     *   * 缓存键 `workspace + revision + path`（模块级，见 commitDiffCache）：切项目、切提交
+     *     天然失效；同一文件反复看**不再重复请求**；
+     *   * 令牌 + "键仍等于当前请求的键"双重把关：快速 A → B 时 A 的迟到响应不许覆盖 B；
+     *   * 组件按 `revision:path` 做 key，切文件即换实例，实例内的旧状态一并丢弃。
+     *
+     * @param props - `{ t, workspace, file, onClose }`，`file` 形如 `{ revision, path, status, added, removed }`。
+     * @returns React 元素。
+     */
+    function DiffPreview(props) {
+      const { t, workspace, file, onClose } = props
+      const revision = typeof file?.revision === 'string' ? file.revision : ''
+      const path = typeof file?.path === 'string' ? file.path : ''
+      const cacheKey = `${workspace ?? ''}\u0000${revision}\u0000${path}`
+      const [state, setState] = react.useState({ key: '', phase: 'loading' })
+      const token = react.useRef(0)
+      /**
+       * 已经发过请求的键。
+       *
+       * 需求是"再次点击同一文件可以保持选中，不要反复请求"。只有 state 是不够的：点击会触发
+       * 一次渲染、effect 依赖 `cacheKey` 不变时不会重跑，但**关闭再打开**同一文件会让组件
+       * 重新挂载、effect 再跑一次——命中缓存当然不请求，可万一缓存被 LRU 淘汰掉，就会多打
+       * 一次。这个集合保证"这一次打开期间"同一个键只发一次请求。
+       */
+      const asked = react.useRef(new Set())
+
+      react.useEffect(() => {
+        if (path === '' || revision === '' || typeof workspace !== 'string' || workspace === '') return undefined
+        const cached = readCommitDiffCache(cacheKey)
+        if (cached !== undefined) {
+          setState({ key: cacheKey, phase: 'ready', result: cached })
+          return undefined
+        }
+        if (asked.current.has(cacheKey)) return undefined
+        asked.current.add(cacheKey)
+        const mine = (token.current += 1)
+        setState({ key: cacheKey, phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('commit-file', { workspace, revision, path })
+            // 迟到的响应：令牌变了（又点了别的文件）、或键已经不是当前请求的键（用户切走了）。
+            if (token.current !== mine) return
+            writeCommitDiffCache(cacheKey, result)
+            setState({ key: cacheKey, phase: 'ready', result })
+          } catch (cause) {
+            if (token.current !== mine) return
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            setState({ key: cacheKey, phase: 'error', message: String(error.detail ?? error.message) })
+          }
+        })()
+        return undefined
+      }, [cacheKey, path, revision, workspace])
+
+      // 键对不上的那一份当它不存在：绝不用上一个文件的差异画这一个（与 LazyFileDiff 同一套）。
+      const current = state.key === cacheKey ? state : { phase: 'loading' }
+      const status = file?.status?.[0] ?? (file?.status ?? '?')
+      const color = STATUS_COLORS[status] ?? GRAPH_DIM
+      const { dir, base } = splitPath(path)
+
+      return react.createElement(
+        'div',
+        {
+          'data-graph-diff-preview': '',
+          style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, borderTop: `1px solid ${BORDER}`, background: 'var(--dsw-alias-bg-base, #fff)' },
+        },
+        // ---- 头部 toolbar：状态 / 路径 / 增删 / 关闭 ----
+        //
+        // 刻意**不重复 CommitSummary**：用户在这里看的是"这个文件的代码"，标题与作者已经在
+        // 上面的详情栏里了，重复一遍只会挤掉真正有用的那一行。
+        react.createElement(
+          'div',
+          {
+            'data-graph-diff-header': '',
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '7px',
+              flexShrink: 0,
+              padding: '4px 8px',
+              borderBottom: `1px solid ${BORDER}`,
+              fontFamily: UI_FONT,
+              fontSize: reviewFont.meta,
+            },
+          },
+          react.createElement(
+            'span',
+            { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
+            status,
+          ),
+          // 路径：目录压暗 + 中间省略（`direction: rtl` 让省略号落在中间偏左），文件名永远可见。
+          dir === ''
+            ? null
+            : react.createElement('span', { style: { flexShrink: 1, minWidth: 0, color: GRAPH_DIM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl' } }, `\u200e${dir}/`),
+          react.createElement('span', { style: { flexShrink: 0, fontWeight: 600 }, title: path }, base),
+          react.createElement('span', { style: { flex: '1 1 auto', minWidth: '6px' } }),
+          react.createElement(
+            'span',
+            { 'data-graph-diff-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } },
+            react.createElement('span', { style: { color: ADDED } }, `+${file?.added ?? '·'}`),
+            ' ',
+            react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? '·'}`),
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-graph-diff-close': '',
+              'data-review-icon-button': '',
+              title: t('graphDiffClose'),
+              'aria-label': t('graphDiffClose'),
+              onClick: () => (typeof onClose === 'function' ? onClose() : undefined),
+              style: {
+                flexShrink: 0,
+                width: '20px',
+                height: '20px',
+                padding: 0,
+                border: 'none',
+                borderRadius: '4px',
+                background: 'transparent',
+                color: GRAPH_DIM,
+                fontSize: reviewFont.meta,
+                lineHeight: 1,
+                cursor: 'pointer',
+              },
+            },
+            '✕',
+          ),
+        ),
+        // ---- 正文：整块差异只在这里横向滚动 ----
+        react.createElement(
+          'div',
+          {
+            'data-graph-diff-body': '',
+            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' },
+          },
+          current.phase === 'loading'
+            ? statusBlock(t('loading'))
+            : current.phase === 'error'
+              ? statusBlock(current.message, 'error')
+              : current.result?.binary === true
+                ? statusBlock(t('binaryDiff'))
+                : react.createElement(DiffBody, { diff: current.result?.diff ?? '' }),
+        ),
       )
     }
 
     /** 分栏宽度的持久化键。 */
     const GRAPH_TREE_WIDTH_KEY = 'dsh.review.graphTreeWidth'
     const GRAPH_DETAIL_WIDTH_KEY = 'dsh.review.graphDetailWidth'
+    /** Diff Preview 高度的持久化键（px；没写过时用百分比默认值，见 graphDiffStore）。 */
+    const GRAPH_DIFF_HEIGHT_KEY = 'dsh.review.graphDiffHeight'
     /** 分栏宽度的取值范围。上限随视口收窄（见 clampGraphPane），避免把中间那栏挤没。 */
     const GRAPH_TREE_MIN = 120
+    /** 右侧详情：默认 340（需求给的 320~360），下限 200。 */
     const GRAPH_DETAIL_MIN = 200
     const GRAPH_TREE_DEFAULT = 200
-    const GRAPH_DETAIL_DEFAULT = 320
+    const GRAPH_DETAIL_DEFAULT = 340
+    /**
+     * Diff Preview 的高度。
+     *
+     * 默认值是**百分比**（`40%`，落在需求给的 38%~45% 里）：它随 Log 可用高度自适应，因此
+     * 不需要在挂载时量一次容器高度（那在窄窗口/首次渲染时很容易量到 0）。用户一旦拖动，
+     * 就改存 px——拖动是一个明确的意图，这时用户要的是**这个像素高度**，而不是"再按比例
+     * 算一次"。双击 splitter 复位回百分比并清掉持久化值。
+     */
+    const GRAPH_DIFF_DEFAULT_BASIS = '40%'
+    const GRAPH_DIFF_MIN = 96
 
     /**
      * 分栏宽度：读/写 localStorage，并按视口夹取。
@@ -5959,9 +6334,33 @@ window.__ModuleLoader__.load({
     function clampGraphPane(which, value) {
       const min = which === 'tree' ? GRAPH_TREE_MIN : GRAPH_DETAIL_MIN
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      const max = Math.max(min, Math.min(420, Math.round(viewport / 3)))
+      // 上限按用途分开：
+      //   * 左栏（分支树）只放分支名，`viewport / 3` 足够，再宽只是空白；
+      //   * **右栏（详情）不再死卡 420**：完整 diff 已经移走，右栏只剩元信息与文件名，但
+      //     长文件名与 commit body 仍然需要空间。因此允许用户主动向左拖到
+      //     `min(600, viewport * 0.4)`——默认值（340）不变，只是上限放开了。
+      const max = which === 'tree' ? Math.min(420, Math.round(viewport / 3)) : Math.min(600, Math.round(viewport * 0.4))
       const raw = Number.isFinite(value) ? value : (which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
-      return Math.max(min, Math.min(max, Math.round(raw)))
+      return Math.max(min, Math.min(Math.max(min, max), Math.round(raw)))
+    }
+
+    /**
+     * Diff Preview 高度的夹取。
+     *
+     * 上限取"容器高度 - 160px"：上面那一半（提交图 + 详情）至少要有 160px 才读得下去，否则
+     * 用户把 Preview 拖到顶就再也看不到提交列表了。拿不到容器高度时退到视口的 70%——那是一
+     * 个"绝不会把上半部挤没"的量级。
+     *
+     * @param value - 期望高度（px）。
+     * @param available - 可用的容器高度（px，可能拿不到）。
+     * @returns 夹取后的高度（px）。
+     */
+    function clampGraphDiffHeight(value, available) {
+      const viewport = typeof window === 'undefined' ? 900 : window.innerHeight
+      const room = Number.isFinite(available) && available > 0 ? available : viewport * 0.7
+      const max = Math.max(GRAPH_DIFF_MIN, Math.round(room - 160))
+      const raw = Number.isFinite(value) ? value : Math.max(GRAPH_DIFF_MIN, Math.round(room * 0.4))
+      return Math.max(GRAPH_DIFF_MIN, Math.min(max, Math.round(raw)))
     }
 
     /** 两个分栏的宽度与折叠状态的持久化（与抽屉宽度同一套做法）。 */
@@ -6011,6 +6410,44 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Diff Preview 高度的持久化。
+     *
+     * `get()` 返回 **undefined** 表示"用户没有拖过"，调用方据此用百分比默认值（40%）；一旦
+     * 拖动过就存 px。把"没拖过"与"拖到某个 px"区分开是必要的：前者要随窗口高度自适应，
+     * 后者要精确复现用户当时的意图。
+     */
+    const graphDiffStore = {
+      /** @returns 持久化高度（px），没记录时 undefined。 */
+      get() {
+        try {
+          const raw = window.localStorage.getItem(GRAPH_DIFF_HEIGHT_KEY)
+          if (raw === null) return undefined
+          const stored = Number(raw)
+          // 同 graphPaneStore：`Number(null)` 是 0，必须排除非正数。
+          return Number.isFinite(stored) && stored > 0 ? stored : undefined
+        } catch {
+          return undefined
+        }
+      },
+      /** @param value - 高度（px）。 */
+      set(value) {
+        try {
+          window.localStorage.setItem(GRAPH_DIFF_HEIGHT_KEY, String(value))
+        } catch {
+          // 写失败不影响本次会话。
+        }
+      },
+      /** 双击 splitter 复位：回到"没拖过"的状态（即百分比默认值）。 */
+      reset() {
+        try {
+          window.localStorage.removeItem(GRAPH_DIFF_HEIGHT_KEY)
+        } catch {
+          // 同上。
+        }
+      },
+    }
+
+    /**
      * 拖动分栏手柄。
      *
      * 与抽屉的宽度手柄同一套做法（见 ReviewPanel.startResize）：`mousemove`/`mouseup` 挂在
@@ -6041,6 +6478,42 @@ window.__ModuleLoader__.load({
             graphPaneStore.set(which, final)
             return final
           })
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+      }
+    }
+
+    /**
+     * 拖动 Diff Preview 的**水平** splitter（上下改变高度）。
+     *
+     * 与左右两个分栏手柄同一套做法（`mousemove`/`mouseup` 挂在 document 上、拖动期间给 body
+     * 打标记），只有两点不同：
+     *   * 方向是纵向，且**往上拖 = 变高**（splitter 在 Preview 上方，所以 `startY - clientY`）；
+     *   * 拖动一开始就要把"当前实际高度"量出来当作基准——默认值是百分比，不量就不知道
+     *     用户是从多少像素开始拖的（见 graphDiffStore 的说明）。
+     *
+     * @param measure - 返回 `{ current, available }`（当前高度与容器可用高度，px）。
+     * @param onChange - 拖动过程中的回调（每帧，参数是 px）。
+     * @param onCommit - 松手时的回调（用于持久化）。
+     * @returns 鼠标按下的处理器。
+     */
+    function startGraphDiffResize(measure, onChange, onCommit) {
+      return (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault()
+        const startY = event.clientY
+        const start = typeof measure === 'function' ? measure() : {}
+        const startHeight = clampGraphDiffHeight(start?.current, start?.available)
+        document.body.dataset.reviewDragging = '1'
+        const onMove = (moveEvent) => {
+          onChange(clampGraphDiffHeight(startHeight + (startY - moveEvent.clientY), start?.available))
+        }
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+          delete document.body.dataset.reviewDragging
+          onCommit()
         }
         document.addEventListener('mousemove', onMove)
         document.addEventListener('mouseup', onUp)
@@ -6570,15 +7043,108 @@ window.__ModuleLoader__.load({
         })
       }, [])
 
+      /**
+       * Diff Preview 的三个状态。
+       *
+       *   * `selectedDiffFile` —— 要看哪个文件的差异（`{ revision, path, … }`）或 null。
+       *     **切提交必须把它清掉**：否则会继续显示上一条提交的 diff（同一路径时几乎看不出
+       *     来，是最容易骗过眼睛的一种错）。
+       *   * `diffVisible` —— 是否展开底部 Preview。与"选中的文件"分开，因此 × / Escape
+       *     只是把它收起来，`selectedDiffFile` 仍在，再点同一个文件（或工具栏按钮）就能
+       *     原样恢复，不必重新取数。
+       *   * `diffHeight` —— 用户拖动过的高度（px）。`undefined` 表示"没拖过"，此时用百分比
+       *     默认值（见 graphDiffStore）。
+       */
+      const [selectedDiffFile, setSelectedDiffFile] = react.useState(null)
+      const [diffVisible, setDiffVisible] = react.useState(true)
+      const [diffHeight, setDiffHeight] = react.useState(() => graphDiffStore.get())
+      const mainRef = react.useRef(null)
+      const previewRef = react.useRef(null)
+      /**
+       * `diffHeight` 的镜像。
+       *
+       * 松手时要持久化**拖动结束时的**高度，而 `startGraphDiffResize` 的 onCommit 是 mousedown
+       * 那一刻创建的闭包——它读到的 `diffHeight` 是拖动**开始前**的值。ref 每次渲染都更新，
+       * 因此 onCommit 拿到的一定是最终值。
+       */
+      const diffHeightRef = react.useRef(diffHeight)
+      diffHeightRef.current = diffHeight
+
+      /** 选中一个文件 → 显示 Preview（已经选中的同一个文件不会重复取数，见 DiffPreview 的缓存）。 */
+      const selectDiffFile = react.useCallback((file) => {
+        setSelectedDiffFile(file)
+        setDiffVisible(true)
+      }, [])
+
+      /** 关掉 Preview：只收起，保留 `selectedDiffFile`（再点同一文件即原样恢复）。 */
+      const closeDiff = react.useCallback(() => setDiffVisible(false), [])
+
+      /**
+       * Escape 关闭 Preview。
+       *
+       * **必须挂在捕获阶段**：抽屉自己也监听 Escape（关整个抽屉），而它是冒泡阶段的
+       * `document` 监听。同一次按键里，捕获阶段的监听先跑，于是这里可以"先关 Preview、
+       * 并让这次按键不再往下走"——否则用户按 Escape 想收起代码区，结果整个抽屉没了。
+       * 只在 Preview 真的可见时拦截，其余情况一律放行。
+       */
+      react.useEffect(() => {
+        if (diffVisible !== true || selectedDiffFile === null) return undefined
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape') return
+          // 输入框里的 Escape 属于输入框自己（清空候选等），不要抢。
+          const target = event.target
+          if (target != null && typeof target.tagName === 'string' && /^(INPUT|TEXTAREA|SELECT)$/u.test(target.tagName)) return
+          event.stopPropagation()
+          setDiffVisible(false)
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [diffVisible, selectedDiffFile])
+
+      /**
+       * 切提交时清空 Preview。
+       *
+       * **两件事一起做，缺一不可**：
+       *   1. 下面那个 effect 把状态真正置空（状态卫生：不留着上一条提交的选中）；
+       *   2. 渲染时**额外**过滤一次（见 `previewFile`）——effect 要在这一帧画完之后才跑，
+       *      因此只靠 effect 的话，"点了另一条提交"的那一帧仍然会把上一条提交的预览画出来。
+       *      这与 `GraphCommitDetail` 的 `state.revision === revision` 是同一套做法：键对不上
+       *      的那一份在渲染时**当它不存在**。
+       */
+      const selectedCommit = fresh.selected
+      react.useEffect(() => {
+        setSelectedDiffFile(null)
+      }, [selectedCommit])
+
+      /** 量出"容器可用高度"与"Preview 当前高度"（拖动与窗口缩放都要用）。 */
+      const measureDiff = react.useCallback(() => {
+        const main = mainRef.current
+        const available = main !== null && typeof main.getBoundingClientRect === 'function' ? main.getBoundingClientRect().height : undefined
+        const preview = previewRef.current
+        const current = preview !== null && typeof preview.getBoundingClientRect === 'function' ? preview.getBoundingClientRect().height : undefined
+        return { available, current }
+      }, [])
+
+      /**
+       * 渲染时只认"属于当前提交"的那一份选中文件。
+       *
+       * 见上面那段说明：effect 清空发生在画完之后，因此这里必须再过滤一次，否则"点了另一条
+       * 提交"的那一帧会画出上一条提交的预览（同一路径时几乎看不出来，最难发现）。
+       */
+      const previewFile =
+        selectedDiffFile !== null && selectedDiffFile.revision === selectedCommit ? selectedDiffFile : null
+
       // 视口变化时把宽度收进允许区间（否则窗口缩小后分栏会占满整屏，而手柄已经贴边）。
       react.useEffect(() => {
         const onResize = () => {
           setTreeWidth((value) => clampGraphPane('tree', value))
           setDetailWidth((value) => clampGraphPane('detail', value))
+          const { available } = measureDiff()
+          setDiffHeight((value) => (value === undefined ? undefined : clampGraphDiffHeight(value, available)))
         }
         window.addEventListener('resize', onResize)
         return () => window.removeEventListener('resize', onResize)
-      }, [])
+      }, [measureDiff])
 
       /**
        * 每个 ref 的**首屏缓存**在模块级（见 `graphPageCache` 的说明）：切页签导致的重挂
@@ -6931,10 +7497,28 @@ window.__ModuleLoader__.load({
               }),
             ),
         collapsed.tree ? null : splitter('tree', treeWidth, setTreeWidth),
-        // ---- 中：提交列表 ----
+        // ---- 主区：上半（提交图 + 详情）+ 下半（Diff Preview）----
+        //
+        // 为什么把 Preview 放在**这一层**而不是塞进右栏：它要横跨"提交图 + 详情"，因此只
+        // 有在 main 区（= 左栏之外）里才能拿到真正的宽度。左栏（分支树）**不参与**这个
+        // 纵向切分，所以不管 Preview 多高，分支树都不会被压扁。
         react.createElement(
           'div',
-          { 'data-graph-pane': 'list', style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          {
+            ref: mainRef,
+            'data-graph-main': '',
+            style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' },
+          },
+          react.createElement(
+            'div',
+            {
+              'data-graph-upper': '',
+              style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'row' },
+            },
+            // ---- 中：提交列表 ----
+            react.createElement(
+              'div',
+              { 'data-graph-pane': 'list', style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
           react.createElement(
             'div',
             {
@@ -7031,11 +7615,19 @@ window.__ModuleLoader__.load({
               },
             }),
             layout.truncated
-              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: uiPx(11.5), flexShrink: 0 } }, t('graphTruncatedLanes'))
+              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: reviewFont.meta, flexShrink: 0 } }, t('graphTruncatedLanes'))
               : null,
             // 收起/展开两侧分栏：窄窗口下唯一能保住"中间那栏还能读"的办法。
             iconButton('tree', t('graphCollapseTree'), () => togglePane('tree'), toolIcon('M2.5 3.5h11M2.5 8h11M2.5 12.5h11'), collapsed.tree),
             iconButton('detail', t('graphCollapseDetail'), () => togglePane('detail'), toolIcon('M3.5 2.5v11M8 2.5h5.5v11H8z'), collapsed.detail),
+            // 显示/隐藏在下面的 Diff Preview：选中过文件之后它就是"把代码区收起来"的开关。
+            iconButton(
+              'diff',
+              t('graphToggleDiff'),
+              () => setDiffVisible((current) => !current),
+              toolIcon('M2.5 3.5h11v9h-11z M2.5 9.5h11'),
+              diffVisible === true && selectedDiffFile !== null,
+            ),
             iconButton('refresh', t('refresh'), () => void reload(fresh.ref), refreshGlyph),
           ),
           react.createElement(
@@ -7137,14 +7729,68 @@ window.__ModuleLoader__.load({
           ),
         ),
         collapsed.detail ? null : splitter('detail', detailWidth, setDetailWidth),
-        // ---- 右：提交详情 ----
+        // ---- 右：提交详情（只放元信息与改动文件清单，不放代码）----
         collapsed.detail
           ? null
           : react.createElement(
               'div',
               { 'data-graph-pane': 'detail', style: { flex: `0 0 ${detailWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${BORDER}` } },
-              react.createElement(GraphCommitDetail, { t, workspace, revision: fresh.selected }),
+              react.createElement(GraphCommitDetail, {
+                t,
+                workspace,
+                revision: fresh.selected,
+                // 选中态也用过滤后的那一份：切提交时右栏的高亮必须同帧清掉。
+                selectedPath: previewFile?.path ?? '',
+                onSelectFile: selectDiffFile,
+              }),
             ),
+          ),
+          // ---- 下：Diff Preview（横跨提交图 + 详情）----
+          //
+          // 可见性 = "选了属于当前提交的文件" 且 "没有把它收起来"。× / Escape / 工具栏按钮
+          // 都只改后者，因此再点同一个文件（或按工具栏按钮）就原样恢复，不必重新取数。
+          diffVisible === true && previewFile !== null
+            ? react.createElement('div', {
+                key: 'split:diff',
+                'data-graph-splitter': 'diff',
+                role: 'separator',
+                'aria-orientation': 'horizontal',
+                'aria-label': t('graphDiffResize'),
+                onMouseDown: startGraphDiffResize(measureDiff, setDiffHeight, () => graphDiffStore.set(diffHeightRef.current)),
+                // 双击复位：回到百分比默认值（并清掉持久化，见 graphDiffStore.reset）。
+                onDoubleClick: () => {
+                  graphDiffStore.reset()
+                  setDiffHeight(undefined)
+                },
+                style: { flex: '0 0 5px', cursor: 'row-resize', background: 'transparent' },
+              })
+            : null,
+          diffVisible === true && previewFile !== null
+            ? react.createElement(
+                'div',
+                {
+                  ref: previewRef,
+                  'data-graph-pane': 'diff',
+                  'data-graph-diff-height': diffHeight === undefined ? 'default' : String(diffHeight),
+                  // 默认按容器高度的百分比（40%）；拖动过之后用精确 px。
+                  style: {
+                    flex: diffHeight === undefined ? `0 0 ${GRAPH_DIFF_DEFAULT_BASIS}` : `0 0 ${diffHeight}px`,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                  },
+                },
+                react.createElement(DiffPreview, {
+                  // key 带 revision + path：切文件即换实例，实例内的旧差异不会残留。
+                  key: `preview:${previewFile.revision}:${previewFile.path}`,
+                  t,
+                  workspace,
+                  file: previewFile,
+                  onClose: closeDiff,
+                }),
+              )
+            : null,
+        ),
       )
     }
 

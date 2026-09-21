@@ -149,6 +149,46 @@ mutate({
   script: 'test-review-graph-view.mjs',
 })
 
+mutate({
+  file: CLIENT,
+  label: '11) 把差异重新塞回右栏（内联展开）→ "右栏没有差异行"断言变红',
+  from: "        { 'data-graph-files': '', style: { display: 'flex', flexDirection: 'column' } },",
+  to: "        { 'data-graph-files': '', style: { display: 'flex', flexDirection: 'column' } },\n        react.createElement('div', { 'data-review-diff-row': '' }, 'inline!'),",
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11b) 让 diff 正文重新折行（pre-wrap）→ 不折行断言变红',
+  from: "              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre', paddingRight: '12px', ...codeStyle },",
+  to: "              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', paddingRight: '12px', ...codeStyle },",
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11c) Diff Preview 高度不持久化 → 持久化断言变红',
+  from: '                onMouseDown: startGraphDiffResize(measureDiff, setDiffHeight, () => graphDiffStore.set(diffHeightRef.current)),',
+  to: '                onMouseDown: startGraphDiffResize(measureDiff, setDiffHeight, () => undefined),',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11d) 切提交时不清空选中文件 → "切提交没有残留 Preview"断言变红',
+  from: '        selectedDiffFile !== null && selectedDiffFile.revision === selectedCommit ? selectedDiffFile : null',
+  to: '        selectedDiffFile',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11e) 文件头不再折叠（回到逐行 meta）→ 折叠断言变红',
+  from: '        const isHeader = /^(diff --git|index |--- |\\+\\+\\+ |new file mode|deleted file mode|old mode|new mode|similarity index|rename from|rename to|copy from|copy to)/u.test(raw)\n        if (isHeader) {',
+  to: '        const isHeader = false\n        if (isHeader) {',
+  script: 'test-review-graph-view.mjs',
+})
+
 console.log('')
 console.log(failures === 0 ? '变异验证全部符合预期' : `${failures} 项变异不符合预期`)
 process.exit(failures === 0 ? 0 : 1)

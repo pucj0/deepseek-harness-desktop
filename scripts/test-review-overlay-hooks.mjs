@@ -883,28 +883,40 @@ check('   分支行的文案键', containingNode?.props?.children, 'graphInBranc
 const branchCall = tCalls.filter((c) => c.key === 'graphInBranches').pop()
 check('   分支文案收到分支名', branchCall?.params?.names, 'main')
 // 文件差异仍然是按需的：刚点开提交时一个差异都没取、也没渲染。
+//
+// 这一版把 diff 从右栏移到了底部横跨"提交图 + 详情"的 Diff Preview，因此这里的断言也从
+// "右栏里内联展开"改成"右栏里绝不出现差异、差异只在 Preview 里"。
 check('   展开提交后仍不取文件差异', fileCalls().length, 0)
-check('   展开提交后没有差异容器', rowsOf(stepNodes, 'data-graph-file-diff').length, 0)
+check('   展开提交后没有内联差异容器', rowsOf(stepNodes, 'data-graph-file-diff').length, 0)
+check('   展开提交后也没有 Diff Preview', rowsOf(stepNodes, 'data-graph-diff-preview').length, 0)
 
-// 点文件 → 取这个文件在这次提交里的差异并渲染出来。
+// 点文件 → 取这个文件在这次提交里的差异，并在**底部 Preview** 里渲染出来。
 check('   点得中改动文件', await clickNow('data-graph-file-row', 'src/app.ts'), 'true')
 stepNodes = await drain()
 const diffCalls = fileCalls()
 check('   点了文件才取差异', diffCalls.length, 1)
 check('   差异请求带上文件路径', JSON.parse(diffCalls[0]?.body).path, 'src/app.ts')
 check('   差异请求带上提交哈希', JSON.parse(diffCalls[0]?.body).revision, 'a'.repeat(40))
-check('   出现差异容器', rowsOf(stepNodes, 'data-graph-file-diff').length, 1)
-const diffContainer = rowsOf(stepNodes, 'data-graph-file-diff')[0]
+check('   出现 Diff Preview', rowsOf(stepNodes, 'data-graph-diff-preview').length, 1)
+// 右栏里**仍然**没有差异：这是这一版的核心约束。
+check('   右栏里没有差异行', collectHostNodes(rowsOf(stepNodes, 'data-graph-detail')[0] ?? { props: {} }).some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+const diffContainer = rowsOf(stepNodes, 'data-graph-diff-preview')[0]
 const diffLines = collectHostNodes(diffContainer).filter((n) => n.props?.['data-review-diff-row'] !== undefined)
 has('   差异内容已渲染', diffLines.length > 0)
 has('   差异里有新增行', diffLines.some((n) => n.props.children?.[1]?.props?.children === '+' && textOf(n).includes('new')))
-check('   只有被点开的那个文件展开', rowsOf(stepNodes, 'data-graph-file-diff').length, 1)
+check('   只有被点开的那个文件在 Preview 里', rowsOf(stepNodes, 'data-graph-diff-preview').length, 1)
+check('   选中的文件行被标记', rowsOf(stepNodes, 'data-graph-file-row').find((n) => n.props['data-graph-file-row'] === 'src/app.ts')?.props?.['aria-selected'], 'true')
 
-// 再点一次收起：差异消失，但不必重新取数据。
+// 再点一次同一个文件：保持选中，且**不重复取数**（需求第 3 条）。
 check('   点得中同一个文件行', await clickNow('data-graph-file-row', 'src/app.ts'), 'true')
 stepNodes = await drain()
-check('   再次点击收起差异', rowsOf(stepNodes, 'data-graph-file-diff').length, 0)
-check('   收起不重复取差异', fileCalls().length, 1)
+check('   再次点击仍保持 Preview', rowsOf(stepNodes, 'data-graph-diff-preview').length, 1)
+check('   再次点击不重复取差异', fileCalls().length, 1)
+// 关闭 Preview：上半部三栏必须不受影响。
+check('   点得中关闭按钮', await clickNow('data-graph-diff-close'), 'true')
+stepNodes = await drain()
+check('   关闭后 Preview 消失', rowsOf(stepNodes, 'data-graph-diff-preview').length, 0)
+check('   关闭后三栏仍在', rowsOf(stepNodes, 'data-graph-pane').map((n) => n.props['data-graph-pane']).join(','), 'tree,list,detail')
 
 // 单击另一条提交只改选中项：右侧详情跟着换，**不再原位展开**（这是与旧实现最大的区别）。
 check('   点得中第二条提交', await clickNow('data-graph-row', 'b'.repeat(40)), 'true')

@@ -579,7 +579,7 @@ console.log('=== 6. Log 页签的三栏：拖动分栏（持久化）、搜索�
   hold = () => false
   let nodes = await renderGraph()
   check('6) 左栏默认宽度', paneFlex(nodes, 'tree'), '0 0 200px')
-  check('   右栏默认宽度', paneFlex(nodes, 'detail'), '0 0 320px')
+  check('   右栏默认宽度', paneFlex(nodes, 'detail'), '0 0 340px')
   const splitter = nodes.find((n) => n.props?.['data-graph-splitter'] === 'tree')
   splitter.props.onMouseDown({ button: 0, clientX: 500, preventDefault() {} })
   emitDocument('mousemove', { clientX: 560 })
