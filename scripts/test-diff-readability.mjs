@@ -79,8 +79,9 @@ async function measure(themeBaseValue) {
       if (!drawer) return JSON.stringify({ found: false, why: 'no-drawer' });
 
       // 差异行：按插件自己打的标记取，而不是靠层级猜——面板的外观会变，这个标记不会。
-      // 行的子元素顺序是插件保证的契约：children[0] 行号栏、children[1] 增删标记、
-      // children[2] 代码正文。
+      // 增删标记是 [data-review-diff-sign]，行号是 [data-review-diff-line-old] /
+      // [data-review-diff-line-new]；**不要**再按 children[0]/[1]/[2] 拿：换行模式下
+      // 行号栏是两格，顺序契约早就不成立了。
       const rows = [...drawer.querySelectorAll('[data-review-diff-row]')];
       if (rows.length === 0) return JSON.stringify({ found: false, why: 'no-diff-rows' });
 
@@ -94,7 +95,7 @@ async function measure(themeBaseValue) {
       const base = parse(themeBaseValue) ?? { r: 255, g: 255, b: 255, a: 1 };
       const sample = (wantAdd) => {
         for (const row of rows) {
-          const marker = (row.children[1].textContent || '').trim();
+          const marker = (row.querySelector('[data-review-diff-sign]')?.textContent || '').trim();
           if (wantAdd ? marker !== '+' : marker !== '−') continue;
           const s = getComputedStyle(row);
           const fg = parse(s.color);
@@ -115,9 +116,22 @@ async function measure(themeBaseValue) {
         removed: sample(false),
         // 取"至少有一行带行号"而不是只看第一行：文件头（diff --git …）那类元数据行
         // 本来就没有行号，用第一行判定会误报。
-        hasLineNumbers: rows.some((row) => /\\d/.test(row.children[0]?.textContent || '')),
-        // 等宽字体挂在差异容器上，测容器比测某一行稳（行的字体随实现变）。
-        monoFont: /mono/i.test(getComputedStyle(drawer.querySelector('[data-review-diff]') ?? rows[0] ?? drawer).fontFamily || ''),
+        hasLineNumbers: rows.some((row) =>
+          /\\d/.test(
+            (row.querySelector('[data-review-diff-line-old]')?.textContent || '') +
+              (row.querySelector('[data-review-diff-line-new]')?.textContent || ''),
+          ),
+        ),
+        // 等宽字体挂在差异正文容器上（现在还有代码格），测它比测某一行的字体稳。
+        monoFont: /mono/i.test(
+          getComputedStyle(
+            drawer.querySelector('[data-review-diff-body]') ??
+              drawer.querySelector('[data-review-diff-code]') ??
+              drawer.querySelector('[data-review-diff]') ??
+              rows[0] ??
+              drawer,
+          ).fontFamily || '',
+        ),
       });
     })()
   `)

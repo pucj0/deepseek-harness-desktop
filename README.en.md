@@ -281,8 +281,12 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   and use ←/→, or Home to reset). The width is remembered per app
 - Two tabs at the top, like IDEA's Git tool window:
   - `Changes`: **Staged / Changes / Unversioned** groups (all filtered from one snapshot, so a
-    group's count always equals the rows listed), click a file for an inline diff with line
-    numbers and add/remove backgrounds, and per-row stage / unstage / revert / file history.
+    group's count always equals the rows listed), laid out as **two panes** — the left pane is
+    "which files am I committing" (per-row stage / unstage / revert / file history), the right pane
+    is "what exactly changed in this file". The splitter between them is draggable (the left pane
+    defaults to **34%**, clamps between 280px and 50% of the available width, resets on double-click
+    and is remembered in `dsh.review.changesFileWidth`); below ~900px of available width the two
+    panes stack vertically.
     The message box (4 rows tall, vertically resizable) and **✨ AI draft / Commit / Commit and
     Push** are pinned to the bottom and never scroll away with a long file list
   - `Log`: **branch tree / commit graph / commit details**, three panes. A single click on a
@@ -301,10 +305,22 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
       `×`, Escape and a toolbar button all hide it, and clicking the same file again restores it
       without refetching. When the window is narrow the graph and the Preview are kept and the tree
       / details panes can be collapsed.
-    - Each diff row is a fixed three-part structure: `old line | new line | +/− | code`. The gutter
+    - **`Log` and `Changes` share one diff viewer** (`ReviewDiffViewer`): the header (status badge
+      + path + `+N −M` + word-wrap + close), the row body, the gutter, hunk headers, the collapsed
+      file header and the loading / error / binary / truncated states exist in exactly one place, so
+      both tabs render and behave identically.
+    - Each diff row is a fixed four-column structure: `old line | new line | +/− | code`. The gutter
       has a fixed width, right-aligned numbers, its own background and a right border, and is
-      unselectable; the **code is `white-space: pre` and never wraps**, so horizontal scrolling
-      happens on the Preview's body container only (no per-row scrollbars); line height is 1.45.
+      unselectable. **Word wrap is on by default** (`white-space: pre-wrap` + `overflow-wrap:
+      anywhere` + `word-break: break-word`, which keeps indentation and tabs while folding long
+      lines into the visible width — long URLs and minified content cannot blow the container up),
+      and the body then shows **no horizontal scrollbar**. The "word wrap" button in the header
+      turns it off, which restores `white-space: pre` and moves horizontal scrolling back onto the
+      container. The preference is **shared by both tabs** (turn it off in `Log` and `Changes`
+      stops wrapping too) and persists in `dsh.review.diffWrap`; line height is 1.45.
+    - **Wrapping never duplicates line numbers**: when one logical line folds into three visual
+      lines, the old/new numbers and the `+` / `−` marker still appear once (each is a single grid
+      cell) while the row background covers every visual continuation.
     - Visually the rule is "**add/remove is a background, the code is the content**": added and
       removed lines get only a ~9% green/red tint while the text keeps the normal code colour, and
       the saturated colours are reserved for the `+` / `−` markers and the gutter. git's

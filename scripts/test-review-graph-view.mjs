@@ -118,7 +118,8 @@ function collectHostNodes(node, key, queued) {
     }
     if (typeof current !== 'object') return
     if (typeof current.type === 'function') {
-      const keyed = current.props?.key === undefined ? path : `${path}#${String(current.props.key)}`
+      const name = current.type.name === '' ? 'anonymous' : current.type.name
+      const keyed = `${path}${current.props?.key === undefined ? '' : `#${String(current.props.key)}`}:${name}`
       const { tree, effects } = render(current.type, current.props, keyed)
       if (queued !== undefined) queued.push(...effects)
       visit(tree, keyed)
@@ -657,9 +658,9 @@ console.log('=== 5. 点击改动文件 → 底部 Diff Preview（右栏不再内
     )
     check('   Preview 不在右栏里', insideDetail, 'false')
     check('   Preview 所在栏标记为 diff', find('data-graph-pane', 'diff') !== null, 'true')
-    check('   Preview 有头部 toolbar', preview !== null && find('data-graph-diff-header') !== null, 'true')
-    check('   头部带增删统计', findAll('data-graph-diff-stats').length, 1)
-    check('   头部有关闭按钮', find('data-graph-diff-close') !== null, 'true')
+    check('   Preview 有头部 toolbar', preview !== null && find('data-review-diff-header') !== null, 'true')
+    check('   头部带增删统计', findAll('data-review-diff-stats').length, 1)
+    check('   头部有关闭按钮', find('data-review-diff-close') !== null, 'true')
   }
   const after = requests.filter((r) => r.url.includes('/review/commit-file')).length
   check('   点击后才请求差异', after - before, 1)
@@ -714,7 +715,7 @@ console.log('')
 console.log('=== 5b. 关闭 Preview ≠ 丢掉选中；切提交必须清空 Preview ===')
 {
   // 前面已经选着 docs/readme.md。关闭 → 上半部三栏不受影响，选中仍在。
-  await click(find('data-graph-diff-close'))
+  await click(find('data-review-diff-close'))
   check('5b) 关闭后 Preview 消失', find('data-graph-diff-preview'), null)
   check('   上半部三栏仍在', find('data-graph-pane', 'list') !== null && find('data-graph-pane', 'detail') !== null, 'true')
   check('   文件行仍保持选中', find('data-graph-file-row', 'docs/readme.md')?.props?.['aria-selected'], 'true')
@@ -1069,31 +1070,118 @@ console.log('=== 11. Diff Preview：高度拖动/持久化、Escape、工具栏�
   await click(find('data-graph-file-row', 'src/app.ts'))
   check('   再点文件立即恢复', find('data-graph-diff-preview') !== null, 'true')
 
-  // ---- 11f. 差异正文的排版契约 ----
+  // ---- 11f. 差异正文的排版契约（默认自动换行）----
   {
     const detailNodes = collectHostNodes(find('data-graph-detail') ?? { props: {} }, 'probe')
     const body = find('data-review-diff-body')
     check('   有差异正文容器', body !== null, 'true')
-    // 横向滚动**只在容器这一层**：每一行自己不许滚（否则窄栏里到处是滚动条）。
-    check('   容器自己横向滚动', body?.props?.style?.overflowX, 'auto')
+    // 默认换行：容器**不能**留横向滚动条（文字已经折好，那条滚动条纯属噪音）。
+    check('   默认换行：容器不横向滚动', body?.props?.style?.overflowX, 'hidden')
+    check('   容器标记 wrap=on', body?.props?.['data-review-diff-wrap'], 'on')
     const codeSpans = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-code'] !== undefined)
     checkTrue('   有代码单元格', codeSpans.length > 0)
-    check('   代码不折行（white-space: pre）', codeSpans[0]?.props?.style?.whiteSpace, 'pre')
-    check('   代码单元格自己不滚动', codeSpans[0]?.props?.style?.overflowX, undefined)
-    // 行号栏：固定宽度 + 右对齐 + 不可选 + 单独底色 + 右侧描边。
+    const codeStyle = codeSpans[0]?.props?.style ?? {}
+    // 需求十七章 A：默认 pre-wrap + anywhere（且绝不能用 normal，那会吃掉缩进）。
+    check('   代码默认 pre-wrap', codeStyle.whiteSpace, 'pre-wrap')
+    check('   超长单词用 anywhere 折', codeStyle.overflowWrap, 'anywhere')
+    check('   必要时的 break-word', codeStyle.wordBreak, 'break-word')
+    check('   tab 按 4 展开', codeStyle.tabSize, 4)
+    check('   代码单元格自己不滚动', codeStyle.overflowX, undefined)
+    // 行号栏：**两列**（旧 / 新），各自固定宽度、右对齐、不可选、单独底色、右侧描边。
     const gutters = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-gutter'] !== undefined)
     checkTrue('   有行号栏', gutters.length > 0)
-    check('   行号栏固定宽度（不参与收缩）', String(gutters[0]?.props?.style?.flex).startsWith('0 0 '), 'true')
-    check('   行号栏不可选中', gutters[0]?.props?.style?.userSelect, 'none')
-    checkTrue('   行号栏有右侧描边', typeof gutters[0]?.props?.style?.borderRight === 'string' && gutters[0].props.style.borderRight.includes('1px'))
-    checkTrue('   行号栏有单独底色', typeof gutters[0]?.props?.style?.background === 'string' && gutters[0].props.style.background !== 'transparent')
-    // 行高收紧到 1.45。
+    const oldCells = gutters.filter((n) => n.props?.['data-review-diff-line-old'] !== undefined)
+    const newCells = gutters.filter((n) => n.props?.['data-review-diff-line-new'] !== undefined)
+    checkTrue('   行号分成旧/新两列', oldCells.length > 0 && newCells.length === oldCells.length)
+    check('   旧行号在第 1 列', String(oldCells[0]?.props?.style?.gridColumn), '1')
+    check('   新行号在第 2 列', String(newCells[0]?.props?.style?.gridColumn), '2')
+    check('   行号栏不可选中', oldCells[0]?.props?.style?.userSelect, 'none')
+    check('   行号栏右对齐', oldCells[0]?.props?.style?.textAlign, 'right')
+    checkTrue('   行号栏有右侧描边', String(newCells[0]?.props?.style?.borderRight ?? '').includes('1px'))
+    checkTrue('   行号栏有单独底色', String(oldCells[0]?.props?.style?.background ?? 'transparent') !== 'transparent')
+    // 增删标记独占第 3 列。
+    const signs = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-sign'] !== undefined)
+    checkTrue('   有增删标记列', signs.length > 0)
+    const addSign = signs.find((n) => n.props?.children === '+')
+    check('   加号在第 3 列', String(addSign?.props?.style?.gridColumn), '3')
+    // 行是 grid 且四列模板来自共享 metrics（列宽固定，因此纵向对齐）。
+    //
+    // 取**代码行**（kind=add/del/context）而不是第一行：第一行是折叠后的文件头，它是整行
+    // 一条、没有行号列，因此不是 grid。
     const rows = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-row'] !== undefined)
     checkTrue('   有差异行', rows.length > 0)
-    check('   行高 1.45', rows[0]?.props?.style?.lineHeight, 1.45)
+    const codeRows = rows.filter((n) => {
+      const kind = n.props?.['data-review-diff-kind']
+      return kind === 'add' || kind === 'del' || kind === 'context'
+    })
+    checkTrue('   有代码行', codeRows.length > 0)
+    check('   行高 1.45', codeRows[0]?.props?.style?.lineHeight, 1.45)
+    check('   行是 grid', codeRows[0]?.props?.style?.display, 'grid')
+    checkTrue('   四列模板以 minmax(0, 1fr) 收尾', String(codeRows[0]?.props?.style?.gridTemplateColumns ?? '').trim().endsWith('minmax(0, 1fr)'))
+    check('   续行时行号停在顶部（对齐 start）', codeRows[0]?.props?.style?.alignItems, 'start')
     // 需求第 9 条：右栏文件列表不会因为看 diff 变成超长滚动页。
     check('   右栏里没有差异行', detailNodes.some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
     check('   右栏里没有差异正文容器', detailNodes.some((n) => n.props?.['data-review-diff-body'] !== undefined), 'false')
+  }
+
+  // ---- 11f2. 自动换行开关（需求十七章 B）----
+  {
+    const wrapButton = find('data-review-diff-wrap')
+    check('   头部有自动换行开关', wrapButton !== null, 'true')
+    check('   开关默认按下（wrap=on）', wrapButton?.props?.['aria-pressed'], true)
+    await click(wrapButton)
+    {
+      const body = find('data-review-diff-body')
+      check('   关掉后容器改为横向滚动', body?.props?.style?.overflowX, 'auto')
+      check('   容器标记 wrap=off', body?.props?.['data-review-diff-wrap'], 'off')
+      const code = collectHostNodes(body ?? { props: {} }, 'probe').find((n) => n.props?.['data-review-diff-code'] !== undefined)
+      check('   关掉后代码是 pre', code?.props?.style?.whiteSpace, 'pre')
+      check('   关掉后不再 anywhere 折行', code?.props?.style?.overflowWrap, 'normal')
+      check('   关掉后 wordBreak 复位', code?.props?.style?.wordBreak, 'normal')
+      check('   开关标记为未按下', find('data-review-diff-wrap')?.props?.['aria-pressed'], false)
+      check('   偏好已持久化', localStore.get('dsh.review.diffWrap'), '0')
+    }
+    // 再点一次：回到自动换行。
+    await click(find('data-review-diff-wrap'))
+    {
+      const body = find('data-review-diff-body')
+      check('   再点回到 pre-wrap', collectHostNodes(body ?? { props: {} }, 'probe').find((n) => n.props?.['data-review-diff-code'] !== undefined)?.props?.style?.whiteSpace, 'pre-wrap')
+      check('   容器回到不滚动', body?.props?.style?.overflowX, 'hidden')
+      check('   偏好已持久化回 1', localStore.get('dsh.review.diffWrap'), '1')
+    }
+    // 重新挂载（模拟切页签/重开）：偏好必须仍然生效。
+    await mount()
+    await click(find('data-graph-row', 'm'.repeat(40)))
+    await click(find('data-graph-file-row', 'src/app.ts'))
+    check('   重挂后开关仍是开', find('data-review-diff-wrap')?.props?.['aria-pressed'], true)
+    // 关掉之后再重挂：偏好要跟着关。
+    await click(find('data-review-diff-wrap'))
+    await mount()
+    await click(find('data-graph-row', 'm'.repeat(40)))
+    await click(find('data-graph-file-row', 'src/app.ts'))
+    check('   重挂后关掉的偏好仍然生效', find('data-review-diff-wrap')?.props?.['aria-pressed'], false)
+    check('   重挂后代码是 pre', collectHostNodes(find('data-review-diff-body') ?? { props: {} }, 'probe').find((n) => n.props?.['data-review-diff-code'] !== undefined)?.props?.style?.whiteSpace, 'pre')
+    // 还原偏好，避免影响后续断言。
+    await click(find('data-review-diff-wrap'))
+  }
+
+  // ---- 11f3. 换行后行号不重复（需求十七章 I）----
+  //
+  // 一条逻辑行折成多个视觉行时，旧/新行号与增删标记都只出现一次——grid 的列结构天然保证
+  // 这一点（代码单元格是第 4 列，续行只让它变高）。这里用一行超长代码验证"标记不重复"。
+  {
+    const body = find('data-review-diff-body')
+    const rows = collectHostNodes(body ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-row'] !== undefined)
+    const addRow = rows.find((n) => n.props?.['data-review-diff-kind'] === 'add')
+    const signs = collectHostNodes(addRow ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-sign'] !== undefined)
+    const oldCells = collectHostNodes(addRow ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-line-old'] !== undefined)
+    const newCells = collectHostNodes(addRow ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-line-new'] !== undefined)
+    check('   一条逻辑行只有一个增删标记', signs.length, 1)
+    check('   一条逻辑行只有一个旧行号', oldCells.length, 1)
+    check('   一条逻辑行只有一个新行号', newCells.length, 1)
+    // 代码单元格只有一个（折行是它内部的事，不是多个代码单元格）。
+    const codes = collectHostNodes(addRow ?? { props: {} }, 'probe').filter((n) => n.props?.['data-review-diff-code'] !== undefined)
+    check('   代码单元格只有一个', codes.length, 1)
   }
 
   // ---- 11g. 文件头被折叠成一条，hunk 头单独一行 ----

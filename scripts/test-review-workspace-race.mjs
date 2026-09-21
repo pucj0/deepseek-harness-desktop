@@ -116,7 +116,8 @@ function collectHostNodes(node, key = 'root', queued) {
     }
     if (typeof current !== 'object') return
     if (typeof current.type === 'function') {
-      const keyed = current.props?.key === undefined ? path : `${path}#${String(current.props.key)}`
+      const name = current.type.name === '' ? 'anonymous' : current.type.name
+      const keyed = `${path}${current.props?.key === undefined ? '' : `#${String(current.props.key)}`}:${name}`
       const { tree, effects } = render(current.type, current.props, keyed)
       if (queued !== undefined) queued.push(...effects)
       visit(tree, keyed)

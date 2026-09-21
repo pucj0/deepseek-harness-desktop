@@ -18,6 +18,29 @@ const run = (script) => {
   return { code: result.status, out: `${result.stdout ?? ''}\n${result.stderr ?? ''}` }
 }
 
+/**
+ * 写文件，遇到 Windows 上的瞬时占用（杀软 / 索引器握着句柄）时重试。
+ *
+ * 实测踩到过：写到一半抛 `UNKNOWN: unknown error, open ...client.js`，此时文件**已经是变异
+ * 后的内容**、还原还没执行，会留下一个"变异版"的源码（必须手工改回来）。重试能避免这种
+ * 假崩溃；真要失败时下面的 restore 也才有机会跑完。
+ *
+ * @param file - 目标文件。
+ * @param text - 完整内容。
+ */
+const writeWithRetry = (file, text) => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      writeFileSync(file, text, 'utf8')
+      return
+    } catch (cause) {
+      if (attempt >= 20) throw cause
+      // 同步 sleep：这里的调用方本来就是同步流程，不值得为它改成异步。
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+}
+
 let failures = 0
 const report = (label, ok, detail) => {
   if (!ok) failures += 1
@@ -34,9 +57,9 @@ const mutate = ({ file, from, to, script, label }) => {
     report(label, false, `变异点没找到：${from.slice(0, 60)}`)
     return
   }
-  writeFileSync(file, original.split(from).join(to), 'utf8')
+  writeWithRetry(file, original.split(from).join(to))
   const mutated = run(script)
-  writeFileSync(file, original, 'utf8')
+  writeWithRetry(file, original)
   const restored = run(script)
   const mutatedFailed = mutated.code !== 0
   const restoredOk = restored.code === 0
@@ -135,9 +158,9 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '10) 未跟踪差异退回 FileDiff+byFile → 未跟踪断言变红（应直接抛 ReferenceError）',
-  from: '                                nodes.push(react.createElement(LazyFileDiff, {\n                                  key: `diff:untracked:${path}`,',
-  to: '                                nodes.push(react.createElement(FileDiff, {\n                                  key: `diff:untracked:${path}`,\n                                  diff: byFile.get(path) ?? \'\',',
+  label: '10) 未跟踪差异退回 FileDiff + byFile → 未跟踪断言变红（应直接抛 ReferenceError）',
+  from: "          : react.createElement(LazyFileDiff, {\n              // key 带 workspace + HEAD + 路径：切项目 / 提交之后换实例，旧差异不会被复用。",
+  to: "          : react.createElement(FileDiff, {\n              diff: byFile.get(previewEntry.path) ?? '',\n              // key 带 workspace + HEAD + 路径：切项目 / 提交之后换实例，旧差异不会被复用。",
   script: 'test-review-staging.mjs',
 })
 
@@ -159,10 +182,50 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '11b) 让 diff 正文重新折行（pre-wrap）→ 不折行断言变红',
-  from: "              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre', paddingRight: '12px', ...codeStyle },",
-  to: "              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', paddingRight: '12px', ...codeStyle },",
+  label: '11b) 把 pre-wrap 偷偷改回 pre（自动换行失效）→ 自动换行断言变红',
+  from: "        wrap === true\n          ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }",
+  to: "        wrap === true\n          ? { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize }",
   script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11f) 查看器忽略共享的换行偏好（写死开启）→ 换行开关断言变红',
+  from: "      const wrap = typeof props?.wrap === 'boolean' ? props.wrap : storeWrap",
+  to: "      const wrap = typeof props?.wrap === 'boolean' ? props.wrap : true",
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '11g) 换行偏好不落盘（localStorage 不写）→ 持久化断言变红',
+  from: "            window.localStorage.setItem(DIFF_WRAP_KEY, wrap ? '1' : '0')",
+  to: "            void DIFF_WRAP_KEY",
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '12) 把差异 inline 插回 Changes 的文件行 → "左栏没有差异行"断言变红',
+  from: "          react.createElement('input', {\n            type: 'checkbox',\n            'data-staging-file-pick': entry.path,",
+  to: "          react.createElement('div', { 'data-review-diff-row': '' }, 'inline!'),\n          react.createElement('input', {\n            type: 'checkbox',\n            'data-staging-file-pick': entry.path,",
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '12b) 关闭 Changes 的差异预览时不清选中 → "关闭同时取消选中"断言变红',
+  from: "              onClose: () => setSelectedFile(''),",
+  to: '              onClose: () => undefined,',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '12c) 点文件名顺手改勾选状态 → "勾选状态没被改动"断言变红',
+  from: '              onClick: () => setSelectedFile(entry.path),',
+  to: '              onClick: () => {\n                setSelectedFile(entry.path)\n                setDeselectedFiles((current) => [...current, entry.path])\n              },',
+  script: 'test-review-overlay-hooks.mjs',
 })
 
 mutate({

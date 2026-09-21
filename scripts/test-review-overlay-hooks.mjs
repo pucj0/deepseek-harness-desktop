@@ -280,6 +280,19 @@ const COMMIT_FILE = {
 }
 
 /**
+ * 工作区里单个文件的差异（Changes 右栏走这条路由）。
+ *
+ * 内容里带上路径，因此可以直接断言"右栏显示的是不是刚点的那个文件"。
+ */
+const WORKSPACE_FILE = {
+  isRepo: true,
+  path: 'src/app.ts',
+  diff: ['diff --git a/src/app.ts b/src/app.ts', '--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1,2 +1,3 @@', ' keep', '-old line', '+new line from workspace', ''].join('\n'),
+  truncated: false,
+  binary: false,
+}
+
+/**
  * 把 `commit-detail` 的响应挂起，用来观察**加载中**那一帧。
  * 平时为 `false`（立即返回）；置为 `true` 后返回一个待决 promise，测试自己 resolve。
  */
@@ -299,11 +312,13 @@ globalThis.fetch = async (url, init) => {
       ? COMMIT_DETAIL
       : target.includes('/commit-file')
         ? COMMIT_FILE
-        : target.includes('/graph')
-          ? GRAPH
-          : target.includes('/history')
-            ? HISTORY
-            : CHANGES
+        : target.includes('/workspace-file')
+          ? WORKSPACE_FILE
+          : target.includes('/graph')
+            ? GRAPH
+            : target.includes('/history')
+              ? HISTORY
+              : CHANGES
   if (holdCommitDetail && target.includes('/commit-detail')) {
     return await new Promise((resolve) => {
       heldDetails.push(() => resolve({ ok: true, text: async () => JSON.stringify(payload) }))
@@ -759,14 +774,17 @@ check('   提交区在 Changes 页签里', settledNodes.some((n) => n.props?.['d
 console.log('')
 console.log('=== 6b. 提交区固定在底部，不随文件列表滚走 ===')
 {
-  // 结构上必须是「可滚动的分组区（order 1）+ 提示（order 2）+ 提交区（order 3）」，
-  // 且它们同属一个纵向 flex 容器。以前整块内容共用一个滚动区，文件一多提交框就被
-  // 滚出视野——那是这次要修的交互之一。
+  // 结构上必须是「双栏主区（order 1）+ 提示（order 2）+ 提交区（order 3）」，且它们同属一个
+  // 纵向 flex 容器。以前整块内容共用一个滚动区，文件一多提交框就被滚出视野——那是要修的
+  // 交互之一。这一版把 order 1 从"分组滚动区"换成了"双栏主区"（左文件 / 右 diff），滚动下移
+  // 到左栏内部，因此这里断言的是主区。
   const staging = settledNodes.find((n) => n.props?.['data-staging'] !== undefined)
+  const main = settledNodes.find((n) => n.props?.['data-changes-main'] !== undefined)
   const scroll = settledNodes.find((n) => n.props?.['data-staging-scroll'] !== undefined)
   const card = settledNodes.find((n) => n.props?.['data-staging-commit-card'] !== undefined)
-  check('   有独立的分组滚动区', scroll !== undefined, 'true')
-  check('   滚动区排在最前（order 1）', String(scroll?.props?.style?.order), '1')
+  check('   有双栏主区', main !== undefined, 'true')
+  check('   主区排在最前（order 1）', String(main?.props?.style?.order), '1')
+  check('   有独立的文件滚动区', scroll !== undefined, 'true')
   check('   滚动区自己滚动', scroll?.props?.style?.overflowY, 'auto')
   check('   提交区排在最后（order 3）', String(card?.props?.style?.order), '3')
   check('   提交区不参与收缩', String(card?.props?.style?.flexShrink), '0')
@@ -777,17 +795,41 @@ console.log('=== 6b. 提交区固定在底部，不随文件列表滚走 ===')
   // 结构上必须成立的两件事：
   //   1. 提交区里那个 textarea 用的是 `minHeight` 而**不是** `height`：4 行是默认高度，
   //      用户还能往下拖大，因此"高度只会增"这件事不能靠固定高度假装；
-  //   2. 滚动区允许被压缩（`flex: 1 1 auto` + `minHeight: 0`）：输入框变高时被挤掉的必须
-  //      是**文件列表**的可视高度，而不是把提交区推出容器（那正是"按钮跑到屏幕外"的形态）。
-  // 另外提交区必须**不在**滚动区里——在里就会被一起滚走。
+  //   2. 主区允许被压缩（`flex: 1 1 auto` + `minHeight: 0`）：输入框变高时被挤掉的必须是
+  //      文件列表 / 代码区的可视高度，而不是把提交区推出容器（那正是"按钮跑到屏幕外"的形态）。
+  // 另外提交区必须**不在**主区里——在里就会被一起滚走。
   const message = settledNodes.find((n) => n.props?.['data-staging-message'] !== undefined)
   check('   输入框在提交区里', card !== undefined && message !== undefined, 'true')
   check('   输入框高度是 minHeight 而不是 height', message?.props?.style?.height, undefined)
   check('   最小高度够放 4 行', message?.props?.style?.minHeight, '90px')
-  check('   滚动区可被压缩（flex-basis auto）', String(scroll?.props?.style?.flex), '1 1 auto')
-  check('   滚动区允许收缩到 0（minHeight 0）', String(scroll?.props?.style?.minHeight), '0')
-  check('   提交区不在滚动区里', scroll !== undefined && card !== undefined ? scroll !== card : false, true)
+  check('   主区可被压缩（flex-basis auto）', String(main?.props?.style?.flex), '1 1 auto')
+  check('   主区允许收缩到 0（minHeight 0）', String(main?.props?.style?.minHeight), '0')
+  check('   提交区不在主区里', main !== undefined && card !== undefined ? main !== card : false, true)
 }
+
+console.log('')
+console.log('=== 6b2. Changes 双栏：左文件列表 + 右 Diff Preview（不再 inline 展开）===')
+{
+  // 需求第六、七、八、九、十条：diff 不再插在文件行下面；左栏是"要提交哪些文件"、右栏是
+  // "当前文件改了什么"；两栏之间可拖动。
+  const main = settledNodes.find((n) => n.props?.['data-changes-main'] !== undefined)
+  const files = settledNodes.find((n) => n.props?.['data-changes-files'] !== undefined)
+  const diff = settledNodes.find((n) => n.props?.['data-changes-diff-preview'] !== undefined)
+  check('   有左栏（文件列表）', files !== undefined, 'true')
+  check('   有右栏（Diff Preview）', diff !== undefined, 'true')
+  check('   主区是左右两栏', main?.props?.style?.flexDirection, 'row')
+  check('   宽屏下标记为 columns', main?.props?.['data-changes-layout'], 'columns')
+  // 左栏默认是百分比（随可用宽度自适应），不是写死的 px。
+  check('   左栏默认宽度是百分比', String(files?.props?.style?.flex ?? '').startsWith('0 0 ') && String(files?.props?.style?.flex ?? '').includes('%'), true)
+  const splitter = settledNodes.find((n) => n.props?.['data-changes-splitter'] !== undefined)
+  check('   有左右 splitter', splitter !== undefined, 'true')
+  check('   splitter 声明为垂直分隔', `${splitter?.props?.role}/${splitter?.props?.['aria-orientation']}`, 'separator/vertical')
+  // 未选文件时右栏是空态提示；**左栏里一行差异都没有**。
+  has('   未选文件时右栏给提示', textOf(diff ?? null).includes('changesDiffEmpty'))
+  check('   左栏里没有差异行', collectHostNodes(files ?? { props: {} }).some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+  check('   左栏里没有差异正文容器', collectHostNodes(files ?? { props: {} }).some((n) => n.props?.['data-review-diff-body'] !== undefined), 'false')
+}
+
 console.log('')
 console.log('=== 6c. 头栏计数就是快照里的文件数 ===')
 {
@@ -837,6 +879,75 @@ const clickNow = async (attr, value) => {
   if (node === undefined || typeof node.props.onClick !== 'function') return false
   node.props.onClick()
   return true
+}
+
+console.log('')
+console.log('=== 6b3. Changes 点文件 → 差异出现在右栏（而不是行下方）===')
+{
+  // 这一步需要 `clickNow` / `drain`（它们定义在上面几行），因此放在这里而不是 6b2。
+  // 需求第六、九、十条：点一个文件只是"在右侧看它"，不许在文件行下面 inline 展开。
+  //
+  // 断言方式值得说明：**不要对右栏那个节点再跑一次 `collectHostNodes`**。这个桩按"树中位置"
+  // 给嵌套组件分配 hook key（`${路径}:${组件名}`），从右栏节点自身出发遍历会让 `LazyFileDiff`
+  // 拿到 `root:LazyFileDiff` 这个**全新的槽位**——于是它永远停在 loading，断言会假红（实测
+  // 踩到过）。正确做法是看 `drain()` 返回的**整棵面板的平铺列表**：它能拿到真正的那个实例，
+  // 而且**保留文档顺序**，因此可以用"差异行的下标落在右栏之后"证明它没出现在左栏里。
+  const before = await drain()
+  const path = before.filter((n) => n.props?.['data-staging-diff-toggle'] !== undefined)[0]?.props?.['data-staging-diff-toggle']
+  has('6b3) 找得到第一个文件行', typeof path === 'string' && path !== '')
+  has('   点得中该文件的路径', await clickNow('data-staging-diff-toggle', path))
+  const after = await drain()
+  const filesAt = after.findIndex((n) => n.props?.['data-changes-files'] !== undefined)
+  const diffAt = after.findIndex((n) => n.props?.['data-changes-diff-preview'] !== undefined)
+  const rowAt = after.findIndex((n) => n.props?.['data-review-diff-row'] !== undefined)
+  check('   有左栏与右栏', filesAt >= 0 && diffAt > filesAt, 'true')
+  check('   右栏里出现了差异行', rowAt > diffAt, 'true')
+  // 左栏区间（filesAt..diffAt）内不许有任何差异行 —— 这就是"没有 inline 展开"。
+  check('   左栏区间里没有差异行（不是 inline 展开）', after.slice(filesAt, diffAt).some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+  // 选中态：行 + 路径按钮都要标记，用户才知道右边那块属于谁。
+  check('   选中的行被标记', after.find((n) => n.props?.['data-staging-row'] === path)?.props?.['data-staging-selected'], 'true')
+  check('   路径按钮标记 aria-selected', after.find((n) => n.props?.['data-staging-diff-toggle'] === path)?.props?.['aria-selected'], 'true')
+  // 请求走的是按需路由，且**只按路径**取这一个文件。
+  const wsCall = fetches.filter((f) => String(f.url).includes('workspace-file')).at(-1)
+  check('   走 workspace-file 路由', wsCall !== undefined, 'true')
+  check('   请求只带这一个路径', JSON.parse(wsCall?.body ?? '{}').path, path)
+  // checkbox 与选中是两件事：点文件不改 commitPaths。
+  //
+  // 断言要**整份对比**（点之前 vs 点之后），只看"被点的那个文件还是勾选的"是假绿：
+  // 一个"顺手把别的文件取消勾选"的实现也能通过。
+  const pickMap = (nodes) =>
+    nodes
+      .filter((n) => n.props?.['data-staging-file-pick'] !== undefined)
+      .map((n) => `${n.props['data-staging-file-pick']}=${n.props.checked}`)
+      .sort()
+      .join(',')
+  const picksBefore = pickMap(before)
+  const picksAfter = pickMap(after)
+  check('   点文件没有改动任何勾选状态', picksAfter === picksBefore, true)
+  has('   勾选框确实都在（不是空集合）', picksBefore.includes(`${path}=`))
+  // 再点另一个文件：选中转移、右栏原地换成它。
+  const other = before.filter((n) => {
+    const p = n.props?.['data-staging-diff-toggle']
+    return typeof p === 'string' && p !== path
+  })[0]?.props?.['data-staging-diff-toggle']
+  if (other !== undefined) {
+    has('   点得中第二个文件', await clickNow('data-staging-diff-toggle', other))
+    const switched = await drain()
+    check('   旧的选中被清掉', switched.find((n) => n.props?.['data-staging-row'] === path)?.props?.['data-staging-selected'], 'false')
+    check('   新的选中被标记', switched.find((n) => n.props?.['data-staging-row'] === other)?.props?.['data-staging-selected'], 'true')
+    const otherAt = switched.findIndex((n) => n.props?.['data-changes-diff-preview'] !== undefined)
+    const otherRowAt = switched.findIndex((n) => n.props?.['data-review-diff-row'] !== undefined)
+    check('   右栏仍然是差异行（原地切换）', otherRowAt > otherAt, 'true')
+    check('   右栏换了文件（请求带新路径）', JSON.parse(fetches.filter((f) => String(f.url).includes('workspace-file')).at(-1)?.body ?? '{}').path, other)
+  }
+  // 需求第十七章 G：差异多长都不许把提交区挤出可视区。
+  //
+  // 桩里量不了真实布局，但"提交区与主区是并列的兄弟、固定贴底且不收缩"这件事是它永远可见的
+  // **结构前提**——以前整块内容共用一个滚动区，正是因为没了这个前提。真实像素级验证在
+  // `test-project-git-smoke.mjs` 的 G3（那里能量 getBoundingClientRect）。
+  const card = after.find((n) => n.props?.['data-staging-commit-card'] !== undefined)
+  check('   看差异时提交区仍在（order 3 / 不收缩）', `${card?.props?.style?.order}/${card?.props?.style?.flexShrink}`, '3/0')
+  check('   提交区不在左栏与右栏之间', after.slice(filesAt, diffAt).includes(card), false)
 }
 
 console.log('')
@@ -903,7 +1014,7 @@ check('   右栏里没有差异行', collectHostNodes(rowsOf(stepNodes, 'data-gr
 const diffContainer = rowsOf(stepNodes, 'data-graph-diff-preview')[0]
 const diffLines = collectHostNodes(diffContainer).filter((n) => n.props?.['data-review-diff-row'] !== undefined)
 has('   差异内容已渲染', diffLines.length > 0)
-has('   差异里有新增行', diffLines.some((n) => n.props.children?.[1]?.props?.children === '+' && textOf(n).includes('new')))
+has('   差异里有新增行', diffLines.some((n) => collectHostNodes(n).some((c) => c.props?.['data-review-diff-sign'] !== undefined && c.props?.children === '+') && textOf(n).includes('new')))
 check('   只有被点开的那个文件在 Preview 里', rowsOf(stepNodes, 'data-graph-diff-preview').length, 1)
 check('   选中的文件行被标记', rowsOf(stepNodes, 'data-graph-file-row').find((n) => n.props['data-graph-file-row'] === 'src/app.ts')?.props?.['aria-selected'], 'true')
 
@@ -913,7 +1024,7 @@ stepNodes = await drain()
 check('   再次点击仍保持 Preview', rowsOf(stepNodes, 'data-graph-diff-preview').length, 1)
 check('   再次点击不重复取差异', fileCalls().length, 1)
 // 关闭 Preview：上半部三栏必须不受影响。
-check('   点得中关闭按钮', await clickNow('data-graph-diff-close'), 'true')
+check('   点得中关闭按钮', await clickNow('data-review-diff-close'), 'true')
 stepNodes = await drain()
 check('   关闭后 Preview 消失', rowsOf(stepNodes, 'data-graph-diff-preview').length, 0)
 check('   关闭后三栏仍在', rowsOf(stepNodes, 'data-graph-pane').map((n) => n.props['data-graph-pane']).join(','), 'tree,list,detail')
@@ -924,6 +1035,65 @@ stepNodes = await drain()
 check('   换选中后右侧仍是同一块详情栏', rowsOf(stepNodes, 'data-graph-pane').filter((n) => n.props['data-graph-pane'] === 'detail').length, 1)
 check('   换选中只再取一次详情', detailCalls().length, 2)
 check('   第二次取的是第二条提交', JSON.parse(detailCalls()[1]?.body).revision, 'b'.repeat(40))
+
+console.log('')
+console.log('=== 7b. 自动换行：Log 与 Changes 共用一份偏好、默认开启、可持久化 ===')
+{
+  // 需求第三、十五、十七条 A/B：两处共用一个 `ReviewDiffViewer`，也共用一份
+  // `dsh.review.diffWrap`（在 Log 里关掉，Changes 也必须不换行）。
+  const bodyOf = (nodes) => nodes.find((n) => n.props?.['data-review-diff-body'] !== undefined)
+  const codeOf = (nodes) => nodes.find((n) => n.props?.['data-review-diff-code'] !== undefined)
+  /**
+   * 差异里所有代码格的派生字号。
+   *
+   * 取**全部**而不是第一个：第一格是 hunk 头（`@@ … @@`），它按设计用更小一档的
+   * `codeMeta`（10.5），普通代码行才是 11。断言"有没有走 uiPx 派生"必须覆盖两者。
+   */
+  const codeSizes = (nodes) =>
+    nodes.filter((n) => n.props?.['data-review-diff-code'] !== undefined).map((n) => n.props?.style?.fontSize)
+  check('7b) 点得中 Log 里的改动文件', await clickNow('data-graph-file-row', 'src/app.ts'), 'true')
+  stepNodes = await drain()
+  check('   Log 默认开启自动换行', bodyOf(stepNodes)?.props?.['data-review-diff-wrap'], 'on')
+  check('   换行态下容器不横向滚动', bodyOf(stepNodes)?.props?.style?.overflowX, 'hidden')
+  check('   代码默认 pre-wrap（保留缩进同时折行）', codeOf(stepNodes)?.props?.style?.whiteSpace, 'pre-wrap')
+  check('   超长词用 anywhere 折', codeOf(stepNodes)?.props?.style?.overflowWrap, 'anywhere')
+  check('   代码单元格自己不滚动', codeOf(stepNodes)?.props?.style?.overflowX, undefined)
+  // 需求第十七章 H：查看器字号必须走 uiPx 派生（UI 字号 12/14/18 时两侧一起缩放）。
+  const logSizes = codeSizes(stepNodes).filter((v) => v !== undefined)
+  check('   有代码格', logSizes.length > 0, true)
+  check('   代码格字号全部是 uiPx 派生（没有裸 px）', logSizes.filter((v) => !String(v).startsWith('calc(')).join(','), '')
+  // 普通代码行不单独设字号，它继承正文容器的 `reviewFont.code`（11）。
+  check('   正文容器字号是 11/14 派生', bodyOf(stepNodes)?.props?.style?.fontSize, 'calc(var(--dsh-ui-px-14, 14px) * 11 / 14)')
+  has('   有字号覆盖的格子也是派生值（hunk 头 10.5）', logSizes.includes('calc(var(--dsh-ui-px-14, 14px) * 10.5 / 14)'))
+  check('7b) 点得中换行开关', await clickNow('data-review-diff-wrap'), 'true')
+  stepNodes = await drain()
+  check('   关掉后代码是 pre', codeOf(stepNodes)?.props?.style?.whiteSpace, 'pre')
+  check('   关掉后容器改回横向滚动', bodyOf(stepNodes)?.props?.style?.overflowX, 'auto')
+  check('   偏好已落盘为 0', panelStorage.getItem('dsh.review.diffWrap'), '0')
+
+  // 切到 Changes：同一份偏好必须生效——这就是"两处不双轨"的判据。
+  check('   点得中 Changes 页签', await clickNow('data-review-tab', 'changes'), 'true')
+  let changed = await drain()
+  const wsPath = changed.filter((n) => n.props?.['data-staging-diff-toggle'] !== undefined)[0]?.props?.['data-staging-diff-toggle']
+  has('   Changes 里有文件行', typeof wsPath === 'string' && wsPath !== '')
+  has('   点得中它', await clickNow('data-staging-diff-toggle', wsPath))
+  changed = await drain()
+  check('   Changes 里的差异也不换行（偏好共用）', bodyOf(changed)?.props?.['data-review-diff-wrap'], 'off')
+  check('   Changes 里的代码也是 pre', codeOf(changed)?.props?.style?.whiteSpace, 'pre')
+  check('   Changes 里同样不横向溢出在代码格上', codeOf(changed)?.props?.style?.overflowX, undefined)
+  // 反方向：在 Changes 里打开 → 回 Log 也必须跟着打开。
+  check('   点得中 Changes 的换行开关', await clickNow('data-review-diff-wrap'), 'true')
+  changed = await drain()
+  check('   Changes 回到 pre-wrap', codeOf(changed)?.props?.style?.whiteSpace, 'pre-wrap')
+  check('   偏好已落盘回 1', panelStorage.getItem('dsh.review.diffWrap'), '1')
+  check('   点得中 Log 页签', await clickNow('data-review-tab', 'log'), 'true')
+  let back = await drain()
+  check('   点得中提交行', await clickNow('data-graph-row', 'b'.repeat(40)), 'true')
+  back = await drain()
+  has('   点得中改动文件', await clickNow('data-graph-file-row', 'src/app.ts'))
+  back = await drain()
+  check('   Log 跟着回到自动换行（偏好共用）', bodyOf(back)?.props?.['data-review-diff-wrap'], 'on')
+}
 
 console.log('')
 console.log('=== 8. 只有一个数据源：快照不会因为重渲染而重复轮询 ===')

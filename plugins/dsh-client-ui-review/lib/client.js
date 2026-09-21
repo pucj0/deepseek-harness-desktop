@@ -97,10 +97,25 @@ window.__ModuleLoader__.load({
     const reviewMetrics = {
       /** 行号栏宽度：两个三位数行号 + 内边距。 */
       gutterWidth: uiPx(52),
+      /**
+       * 单侧行号列的宽度（旧行号 / 新行号各一列）。
+       *
+       * 为什么用**固定宽度**而不是需求里建议的 `max-content`：每一行是**各自**的 grid 容器
+       * （这样整行背景才能一次覆盖所有视觉续行），而 `max-content` 是按**本行内容**算宽的
+       * ——于是 "5" 那一行窄、"4363" 那一行宽，纵向扫读时行号会变成锯齿状。要让 `max-content`
+       * 真正对齐，只能把 grid 提到整个 diff body 上、再让每行 `display: contents`，那会丢掉
+       * 行自身的背景盒子（而"整条 row 的背景覆盖续行"是明确要求）。固定列宽是两者兼得的做法，
+       * 也是真实 diff 视图的通行做法：`uiPx(42)` 在基准字号下刚好放下 4~5 位数字 + 内边距。
+       */
+      lineColWidth: uiPx(42),
+      /** 增删标记列宽度。 */
+      signColWidth: uiPx(18),
       /** 单行最小高度（`line-height` 之外再给一点，免得点选时抖）。 */
       rowMinHeight: uiPx(17),
       /** 差异行高倍数：1.45 比原来的 1.55 紧凑一档，但还没有挤到影响扫读。 */
       codeLineHeight: 1.45,
+      /** 制表符宽度：diff 里的 tab 必须按 4 展开（否则 Go / 老代码的缩进对不齐）。 */
+      tabSize: 4,
     }
 
     const styles = `
@@ -765,6 +780,15 @@ window.__ModuleLoader__.load({
       graphDiffClose: '收起 Diff Preview',
       graphDiffResize: '拖动调整 Diff Preview 高度（双击复位）',
       graphDiffHint: '从右侧点一个改动文件，在这里看它的差异。',
+      // ---- 共用的差异视图（Log 与 Changes 只有这一套）----
+      diffWrapOn: '自动换行：开（点一下改为不换行）',
+      diffWrapOff: '自动换行：关（点一下改为自动换行）',
+      diffClose: '关闭差异视图',
+      // ---- Changes 的双栏 ----
+      changesFilesTitle: '文件',
+      changesDiffTitle: '改动详情',
+      changesDiffEmpty: '从左侧点一个文件，在这里看它改了什么。',
+      changesFilesResize: '拖动调整文件列表宽度（双击复位）',
       // 提交图顶部的计数说的是"**已经加载出来**的提交数"，不是仓库总数——提交是分页取的
       // （滚到底会继续加载），所以用"文件"那个键是错的（早先就是错用 `graphFiles`）。
       // 计数与列表里的行数同源（都来自 `visibleCommits`，已过搜索过滤），因此不会出现
@@ -935,6 +959,15 @@ window.__ModuleLoader__.load({
       graphDiffClose: 'Hide the Diff Preview',
       graphDiffResize: 'Drag to resize the Diff Preview (double-click to reset)',
       graphDiffHint: 'Pick a changed file on the right to see its diff here.',
+      // ---- The shared diff viewer (Log and Changes use this one only) ----
+      diffWrapOn: 'Wrapping long lines: on (click to turn off)',
+      diffWrapOff: 'Wrapping long lines: off (click to turn on)',
+      diffClose: 'Close the diff viewer',
+      // ---- Changes, two panes ----
+      changesFilesTitle: 'Files',
+      changesDiffTitle: 'Diff',
+      changesDiffEmpty: 'Pick a file on the left to see what it changed.',
+      changesFilesResize: 'Drag to resize the file list (double-click to reset)',
       // The count in the commit-graph toolbar is the number of commits **loaded so far**,
       // not the repository total: commits are paged in as you scroll. Sharing `graphFiles`
       // here was simply the wrong noun.
@@ -1093,6 +1126,54 @@ window.__ModuleLoader__.load({
      */
     function usePanelOpen() {
       return react.useSyncExternalStore(panelStore.subscribe, panelStore.get, () => false)
+    }
+
+    /** 「差异自动换行」偏好的持久化键。 */
+    const DIFF_WRAP_KEY = 'dsh.review.diffWrap'
+
+    /**
+     * 「差异自动换行」偏好。
+     *
+     * **Log 与 Changes 共用这一份**（需求原话："用户在 Log 里关闭自动换行 → Changes 也使用
+     * 不换行"）。因此它必须放在模块级 + 订阅列表里，而不是各自的组件 state——两处是两个
+     * 组件实例（一个在 Log 页签、一个在 Changes 页签），组件内 state 天然做不到同步。
+     *
+     * 默认 **true**：长 JSON / Java / Go / SQL 一行动辄几百字符，默认不换行的话用户必须拖
+     * 横向滚动条才能看到后半段（这正是本轮要修的实机反馈）。需要看原始横向结构时再手动关掉。
+     */
+    const diffWrapStore = (() => {
+      const listeners = new Set()
+      let wrap = true
+      try {
+        // 只有明确存过 '0' 才算"关"：没记录（null）与存了别的值都按默认的开启处理。
+        wrap = window.localStorage.getItem(DIFF_WRAP_KEY) !== '0'
+      } catch {
+        // 读不到就用默认值（隐私模式等）。
+      }
+      return {
+        get: () => wrap,
+        set: (value) => {
+          wrap = value === true
+          try {
+            window.localStorage.setItem(DIFF_WRAP_KEY, wrap ? '1' : '0')
+          } catch {
+            // 存不了也不影响本次会话内的行为。
+          }
+          for (const listener of listeners) listener()
+        },
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    })()
+
+    /**
+     * 订阅「差异自动换行」偏好。
+     * @returns 当前是否自动换行。
+     */
+    function useDiffWrap() {
+      return react.useSyncExternalStore(diffWrapStore.subscribe, diffWrapStore.get, () => true)
     }
 
     /**
@@ -1869,26 +1950,35 @@ window.__ModuleLoader__.load({
     /**
      * 渲染差异：行号栏 + 增删标记 + 代码正文。
      *
-     * 固定的三段结构（顺序是**契约**：`scripts/test-diff-readability.mjs` 与
-     * `test-review-overlay-hooks.mjs` 都按 `children[0]` = 行号栏、`children[1]` = 增删标记来
-     * 断言，因此子元素顺序不能改）：
+     * 固定的**四列**结构（这一版改成 CSS grid，契约也随之明确到"列"上）：
      *
-     *   `old line | new line | marker | code`
+     *   `old line | new line | sign | code`
      *
-     * 设计取舍（这一版按实机观感重排）：
-     *   * **行号栏固定宽度、右对齐、单独底色、右侧一条描边**，并 `userSelect: none`——三段
-     *     各自有边界，扫读时不会串到一起；
-     *   * **正文 `white-space: pre`，绝不折行**：折行的差异会变成"窄长代码块"，长行被切成
-     *     好几截，缩进与括号配对全乱。横向溢出交给**外层容器**统一 `overflow-x: auto`，
-     *     不让每一行各自产生滚动条；
-     *   * 增删只用**很浅的底色**，正文用普通代码文字色；饱和的绿/红只给 `+` / `−` 与行号栏。
+     * 为什么必须用 grid 而不是 flex：**自动换行之后，一条逻辑行会变成好几个视觉行**。用
+     * flex 时行号栏与标记只占第一行的高度、背景只覆盖第一行的行高，续行会露出空白 gutter；
+     * 更糟的是有人会把行号栏做成"每行复制一次"（于是 4363 出现三遍，看起来像三个 git 行号）。
+     * grid 的解法是：行号 / 标记本身就是**独立的列**，代码列是第 4 列——续行只让第 4 列变高，
+     * 前三列各占一格、`align-items: start` 停在顶部，整行背景由行盒子一次覆盖。
+     *
+     * 三种"折行"相关的样式都集中在这里，且**只在 wrap 时生效**：
+     *   * `whiteSpace: 'pre-wrap'` —— 保留空格 / 缩进 / tab / 换行，同时允许在空白处折行
+     *     （绝不能用 `normal`，那会把代码缩进全部吃掉）；
+     *   * `overflowWrap: 'anywhere'` + `wordBreak: 'break-word'` —— 超长单词 / URL / minified JS
+     *     没有空白可折，只靠 `pre-wrap` 仍然会撑破容器；
+     *   * `tabSize: 4` —— tab 按 4 展开，Go / 老代码的缩进才对得上。
      *
      * @param diff - 单个文件的统一差异文本。
+     * @param wrap - 是否自动换行。
      * @returns React 元素数组。
      */
-    function renderDiff(diff) {
+    function renderDiff(diff, wrap) {
       const palette = diffPalette(isDarkTheme())
       const rows = parseDiffRows(diff)
+      const columns = `${reviewMetrics.lineColWidth} ${reviewMetrics.lineColWidth} ${reviewMetrics.signColWidth} minmax(0, 1fr)`
+      const codeWrapStyle =
+        wrap === true
+          ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }
+          : { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize }
       return rows.map((row, index) => {
         // 折叠后的 git 文件头：单独一条，退到背景里（见 parseDiffRows 的说明）。
         if (row.kind === 'fileheader') {
@@ -1900,21 +1990,18 @@ window.__ModuleLoader__.load({
               'data-review-diff-fileheader': '',
               title: row.meta,
               style: {
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
+                display: 'block',
                 padding: '4px 8px',
                 background: palette.metaBg,
                 color: palette.meta,
                 fontFamily: CODE_FONT,
                 fontSize: reviewFont.codeMeta,
                 lineHeight: reviewMetrics.codeLineHeight,
-                whiteSpace: 'pre',
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
               },
             },
-            react.createElement('span', { style: { minWidth: reviewMetrics.gutterWidth, flex: '0 0 auto' } }, ''),
-            react.createElement('span', { style: { flex: '0 0 auto', width: '1em', textAlign: 'center', opacity: 0.6 } }, '·'),
-            react.createElement('span', null, row.text),
+            row.text,
           )
         }
         const isAdd = row.kind === 'add'
@@ -1927,6 +2014,31 @@ window.__ModuleLoader__.load({
           ? { color: isHunk ? palette.hunk : palette.meta, fontSize: reviewFont.codeMeta }
           : { color: palette.text }
         const marker = isAdd ? '+' : isDel ? '−' : ' '
+        // hunk / meta 行没有行号与标记：让代码列横跨其余三列，避免出现"空 gutter 把正文推右"。
+        const spans = isHunk || isMeta
+        const gutterBackground = isAdd ? palette.addGutter : isDel ? palette.delGutter : palette.gutter
+        const lineCell = (value, key, bordered) =>
+          react.createElement(
+            'span',
+            {
+              key,
+              'data-review-diff-gutter': '',
+              ...(key === 'old' ? { 'data-review-diff-line-old': '' } : { 'data-review-diff-line-new': '' }),
+              style: {
+                gridColumn: key === 'old' ? '1' : '2',
+                gridRow: '1',
+                padding: '0 5px',
+                background: gutterBackground,
+                color: palette.gutterFg,
+                textAlign: 'right',
+                userSelect: 'none',
+                fontVariantNumeric: 'tabular-nums',
+                fontSize: reviewFont.codeMeta,
+                ...(bordered === true ? { borderRight: `1px solid ${palette.gutterLine}` } : {}),
+              },
+            },
+            value === undefined ? '' : String(value),
+          )
         return react.createElement(
           'div',
           {
@@ -1934,60 +2046,54 @@ window.__ModuleLoader__.load({
             'data-review-diff-row': '',
             'data-review-diff-kind': row.kind,
             style: {
-              display: 'flex',
-              alignItems: 'stretch',
+              display: 'grid',
+              gridTemplateColumns: columns,
+              // 续行只让代码列变高；行号与标记停在第一行（不会重复、不会垂直居中）。
+              alignItems: 'start',
               background,
               color: palette.text,
               fontFamily: CODE_FONT,
               fontSize: reviewFont.code,
               lineHeight: reviewMetrics.codeLineHeight,
               minHeight: reviewMetrics.rowMinHeight,
-              ...(isHunk || isMeta ? { padding: '4px 8px' } : {}),
             },
           },
-          // 行号栏：固定宽度、右对齐、单独背景 + 右侧描边；删除行只显示旧行号，新增行只显示
-          // 新行号，上下文行两侧都有。增删行的行号栏带一点饱和底色，是"哪几行变了"的主信号。
+          // ---- 行号两列 + 标记列 ----
+          //
+          // 删除行只显示旧行号，新增行只显示新行号，上下文行两侧都有；增删行的行号栏带一点
+          // 饱和底色，那是"哪几行变了"的主信号。三列都是**一格**，因此一条逻辑行换行成三个
+          // 视觉行时它们只出现一次。
+          spans ? null : lineCell(row.oldLine, 'old', false),
+          spans ? null : lineCell(row.newLine, 'new', true),
           react.createElement(
             'span',
             {
-              'data-review-diff-gutter': '',
+              'data-review-diff-sign': '',
               style: {
-                flex: `0 0 ${reviewMetrics.gutterWidth}`,
-                boxSizing: 'border-box',
-                display: 'flex',
-                gap: '4px',
-                padding: '0 6px',
-                background: isAdd ? palette.addGutter : isDel ? palette.delGutter : palette.gutter,
-                color: palette.gutterFg,
-                textAlign: 'right',
-                userSelect: 'none',
-                borderRight: `1px solid ${palette.gutterLine}`,
-                fontVariantNumeric: 'tabular-nums',
-                fontSize: reviewFont.codeMeta,
-              },
-            },
-            react.createElement('span', { style: { flex: '1 1 0', textAlign: 'right' } }, row.oldLine === undefined ? '' : String(row.oldLine)),
-            react.createElement('span', { style: { flex: '1 1 0', textAlign: 'right' } }, row.newLine === undefined ? '' : String(row.newLine)),
-          ),
-          react.createElement(
-            'span',
-            {
-              style: {
-                flex: '0 0 auto',
-                width: '1.4em',
-                textAlign: 'center',
+                gridColumn: spans ? '1 / -1' : '3',
+                gridRow: '1',
+                padding: spans ? '4px 8px' : 0,
+                textAlign: spans ? 'left' : 'center',
                 color: isAdd ? palette.addMark : isDel ? palette.delMark : 'transparent',
                 fontWeight: isAdd || isDel ? 600 : 400,
               },
             },
-            isHunk || isMeta ? '' : marker,
+            spans ? '' : marker,
           ),
           react.createElement(
             'span',
             {
-              // 正文：**不折行**。`pre` 保留缩进与制表符，横向滚动由外层统一负责。
+              // 正文：第 4 列。wrap 时折行（保留缩进 / tab），不 wrap 时 `pre` 并由外层横向滚动。
               'data-review-diff-code': '',
-              style: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'pre', paddingRight: '12px', ...codeStyle },
+              style: {
+                gridColumn: spans ? '1 / -1' : '4',
+                gridRow: spans ? '2' : '1',
+                minWidth: 0,
+                paddingRight: '12px',
+                ...(spans ? { padding: '0 8px 4px' } : {}),
+                ...codeStyle,
+                ...codeWrapStyle,
+              },
             },
             row.text === '' ? ' ' : row.text,
           ),
@@ -3379,8 +3485,29 @@ window.__ModuleLoader__.load({
       const [deselectedFiles, setDeselectedFiles] = react.useState([])
       /** 正在查看变更记录的文件路径（空串表示没有）。 */
       const [history, setHistory] = react.useState('')
-      /** 正在展开逐行差异的文件路径（空串表示没有）。 */
-      const [diffOpen, setDiffOpen] = react.useState('')
+      /**
+       * **正在右侧预览差异的文件路径**（空串表示没有）。
+       *
+       * 与"要不要提交这个文件"（`deselectedFiles` / `chosenUntracked`）是**两个独立概念**：
+       * 点一个文件只是"我想看看它改了什么"，绝不能顺手改掉它的勾选状态或 `commitPaths`。
+       * 这也是这一版删掉"点击即在行下方展开 diff"之后的新语义。
+       */
+      const [selectedFile, setSelectedFile] = react.useState('')
+      /** 左栏宽度（px）；`undefined` 表示用户没拖过，此时用百分比默认值。 */
+      const [fileWidth, setFileWidth] = react.useState(() => changesFileWidthStore.get())
+      /**
+       * `fileWidth` 的镜像。
+       *
+       * 松手时要持久化**拖动结束时的**宽度，而 `startChangesFileResize` 的 onCommit 是 mousedown
+       * 那一刻创建的闭包——它读到的 `fileWidth` 是拖动**开始前**的值。ref 每次渲染都更新，
+       * 因此 onCommit 拿到的一定是最终值。
+       */
+      const fileWidthRef = react.useRef(fileWidth)
+      fileWidthRef.current = fileWidth
+      /** Changes 内容的实测宽度（用于夹取与窄窗口判定）。0 = 还没量到。 */
+      const [contentWidth, setContentWidth] = react.useState(0)
+      const changesMainRef = react.useRef(null)
+      const changesFilePaneRef = react.useRef(null)
       /** 正在等待确认还原的文件路径（空串表示没有）。 */
       const [confirming, setConfirming] = react.useState('')
       const [message, setMessage] = react.useState('')
@@ -3436,7 +3563,7 @@ window.__ModuleLoader__.load({
         setDeselectedFiles([])
         setChosenUntracked([])
         setHistory('')
-        setDiffOpen('')
+        setSelectedFile('')
         setConfirming('')
         setTrouble(null)
         setNotice('')
@@ -3450,6 +3577,38 @@ window.__ModuleLoader__.load({
         setAiNotice('')
         setAiSuggestion(null)
       }, [workspace])
+
+      /**
+       * 量出 Changes 内容的可用宽度。
+       *
+       * 两个用途：夹取左栏宽度（上限是它的一半）、以及判断要不要退化成上下堆叠。
+       * **量不到（0）时按"宽"处理**：首帧还没有布局，此时切到堆叠会让界面先闪一下，
+       * 而宽屏是绝大多数情况。窄屏在量到之后会立刻切过去。
+       */
+      const measureChanges = react.useCallback(() => {
+        const node = changesMainRef.current
+        const width =
+          node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function'
+            ? node.getBoundingClientRect().width
+            : 0
+        const fileNode = changesFilePaneRef.current
+        const current =
+          fileNode !== null && fileNode !== undefined && typeof fileNode.getBoundingClientRect === 'function'
+            ? fileNode.getBoundingClientRect().width
+            : undefined
+        return { available: width, current }
+      }, [])
+
+      react.useEffect(() => {
+        const onResize = () => {
+          const { available } = measureChanges()
+          setContentWidth(Number.isFinite(available) ? available : 0)
+          setFileWidth((value) => (value === undefined ? undefined : clampChangesFileWidth(value, available)))
+        }
+        onResize()
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [measureChanges])
 
       /**
        * 跑一次写操作，成功后**统一让当前工作区的快照失效并重取**。
@@ -3606,7 +3765,12 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 渲染一组行，并在需要时在其下方插入差异 / 变更记录面板。
+       * 渲染一组行。
+       *
+       * **这一版不再在行下方插差异**：以前点一个文件会在它下面 inline 展开一份完整 diff，
+       * 于是文件列表被从中间撑开、后面的文件被推到屏幕外、提交区离文件选择区越来越远——
+       * 实机反馈就是"视觉和操作都很奇怪"。现在点击只把该文件交给右侧的 Diff Preview，
+       * 列表永远保持紧凑（只有"变更记录"面板还会挂在行下方，因为它是这个文件的元信息、高度有限）。
        *
        * @param entries - 文件条目数组。
        * @param sideOf - 由条目算出该行显示哪种暂存动作的函数（`'staged'` → 取消暂存）。
@@ -3616,19 +3780,6 @@ window.__ModuleLoader__.load({
         for (const entry of entries) {
           const side = typeof sideOf === 'function' ? sideOf(entry) : sideOf
           nodes.push(fileRow(entry, side))
-          // 点文件 → 展开逐行差异（IDEA 的改动列表就是这个交互）。差异与文件列表来自
-          // 同一份快照，因此不可能出现"列表里有这个文件、差异区却是别人的改动"。
-          if (diffOpen === entry.path) {
-            nodes.push(react.createElement(LazyFileDiff, {
-              key: `diff:${side}:${entry.path}`,
-              t,
-              file: entry,
-              workspace,
-              // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
-              revision: props.revision ?? snapshot?.head ?? '',
-              margin: '0 0 6px 8px',
-            }))
-          }
           if (history === entry.path) {
             nodes.push(react.createElement(FileHistory, {
               key: `history:${side}:${entry.path}`,
@@ -3800,13 +3951,29 @@ window.__ModuleLoader__.load({
        */
       const fileRow = (entry, side) => {
         const picked = !deselectedFiles.includes(entry.path)
+        const selected = selectedFile === entry.path
         return react.createElement(
           'div',
           {
             key: `${side}:${entry.path}`,
             'data-staging-row': entry.path,
             'data-staging-side': side,
-            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 18px', borderRadius: '6px', fontSize: uiPx(12.5), fontFamily: UI_FONT },
+            // 选中态用**数据标记 + ARIA**一起表达：视觉上只有一层浅强调色，靠样式断言很容易
+            // 写成"看起来像"；脚本与读屏都读这两个稳定契约。
+            'data-staging-selected': selected ? 'true' : 'false',
+            'aria-selected': selected,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '7px',
+              minHeight: 'var(--dsh-review-row-h, 28px)',
+              boxSizing: 'border-box',
+              padding: '2px 6px 2px 18px',
+              borderRadius: '6px',
+              fontSize: uiPx(12.5),
+              fontFamily: UI_FONT,
+              background: selected ? `color-mix(in srgb, ${ACCENT} 9%, transparent)` : 'transparent',
+            },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -3827,13 +3994,16 @@ window.__ModuleLoader__.load({
             'button',
             {
               type: 'button',
-              // 点路径展开逐行差异：IDEA 里点文件名就是看 diff。用 button 而不是 span，
-              // 这样键盘可聚焦（Tab 能到、回车能开）。
+              // 属性名保留 `data-staging-diff-toggle`（它是"这个文件的差异入口"的稳定钩子，
+              // 被多个测试引用）；但**语义已经变了**：点击是"在右侧看这个文件"，不是
+              // "在下面展开/收起"——因此 `aria-expanded` 换成了 `aria-selected`。
               'data-staging-diff-toggle': entry.path,
               'data-review-file': '',
-              'aria-expanded': diffOpen === entry.path,
+              'aria-selected': selected,
               title: `${entry.path}\n${t(STATUS_KEYS[entry.status?.[0] ?? ''] ?? 'statusOther')}`,
-              onClick: () => setDiffOpen((current) => (current === entry.path ? '' : entry.path)),
+              // 点同一个文件是**保持选中**（而不是取消选中）：右侧那一栏是一个常驻的预览区，
+              // 不是可以反复开合的折叠面板。
+              onClick: () => setSelectedFile(entry.path),
               style: {
                 flex: '1 1 auto',
                 minWidth: 0,
@@ -3841,8 +4011,9 @@ window.__ModuleLoader__.load({
                 padding: '2px 4px',
                 border: 'none',
                 borderRadius: '5px',
-                background: diffOpen === entry.path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
-                color: 'inherit',
+                background: 'transparent',
+                color: selected ? ACCENT : 'inherit',
+                fontWeight: selected ? 600 : 400,
                 fontFamily: CODE_FONT,
                 fontSize: uiPx(12.5),
                 textAlign: 'left',
@@ -3982,7 +4153,9 @@ window.__ModuleLoader__.load({
             key: `untracked:${path}`,
             'data-staging-row': path,
             'data-staging-side': 'untracked',
-            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 22px', borderRadius: '6px', fontSize: uiPx(12.5), fontFamily: UI_FONT },
+            'data-staging-selected': selectedFile === path ? 'true' : 'false',
+            'aria-selected': selectedFile === path,
+            style: { display: 'flex', alignItems: 'center', gap: '7px', minHeight: 'var(--dsh-review-row-h, 28px)', boxSizing: 'border-box', padding: '2px 6px 2px 22px', borderRadius: '6px', fontSize: uiPx(12.5), fontFamily: UI_FONT, background: selectedFile === path ? `color-mix(in srgb, ${ACCENT} 9%, transparent)` : 'transparent' },
           },
           react.createElement('input', {
             type: 'checkbox',
@@ -4003,9 +4176,10 @@ window.__ModuleLoader__.load({
               type: 'button',
               'data-staging-diff-toggle': path,
               'data-review-file': '',
-              'aria-expanded': diffOpen === path,
+              // 与已跟踪行一致：点它 = 在右侧看这个文件（不再是在行下方展开）。
+              'aria-selected': selectedFile === path,
               title: path,
-              onClick: () => setDiffOpen((current) => (current === path ? '' : path)),
+              onClick: () => setSelectedFile(path),
               style: {
                 flex: '1 1 auto',
                 minWidth: 0,
@@ -4013,8 +4187,9 @@ window.__ModuleLoader__.load({
                 padding: '2px 4px',
                 border: 'none',
                 borderRadius: '5px',
-                background: diffOpen === path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
-                color: 'inherit',
+                background: 'transparent',
+                color: selectedFile === path ? ACCENT : 'inherit',
+                fontWeight: selectedFile === path ? 600 : 400,
                 fontFamily: CODE_FONT,
                 fontSize: uiPx(12.5),
                 textAlign: 'left',
@@ -4093,6 +4268,299 @@ window.__ModuleLoader__.load({
       if (snapshot.phase === 'error') return statusBlock(snapshot.error ?? '', 'error')
       // 尚无任何提交的仓库：没有 HEAD 可比较，说"改动"会误导（用户会以为文件丢了）。
       if (snapshot.empty === true) return statusBlock(t('workspaceEmpty'))
+
+      // ---- 左栏内容：三组文件 ----------------------------------------------------
+      //
+      // 计算在 return 之前（不是 hook，只是普通的元素构造），因为它现在要被放进"左栏"这个
+      // 容器里，而右栏的 Diff Preview 与它是并列关系。
+      //
+      // 三组全部由**同一份 snapshot.files** 过滤得出（每个文件的 `staged`/`unstaged`/
+      // `untracked` 由 host 在同一次 `/workspace` 请求里随文件一起给出，见 indexStates）。
+      // 因此分组标题上的数字与组内行数永远一致——"外面 0、进去却有文件"那类问题在这里被
+      // 结构性排除：不可能再出现"分组来自 A 请求、清单来自 B 请求"。
+      //
+      // 同一个文件同时有已暂存与未暂存改动（porcelain 的 `MM`）时会出现在两组里——这是
+      // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
+      const fileGroups = [
+        dedupe(staged).length === 0
+          ? null
+          : react.createElement(
+              'div',
+              { key: 'g:staged', 'data-staging-group': 'staged' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'staged',
+                label: t('stagedTitle'),
+                count: dedupe(staged).length,
+                collapsed: collapsed.staged,
+                onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
+                action: react.createElement(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                  groupPick('staged', dedupe(staged).map((entry) => entry.path)),
+                  react.createElement(
+                    StagingIconButton,
+                    {
+                      t,
+                      id: 'unstage-all',
+                      label: t('unstageAll'),
+                      disabled: busy,
+                      onClick: () => void run('unstage', { paths: dedupe(staged).map((entry) => entry.path) }),
+                    },
+                    bulkIcon,
+                  ),
+                ),
+              }),
+              collapsed.staged ? null : renderRows(dedupe(staged), 'staged'),
+            ),
+        dedupe(unstaged).length === 0
+          ? null
+          : react.createElement(
+              'div',
+              { key: 'g:unstaged', 'data-staging-group': 'unstaged' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'unstaged',
+                label: t('unstagedTitle'),
+                count: dedupe(unstaged).length,
+                collapsed: collapsed.unstaged,
+                onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
+                action: react.createElement(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                  groupPick('unstaged', dedupe(unstaged).map((entry) => entry.path)),
+                  react.createElement(
+                    StagingIconButton,
+                    {
+                      t,
+                      id: 'stage-all',
+                      label: t('stageAll'),
+                      disabled: busy,
+                      // 仍然保留"只暂存不提交"这条路：有人习惯先把改动摆进索引再逐次提交。
+                      onClick: () => void run('stage', { paths: dedupe(unstaged).map((entry) => entry.path) }),
+                    },
+                    bulkIcon,
+                  ),
+                ),
+              }),
+              collapsed.unstaged ? null : renderRows(dedupe(unstaged), 'unstaged'),
+            ),
+        untrackedCount === 0
+          ? null
+          : react.createElement(
+              'div',
+              { key: 'g:untracked', 'data-staging-group': 'untracked' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'untracked',
+                // 数量用**完整**条数（不是折叠/截断后列出的条数）：界面上"6,636 个文件"
+                // 这个数字本身就是用户想知道的第一件事，用列出的条数会把它说小。
+                label: t('untrackedTitle'),
+                count: untrackedCount,
+                collapsed: collapsed.untracked,
+                onToggle: () => setCollapsed((value) => ({ ...value, untracked: !value.untracked })),
+                // 全选/全不选。IDEA 的分组标题上也有这个勾选框，它决定"下面那批要不要
+                // 一起加入"。
+                action: react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-staging-toggle-all': 'untracked',
+                    title: allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
+                    'aria-label': allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
+                    'aria-pressed': allChosen,
+                    disabled: busy || untrackedPaths.length === 0,
+                    onClick: (event) => {
+                      event.stopPropagation()
+                      setChosenUntracked(allChosen ? [] : untrackedPaths)
+                    },
+                    style: {
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                      width: '22px',
+                      height: '22px',
+                      padding: 0,
+                      border: 'none',
+                      borderRadius: '4px',
+                      background: 'transparent',
+                      color: allChosen ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+                      fontFamily: UI_FONT,
+                      fontSize: uiPx(13),
+                      lineHeight: 1,
+                      cursor: busy ? 'default' : 'pointer',
+                    },
+                  },
+                  allChosen ? '☑' : '☐',
+                ),
+              }),
+              collapsed.untracked
+                ? null
+                : [
+                    react.createElement(
+                      'div',
+                      { key: 'list', 'data-staging-untracked-list': '' },
+                      untrackedPaths.slice(0, UNTRACKED_RENDER_LIMIT).flatMap((path) => {
+                        const row = untrackedRow(path, chosenUntracked.includes(path))
+                        const nodes = [row]
+                        // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
+                        //
+                        // 差异**不再 inline 插在这一行下面**（见 renderRows 的说明）：点了它
+                        // 只是把这个路径交给右侧的 Diff Preview，由那个常驻的 viewer 走
+                        // `/workspace-file?untracked=true` 取差异。**这里曾经传
+                        // `byFile.get(path)`**——那是按需差异改造时删掉的整页拆分产物，于是
+                        // 点击直接 `ReferenceError: byFile is not defined`。不要重建 `byFile`。
+                        if (history === path) {
+                          nodes.push(react.createElement(FileHistory, {
+                            key: `history:untracked:${path}`,
+                            t,
+                            workspace,
+                            path,
+                          }))
+                        }
+                        return nodes
+                      }),
+                      // 只渲染前 UNTRACKED_RENDER_LIMIT 条：实测一个真实仓库有 6,636 个
+                      // 未跟踪文件，全量渲染会让这块面板变成一堵墙（而且每一行都有
+                      // 勾选框与按钮）。**数量仍然显示完整总数**（见分组标题），
+                      // 因此"数量与列表一致"这条要求不受影响——列表是被明确标注为
+                      // "只显示前 N 个"的视图，不是数据源。
+                      untrackedCount > UNTRACKED_RENDER_LIMIT
+                        ? react.createElement(
+                            'div',
+                            { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
+                            t('untrackedTruncated', {
+                              count: UNTRACKED_RENDER_LIMIT,
+                              rest: untrackedCount - UNTRACKED_RENDER_LIMIT,
+                            }),
+                          )
+                        : null,
+                    ),
+                    // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
+                    // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
+                    //
+                    // 做成贴底的一条汇总栏（而不是挤在列表末尾）：文件多的时候"选了
+                    // 几个、点哪个按钮"必须一眼可见，否则要滚到底才知道能干什么。
+                    react.createElement(
+                      'div',
+                      { key: 'bar', 'data-review-untracked-bar': '' },
+                      react.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-staging-add-chosen': '',
+                          'data-review-primary': '',
+                          disabled: busy || chosen.length === 0,
+                          onClick: () =>
+                            void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
+                              (ok) => {
+                                // `run` 现在返回响应体（成功）或 undefined（失败）。
+                                if (ok !== undefined) setChosenUntracked([])
+                              },
+                            ),
+                          style: {
+                            height: '24px',
+                            padding: '0 12px',
+                            border: 'none',
+                            background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
+                            color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
+                          },
+                        },
+                        t('addToGit'),
+                      ),
+                      react.createElement(
+                        'span',
+                        {
+                          'data-staging-chosen-count': '',
+                          style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                        },
+                        chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
+                      ),
+                    ),
+                  ],
+            ),
+      ]
+
+      /**
+       * 当前正在预览的文件条目。
+       *
+       * 从 `files` 里现取一次（而不是把整条目存进 state）：快照刷新之后行上的增删数字会变，
+       * 而 state 里那份是旧的，两者会在同一屏上打架。找不到时兜底一个最小条目——未跟踪文件
+       * 在快照里可能刚好被截断掉。
+       */
+      const previewEntry =
+        selectedFile === ''
+          ? undefined
+          : files.find((entry) => entry.path === selectedFile)
+            ?? { path: selectedFile, status: '?', index: '?', worktree: '?', staged: false, unstaged: false, untracked: false }
+
+      // 窄窗口（内容宽度不足）改成上下堆叠；宽屏是左右两栏。**两种模式都不会把 diff 插回
+      // 文件行下面**（那是这一轮要删掉的 UI）。
+      const narrow = contentWidth > 0 && contentWidth < CHANGES_NARROW_WIDTH
+
+      const filePane = react.createElement(
+        'div',
+        {
+          ref: changesFilePaneRef,
+          'data-changes-files': '',
+          style: narrow
+            ? { flex: '1 1 55%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }
+            : {
+                flex: fileWidth === undefined ? `0 0 ${CHANGES_FILE_DEFAULT_BASIS}` : `0 0 ${fileWidth}px`,
+                minWidth: 0,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                borderRight: `1px solid ${BORDER}`,
+              },
+        },
+        react.createElement(
+          'div',
+          {
+            'data-changes-files-header': '',
+            style: { display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, padding: '4px 8px', borderBottom: `1px solid ${BORDER}`, fontFamily: UI_FONT, fontSize: reviewFont.meta, color: 'var(--dsw-alias-label-tertiary)' },
+          },
+          t('changesFilesTitle'),
+          react.createElement('span', { style: { flex: '1 1 auto' } }),
+        ),
+        // 滚动只发生在这一层：提交区在这块面板之外（order 3），因此永远贴底不动。
+        react.createElement(
+          'div',
+          {
+            'data-staging-scroll': '',
+            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', padding: '0 2px 6px' },
+          },
+          fileGroups,
+        ),
+      )
+
+      const diffPane = react.createElement(
+        'div',
+        {
+          'data-changes-diff-preview': '',
+          'aria-label': t('changesDiffTitle'),
+          style: narrow
+            ? { flex: '1 1 45%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderTop: `1px solid ${BORDER}` }
+            : { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' },
+        },
+        previewEntry === undefined
+          ? react.createElement(
+              'div',
+              { style: { padding: '16px', fontFamily: UI_FONT, fontSize: reviewFont.normal, color: 'var(--dsw-alias-label-tertiary)' } },
+              t('changesDiffEmpty'),
+            )
+          : react.createElement(LazyFileDiff, {
+              // key 带 workspace + HEAD + 路径：切项目 / 提交之后换实例，旧差异不会被复用。
+              key: `wsdiff:${workspace}:${props.revision ?? snapshot?.head ?? ''}:${previewEntry.path}`,
+              t,
+              file: previewEntry,
+              workspace,
+              // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
+              revision: props.revision ?? snapshot?.head ?? '',
+              onClose: () => setSelectedFile(''),
+            }),
+      )
 
       return react.createElement(
         'div',
@@ -4415,233 +4883,43 @@ window.__ModuleLoader__.load({
               t('noStagedOrChanged'),
             )
           : react.createElement(
+              // ---- 主区：左"要提交哪些文件" + 右"当前文件改了什么" ----
+              //
+              // 左栏固定宽度（默认 34%，可拖动、可持久化），右栏吃掉剩余宽度。大窗口下这是
+              // 左右两栏；窄窗口（< 900px）改成上下堆叠——**但绝不把 diff 插回某一个文件行
+              // 下面**（那正是这一轮要删掉的 inline UI）。
               'div',
               {
-                'data-staging-scroll': '',
-                // 滚动只发生在这一层：提交区（order 3）在它之外，因此永远贴底不动。
-                style: { order: 1, flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', padding: '0 2px 6px' },
+                ref: changesMainRef,
+                'data-changes-main': '',
+                'data-changes-layout': narrow ? 'stacked' : 'columns',
+                style: {
+                  order: 1,
+                  flex: '1 1 auto',
+                  minHeight: 0,
+                  display: 'flex',
+                  flexDirection: narrow ? 'column' : 'row',
+                },
               },
-              // ---- 已暂存（Staged）----
-              //
-              // 与下面的「更改」分开：IDEA 的 Git 工具窗就是 `Staged / Changes / Unversioned`
-              // 三组，而它们的动作不同（已暂存的行只能"取消暂存"，未暂存的行才能"暂存"）。
-              // 以前合成一组是"索引对用户不可见"的折中，代价是"我到底暂存了什么"无从回答。
-              dedupe(staged).length === 0
+              filePane,
+              // splitter 只在左右模式下有意义（上下模式下高度由两侧各占一份，不提供拖动）。
+              narrow
                 ? null
-                : react.createElement(
-                    'div',
-                    { 'data-staging-group': 'staged' },
-                    react.createElement(StagingGroupHeader, {
-                      t,
-                      id: 'staged',
-                      label: t('stagedTitle'),
-                      count: dedupe(staged).length,
-                      collapsed: collapsed.staged,
-                      onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
-                      action: react.createElement(
-                        'div',
-                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-                        groupPick('staged', dedupe(staged).map((entry) => entry.path)),
-                        react.createElement(
-                          StagingIconButton,
-                          {
-                            t,
-                            id: 'unstage-all',
-                            label: t('unstageAll'),
-                            disabled: busy,
-                            onClick: () => void run('unstage', { paths: dedupe(staged).map((entry) => entry.path) }),
-                          },
-                          bulkIcon,
-                        ),
-                      ),
-                    }),
-                    collapsed.staged ? null : renderRows(dedupe(staged), 'staged'),
-                  ),
-              // ---- 更改（Changes：未暂存的工作区改动）----
-              dedupe(unstaged).length === 0
-                ? null
-                : react.createElement(
-                    'div',
-                    { 'data-staging-group': 'unstaged' },
-                    react.createElement(StagingGroupHeader, {
-                      t,
-                      id: 'unstaged',
-                      label: t('unstagedTitle'),
-                      count: dedupe(unstaged).length,
-                      collapsed: collapsed.unstaged,
-                      onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
-                      action: react.createElement(
-                        'div',
-                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-                        groupPick('unstaged', dedupe(unstaged).map((entry) => entry.path)),
-                        react.createElement(
-                          StagingIconButton,
-                          {
-                            t,
-                            id: 'stage-all',
-                            label: t('stageAll'),
-                            disabled: busy,
-                            // 仍然保留"只暂存不提交"这条路：有人习惯先把改动摆进索引再逐次提交。
-                            onClick: () => void run('stage', { paths: dedupe(unstaged).map((entry) => entry.path) }),
-                          },
-                          bulkIcon,
-                        ),
-                      ),
-                    }),
-                    collapsed.unstaged ? null : renderRows(dedupe(unstaged), 'unstaged'),
-                  ),
-              // ---- 未跟踪（可以勾选后"加入 git"）----
-              untrackedCount === 0
-                ? null
-                : react.createElement(
-                    'div',
-                    { 'data-staging-group': 'untracked' },
-                    react.createElement(StagingGroupHeader, {
-                      t,
-                      id: 'untracked',
-                      // 数量用**完整**条数（不是折叠/截断后列出的条数）：界面上"6,636 个文件"
-                      // 这个数字本身就是用户想知道的第一件事，用列出的条数会把它说小。
-                      label: t('untrackedTitle'),
-                      count: untrackedCount,
-                      collapsed: collapsed.untracked,
-                      onToggle: () => setCollapsed((value) => ({ ...value, untracked: !value.untracked })),
-                      // 全选/全不选。IDEA 的分组标题上也有这个勾选框，它决定"下面那批要不要
-                      // 一起加入"。
-                      action: react.createElement(
-                        'button',
-                        {
-                          type: 'button',
-                          'data-staging-toggle-all': 'untracked',
-                          title: allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
-                          'aria-label': allChosen ? t('untrackedClearAll') : t('untrackedSelectAll'),
-                          'aria-pressed': allChosen,
-                          disabled: busy || untrackedPaths.length === 0,
-                          onClick: (event) => {
-                            event.stopPropagation()
-                            setChosenUntracked(allChosen ? [] : untrackedPaths)
-                          },
-                          style: {
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
-                            width: '22px',
-                            height: '22px',
-                            padding: 0,
-                            border: 'none',
-                            borderRadius: '4px',
-                            background: 'transparent',
-                            color: allChosen ? ACCENT : 'var(--dsw-alias-label-tertiary)',
-                            fontFamily: UI_FONT,
-                            fontSize: uiPx(13),
-                            lineHeight: 1,
-                            cursor: busy ? 'default' : 'pointer',
-                          },
-                        },
-                        allChosen ? '☑' : '☐',
-                      ),
-                    }),
-                    collapsed.untracked
-                      ? null
-                      : [
-                          react.createElement(
-                            'div',
-                            { key: 'list', 'data-staging-untracked-list': '' },
-                            untrackedPaths.slice(0, UNTRACKED_RENDER_LIMIT).flatMap((path) => {
-                              const row = untrackedRow(path, chosenUntracked.includes(path))
-                              const nodes = [row]
-                              // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
-                              //
-                              // 走 `LazyFileDiff` 而不是 `FileDiff`：项目级快照是元数据级的，
-                              // 不带任何统一差异，未跟踪文件的差异由 host 用
-                              // `git diff --no-index /dev/null <path>` 按需给出（见 /workspace-file
-                              // 与 LazyFileDiff 的说明）。**这里曾经传 `byFile.get(path)`**——那是
-                              // 按需差异改造时删掉的整页拆分产物，于是点击直接
-                              // `ReferenceError: byFile is not defined`。不要重建 `byFile`。
-                              if (diffOpen === path) {
-                                nodes.push(react.createElement(LazyFileDiff, {
-                                  key: `diff:untracked:${path}`,
-                                  t,
-                                  // 用 files 里的真实条目（它带 untracked/status 等 host 事实）；
-                                  // 找不到时兜底成一个"新增且未跟踪"的最小条目，而不是让渲染层
-                                  // 拿到 undefined。
-                                  file: files.find((entry) => entry.path === path)
-                                    ?? { path, status: 'A', index: '?', worktree: '?', staged: false, unstaged: false, untracked: true },
-                                  workspace,
-                                  // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
-                                  revision: props.revision ?? snapshot?.head ?? '',
-                                  margin: '0 0 6px 8px',
-                                }))
-                              }
-                              if (history === path) {
-                                nodes.push(react.createElement(FileHistory, {
-                                  key: `history:untracked:${path}`,
-                                  t,
-                                  workspace,
-                                  path,
-                                }))
-                              }
-                              return nodes
-                            }),
-                            // 只渲染前 UNTRACKED_RENDER_LIMIT 条：实测一个真实仓库有 6,636 个
-                            // 未跟踪文件，全量渲染会让这块面板变成一堵墙（而且每一行都有
-                            // 勾选框与按钮）。**数量仍然显示完整总数**（见分组标题），
-                            // 因此"数量与列表一致"这条要求不受影响——列表是被明确标注为
-                            // "只显示前 N 个"的视图，不是数据源。
-                            untrackedCount > UNTRACKED_RENDER_LIMIT
-                              ? react.createElement(
-                                  'div',
-                                  { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
-                                  t('untrackedTruncated', {
-                                    count: UNTRACKED_RENDER_LIMIT,
-                                    rest: untrackedCount - UNTRACKED_RENDER_LIMIT,
-                                  }),
-                                )
-                              : null,
-                          ),
-                          // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
-                          // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
-                          //
-                          // 做成贴底的一条汇总栏（而不是挤在列表末尾）：文件多的时候"选了
-                          // 几个、点哪个按钮"必须一眼可见，否则要滚到底才知道能干什么。
-                          react.createElement(
-                            'div',
-                            { key: 'bar', 'data-review-untracked-bar': '' },
-                            react.createElement(
-                              'button',
-                              {
-                                type: 'button',
-                                'data-staging-add-chosen': '',
-                                'data-review-primary': '',
-                                disabled: busy || chosen.length === 0,
-                                onClick: () =>
-                                  void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
-                                    (ok) => {
-                                      // `run` 现在返回响应体（成功）或 undefined（失败）。
-                                      if (ok !== undefined) setChosenUntracked([])
-                                    },
-                                  ),
-                                style: {
-                                  height: '24px',
-                                  padding: '0 12px',
-                                  border: 'none',
-                                  background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
-                                  color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
-                                },
-                              },
-                              t('addToGit'),
-                            ),
-                            react.createElement(
-                              'span',
-                              {
-                                'data-staging-chosen-count': '',
-                                style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                              },
-                              chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
-                            ),
-                          ),
-                        ],
-                  ),
+                : react.createElement('div', {
+                    key: 'split:changes-files',
+                    'data-changes-splitter': '',
+                    role: 'separator',
+                    'aria-orientation': 'vertical',
+                    'aria-label': t('changesFilesResize'),
+                    onMouseDown: startChangesFileResize(measureChanges, setFileWidth, () => changesFileWidthStore.set(fileWidthRef.current)),
+                    // 双击复位：回到百分比默认值（并清掉持久化）。
+                    onDoubleClick: () => {
+                      changesFileWidthStore.reset()
+                      setFileWidth(undefined)
+                    },
+                    style: { flex: '0 0 5px', cursor: 'col-resize', background: 'transparent' },
+                  }),
+              diffPane,
             ),
         // 还原确认弹窗：还原会改写工作区（**唯一**这类操作），必须由用户明确决定。
         // 与错误/提示区块一样用 `order` 让它排在最后，但它是 fixed 定位的遮罩层，顺序无关。
@@ -4789,6 +5067,7 @@ window.__ModuleLoader__.load({
              if (token.current !== mine) return
              writeWorkspaceDiffCache(cacheKey, result)
              setState({ key: cacheKey, phase: 'ready', result })
+             try { (globalThis.__lazy = globalThis.__lazy ?? []).push(`READY(${path}) key=[${cacheKey}]`) } catch {}
              if (onStats !== undefined) onStats(path, result)
            } catch (cause) {
              if (token.current !== mine) return
@@ -4803,102 +5082,224 @@ window.__ModuleLoader__.load({
        // 键对不上的那一份（切换文件/切换项目）在渲染时**当它不存在**，避免用上一个文件的
        // 差异画这一行（与 GraphCommitDetail 的 state.revision 是同一套做法）。
        const current = state.key === cacheKey ? state : { phase: 'loading' }
-       if (current.phase === 'idle' || current.phase === 'loading') return statusBlock(t('loading'))
-       if (current.phase === 'error') return statusBlock(current.message, 'error')
+       try { (globalThis.__lazy = globalThis.__lazy ?? []).push(`render(${path}) state=${JSON.stringify(state)}`) } catch {}
        const result = current.result
-       // 二进制不需要额外说明：host 回的就是 `Binary files … differ`，FileDiff 自己认得出。
+       // 二进制不需要额外说明：host 回的就是 `Binary files … differ`，viewer 自己认得出。
        // 超长截断要说一句，否则用户以为文件只有这么点改动。
-       return react.createElement(FileDiff, {
+       //
+       // **加载中 / 出错也走同一个 viewer**：头部（路径 + 增删）始终在，正文换成状态块——这样
+       // "我在看哪个文件"这个锚点不会因为一次请求而消失（也就不会闪一下）。
+       return react.createElement(ReviewDiffViewer, {
          t,
          file,
          diff: typeof result?.diff === 'string' ? result.diff : '',
          margin: props.margin,
+         phase: current.phase,
+         message: current.phase === 'error' ? current.message : '',
          ...(result?.truncated === true ? { note: t('truncated') } : {}),
+         ...(props?.onClose !== undefined ? { onClose: props.onClose } : {}),
+         ...(typeof props?.wrap === 'boolean' ? { wrap: props.wrap } : {}),
        })
      }
 
     /**
-     * 一个文件的逐行差异（含顶部那条固定信息：状态、路径、增删行数）。
+     * **唯一的差异视图**（Log 的 Diff Preview 与会话内的文件列表都用它）。
      *
-     * 抽成独立组件是因为它有**两个使用者**：会话内的文件列表（`FileList`）与项目级的
-     * 更改页签（`StagingSection` 的行展开）。两处必须长得一样——差异视图是最不该出现
-     * "这个入口能看、那个入口不能看"的地方，而复制一份必然漂移。
+     * 这一版把它抽成共享组件，是为了终止此前那种"双轨"：Log 一套 `renderDiff`、Changes 一套
+     * `FileDiff`，两边各自演化，字号、换行、hunk、行号、配色每次都要改两遍、而且必然漂移。
+     * 现在这些只在这一个组件（以及它下面的 `renderDiff` / `DiffBody`）里定义。
      *
-     * @param props - `{ t, file, diff, margin, note }`。
+     * 它负责：header（状态徽标 + 路径 + 增删行数）、自动换行开关、关闭按钮、截断提示、
+     * 二进制提示、差异正文（行号栏 / 增删标记 / hunk / 折叠后的文件头）。
+     *
+     * `wrap` / `onToggleWrap` 不传时**直接用共享偏好**（`dsh.review.diffWrap`）：因此 Log 与
+     * Changes 天然是同一个设置，调用方也不需要各自接线。
+     *
+     * 正文的三种状态由调用方用 `phase` / `message` / `binary` 表达，而**头部始终渲染**：路径与
+     * 增删数字是"我在看哪个文件"的锚点，跟着正文一起变成 loading 会让界面跳一下。
+     *
+     * @param props - `{ t, file, diff, note, margin, dense, phase, message, binary, onClose }`。
      * @returns React 元素。
      */
-    function FileDiff(props) {
+    function ReviewDiffViewer(props) {
       const { t, file, diff } = props
+      // 无条件取钩子（hook 顺序必须稳定，见 check-react-rules）。
+      const storeWrap = useDiffWrap()
+      const wrap = typeof props?.wrap === 'boolean' ? props.wrap : storeWrap
+      const onToggleWrap =
+        typeof props?.onToggleWrap === 'function' ? props.onToggleWrap : () => diffWrapStore.set(!storeWrap)
+      const onClose = typeof props?.onClose === 'function' ? props.onClose : undefined
+      const phase = typeof props?.phase === 'string' ? props.phase : 'ready'
+      const binary = props?.binary === true || isBinaryDiff(diff)
+      // `dense`：会话内的文件列表里没有独立头部空间，按钮与内边距收一档。
+      const dense = props?.dense === true
       const status = file?.status?.[0] ?? '?'
       const color = STATUS_COLORS[status] ?? 'var(--dsw-alias-label-secondary)'
+      const { dir, base } = splitPath(typeof file?.path === 'string' ? file.path : '')
+      const iconButton = (key, label, onClick, pressed, glyph) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            [`data-review-diff-${key}`]: '',
+            'data-review-icon-button': '',
+            title: label,
+            'aria-label': label,
+            'aria-pressed': pressed,
+            onClick,
+            style: {
+              flexShrink: 0,
+              width: '20px',
+              height: '20px',
+              padding: 0,
+              border: 'none',
+              borderRadius: '4px',
+              background: pressed === true ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+              color: pressed === true ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+              fontSize: reviewFont.meta,
+              lineHeight: 1,
+              cursor: 'pointer',
+            },
+          },
+          glyph,
+        )
       return react.createElement(
         'div',
-        { 'data-review-diff': '', 'data-review-diff-path': file?.path ?? '', style: { margin: props.margin ?? '2px 0 8px' } },
+        {
+          'data-review-diff': '',
+          'data-review-diff-viewer': '',
+          'data-review-diff-path': file?.path ?? '',
+          style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto', margin: props.margin ?? 0 },
+        },
         react.createElement(
           'div',
-          { 'data-review-diff-header': '' },
-          react.createElement('span', { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } }, status),
+          {
+            'data-review-diff-header': '',
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '7px',
+              flexShrink: 0,
+              padding: dense ? '3px 8px' : '4px 8px',
+              borderBottom: `1px solid ${BORDER}`,
+              fontFamily: UI_FONT,
+              fontSize: reviewFont.meta,
+            },
+          },
           react.createElement(
             'span',
-            { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: CODE_FONT } },
-            file?.path ?? '',
+            { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
+            status,
           ),
-          react.createElement('span', { style: { flex: 1 } }),
+          // 路径：目录压暗 + 中间省略（`direction: rtl` 让省略号落在中间偏左），文件名永远可见。
+          dir === ''
+            ? null
+            : react.createElement(
+                'span',
+                { style: { flexShrink: 1, minWidth: 0, color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta } },
+                `\u200e${dir}/`,
+              ),
+          react.createElement('span', { style: { flexShrink: 0, fontWeight: 600, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta }, title: file?.path ?? '' }, base),
+          react.createElement('span', { style: { flex: '1 1 auto', minWidth: '6px' } }),
           react.createElement(
             'span',
-            { 'data-review-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT } },
-            react.createElement('span', { style: { color: ADDED } }, `+${file?.added ?? 0}`),
+            { 'data-review-diff-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } },
+            react.createElement('span', { style: { color: ADDED } }, `+${file?.added ?? '·'}`),
             ' ',
-            react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? 0}`),
+            react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? '·'}`),
           ),
+          // 自动换行开关：默认开启，关掉后回到 `pre` + 横向滚动（看原始横向结构时用）。
+          iconButton('wrap', wrap ? t('diffWrapOn') : t('diffWrapOff'), onToggleWrap, wrap, wrap ? '↵' : '→'),
+          onClose === undefined ? null : iconButton('close', t('diffClose'), onClose, undefined, '✕'),
         ),
         // 按需取差异时可能被截断（host 侧 MAX_DIFF_BYTES）：必须说明，否则用户以为文件
         // 只有这么点改动。会话内的整份差异则在列表级统一提示（见 FileList 的 truncated）。
         typeof props?.note === 'string' && props.note !== ''
           ? react.createElement(
               'div',
-              { 'data-review-diff-note': '', style: { padding: '6px 10px', color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: uiPx(11.5) } },
+              { 'data-review-diff-note': '', style: { padding: '6px 10px', color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: reviewFont.meta } },
               props.note,
             )
           : null,
-        isBinaryDiff(diff)
+        // 正文：`phase` 决定是加载 / 出错 / 正常的差异（头部已在上面渲染完）。
+        phase === 'loading' || phase === 'idle'
           ? react.createElement(
               'div',
-              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: reviewFont.meta } },
-              t('binaryDiff'),
+              { 'data-review-diff-body': '', 'data-review-diff-state': 'loading', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+              statusBlock(t('loading')),
             )
-          : react.createElement(DiffBody, { diff }),
+          : phase === 'error'
+            ? react.createElement(
+                'div',
+                { 'data-review-diff-body': '', 'data-review-diff-state': 'error', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                statusBlock(props?.message ?? '', 'error'),
+              )
+            : binary
+              ? react.createElement(
+                  'div',
+                  { 'data-review-diff-body': '', 'data-review-diff-state': 'binary', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                  statusBlock(t('binaryDiff')),
+                )
+              : react.createElement(
+                  'div',
+                  { 'data-review-diff-body-wrap': '', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                  react.createElement(DiffBody, { diff, wrap }),
+                ),
       )
+    }
+
+    /**
+     * 一个文件的逐行差异。
+     *
+     * 保留这个名字是因为会话内的文件列表（`FileList`）与 `LazyFileDiff` 都按"给我 file + diff，
+     * 我画出来"使用它；内部完全委托给唯一的 `ReviewDiffViewer`，因此不再是"另一套实现"。
+     *
+     * @param props - `{ t, file, diff, margin, note }`。
+     * @returns React 元素。
+     */
+    function FileDiff(props) {
+      return react.createElement(ReviewDiffViewer, {
+        t: props?.t,
+        file: props?.file,
+        diff: props?.diff,
+        note: props?.note,
+        margin: props?.margin ?? '2px 0 8px',
+        dense: true,
+      })
     }
 
     /**
      * 差异正文的容器。
      *
-     * **横向滚动只在这一层**（`overflowX: auto`），因此：
-     *   * 每一行自己不会产生滚动条（那会让窄栏里的代码看起来"到处都是滚动条"）；
-     *   * 正文可以安全地 `white-space: pre` 不折行——长行的溢出由这里统一吸收；
-     *   * 行号栏与正文在同一个滚动容器里，横向滚动时一起移动（否则行号会与代码错位）。
-     * 纵向不在这里滚：由外层（Changes 的滚动区 / Diff Preview 的 body）负责，避免嵌套。
+     * **横向滚动只在"不换行"模式下出现**：
+     *   * `wrap === true` → `overflowX: 'hidden'`。文字已经折好了，再留一条横向滚动条是纯噪音
+     *     （而且是实机反馈里那种"文字明明换了行、下面还挂着一条没用的滚动条"）；
+     *   * `wrap === false` → `overflowX: 'auto'`，长行由这一层统一吸收，每一行自己不产生滚动条。
      *
-     * @param props - `{ diff }`。
+     * 纵向不在这里滚：由外层（Changes 的文件滚动区 / Diff Preview 的 body）负责，避免嵌套滚动。
+     *
+     * @param props - `{ diff, wrap }`。
      * @returns React 元素。
      */
     function DiffBody(props) {
+      const wrap = props?.wrap !== false
       return react.createElement(
         'div',
         {
           'data-review-diff-body': '',
+          'data-review-diff-wrap': wrap ? 'on' : 'off',
           style: {
             // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
             fontFamily: CODE_FONT,
             fontSize: reviewFont.code,
             lineHeight: reviewMetrics.codeLineHeight,
             fontVariantLigatures: 'none',
-            overflowX: 'auto',
+            overflowX: wrap ? 'hidden' : 'auto',
             overflowY: 'hidden',
           },
         },
-        renderDiff(props?.diff),
+        renderDiff(props?.diff, wrap),
       )
     }
 
@@ -6207,9 +6608,7 @@ window.__ModuleLoader__.load({
 
       // 键对不上的那一份当它不存在：绝不用上一个文件的差异画这一个（与 LazyFileDiff 同一套）。
       const current = state.key === cacheKey ? state : { phase: 'loading' }
-      const status = file?.status?.[0] ?? (file?.status ?? '?')
-      const color = STATUS_COLORS[status] ?? GRAPH_DIM
-      const { dir, base } = splitPath(path)
+      const diff = typeof current.result?.diff === 'string' ? current.result.diff : ''
 
       return react.createElement(
         'div',
@@ -6217,84 +6616,24 @@ window.__ModuleLoader__.load({
           'data-graph-diff-preview': '',
           style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, borderTop: `1px solid ${BORDER}`, background: 'var(--dsw-alias-bg-base, #fff)' },
         },
-        // ---- 头部 toolbar：状态 / 路径 / 增删 / 关闭 ----
+        // **整个视图交给共享的 `ReviewDiffViewer`**：header（状态 / 路径 / 增删 / 自动换行 /
+        // 关闭）与正文（行号栏 / 标记 / hunk / 折叠文件头）都只有那一处实现。这里只负责
+        // "取这个文件在这次提交里的差异"以及那三种状态。
         //
-        // 刻意**不重复 CommitSummary**：用户在这里看的是"这个文件的代码"，标题与作者已经在
-        // 上面的详情栏里了，重复一遍只会挤掉真正有用的那一行。
-        react.createElement(
-          'div',
-          {
-            'data-graph-diff-header': '',
-            style: {
-              display: 'flex',
-              alignItems: 'center',
-              gap: '7px',
-              flexShrink: 0,
-              padding: '4px 8px',
-              borderBottom: `1px solid ${BORDER}`,
-              fontFamily: UI_FONT,
-              fontSize: reviewFont.meta,
-            },
-          },
-          react.createElement(
-            'span',
-            { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } },
-            status,
-          ),
-          // 路径：目录压暗 + 中间省略（`direction: rtl` 让省略号落在中间偏左），文件名永远可见。
-          dir === ''
-            ? null
-            : react.createElement('span', { style: { flexShrink: 1, minWidth: 0, color: GRAPH_DIM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl' } }, `\u200e${dir}/`),
-          react.createElement('span', { style: { flexShrink: 0, fontWeight: 600 }, title: path }, base),
-          react.createElement('span', { style: { flex: '1 1 auto', minWidth: '6px' } }),
-          react.createElement(
-            'span',
-            { 'data-graph-diff-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } },
-            react.createElement('span', { style: { color: ADDED } }, `+${file?.added ?? '·'}`),
-            ' ',
-            react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? '·'}`),
-          ),
-          react.createElement(
-            'button',
-            {
-              type: 'button',
-              'data-graph-diff-close': '',
-              'data-review-icon-button': '',
-              title: t('graphDiffClose'),
-              'aria-label': t('graphDiffClose'),
-              onClick: () => (typeof onClose === 'function' ? onClose() : undefined),
-              style: {
-                flexShrink: 0,
-                width: '20px',
-                height: '20px',
-                padding: 0,
-                border: 'none',
-                borderRadius: '4px',
-                background: 'transparent',
-                color: GRAPH_DIM,
-                fontSize: reviewFont.meta,
-                lineHeight: 1,
-                cursor: 'pointer',
-              },
-            },
-            '✕',
-          ),
-        ),
-        // ---- 正文：整块差异只在这里横向滚动 ----
-        react.createElement(
-          'div',
-          {
-            'data-graph-diff-body': '',
-            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' },
-          },
-          current.phase === 'loading'
-            ? statusBlock(t('loading'))
-            : current.phase === 'error'
-              ? statusBlock(current.message, 'error')
-              : current.result?.binary === true
-                ? statusBlock(t('binaryDiff'))
-                : react.createElement(DiffBody, { diff: current.result?.diff ?? '' }),
-        ),
+        // 刻意**不重复 CommitSummary**：标题与作者已经在上面那条 commit 详情里了，重复一遍
+        // 只会挤掉真正有用的那一行。
+        react.createElement(ReviewDiffViewer, {
+          t,
+          file: { ...file, path },
+          diff,
+          onClose,
+          ...(current.result?.truncated === true ? { note: t('truncated') } : {}),
+          // 头部始终在（哪怕正文还在加载）：路径与增删数字是"我在看哪个文件"的锚点，
+          // 把它们一起换成 loading 会让界面跳一下。
+          phase: current.phase,
+          message: current.phase === 'error' ? current.message : '',
+          ...(current.result?.binary === true ? { binary: true } : {}),
+        }),
       )
     }
 
@@ -6448,6 +6787,73 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Changes 双栏里"文件列表"那一栏的宽度。
+     *
+     * 与 Diff Preview 高度同一套约定：**没拖过 = 百分比**（`34%`，随可用宽度自适应），拖动过
+     * 就存 px（用户要的是那个精确宽度），双击 splitter 复位（清掉记录、回到百分比）。
+     */
+    const CHANGES_FILE_WIDTH_KEY = 'dsh.review.changesFileWidth'
+    /** 默认占可用宽度的 34%（需求给的 32%~36% 区间）。 */
+    const CHANGES_FILE_DEFAULT_BASIS = '34%'
+    /** 左栏下限：再窄就看不清路径了（需求给的 280~320）。 */
+    const CHANGES_FILE_MIN = 280
+    const changesFileWidthStore = {
+      /** @returns 持久化宽度（px），没记录时 undefined。 */
+      get() {
+        try {
+          const raw = window.localStorage.getItem(CHANGES_FILE_WIDTH_KEY)
+          if (raw === null) return undefined
+          const stored = Number(raw)
+          return Number.isFinite(stored) && stored > 0 ? stored : undefined
+        } catch {
+          return undefined
+        }
+      },
+      /** @param value - 宽度（px）。 */
+      set(value) {
+        try {
+          window.localStorage.setItem(CHANGES_FILE_WIDTH_KEY, String(value))
+        } catch {
+          // 写失败不影响本次会话。
+        }
+      },
+      /** 双击 splitter 复位。 */
+      reset() {
+        try {
+          window.localStorage.removeItem(CHANGES_FILE_WIDTH_KEY)
+        } catch {
+          // 同上。
+        }
+      },
+    }
+
+    /**
+     * Changes 左栏宽度的夹取。
+     *
+     * 上限是**可用宽度的一半**（需求给的 max 50%）：右栏是代码，必须留出比左栏更大的空间，
+     * 否则"文件列表 + 代码"会变成两栏都读不了。拿不到宽度时退到视口的一半，量级上安全。
+     *
+     * @param value - 期望宽度（px）。
+     * @param available - 可用的内容宽度（px，可能拿不到）。
+     * @returns 夹取后的宽度（px）。
+     */
+    function clampChangesFileWidth(value, available) {
+      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
+      const room = Number.isFinite(available) && available > 0 ? available : viewport * 0.7
+      const max = Math.max(CHANGES_FILE_MIN, Math.round(room * 0.5))
+      const raw = Number.isFinite(value) ? value : Math.round(room * 0.34)
+      return Math.max(CHANGES_FILE_MIN, Math.min(max, Math.round(raw)))
+    }
+
+    /**
+     * Changes 窄窗口的阈值。
+     *
+     * 低于它就**不再硬挤左右两栏**，改成上下（文件列表 / Diff），但**绝不回退到"把 diff 插在
+     * 某一个文件行下面"**——那种 inline 展开正是这一轮要删掉的 UI。
+     */
+    const CHANGES_NARROW_WIDTH = 900
+
+    /**
      * 拖动分栏手柄。
      *
      * 与抽屉的宽度手柄同一套做法（见 ReviewPanel.startResize）：`mousemove`/`mouseup` 挂在
@@ -6508,6 +6914,40 @@ window.__ModuleLoader__.load({
         document.body.dataset.reviewDragging = '1'
         const onMove = (moveEvent) => {
           onChange(clampGraphDiffHeight(startHeight + (startY - moveEvent.clientY), start?.available))
+        }
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+          delete document.body.dataset.reviewDragging
+          onCommit()
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+      }
+    }
+
+    /**
+     * 拖动 Changes 左栏与右栏之间的 splitter（左右改变左栏宽度）。
+     *
+     * 与另外两个手柄同一套做法（`mousemove`/`mouseup` 挂在 document 上、拖动期间给 body 打
+     * 标记），方向是横向且**往右拖 = 左栏变宽**。开始时先量一次"当前实际宽度"当基准：默认值
+     * 是百分比，不量就不知道用户是从多少像素开始拖的。
+     *
+     * @param measure - 返回 `{ current, available }`（当前宽度与可用内容宽度，px）。
+     * @param onChange - 拖动过程中的回调（每帧，参数是 px）。
+     * @param onCommit - 松手时的回调（用于持久化）。
+     * @returns 鼠标按下的处理器。
+     */
+    function startChangesFileResize(measure, onChange, onCommit) {
+      return (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault()
+        const startX = event.clientX
+        const start = typeof measure === 'function' ? measure() : {}
+        const startWidth = clampChangesFileWidth(start?.current, start?.available)
+        document.body.dataset.reviewDragging = '1'
+        const onMove = (moveEvent) => {
+          onChange(clampChangesFileWidth(startWidth + (moveEvent.clientX - startX), start?.available))
         }
         const onUp = () => {
           document.removeEventListener('mousemove', onMove)

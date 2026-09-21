@@ -129,7 +129,8 @@ function collectHostNodes(node, key = 'bar', queued) {
       // key 变了就卸载重建（`useState` 初值重新执行）。桩如果不认 key，就没法验证
       // "换一个对话框就换一个实例"这类修复——实测踩到过：组件加了 key、预填值却依然错，
       // 因为桩把它当成了同一个实例。
-      const keyed = current.props?.key === undefined ? path : `${path}#${String(current.props.key)}`
+      const name = current.type.name === '' ? 'anonymous' : current.type.name
+      const keyed = `${path}${current.props?.key === undefined ? '' : `#${String(current.props.key)}`}:${name}`
       const { tree, effects } = render(current.type, current.props, keyed)
       if (queued !== undefined) queued.push(...effects)
       // **展开后不能 return**：函数组件返回的元素树要交给同一次遍历继续走，才能把它的

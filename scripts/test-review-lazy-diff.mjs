@@ -296,57 +296,64 @@ console.log('=== 1. 不点文件：一个差异请求都不发 ===')
 }
 
 console.log('')
-console.log('=== 2. 点开一个文件：只取它、带上 HEAD、渲染出来 ===')
+console.log('=== 2. 选中一个文件：只取它、带上 HEAD、在右栏渲染出来 ===')
 {
   has('2) 点得中 a.txt', await clickNow('data-staging-diff-toggle', 'a.txt'))
   const nodes = await drain()
   check('   只发了一次请求', fileReqs().length, 1)
   check('   请求路径正确', fileReqs()[0]?.body?.path, 'a.txt')
   check('   带 HEAD 作为基线', fileReqs()[0]?.body?.revision, HEAD)
-  check('   该行标记为展开', rowsOf(nodes, 'data-staging-diff-toggle').find((n) => n.props['data-staging-diff-toggle'] === 'a.txt')?.props?.['aria-expanded'], 'true')
-  has('   差异渲染出来', subtreeText(rowsOf(nodes, 'data-review-diff')[0] ?? null).includes('new a.txt'))
+  // 语义变了：点击不再"展开/收起"，而是"在右侧看它"，因此是 aria-selected。
+  check('   该行标记为选中', rowsOf(nodes, 'data-staging-diff-toggle').find((n) => n.props['data-staging-diff-toggle'] === 'a.txt')?.props?.['aria-selected'], 'true')
+  check('   行上也有 data 标记', rowsOf(nodes, 'data-staging-row').find((n) => n.props['data-staging-row'] === 'a.txt')?.props?.['data-staging-selected'], 'true')
+  has('   差异渲染出来', allText(nodes).includes('new a.txt'))
+  // 差异只在右栏那一份 viewer 里（不再 inline 插在文件行下面）。
+  check('   只有一个差异视图', rowsOf(nodes, 'data-review-diff').length, 1)
+  check('   它在右栏里', rowsOf(nodes, 'data-changes-diff-preview').length, 1)
   has('   行上的增删数字由差异补上', textOf(nodes).includes('+1'))
 }
 
 console.log('')
-console.log('=== 3. 折叠不发请求；再展开走缓存 ===')
+console.log('=== 3. 关闭右栏不发请求；再点同一个文件走缓存 ===')
 {
-  has('3) 折叠 a.txt', await clickNow('data-staging-diff-toggle', 'a.txt'))
-  const collapsed = await drain()
-  check('   折叠后没有差异容器', rowsOf(collapsed, 'data-review-diff').length, 0)
-  check('   折叠不发请求', fileReqs().length, 1)
-  has('   再展开', await clickNow('data-staging-diff-toggle', 'a.txt'))
+  has('3) 点得中关闭按钮', await clickNow('data-review-diff-close'))
+  const closed = await drain()
+  check('   关闭后没有差异视图', rowsOf(closed, 'data-review-diff').length, 0)
+  check('   关闭不发请求', fileReqs().length, 1)
+  // Changes 的关闭 = **取消选中**（右栏那个文件不再"正在被查看"）：行的高亮同时消失。
+  // 与 Log 的 Preview 不同——那里的 × 只收起面板、保留选中（那边有明确的"选中可以保留"要求）。
+  check('   关闭同时取消选中', rowsOf(closed, 'data-staging-row').find((n) => n.props['data-staging-row'] === 'a.txt')?.props?.['data-staging-selected'], 'false')
+  has('   再点同一个文件', await clickNow('data-staging-diff-toggle', 'a.txt'))
   const reopened = await drain()
   check('   缓存命中，仍只有一次请求', fileReqs().length, 1)
-  has('   差异仍然显示', subtreeText(rowsOf(reopened, 'data-review-diff')[0] ?? null).includes('new a.txt'))
+  has('   差异仍然显示', allText(reopened).includes('new a.txt'))
 }
 
 console.log('')
 console.log('=== 4. 换文件会再取一次；二进制给 binary 提示 ===')
 {
-  has('4) 点开 bin.dat', await clickNow('data-staging-diff-toggle', 'bin.dat'))
+  has('4) 点得中 bin.dat', await clickNow('data-staging-diff-toggle', 'bin.dat'))
   const nodes = await drain()
   check('   共两次请求', fileReqs().length, 2)
   check('   第二次是 bin.dat', fileReqs()[1]?.body?.path, 'bin.dat')
   has('   二进制提示', allText(nodes).includes('binaryDiff'))
-  check('   仍然只有一个差异容器', rowsOf(nodes, 'data-review-diff').length, 1)
+  check('   仍然只有一个差异视图', rowsOf(nodes, 'data-review-diff').length, 1)
 }
 
 console.log('')
 console.log('=== 5. 换 workspace / 换 HEAD：缓存键不同，必须重新取 ===')
 {
-  // 同一个路径、不同的 HEAD：基线变了，旧差异不能复用。
+  // 同一个路径、不同的 HEAD：基线变了，旧差异不能复用。选中的文件没变，因此**不需要再点一次**
+  // ——右栏的实例是按 `revision:path` 做 key 的，props 一变它就换实例并重新取数。
   const head2 = 'b'.repeat(40)
   const before = fileReqsFor('a.txt').length
-  has('5) 点得中 a.txt（换 HEAD）', await clickNow('data-staging-diff-toggle', 'a.txt', mountProps({ revision: head2 })))
+  has('5) 点得中 a.txt', await clickNow('data-staging-diff-toggle', 'a.txt'))
   await drain(mountProps({ revision: head2 }))
   check('   换 HEAD 后重新请求', fileReqsFor('a.txt').length - before, 1)
   check('   新请求带的是新 HEAD', fileReqsFor('a.txt').at(-1)?.body?.revision, head2)
   // 不同 workspace：即使 HEAD 与路径都相同也不复用。
   const beforeWs = fileReqsFor('a.txt').length
   const other = mountProps({ workspace: 'F:\\code\\projB', revision: head2 })
-  await drain(other)
-  has('   点得中同一个文件（换 workspace）', await clickNow('data-staging-diff-toggle', 'a.txt', other))
   await drain(other)
   check('   换 workspace 后重新请求', fileReqsFor('a.txt').length - beforeWs, 1)
   check('   请求带的是新 workspace', fileReqsFor('a.txt').at(-1)?.body?.workspace, 'F:\\code\\projB')
@@ -360,16 +367,14 @@ console.log('=== 6. 迟到的响应不许写进另一个文件 ===')
   const props3 = mountProps({ revision: head3 })
   rootKey = 'lazy-late'
   held.set('a.txt', [])
-  has('6) 展开 a.txt（响应被挂起）', await clickNow('data-staging-diff-toggle', 'a.txt', props3))
+  has('6) 选中 a.txt（响应被挂起）', await clickNow('data-staging-diff-toggle', 'a.txt', props3))
   await drain(props3)
   const pending = held.get('a.txt') ?? []
   has('   a.txt 的请求确实在飞', pending.length === 1)
-  has('   折叠 a.txt', await clickNow('data-staging-diff-toggle', 'a.txt', props3))
-  await drain(props3)
-  has('   展开 bin.dat', await clickNow('data-staging-diff-toggle', 'bin.dat', props3))
+  has('   改选 bin.dat', await clickNow('data-staging-diff-toggle', 'bin.dat', props3))
   const withBin = await drain(props3)
   has('   当前显示的是 bin.dat 的二进制提示', allText(withBin).includes('binaryDiff'))
-  // 放行旧响应：它属于 a.txt，而 a.txt 已经不是当前展开项 → 不许出现在界面上。
+  // 放行旧响应：它属于 a.txt，而 a.txt 已经不是当前选中项 → 不许出现在界面上。
   held.delete('a.txt')
   for (const release of pending.splice(0)) release()
   const after = await drain(props3)

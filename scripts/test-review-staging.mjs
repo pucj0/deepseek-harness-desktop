@@ -98,7 +98,8 @@ function collectHostNodes(node, key, queued) {
     }
     if (typeof current !== 'object') return
     if (typeof current.type === 'function') {
-      const keyed = current.props?.key === undefined ? path : `${path}#${String(current.props.key)}`
+      const name = current.type.name === '' ? 'anonymous' : current.type.name
+      const keyed = `${path}${current.props?.key === undefined ? '' : `#${String(current.props.key)}`}:${name}`
       const { tree, effects } = render(current.type, current.props, keyed)
       if (queued !== undefined) queued.push(...effects)
       visit(tree, keyed)
@@ -843,10 +844,13 @@ console.log('=== 11. 未跟踪文件的按需差异（点开不许报错）===')
   //   1. 点击**不抛错**（这是回归本体：旧写法的报错发生在渲染期，会直接冒出来）；
   //   2. 请求形状对（路由、path、revision、`untracked: true`），且**只发一次**；
   //   3. 界面上真的出现了那份差异的内容（"没报错但什么都没画"同样是坏的）。
+  //
+  // 这一版差异**不再 inline 插在文件行下面**，而是出现在右栏的 Diff Preview 里，因此
+  // 第 3 条改成"右栏里画出了内容"，并额外断言"再点同一个文件不会重复请求"。
   await mount()
   const before = requests.filter((r) => r.route === 'workspace-file').length
   const toggle = find('data-staging-diff-toggle', 'untracked-1.txt')
-  checkTrue('11) 未跟踪行有展开按钮', toggle !== null)
+  checkTrue('11) 未跟踪行有选中入口', toggle !== null)
 
   let threw = null
   try {
@@ -861,13 +865,35 @@ console.log('=== 11. 未跟踪文件的按需差异（点开不许报错）===')
   check('   请求带的是这个未跟踪文件', calls[calls.length - 1]?.body?.path, 'untracked-1.txt')
   checkTrue('   请求标记 untracked', calls[calls.length - 1]?.body?.untracked === true)
   check('   请求带上了 HEAD 作为基线', calls[calls.length - 1]?.body?.revision, 'a'.repeat(40))
-  checkTrue('   界面上画出了新增内容', viewText().includes('hello from untracked-1.txt'))
+  // 差异在**右栏**里画出来，而不是那个文件行下面。
+  //
+  // 断言取材很关键：这里读 `settledNodes`（`settle()` 跑过副作用之后收集的那份平铺列表），
+  // **不要**再调一次 `collectHostNodes(render(...))` 去找内容。这个桩按"树中位置 + props.key"
+  // 给嵌套组件分配 hook 槽，而 `LazyFileDiff` 是"挂载之后才去取数"的状态组件：重新遍历一次
+  // 会拿到一个**全新的槽位**，于是它永远停在 loading、断言假红（实测踩到过，排查成本很高）。
+  const flat = settledNodes.map((n) => textOf(n)).join(' ')
+  const paneAt = settledNodes.findIndex((n) => n.props?.['data-changes-diff-preview'] !== undefined)
+  const rowAt = settledNodes.findIndex((n) => n.props?.['data-review-diff-row'] !== undefined)
+  checkTrue('   右栏画出了新增内容', flat.includes('hello from untracked-1.txt'))
+  check('   差异在右栏之后（不是文件行下面）', rowAt > paneAt, 'true')
+  check('   左栏里没有差异行（不是 inline 展开）', settledNodes.slice(0, paneAt).some((n) => n.props?.['data-review-diff-row'] !== undefined), 'false')
+  // 选中的行被标记（aria-selected + data 标记），用户才知道右边那块属于谁。
+  check('   选中的行被标记', find('data-staging-row', 'untracked-1.txt')?.props?.['data-staging-selected'], 'true')
+  check('   路径按钮标记 aria-selected', find('data-staging-diff-toggle', 'untracked-1.txt')?.props?.['aria-selected'], true)
 
-  // 收起再展开必须走缓存：缓存键是 workspace + HEAD + path，同一份内容不该再问一次 host。
+  // 再点同一个文件：保持选中，且**不重复请求**（缓存 + 同一键只问一次）。
   await click(find('data-staging-diff-toggle', 'untracked-1.txt'))
-  checkTrue('   收起后差异消失', viewText().includes('hello from untracked-1.txt') === false)
+  check('   再次点击仍保持选中', find('data-staging-diff-toggle', 'untracked-1.txt')?.props?.['aria-selected'], true)
+  check('   再次点击不重复请求', requests.filter((r) => r.route === 'workspace-file').length - before, 1)
+  checkTrue('   内容仍在右栏', settledNodes.map((n) => textOf(n)).join(' ').includes('hello from untracked-1.txt'))
+
+  // 关闭按钮：取消选中（行高亮消失、右栏回到空态）；再点同一个文件从缓存恢复，不再请求。
+  await click(find('data-review-diff-close'))
+  checkTrue('   关闭后差异内容消失', settledNodes.map((n) => textOf(n)).join(' ').includes('hello from untracked-1.txt') === false)
+  check('   关闭同时取消选中', find('data-staging-row', 'untracked-1.txt')?.props?.['data-staging-selected'], 'false')
   await click(find('data-staging-diff-toggle', 'untracked-1.txt'))
-  check('   收起再展开不再发请求（走缓存）', requests.filter((r) => r.route === 'workspace-file').length - before, 1)
+  check('   再点同一个文件恢复显示且不再请求', requests.filter((r) => r.route === 'workspace-file').length - before, 1)
+  checkTrue('   内容回来了', settledNodes.map((n) => textOf(n)).join(' ').includes('hello from untracked-1.txt'))
 
   // 换一个 workspace：缓存键里有 workspace，旧项目的差异**不允许**被复用。
   const otherWorkspace = 'F:\\code\\projB'

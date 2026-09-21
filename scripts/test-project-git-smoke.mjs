@@ -443,7 +443,7 @@ console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
 
 // ---- G2. Log：点改动文件 → 底部 Diff Preview（不再内联在窄右栏里）--------------
 console.log('')
-console.log('=== G2. Diff Preview：右栏不内联 diff、代码区不折行、能关能恢复 ===')
+console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动换行且可切换、能关能恢复 ===')
 {
   // 选一条提交（第一条），右栏出现改动文件清单。
   await evaluate(`(() => { const row = document.querySelector('[data-graph-row]'); if (row) row.click(); return true })()`)
@@ -468,14 +468,23 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区不折行、
           const gutter = document.querySelector('[data-review-diff-gutter]');
           const header = document.querySelector('[data-review-diff-fileheader]');
           const pane = document.querySelector('[data-graph-pane="diff"]');
+          const codeStyle = code ? getComputedStyle(code) : null;
+          const oldCell = document.querySelector('[data-review-diff-line-old]');
+          const newCell = document.querySelector('[data-review-diff-line-new]');
           return JSON.stringify({
             hasPreview: preview !== null,
             previewInDetail: detail !== null && detail.querySelector('[data-graph-diff-preview]') !== null,
             diffRowsInDetail: detail ? detail.querySelectorAll('[data-review-diff-row]').length : -1,
             diffRowsInPreview: preview ? preview.querySelectorAll('[data-review-diff-row]').length : -1,
-            whiteSpace: code ? getComputedStyle(code).whiteSpace : '',
+            whiteSpace: code ? codeStyle.whiteSpace : '',
+            overflowWrap: code ? codeStyle.overflowWrap : '',
+            wordBreak: code ? codeStyle.wordBreak : '',
+            codeScrollsX: code ? code.scrollWidth > code.clientWidth + 1 : false,
             overflowX: body ? getComputedStyle(body).overflowX : '',
+            wrap: body ? body.getAttribute('data-review-diff-wrap') : null,
+            hasWrapToggle: document.querySelector('[data-review-diff-wrap]') !== null,
             gutterUserSelect: gutter ? getComputedStyle(gutter).userSelect : '',
+            gutterGrid: oldCell && newCell ? getComputedStyle(oldCell).gridColumnStart + '/' + getComputedStyle(newCell).gridColumnStart : '',
             hasHeader: header !== null,
             headerText: header ? header.innerText.trim() : '',
             heightMode: pane ? pane.getAttribute('data-graph-diff-height') : null,
@@ -484,21 +493,41 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区不折行、
         })()`),
       )
     const first = await read()
-    console.log(`   Preview=${first.hasPreview} 右栏内差异行=${first.diffRowsInDetail} Preview 内差异行=${first.diffRowsInPreview} 高度=${first.flex}`)
+    console.log(`   Preview=${first.hasPreview} 右栏内差异行=${first.diffRowsInDetail} Preview 内差异行=${first.diffRowsInPreview} 高度=${first.flex} wrap=${first.wrap}`)
     has('G2) 出现 Diff Preview', first.hasPreview)
     // 这一条是本次重构的核心约束：完整 diff 不许再出现在右栏里。
     check('   右栏里没有内联差异行', first.diffRowsInDetail, 0)
     check('   Preview 不在右栏里', first.previewInDetail, false)
     has('   Preview 里有差异行', first.diffRowsInPreview > 0)
-    check('   代码不折行（white-space: pre）', first.whiteSpace, 'pre')
-    check('   横向滚动在容器上', first.overflowX, 'auto')
+    // 本轮的核心：默认自动换行；长代码不能把容器撑出横向滚动。
+    check('   代码默认自动换行（white-space: pre-wrap）', first.whiteSpace, 'pre-wrap')
+    check('   长词/URL 也断行（overflow-wrap: anywhere）', first.overflowWrap, 'anywhere')
+    check('   默认 wrap 状态是 on', first.wrap, 'on')
+    check('   换行态下容器不横向滚动', first.overflowX, 'hidden')
+    check('   换行之后代码区没有横向溢出', first.codeScrollsX, false)
+    has('   有「自动换行」开关', first.hasWrapToggle === true)
     check('   行号栏不可选中', first.gutterUserSelect, 'none')
+    check('   旧/新行号各占一列（不重复）', first.gutterGrid, '1/2')
     has('   文件头被折叠成一条', first.hasHeader && /File changed|New file|Deleted file|Renamed file/.test(first.headerText))
     check('   默认高度是百分比', first.flex, '0 0 40%')
     check('   这一段没有 React error / ReferenceError', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
 
+    // 关掉自动换行 → 回到 pre + 容器横向滚动；再打开 → 回到 pre-wrap。
+    const toggled = await evaluate(`(() => { const el = document.querySelector('[data-review-diff-wrap]'); if (!el) return false; el.click(); return true })()`)
+    has('   点得中「自动换行」开关', toggled === true)
+    await sleep(700)
+    const nowrap = await read()
+    check('   关掉后代码不再折行（white-space: pre）', nowrap.whiteSpace, 'pre')
+    check('   关掉后 wrap 状态是 off', nowrap.wrap, 'off')
+    check('   关掉后横向滚动回到容器上', nowrap.overflowX, 'auto')
+    await evaluate(`(() => { const el = document.querySelector('[data-review-diff-wrap]'); if (el) el.click(); return true })()`)
+    await sleep(700)
+    const rewrapped = await read()
+    check('   再打开回到自动换行', rewrapped.whiteSpace, 'pre-wrap')
+    check('   再打开 wrap 状态回到 on', rewrapped.wrap, 'on')
+
     // 关闭 → 上半部三栏不受影响；再点同一文件 → 立即恢复。
-    const closed = await evaluate(`(() => { const el = document.querySelector('[data-graph-diff-close]'); if (!el) return false; el.click(); return true })()`)
+    const closed = await evaluate(`(() => { const el = document.querySelector('[data-review-diff-close]'); if (!el) return false; el.click(); return true })()`)
     has('   点得中关闭按钮', closed === true)
     await sleep(900)
     check('   关闭后 Preview 消失', await evaluate(`document.querySelector('[data-graph-diff-preview]') === null`), true)
@@ -507,6 +536,139 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区不折行、
     await sleep(1500)
     check('   再点同一文件 Preview 立即恢复', await evaluate(`document.querySelector('[data-graph-diff-preview]') !== null`), true)
     check('   这一段没有 React error', reactErrors().length, 0)
+  }
+}
+
+// ---- G3. Changes：左栏选文件 / 右栏看差异（不再 inline 展开）+ 提交区常驻 ---------
+console.log('')
+console.log('=== G3. Changes 左右分栏：选文件、右栏看差异、提交区常驻 ===')
+{
+  await click('[data-review-tab="changes"]')
+  await sleep(1500)
+  const layout = JSON.parse(
+    await evaluate(`(() => {
+      const main = document.querySelector('[data-changes-main]');
+      const files = document.querySelector('[data-changes-files]');
+      const splitter = document.querySelector('[data-changes-splitter]');
+      const pane = document.querySelector('[data-changes-diff-preview]');
+      const card = document.querySelector('[data-staging-commit-card]');
+      const rect = card ? card.getBoundingClientRect() : null;
+      return JSON.stringify({
+        hasMain: main !== null,
+        mode: main ? main.getAttribute('data-changes-layout') : null,
+        hasFiles: files !== null,
+        filesBasis: files ? files.style.flexBasis : '',
+        hasSplitter: splitter !== null,
+        hasPane: pane !== null,
+        paneInFiles: files !== null && files.querySelector('[data-changes-diff-preview]') !== null,
+        rowsInFiles: files ? files.querySelectorAll('[data-review-diff-row]').length : -1,
+        hasPreviewEmptyHint: pane !== null && pane.innerText.trim().length > 0,
+        cardPinned: rect !== null && rect.bottom <= window.innerHeight + 1 && rect.top > 0,
+        cardAfterMain: main !== null && card !== null && (main.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+      });
+    })()`),
+  )
+  console.log(`   布局=${layout.mode} 左栏份额=${layout.filesBasis} 左栏内差异行=${layout.rowsInFiles} 提交区贴底=${layout.cardPinned}`)
+  has('G3) Changes 有左右分栏容器', layout.hasMain && layout.hasFiles && layout.hasPane)
+  has('   有可拖拽的分隔条', layout.hasSplitter)
+  check('   Diff 预览不在文件列表里', layout.paneInFiles, false)
+  check('   文件列表里没有内联差异行', layout.rowsInFiles, 0)
+  has('   未选文件时右栏是空态提示（不是空白）', layout.hasPreviewEmptyHint)
+  // 宽窗口默认左右分栏、左栏约 34%；窄窗口退化成上下堆叠。
+  if (layout.mode === 'columns') {
+    has('   左栏默认份额在 20%~50% 之间', Number.parseFloat(layout.filesBasis) >= 20 && Number.parseFloat(layout.filesBasis) <= 50)
+  } else {
+    check('   窄窗口退化成上下堆叠', layout.mode, 'stacked')
+  }
+  has('   提交区常驻在底部（没有被差异挤出视口）', layout.cardPinned)
+  has('   提交区在主区之后', layout.cardAfterMain)
+
+  // 选中一个已跟踪文件：只改变选中，绝不动勾选/暂存状态。
+  const picked = JSON.parse(
+    await evaluate(`(() => {
+      const rows = [...document.querySelectorAll('[data-staging-row]')].filter(
+        (r) => r.querySelector('[data-staging-file-pick]') && r.querySelector('[data-staging-diff-toggle]'),
+      );
+      if (rows.length === 0) return JSON.stringify({ ok: false });
+      const row = rows[0];
+      const pick = row.querySelector('[data-staging-file-pick]');
+      const before = { checked: pick.checked, checkedTotal: document.querySelectorAll('[data-staging-file-pick]:checked').length };
+      row.querySelector('[data-staging-diff-toggle]').click();
+      return JSON.stringify({ ok: true, path: row.getAttribute('data-staging-row'), before });
+    })()`),
+  )
+  if (picked.ok !== true) {
+    console.log('   没有可点的已跟踪改动文件，跳过选中/右栏断言')
+  } else {
+    await sleep(1800)
+    const after = JSON.parse(
+      await evaluate(`(() => {
+        const path = ${JSON.stringify(picked.path)};
+        const row = [...document.querySelectorAll('[data-staging-row]')].find((r) => r.getAttribute('data-staging-row') === path);
+        const pick = row ? row.querySelector('[data-staging-file-pick]') : null;
+        const pane = document.querySelector('[data-changes-diff-preview]');
+        const files = document.querySelector('[data-changes-files]');
+        const code = document.querySelector('[data-review-diff-code]');
+        const body = document.querySelector('[data-review-diff-body]');
+        return JSON.stringify({
+          selected: row ? row.getAttribute('data-staging-selected') : null,
+          ariaSelected: row ? row.querySelector('[data-staging-diff-toggle]')?.getAttribute('aria-selected') : null,
+          checked: pick ? pick.checked : null,
+          checkedTotal: document.querySelectorAll('[data-staging-file-pick]:checked').length,
+          paths: [...document.querySelectorAll('[data-review-diff-path]')].map((n) => n.getAttribute('data-review-diff-path')),
+          rows: pane ? pane.querySelectorAll('[data-review-diff-row]').length : -1,
+          rowsInFiles: files ? files.querySelectorAll('[data-review-diff-row]').length : -1,
+          viewers: document.querySelectorAll('[data-review-diff-viewer]').length,
+          wrap: body ? body.getAttribute('data-review-diff-wrap') : null,
+          whiteSpace: code ? getComputedStyle(code).whiteSpace : '',
+        });
+      })()`),
+    )
+    check('   选中的行被标记', after.selected, 'true')
+    check('   路径按钮带 aria-selected', after.ariaSelected, 'true')
+    check('   差异落在右栏', after.paths.includes(picked.path), true)
+    has('   右栏画出差异内容', after.rows > 0)
+    check('   文件列表里仍然没有内联差异行', after.rowsInFiles, 0)
+    check('   整屏只有一个 Diff Viewer', after.viewers, 1)
+    check('   Changes 的差异也默认自动换行', after.wrap, 'on')
+    check('   Changes 的代码区默认 pre-wrap', after.whiteSpace, 'pre-wrap')
+    // 本轮的硬约束：点文件名只改选中，勾选/暂存状态一律不许被牵连。
+    check('   这一行的勾选状态没被改动', after.checked, picked.before.checked)
+    check('   全局勾选数量没变', after.checkedTotal, picked.before.checkedTotal)
+    check('   提交区仍然贴底', await evaluate(`(() => { const r = document.querySelector('[data-staging-commit-card]')?.getBoundingClientRect(); return r ? r.bottom <= window.innerHeight + 1 : false })()`), true)
+
+    // 换一个文件：同一个右栏就地换内容，不新增 Viewer、不回到 inline。
+    const second = JSON.parse(
+      await evaluate(`(() => {
+        const path = ${JSON.stringify(picked.path)};
+        const rows = [...document.querySelectorAll('[data-staging-row]')].filter(
+          (r) => r.querySelector('[data-staging-diff-toggle]') && r.getAttribute('data-staging-row') !== path,
+        );
+        if (rows.length === 0) return JSON.stringify({ ok: false });
+        rows[0].querySelector('[data-staging-diff-toggle]').click();
+        return JSON.stringify({ ok: true, path: rows[0].getAttribute('data-staging-row') });
+      })()`),
+    )
+    if (second.ok === true) {
+      await sleep(1800)
+      const switched = JSON.parse(
+        await evaluate(`(() => {
+          const first = [...document.querySelectorAll('[data-staging-row]')].find((r) => r.getAttribute('data-staging-row') === ${JSON.stringify(picked.path)});
+          return JSON.stringify({
+            paths: [...document.querySelectorAll('[data-review-diff-path]')].map((n) => n.getAttribute('data-review-diff-path')),
+            viewers: document.querySelectorAll('[data-review-diff-viewer]').length,
+            rowsInFiles: document.querySelector('[data-changes-files]')?.querySelectorAll('[data-review-diff-row]').length ?? -1,
+            firstSelected: first ? first.getAttribute('data-staging-selected') : null,
+          });
+        })()`),
+      )
+      check('   第二个文件在同一个右栏里打开', switched.paths.includes(second.path), true)
+      check('   只有一个文件处于选中态', switched.paths.length, 1)
+      check('   换文件不新增 Viewer', switched.viewers, 1)
+      check('   上一个文件不再选中', switched.firstSelected, 'false')
+      check('   换文件后列表里依然没有内联差异', switched.rowsInFiles, 0)
+    }
+    check('   G3 没有 React error / 引用错误', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
   }
 }
 
