@@ -311,6 +311,53 @@ console.log('=== D. 快速 A→B→A：最终数据必须都属于 A ===')
   check('   这一段没有 React error', reactErrors().length, 0)
 }
 
+// ---- E. Log 左栏分支树：点分支后左栏不变、不白屏、滚动位置不丢 -------------------
+//
+// 这一条对应"点左栏某个分支之后，左栏只剩那个分支附近的 refs / 整个 Log 先白屏再出现"。
+// 真渲染器下这两件事都必须不发生。
+console.log('')
+console.log('=== E. 点分支：左栏完整、不白屏、滚动位置保持 ===')
+{
+  await click('[data-review-tab="log"]')
+  has('E) 提交图已渲染', await waitFor(`document.querySelector('[data-graph-tree]') !== null`, 10000))
+  const readTree = async () =>
+    JSON.parse(
+      await evaluate(`(() => {
+        const rows = [...document.querySelectorAll('[data-graph-tree-row]')].map((el) => el.getAttribute('data-graph-tree-row'));
+        const selected = [...document.querySelectorAll('[data-graph-tree-row][aria-selected="true"]')].map((el) => el.getAttribute('data-graph-tree-row'));
+        const scroll = document.querySelector('[data-graph-tree]');
+        return JSON.stringify({ rows, selected, scrollTop: scroll ? scroll.scrollTop : -1, panes: document.querySelectorAll('[data-graph-pane]').length });
+      })()`),
+    )
+  const before = await readTree()
+  console.log(`   左栏 ${before.rows.length} 项，三栏 ${before.panes} 个: ${before.rows.slice(0, 8).join(', ')}`)
+  if (before.rows.length < 2) {
+    console.log('   分支太少，跳过这一节（需要一个有多分支的仓库）')
+  } else {
+    // 先把左栏滚动一段，之后要验证它没被重置。
+    await evaluate(`(() => { const el = document.querySelector('[data-graph-tree]'); if (el) el.scrollTop = 24; return true })()`)
+    // 点第二个分支（第一个通常是当前分支，点它意义不大）。
+    const target = before.rows[1]
+    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-tree-row]')].find((n) => n.getAttribute('data-graph-tree-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
+    await sleep(1500)
+    const after = await readTree()
+    check('   左栏项数与点之前一致', after.rows.length, before.rows.length)
+    check('   左栏内容与点之前一致', after.rows.join(','), before.rows.join(','))
+    check('   被点的分支是唯一高亮项', after.selected.join(','), target)
+    check('   三栏仍在（没有白屏）', after.panes, before.panes)
+    has('   提交图容器仍在', (await evaluate(`document.querySelector('[data-graph-view]') !== null`)) === true)
+    has('   左栏滚动位置保持', after.scrollTop === before.scrollTop + 24 || after.scrollTop > 0)
+    check('   点分支没有 React error', reactErrors().length, 0)
+    // 再点一次同一个分支 = 取消过滤，左栏仍然完整。
+    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-tree-row]')].find((n) => n.getAttribute('data-graph-tree-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
+    await sleep(1200)
+    const cleared = await readTree()
+    check('   取消过滤后左栏仍然完整', cleared.rows.length, before.rows.length)
+    check('   取消过滤后没有高亮项', cleared.selected.length, 0)
+    check('   这一段没有 React error', reactErrors().length, 0)
+  }
+}
+
 // ---- 总结 ------------------------------------------------------------------------
 console.log('')
 console.log('=== 页面错误汇总 ===')

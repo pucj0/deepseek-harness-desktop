@@ -263,6 +263,9 @@ nsis:
 - 顶部是 `Changes / Log` 两个页签（IDEA 的 Git 工具窗同款）：
   - `Changes`：**已暂存 / 更改 / 未跟踪** 三组（同一份快照过滤得出，分组数量与列表恒等），点文件展开带行号与增删底色的差异，每行可暂存 / 取消暂存 / 还原 / 查看该文件的变更记录；提交信息与「提交」「提交并推送」固定在**底部**，不随超长文件列表滚走
   - `Log`：**分支树 / 提交图 / 详情** 三栏，单击一条提交只在右侧显示它的详情与改动文件（不再在原位置展开），点文件看这次提交对该文件的差异；两条分栏可拖动调整宽度并记忆，窄窗口可以把分支树或详情收起来；顶部有刷新与搜索
+    - **左栏与中栏的数据源是分开的**：左栏（`HEAD / 本地 / 远程 / 标签`）来自**未经过滤**的提交（只由"全部分支"的响应写入 `treeCommits`），中栏才是按 `selectedRef` 过滤的结果。点一个分支只会换中栏，左栏始终完整；再点同一个分支即取消过滤、回到全部。
+    - **点分支不会白屏**：已经有数据时刷新只置 `refreshing`（工具栏显示"正在加载…"、列表压暗），三栏 DOM 与左栏滚动位置原地保留；失败也只在中栏给一条非阻塞提示，不会把整个 Log 换成错误页。只有**首次进入**（手上一条提交都没有）才显示整页 loading。
+    - 每个 ref 的首屏有缓存（模块级、上限 12 个、键含工作区），因此 `develop → master → develop` 切回来**同一帧**就能看到，随后在后台 revalidate。分页只追加中栏；未过滤的分页会顺势扩展左栏（能看到更深历史里的分支），**过滤状态下的分页绝不改动左栏**。
 - 入口上的改动数字与抽屉里的文件列表**来自同一份共享快照**（同一个轮询），因此不会出现"外面显示 0、进去却有文件"；`stage / unstage / revert / commit` 成功后统一让快照失效并重取一次
 - **`Log` 页签渲染失败只降级这一页**：提交图的字段全部先在取数处规范化（`/graph`、`/commit-detail` 少给或多给字段都不会进渲染层），外面还包了一层错误边界——图炸了只会让 Log 页签显示带组件与字段的诊断信息与「重新加载 Log」，抽屉、`Changes` 页签与右上角入口都不会被带走。（曾经的实机现象是：点 `Log` 之后整块抽屉连右上角入口一起消失，看起来像面板被关掉，实际是渲染期异常被槽位级的错误边界替换掉了整个入口。）
 - **入口按钮与面板是两条互不连累的子树**：右上角按钮（`ProjectChangesTriggerButton`）与面板（`ProjectGitPanelErrorBoundary` → `ReviewPanel`）分开，面板内部（Changes / Log / 暂存区 / 提交框）任何渲染期异常都只让**面板**显示「Git 面板加载失败 + 详细错误 + 重新加载 + 关闭」，入口永远在。`Log` 页签里还有更细的一层边界。
@@ -543,6 +546,7 @@ node scripts/test-review-overlay-hooks.mjs   # 项目级入口：inject 不遮�
 node scripts/test-gitbar-workspace-race.mjs  # 切换项目时的竞态：迟到的旧响应不许覆盖新工作区
 node scripts/test-review-workspace-race.mjs  # 共享快照与提交图的竞态、外部数字与抽屉列表同源
 node scripts/test-review-log-tab-crash.mjs   # 点 Log 不许把抽屉与右上角入口一起带走（host 数据缺字段 + 错误边界）
+node scripts/test-review-graph-branch-filter.mjs # 左栏分支树与中栏过滤解耦：点分支不污染左栏、不白屏、乱序响应不覆盖
 node scripts/test-review-project-git.mjs     # 切项目的状态机：hook 数量不许变、入口永不消失、正在切换项目、面板级降级
 node scripts/test-review-lazy-diff.mjs       # 逐行差异按需取：不点不取、点一次只取一次、缓存键含 workspace/HEAD
 node scripts/check-react-rules.mjs           # 静态挡住 React #310（hook 顺序）与 #290（把 ref 当业务字段传）

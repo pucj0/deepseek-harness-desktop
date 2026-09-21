@@ -288,6 +288,20 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
     no inline expansion; click a changed file for that commit's diff of it. The two splitters
     are draggable and remembered, narrow windows can collapse the tree or the details, and the
     toolbar has refresh and search
+    - **The left tree and the middle list have separate data sources.** The tree
+      (`HEAD / Local / Remote / Tags`) is built from the **unfiltered** commits
+      (`treeCommits`, written only by the "all branches" response); the middle list is what
+      `selectedRef` filters. Clicking a branch therefore only swaps the middle list and the tree
+      stays complete; clicking the same branch again clears the filter and restores everything.
+    - **Clicking a branch does not blank the pane.** When data is already on screen a refresh only
+      sets `refreshing` (a "Loading…" chip in the toolbar, the list dimmed) and the three panes —
+      including the tree's own scroll position — stay mounted; a failure only adds a non-blocking
+      note in the middle pane instead of replacing the whole Log with an error page. The full-page
+      loading state is reserved for the first load, when there is nothing to show yet.
+    - Each ref's first page is cached (module level, capped at 12 entries, keyed by workspace), so
+      `develop → master → develop` is visible **in the same frame** and revalidates in the
+      background. Paging appends to the middle list only; unfiltered paging also extends the tree
+      (that is how refs from deeper history appear), while **filtered paging never touches it**.
 - The change count on the entry and the file list inside the drawer come from the **same shared
   snapshot** (one poll), so "shows 0 outside, has files inside" cannot happen; `stage /
   unstage / revert / commit` all invalidate that snapshot and refetch once
@@ -610,6 +624,7 @@ was verified rather than assumed:
 | `scripts/test-gitbar-workspace-race.mjs` | switching projects: a late response from the old workspace must never land |
 | `scripts/test-review-workspace-race.mjs` | shared-snapshot and commit-graph races; the entry's number and the drawer's list come from one snapshot |
 | `scripts/test-review-log-tab-crash.mjs` | clicking Log must not take the drawer and the top-right entry down with it (missing host fields + an error boundary) |
+| `scripts/test-review-graph-branch-filter.mjs` | the Log branch tree is decoupled from the filtered commit list: clicking a ref never shrinks the tree, never blanks the panes, and out-of-order responses never overwrite |
 | `scripts/test-review-project-git.mjs` | the project-switch state machine: the hook count must never change, the entry never disappears, "switching project…", panel-level crash isolation |
 | `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |

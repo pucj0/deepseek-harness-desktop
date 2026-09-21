@@ -666,6 +666,8 @@ window.__ModuleLoader__.load({
       graphNoCommits: '这个仓库还没有任何提交。',
       graphLoadMore: '加载更多',
       graphLoading: '正在读取提交历史…',
+      graphRefreshing: '正在加载…',
+      graphRefreshFailed: '刷新失败：{detail}',
       graphTruncatedLanes: '打开的线太多，右侧已折叠显示。',
       graphAllBranches: '全部分支',
       graphFilterRef: '按分支筛选',
@@ -799,6 +801,8 @@ window.__ModuleLoader__.load({
       graphNoCommits: 'This repository has no commits yet.',
       graphLoadMore: 'Load more',
       graphLoading: 'Reading commit history…',
+      graphRefreshing: 'Loading…',
+      graphRefreshFailed: 'Refresh failed: {detail}',
       graphTruncatedLanes: 'Too many open lines; the right side is collapsed.',
       graphAllBranches: 'All branches',
       graphFilterRef: 'Filter by branch',
@@ -4759,6 +4763,60 @@ window.__ModuleLoader__.load({
     /** 一屏最多渲染多少行（超出靠滚动占位撑开）。 */
     const GRAPH_WINDOW = 40
 
+    /**
+     * 每个 ref 首屏缓存的条数上限（最近使用的留下）。
+     *
+     * 有界是硬要求：仓库可能有两千个分支，而每个分支点一下都会产生一份首屏；不设上限就是
+     * 一处无界内存增长。8~16 足够覆盖"在几个常用分支之间来回看"这个真实用法。
+     */
+    const GRAPH_REF_CACHE_MAX = 12
+
+    /**
+     * ref → 首屏的缓存（模块级，跨组件实例）。
+     *
+     * 为什么放在模块级而不是组件里的 `useRef`：`CommitGraphView` 会在**切到 Changes 页签
+     * 再切回来**时整个卸载重挂（页签内容是条件渲染的），组件内的缓存那样就没了。键里带
+     * workspace，因此 A 项目缓存过的 develop 不会被 B 项目读到。
+     *
+     * 只缓存**首屏**（`skip === 0`）：分页追加的结果不进缓存，否则 `loadMore` 的 `skip`
+     * 依据（`commits.length`）会随缓存内容变来变去，两个视图的页边界就对不上了。
+     */
+    const graphPageCache = new Map()
+
+    /**
+     * 读某个 workspace + ref 的首屏缓存（命中后移到队尾 = 最近使用）。
+     * @param workspace - 工作区路径。
+     * @param refName - 过滤用的 ref（`''` 表示全部）。
+     * @returns `{ commits, hasMore }` 或 undefined。
+     */
+    function readGraphPage(workspace, refName) {
+      if (typeof workspace !== 'string' || workspace === '') return undefined
+      const key = `${workspace}\u0000${refName}`
+      if (!graphPageCache.has(key)) return undefined
+      const value = graphPageCache.get(key)
+      graphPageCache.delete(key)
+      graphPageCache.set(key, value)
+      return value
+    }
+
+    /**
+     * 写首屏缓存（超出上限时淘汰最久未用的）。
+     * @param workspace - 工作区路径。
+     * @param refName - 过滤用的 ref。
+     * @param page - `{ commits, hasMore }`。
+     */
+    function writeGraphPage(workspace, refName, page) {
+      if (typeof workspace !== 'string' || workspace === '') return
+      const key = `${workspace}\u0000${refName}`
+      graphPageCache.delete(key)
+      graphPageCache.set(key, page)
+      while (graphPageCache.size > GRAPH_REF_CACHE_MAX) {
+        const oldest = graphPageCache.keys().next()
+        if (oldest.done === true) break
+        graphPageCache.delete(oldest.value)
+      }
+    }
+
     /** 提交图上的取色：与泳道无关的常规色。 */
     const GRAPH_DIM = 'var(--dsw-alias-label-tertiary, #9aa0a6)'
 
@@ -4979,6 +5037,10 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     key: `${key}:${row.name}`,
                     'data-graph-tree-row': row.name,
+                    // 选中态同时用 ARIA 与一个 data 标记表达：ARIA 是给读屏与脚本用的稳定契约
+                    // （视觉上只有背景色差异，靠样式断言很容易写成"看起来像"）。
+                    'aria-selected': selectedRef === row.name,
+                    'data-graph-tree-selected': selectedRef === row.name ? 'true' : 'false',
                     onClick: () => onPickRef(row.name),
                     title: `${row.name}\n${textSlice(row.hash, 8)} ${row.subject}`,
                     style: {
@@ -6010,20 +6072,48 @@ window.__ModuleLoader__.load({
        * 这一次工作区的加载状态。**全部字段都代际化**（含过滤 ref 与选中项）：
        * 换了工作区之后，这一帧读到的就是新那一份的初值，因此既不会显示上一个项目的提交，
        * 也不会带着上一个项目的过滤条件去请求。
+       *
+       * 这里的字段分成**三组互不相同的用途**，混淆它们正是这一版要修的 bug：
+       *   * `treeCommits` / `treeHasMore` —— **左栏分支树**的数据源。只由 `ref === ''`
+       *     的响应写入，永远不受"按分支过滤"的影响；否则点一下 `develop`，中栏被替换成
+       *     过滤后的提交，左栏又从这些提交里聚合 refs，于是其它分支全部消失。
+       *   * `commits` / `hasMore` —— **中栏提交列表**当前显示的数据（可能来自某个 ref 的
+       *     过滤结果）。分页只追加到这里，并且**不碰** `treeCommits`。
+       *   * `ref` / `selected` —— 过滤条件与当前选中的提交。
+       *
+       * `phase` 与 `refreshing` 也刻意分开：
+       *   * 首次进入、手上一条提交都没有 → `phase: 'loading'`（整页 loading 是对的）；
+       *   * 已经有可展示的数据 → 保持 `phase: 'ready'` + `refreshing: true`，三栏 DOM
+       *     原地保留（换 ref 时不再整页白屏）。
        */
       const [state, setState] = react.useState({
         generation: -1,
         phase: 'idle',
+        refreshing: false,
         commits: [],
+        treeCommits: [],
         hasMore: false,
+        treeHasMore: false,
         error: '',
+        refreshError: '',
         ref: '',
         selected: '',
       })
-      const fresh =
-        state.generation === generation
-          ? state
-          : { generation, phase: 'loading', commits: [], hasMore: false, error: '', ref: '', selected: '' }
+      /** 某一代的空状态（新一代、或初值那一份）。 */
+      const blankState = (gen) => ({
+        generation: gen,
+        phase: 'loading',
+        refreshing: false,
+        commits: [],
+        treeCommits: [],
+        hasMore: false,
+        treeHasMore: false,
+        error: '',
+        refreshError: '',
+        ref: '',
+        selected: '',
+      })
+      const fresh = state.generation === generation ? state : blankState(generation)
 
       /**
        * 只写当前代。
@@ -6031,15 +6121,16 @@ window.__ModuleLoader__.load({
        * 基准必须按**当前代**重建，而不是"不是这一代就丢弃"：初值那一份的 generation 是 -1
        * （"还没有任何一代的数据"），如果直接丢弃，第一次响应就永远写不进去，界面会一直停在
        * 加载态。重建基准则天然等价于"换代时把这一份状态初始化成空"。
+       *
+       * 支持传函数：像"有数据就只置 refreshing、没数据才整页 loading"这种判断必须基于
+       * **当前**状态（`prev.commits`），不能基于这一帧闭包里的旧值。
        */
       const update = react.useCallback(
         (changes) => {
           setState((prev) => {
-            const base =
-              prev.generation === generation
-                ? prev
-                : { generation, phase: 'idle', commits: [], hasMore: false, error: '', ref: '', selected: '' }
-            return { ...base, ...changes }
+            const base = prev.generation === generation ? prev : blankState(generation)
+            const patch = typeof changes === 'function' ? changes(base) : changes
+            return { ...base, ...patch }
           })
         },
         [generation],
@@ -6073,12 +6164,23 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
+       * 每个 ref 的**首屏缓存**在模块级（见 `graphPageCache` 的说明）：切页签导致的重挂
+       * 不该把"刚看过的那个分支"丢掉。这里只剩两个薄包装，绑上当前工作区。
+       */
+      const readCachedPage = react.useCallback((refName) => readGraphPage(workspace, refName), [workspace])
+      const writeCachedPage = react.useCallback(
+        (refName, page) => writeGraphPage(workspace, refName, page),
+        [workspace],
+      )
+
+      /**
        * 拉第一页。
        *
        * 三处竞态保护（对应曾经真实出现的现象）：
        *   1. `gate.accept` —— 切换工作区后回来的响应一律丢弃；
        *   2. `slices: ['graph']` —— 重新加载会**抢占**这一片状态，因此一个更早发出的
-       *      `loadMore` 不会在这一页之后追加（否则会把两个筛选条件的提交混在一起）；
+       *      `loadMore` / 另一个 ref 的响应不会落地（否则会把两个筛选条件的提交混在一起，
+       *      或者让"先点 develop、再点 master"最终显示 develop）；
        *   3. `coalesce` —— 同一条件并发只会有一个请求在飞（点两次刷新不会发两次）。
        *
        * **`refreshToken` 必须进合并键**：它代表"外部事件要求重新拉一页"（提交成功、
@@ -6086,6 +6188,10 @@ window.__ModuleLoader__.load({
        * 还在飞，这次刷新会被合并到那个旧请求上——提交刚成功，历史里却没有刚才那条提交，
        * 而提交图**不轮询**，界面会一直停在旧历史上直到用户手动刷新。带上之后刷新是**另一个**
        * 请求：它抢占 `graph` 分片，旧响应回来时 `accept` 为假、被丢弃，新的那一页落地。
+       *
+       * **不做整页 loading**：只有"手上一条提交都没有"时才进 `loading`；已经有数据时只置
+       * `refreshing`，三栏（含左栏分支树与它自己的滚动位置）原地保留。这就是"点分支不再白屏
+       * 闪烁"的那一条。
        */
       const reload = react.useCallback(
         async (refValue) => {
@@ -6097,22 +6203,56 @@ window.__ModuleLoader__.load({
             { coalesce: true, slices: ['graph'] },
           )
           if (!gate.isCurrent(ticket)) return
-          if (gate.accept(ticket)) update({ phase: 'loading', error: '' })
+          if (gate.accept(ticket)) {
+            update((prev) =>
+              prev.commits.length > 0
+                ? { refreshing: true, error: '', refreshError: '' }
+                : { phase: 'loading', refreshing: false, error: '', refreshError: '' },
+            )
+          }
           const outcome = await promise
+          // 换了工作区：连缓存都不写（那份数据属于上一个项目）。
+          if (!gate.isCurrent(ticket)) return
+          const result = outcome.ok ? outcome.value : undefined
+          // **缓存先写**（哪怕这次响应已经被更晚的请求抢占）：它对"这个 ref"来说依然是
+          // 正确的一页，下次切回来就能立刻显示。界面状态仍然只由最新那次请求写。
+          if (result !== undefined && result.isRepo !== false) {
+            writeCachedPage(filterRef, { commits: result.commits ?? [], hasMore: result.hasMore === true })
+          }
           if (!gate.accept(ticket)) return
           if (!outcome.ok) {
             const error = outcome.cause
-            update({ phase: 'error', error: String(error?.detail ?? error?.message ?? error) })
+            const message = String(error?.detail ?? error?.message ?? error)
+            // 有数据就**保留数据**、只给一条非阻塞提示；没数据才整页 error。
+            update((prev) =>
+              prev.commits.length > 0
+                ? { refreshing: false, refreshError: message }
+                : { phase: 'error', refreshing: false, error: message },
+            )
             return
           }
-          const result = outcome.value
           if (result?.isRepo === false) {
-            update({ phase: 'notRepo', commits: [], hasMore: false })
+            update({ phase: 'notRepo', commits: [], treeCommits: [], hasMore: false, treeHasMore: false, refreshing: false })
             return
           }
-          update({ phase: 'ready', commits: result.commits ?? [], hasMore: result.hasMore === true })
+          const commits = result.commits ?? []
+          const hasMore = result.hasMore === true
+          update((prev) => ({
+            phase: 'ready',
+            refreshing: false,
+            error: '',
+            refreshError: '',
+            ref: filterRef,
+            commits,
+            hasMore,
+            // **左栏只在未过滤的响应上更新**：过滤结果绝不允许改写分支树的数据源。
+            ...(filterRef === '' ? { treeCommits: commits, treeHasMore: hasMore } : {}),
+            // 选中的提交不在新结果里 → 清掉（右栏会回到"选一条提交"）。留着会出现
+            // "列表里没有这一条、右栏却显示它的详情"。
+            ...(prev.selected !== '' && !commits.some((commit) => commit.hash === prev.selected) ? { selected: '' } : {}),
+          }))
         },
-        [gate, workspace, generation, update, refreshToken],
+        [gate, workspace, update, refreshToken, writeCachedPage],
       )
 
       react.useEffect(() => {
@@ -6121,9 +6261,18 @@ window.__ModuleLoader__.load({
         // `fresh.ref` 与 `refreshToken` 一起构成"什么时候该重拉"。
       }, [reload, fresh.ref, refreshToken])
 
-      /** 追加下一页。 */
+      /**
+       * 追加下一页。
+       *
+       * 两条硬规则：
+       *   * 追加只写 `commits`（中栏）。**过滤状态下的分页绝不触碰 `treeCommits`**——
+       *     否则"加载 develop 的下一页"会让左栏的分支一会儿多一会儿少；
+       *     未过滤（`ref === ''`）时两者本来就是同一份序列，因此一起追加，左栏才会随着
+       *     "加载更多"看到更深历史里的分支（这是特性，不是污染）。
+       *   * `prev.ref` 与本次请求的 ref 不一致时直接丢弃：用户已经切到别的 ref 了。
+       */
       const loadMore = react.useCallback(async () => {
-        if (workspace === undefined || fresh.hasMore !== true) return
+        if (workspace === undefined || fresh.hasMore !== true || fresh.refreshing === true) return
         const skip = fresh.commits.length
         const filterRef = fresh.ref
         const { ticket, promise } = gate.run(
@@ -6137,14 +6286,56 @@ window.__ModuleLoader__.load({
         if (!gate.accept(ticket)) return
         if (!outcome.ok) {
           const error = outcome.cause
-          update({ phase: 'error', error: String(error?.detail ?? error?.message ?? error) })
+          const message = String(error?.detail ?? error?.message ?? error)
+          update((prev) => (prev.commits.length > 0 ? { refreshing: false, refreshError: message } : { phase: 'error', error: message }))
           return
         }
-        update({
-          commits: [...fresh.commits, ...(outcome.value?.commits ?? [])],
-          hasMore: outcome.value?.hasMore === true,
+        const more = outcome.value?.commits ?? []
+        update((prev) => {
+          // 期间用户换了 ref：这一页属于上一个条件，丢弃。
+          if (prev.ref !== filterRef) return {}
+          const merged = [...prev.commits, ...more]
+          return {
+            commits: merged,
+            hasMore: outcome.value?.hasMore === true,
+            refreshing: false,
+            refreshError: '',
+            ...(filterRef === '' ? { treeCommits: merged, treeHasMore: outcome.value?.hasMore === true } : {}),
+          }
         })
-      }, [gate, workspace, generation, update, fresh.commits, fresh.hasMore, fresh.ref])
+      }, [gate, workspace, update, fresh.commits.length, fresh.hasMore, fresh.ref, fresh.refreshing])
+
+      /**
+       * 点击左栏的一个 ref（分支/标签/HEAD）。
+       *
+       * 行为（与 IDEA 一致）：再点同一个 = 取消过滤、回到全部。
+       *   * 命中该 ref 的首屏缓存 → **同一帧**就把中栏换成缓存那一份（不经过 loading，
+       *     左栏完全不动），请求照发（后台 revalidate），因此不会出现白屏或等待；
+       *   * 没命中 → 只改 `ref`，中栏先保留当前提交并置 `refreshing`（见 reload），
+       *     请求回来再原地替换。
+       */
+      const pickRef = react.useCallback(
+        (name) => {
+          if (workspace === undefined) return
+          const next = fresh.ref === name ? '' : name
+          const cached = readCachedPage(next)
+          if (cached === undefined) {
+            update({ ref: next })
+            return
+          }
+          update((prev) => ({
+            ref: next,
+            phase: 'ready',
+            commits: cached.commits,
+            hasMore: cached.hasMore,
+            refreshing: true,
+            error: '',
+            refreshError: '',
+            ...(prev.selected !== '' && !cached.commits.some((commit) => commit.hash === prev.selected) ? { selected: '' } : {}),
+          }))
+        },
+        [fresh.ref, workspace, update, readCachedPage],
+      )
 
       /** 搜索：在**已加载**的提交里过滤（标题 / 作者 / 哈希）。 */
       const keyword = query.trim().toLowerCase()
@@ -6166,16 +6357,23 @@ window.__ModuleLoader__.load({
         setViewport(event.target.clientHeight)
       }, [])
 
+      /**
+       * 整页状态只在**手上没有可展示数据**时才出现。
+       *
+       * 这一条是"点分支不再白屏闪烁"的关键：以前只要 `phase === 'loading'` 就 return 整页，
+       * 而换 ref 一定经过 loading，于是三栏（含左栏分支树与它自己的滚动位置）会被整体卸掉
+       * 再重建。现在换 ref 只置 `refreshing`，`phase` 保持 `ready`。
+       */
       if (workspace === undefined) {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('noWorkspace')))
       }
-      if (fresh.phase === 'loading' || fresh.phase === 'idle') {
+      if (fresh.commits.length === 0 && (fresh.phase === 'loading' || fresh.phase === 'idle')) {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('graphLoading')))
       }
-      if (fresh.phase === 'notRepo') {
+      if (fresh.commits.length === 0 && fresh.phase === 'notRepo') {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notRepo', { name: projectName(workspace) })))
       }
-      if (fresh.phase === 'error') {
+      if (fresh.commits.length === 0 && fresh.phase === 'error') {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(fresh.error, 'error'))
       }
 
@@ -6263,11 +6461,14 @@ window.__ModuleLoader__.load({
               { 'data-graph-pane': 'tree', style: { flex: `0 0 ${treeWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${BORDER}` } },
               react.createElement(GraphBranchTree, {
                 t,
-                commits: fresh.commits,
-                hasMore: fresh.hasMore,
+                // **左栏的数据源是中栏之外的 treeCommits**：它只由"未过滤"的 `/graph`
+                // 响应写入，因此选中某个分支把中栏换成过滤结果时，左栏一点都不会变
+                // （以前传 `fresh.commits`，于是点 develop 之后左栏只剩 develop 附近的 refs）。
+                commits: fresh.treeCommits,
+                hasMore: fresh.treeHasMore,
                 // 名字里带 ref 但**不是** React 的 ref（见 GraphBranchTree 的说明）。
                 selectedRef: fresh.ref,
-                onPickRef: (name) => update({ ref: fresh.ref === name ? '' : name }),
+                onPickRef: pickRef,
               }),
             ),
         collapsed.tree ? null : splitter('tree', treeWidth, setTreeWidth),
@@ -6291,6 +6492,27 @@ window.__ModuleLoader__.load({
             },
             react.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, t('graphTitle')),
             react.createElement('span', { 'data-graph-count': '', style: { color: GRAPH_DIM, flexShrink: 0 } }, t('graphFiles', { count: visibleCommits.length })),
+            // 后台刷新（换 ref / 手动刷新）：**不卸界面**，只在工具栏上给一个小提示，
+            // 列表本身压暗一点表示"这一份是上一次的结果，马上换"。
+            fresh.refreshing === true
+              ? react.createElement(
+                  'span',
+                  {
+                    'data-graph-refreshing': '',
+                    role: 'status',
+                    style: { color: GRAPH_DIM, fontSize: '11.5px', flexShrink: 0 },
+                  },
+                  t('graphRefreshing'),
+                )
+              : null,
+            // 刷新失败但手上还有数据：**非阻塞**提示（不把整个 Log 换成错误页）。
+            fresh.refreshError === ''
+              ? null
+              : react.createElement(
+                  'span',
+                  { 'data-graph-refresh-error': '', role: 'alert', style: { color: REMOVED, fontSize: '11.5px', flexShrink: 0, maxWidth: '18em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.refreshError },
+                  t('graphRefreshFailed', { detail: fresh.refreshError }),
+                ),
             fresh.ref === ''
               ? null
               : react.createElement(
@@ -6353,7 +6575,16 @@ window.__ModuleLoader__.load({
               ref: scrollRef,
               'data-graph-scroll': '',
               onScroll,
-              style: { minHeight: 0, flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' },
+              // 刷新期间**保留**这一份列表并压暗：三栏 DOM 不卸、滚动位置不丢，
+              // 但用户能看出"这一份是上一次的结果"。
+              style: {
+                minHeight: 0,
+                flex: '1 1 auto',
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                opacity: fresh.refreshing === true ? 0.55 : 1,
+                transition: 'opacity .12s ease',
+              },
             },
             visibleCommits.length === 0
               ? statusBlock(keyword === '' ? t('graphNoCommits') : t('graphNoMatches'))

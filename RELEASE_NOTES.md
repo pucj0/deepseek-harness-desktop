@@ -1,3 +1,66 @@
+# 1.4.8
+
+本次修掉 `Log` 页签（提交图）里两个很显眼的交互问题：**点一下左栏的分支，左栏就只剩那个分支附近
+的 refs**；以及**点分支时整个 Log 先变成 loading 空白页再重新出现**。根因是左栏分支树与中栏提交
+列表用了同一份数据、而刷新又用了"整页 loading"的语义。现在两者彻底分开，刷新改成后台进行。
+
+## 修复
+
+- **点分支之后左栏分支树被"过滤没了"。** 左栏以前直接由 `fresh.commits` 聚合 refs，而它同时也是
+  中栏的数据；点 `develop` 会把中栏换成 `/graph { ref: 'develop' }` 的结果，左栏再从这些提交里
+  聚合，于是 `master / feature/a / feature/b / origin/*` 全部消失——看起来像"分支树只显示当前
+  分支"。现在状态分成两组：
+  - **左栏**用 `treeCommits`（外加 `treeHasMore`），**只由"全部分支"（`ref === ''`）的响应写入**，
+    按分支过滤的结果永远不会改写它；
+  - **中栏**用 `commits`，`selectedRef` 非空时就是某个分支的过滤结果。
+
+  因此点 `develop` 之后左栏仍然是 `master / develop / feature/a / feature/b / origin/master /
+  origin/develop`（`develop` 高亮），再点一次同一个分支即取消过滤、中栏回到全部提交。左栏的选中
+  态现在同时给出 `aria-selected` 与 `data-graph-tree-selected`（以前只有背景色差异）。
+- **点分支时整个 Log 白屏闪烁。** 以前 `reload` 无条件把 `phase` 置成 `loading`，而视图在
+  `phase === 'loading'` 时直接 return 整页 loading —— 于是三栏（连同左栏分支树与它自己的滚动
+  位置）被整体卸载再重建。现在：
+  - **手上没有可展示数据**（首次进入、切换项目）才显示整页 loading；
+  - **已经有数据**时切分支/刷新只置 `refreshing`：`phase` 保持 `ready`，三栏 DOM 原地保留，
+    工具栏出现「正在加载…」，中栏列表压暗表示"这一份是上一次的结果"；
+  - 请求成功 → 中栏原地替换；若原来选中的提交不在新结果里才清空选中（右栏回到"选一条提交"）；
+  - 请求失败 → **保留上一份可用提交**，只在中栏给一条非阻塞提示（不会把整个 Log 换成错误页）。
+  - 顺带修好了"提交成功之后 Log 闪一下"：它走的也是这条刷新路径。
+- **分支树不会因为切分支重新挂载。** 左栏的行 `key` 稳定、视图在切 ref 时不返回 loading 页，因此
+  左栏的 DOM 实例、滚动位置与分组结构都由 React 原样保留，只有选中样式变化。
+
+## 变更
+
+- **每个 ref 的首屏有缓存**（模块级、键含工作区、上限 12 个，最近使用的留下）：因此
+  `develop → master → develop` 这类来回切是**同一帧**就显示缓存那一份（左栏完全不动），随后在
+  后台 revalidate；取消 `selectedRef` 恢复"全部"同样是立即的。缓存放在模块级而不是组件里，是因为
+  `Changes ↔ Log` 切页签会让提交图整个重挂，实例内的缓存那样就没了。
+- **分页与左栏彻底解耦**：过滤状态下的"加载更多"只追加中栏；未过滤时的分页才会顺带扩展左栏（那是
+  特性——更深历史里的分支会随之出现）。任何一种分页都不会让左栏"越来越少/越来越多"。
+- 左栏数据源仍然只覆盖"已加载的提交"，因此 tip 落在更早历史里的分支要等"加载更多"才出现（与之前
+  一致，未变）。
+
+## 校验
+
+- 新增 `scripts/test-review-graph-branch-filter.mjs`（**61 项**断言）：初始左栏完整六项 → 点
+  `develop`（左栏仍六项、唯一高亮、中栏换成 develop 的提交）→ 点 `master`（只换高亮与中栏）→
+  再点 `master`（取消过滤、中栏回全部）→ **请求故意挂起期间断言 `data-graph-view` /
+  `data-graph-tree` / `data-graph-pane=list` 一直在、左栏内容不变、出现 refreshing 提示、界面不是
+  只有 `graphLoading`** → 放行后中栏原地替换 → 过滤分页不动左栏、未过滤分页扩展左栏 → 快速
+  `develop → master → feature/a` 且**最新的先回、旧的最后回**（乱序）时最终只采用 `feature/a`、
+  旧响应不覆盖 → 缓存命中同帧可见 → 全程 hook 数量恒定（等价于真实 React #310）。
+- 三处变异验证（随后均已还原）：把左栏改回 `fresh.commits` → 复现"左栏只剩 `develop`"；把
+  `reload` 与阶段守卫改回 v1.4.7 的写法 → 复现"三栏消失、只剩 graphLoading"；去掉缓存命中 →
+  缓存断言变红。
+- `scripts/test-project-git-smoke.mjs`（真实 Electron + CDP）新增 **case E**：把左栏滚动一段后点
+  一个分支，断言左栏项数与内容不变、唯一高亮、三栏仍在、**左栏滚动位置保持**、无 React error；
+  再点一次取消过滤后左栏仍完整。
+- 22 个 Node 测试脚本合计 **1448 项**断言全部通过；`check-react-rules`、`check-plugin-i18n`、
+  `check-imports`、`check-readme`、`check-version`、`test-plugin-sync`、`test-i18n`、类型检查
+  全部通过。
+
+---
+
 # 1.4.7
 
 本次继续收口**项目级 Git**（右上角入口 + 项目改动抽屉 + 分支徽章）：修掉三处让"入口/抽屉整个
