@@ -680,6 +680,13 @@ window.__ModuleLoader__.load({
       logCrashedHint: '抽屉与右上角的入口都还在：切回"更改"页签可以继续暂存与提交。修好之后点下面的按钮重试。',
       logReload: '重新加载 Log',
       logErrorDetail: '错误详情（组件与字段）',
+      // ---- 整个项目 Git 面板的渲染失败降级 ----
+      panelCrashedTitle: 'Git 面板加载失败',
+      panelCrashedHint: '右上角的入口仍然可用（关掉面板再打开即可重试），下面是可以直接复制的错误详情。',
+      panelReload: '重新加载',
+      close: '关闭',
+      // ---- 切换项目的瞬间 ----
+      switchingProject: '正在切换项目…',
       // ---- 暂存与提交（更改区块）----
       stagedTitle: '已暂存',
       unstagedTitle: '更改',
@@ -806,6 +813,13 @@ window.__ModuleLoader__.load({
       logCrashedHint: 'The drawer and the top-right entry are still here: switch back to Changes to keep staging and committing. Retry with the button below once the cause is fixed.',
       logReload: 'Reload Log',
       logErrorDetail: 'Error detail (component and field)',
+      // ---- Whole project-Git panel render failure fallback ----
+      panelCrashedTitle: 'The Git panel failed to load',
+      panelCrashedHint: 'The top-right entry still works (close the panel and open it again to retry). The error detail below can be copied as-is.',
+      panelReload: 'Reload',
+      close: 'Close',
+      // ---- The instant a project switch is in flight ----
+      switchingProject: 'Switching project…',
       // ---- Staging and committing (the Changes section) ----
       stagedTitle: 'Staged',
       unstagedTitle: 'Changes',
@@ -1207,13 +1221,22 @@ window.__ModuleLoader__.load({
        * 两个函数在同一个 record 上是稳定的引用，因此不会破坏
        * `useSyncExternalStore` 的"引用不变就不重渲染"这条约定。
        *
+       * `phase` 的取值是这套状态机的全部状态（见下方 load 的说明）：
+       *   `idle`（还没开始）→ `loading`（首次取数）→ `ready` | `error` | `notrepo`。
+       *
        * @param record - 所属记录。
+       * @param phase - 初始相位（默认 idle）。
        * @returns 快照对象。
        */
-      const emptySnapshot = (record) => ({
+      const emptySnapshot = (record, phase = 'idle') => ({
         workspace: record.workspace,
         generation: record.generation,
-        phase: 'idle',
+        requestId: record.requestId,
+        phase,
+        /** 是否正在后台重新取数（stale-while-revalidate：旧数据仍然显示）。 */
+        refreshing: false,
+        /** 数据是否已过期（写操作之后置起）：界面继续显示，但知道它不可信。 */
+        stale: false,
         branch: '',
         head: '',
         files: [],
@@ -1221,10 +1244,10 @@ window.__ModuleLoader__.load({
         staged: 0,
         unstaged: 0,
         untracked: 0,
-        diff: '',
-        diffOversized: false,
         empty: false,
         error: '',
+        /** 有旧数据时刷新失败的原因（数据仍然显示，只是标出"这次没刷新上"）。 */
+        refreshError: '',
         updatedAt: 0,
         refresh: () => load(record),
         invalidate: () => invalidateRecord(record),
@@ -1236,6 +1259,8 @@ window.__ModuleLoader__.load({
           record = {
             workspace,
             generation: 0,
+            /** 这一代里的第几次请求；用于"只看最新那次请求的响应"。 */
+            requestId: 0,
             snapshot: null,
             listeners: new Set(),
             inflight: null,
@@ -1259,7 +1284,10 @@ window.__ModuleLoader__.load({
           return
         }
         const rawFiles = Array.isArray(payload?.files) ? payload.files : []
-        const files = rawFiles.map((file) => ({ ...file, ...entryOfFile(file) }))
+        // 宿主现在**直接给** `index`/`worktree`（来自 `porcelain=v2`）与三个布尔值；旧形状的
+        // fixture（以及测试里的 `__setForTest`）只有布尔值，因此用 `entryOfFile` 补齐，
+        // 但**以宿主给的为准**——v2 的两列比"从 status 字母反推"更精确。
+        const files = rawFiles.map((file) => ({ ...entryOfFile(file), ...file }))
         // 三组数量与文件列表**同源**：全部由这一份 files 现场算出。把它们做成独立字段
         // 只是省去调用方各自 filter 一遍，不会引入第二个数据来源。
         const stagedFiles = files.filter((file) => classifyEntry(file).staged)
@@ -1268,7 +1296,10 @@ window.__ModuleLoader__.load({
         record.snapshot = {
           workspace: record.workspace,
           generation: record.generation,
+          requestId: record.requestId,
           phase: 'ready',
+          refreshing: false,
+          stale: false,
           branch: typeof payload?.branch === 'string' ? payload.branch : '',
           head: typeof payload?.head === 'string' ? payload.head : '',
           files,
@@ -1276,10 +1307,9 @@ window.__ModuleLoader__.load({
           staged: stagedFiles.length,
           unstaged: unstagedFiles.length,
           untracked: untrackedFiles.length,
-          diff: typeof payload?.diff === 'string' ? payload.diff : '',
-          diffOversized: payload?.diffOversized === true,
           empty: payload?.empty === true,
           error: '',
+          refreshError: '',
           updatedAt: Date.now(),
           // 快照自带"重取 / 失效重取"两个入口（见 emptySnapshot 的说明）。
           refresh: () => load(record),
@@ -1288,27 +1318,58 @@ window.__ModuleLoader__.load({
         emit(record)
       }
 
-      /** 拉一次快照。single-flight：同一个工作区同时只会有一个在途请求。 */
+      /**
+       * 记录一次失败。
+       *
+       * 分两种情况，区别就是"有没有东西可显示"：
+       *   * **有旧数据**：保持 `ready`，把原因写进 `refreshError`——界面继续显示那份文件
+       *     清单，只在旁边说明"这次没刷新上"。清空列表会让用户以为改动都没了。
+       *   * **没有旧数据**：进 `error` 相位，界面显示错误。
+       * 两种情况都必须**结束 loading**：否则界面会永远停在"正在读取差异"（这正是要修的
+       * 现象之一：请求失败后没有兜底状态）。
+       */
+      const fail = (record, message) => {
+        const previous = record.snapshot
+        const hasData = previous !== null && previous !== undefined && previous.updatedAt > 0 && previous.phase === 'ready'
+        record.snapshot = hasData
+          ? { ...previous, generation: record.generation, requestId: record.requestId, refreshing: false, refreshError: message }
+          : { ...emptySnapshot(record, 'error'), generation: record.generation, requestId: record.requestId, error: message, updatedAt: Date.now() }
+        emit(record)
+      }
+
+      /**
+       * 拉一次快照。single-flight：同一个工作区同时只会有一个在途请求。
+       *
+       * 三种结果的写法各不相同，这是这套状态机的要点：
+       *   * **开始请求**：还没有数据时进 `loading`（首次进入新工作区就该显示加载）；
+       *     已有 `ready` 数据时**不动 `phase`**，只置 `refreshing`（stale-while-revalidate：
+       *     界面上那份清单不清空，用户看不到闪烁）。
+       *   * **成功**：`ready` + 新的 files。
+       *   * **失败**：见 fail()。
+       *
+       * 每次请求都带 `{ generation, requestId }`：写回之前两者都要对得上。只管 generation
+       * 是不够的——`invalidate()` 会换代并把在途请求丢弃，但**同一代里也可能有两个请求**
+       * （失效后立即重取时前一个还没回来），只看代际就会让旧的那个后到并覆盖新的。
+       */
       const load = (record) => {
         if (record.inflight !== null) return record.inflight
         const generation = record.generation
+        const requestId = (record.requestId += 1)
+        const fresh = record.snapshot === null || record.snapshot.updatedAt === 0 || record.snapshot.phase !== 'ready'
+        record.snapshot = fresh
+          ? { ...emptySnapshot(record, 'loading'), generation, requestId }
+          : { ...record.snapshot, requestId, refreshing: true, refreshError: '' }
+        if (fresh) emit(record)
         const promise = (async () => {
           try {
             const payload = await call('workspace', { workspace: record.workspace })
-            // 换代之后回来的响应一律丢弃：它属于上一个"代"的工作区（见 createWorkspaceGate）。
-            if (record.generation !== generation) return
+            // 换代（切了工作区）或已有更晚的请求：这次响应属于过去，静默丢弃。
+            if (record.generation !== generation || record.requestId !== requestId) return
             commit(record, payload)
           } catch (cause) {
-            if (record.generation !== generation) return
+            if (record.generation !== generation || record.requestId !== requestId) return
             const error = cause instanceof Error ? cause : new Error(String(cause))
-            record.snapshot = {
-              ...record.snapshot,
-              generation: record.generation,
-              phase: 'error',
-              error: error.detail ?? error.message,
-              updatedAt: Date.now(),
-            }
-            emit(record)
+            fail(record, String(error.detail ?? error.message))
           } finally {
             if (record.inflight === promise) record.inflight = null
           }
@@ -1332,8 +1393,12 @@ window.__ModuleLoader__.load({
        *
        * "过期"的做法是**换代**（`generation += 1`）：在途的响应回来时对不上代，于是被丢弃
        * ——这正是"写操作之后旧读不许覆盖新状态"的机制，与 `createWorkspaceGate` 里那一套
-       * 是同一条原则。数据仍然显示着（避免刷新时闪成空白），只有 `updatedAt` 归零表示它
-       * 已经不可信。
+       * 是同一条原则。
+       *
+       * **数据继续显示**（`files` 一个字不动，`updatedAt` 也保留），只把 `stale` 置起来：
+       * 写操作之后界面立刻清空再填回来会闪一下，而"这份数据已经不可信"这件事由 `stale`
+       * 表达（`refreshIfStale` 据此决定要不要补一次）。以前这里把 `updatedAt` 归零来表示
+       * 过期，于是"归零"同时意味着"没有数据"——两者混在一起，刷新时会闪成空白。
        *
        * @param record - 工作区记录。
        * @returns 重取完成（或失败）的 promise。
@@ -1341,7 +1406,7 @@ window.__ModuleLoader__.load({
       const invalidateRecord = (record) => {
         record.generation += 1
         record.inflight = null
-        record.snapshot = { ...record.snapshot, generation: record.generation, updatedAt: 0 }
+        record.snapshot = { ...record.snapshot, generation: record.generation, stale: true }
         return load(record)
       }
 
@@ -1374,7 +1439,11 @@ window.__ModuleLoader__.load({
         /** 面板打开时调用：过期就补一次刷新。 */
         refreshIfStale(workspace) {
           const record = ensure(workspace)
-          if (Date.now() - record.snapshot.updatedAt < SNAPSHOT_STALE_MS) return Promise.resolve(record.snapshot)
+          // `stale` 由 invalidate（写操作之后）置起，与"多久没更新"是两件事：前者是"这份
+          // 数据不可信"，后者只是"有点旧"。两者都刷新，但只有"从没取到过"才显示 loading。
+          if (record.snapshot.stale !== true && Date.now() - record.snapshot.updatedAt < SNAPSHOT_STALE_MS) {
+            return Promise.resolve(record.snapshot)
+          }
           return load(record)
         },
         /** 只给测试用：直接写入一份快照（免去伪造 host 响应）。 */
@@ -1750,6 +1819,13 @@ window.__ModuleLoader__.load({
      */
     function ReviewPanel(props) {
       const { t, workspace, sessionId, scope, anchor } = props
+      /**
+       * 是否正处在"已经切到新会话、但它的 cwd 还没到"的那一瞬间（见 HeroChangesTrigger）。
+       *
+       * 这一帧**不能显示任何项目数据**（连"没有工作区"都不能说：那句话会让用户以为项目
+       * 丢了），只说"正在切换项目…"。等 cwd 到手，下一帧就是新项目的数据。
+       */
+      const switching = props?.switching === true
       const open = usePanelOpen()
       const rootRef = react.useRef(null)
 
@@ -1828,15 +1904,20 @@ window.__ModuleLoader__.load({
       /**
        * 点击外部或按 Escape 关闭抽屉。
        *
-       * 与分支菜单同一套做法：用 `mousedown`（而不是 click）在**捕获阶段**判定，
-       * 这样拖选文本之类的操作不会误判；关闭条件写进 `open` 的依赖里，关闭后立刻摘掉
-       * 监听，不给文档留常驻监听。
+       * **两种 scope 的语义不同，必须分开**：
+       *   * 项目级的抽屉是 **IDEA 的 Git 工具窗**，不是 popover：点左侧项目、点聊天正文、
+       *     点主界面任何别处都**不该**把它关掉（用户切项目时正希望它开着、并跟着切过去）。
+       *     只有三种方式关闭：X 按钮、Escape、再点一次右上角入口。
+       *     以前它对两种 scope 一视同仁地"点外部就关"，于是"点一下项目 B，抽屉先消失、
+       *     再点入口打开才看到 B"——用户以为面板坏了。
+       *   * 会话内的标签沿用 popover 语义（点外部关闭）：它挂在右侧栏里，靠外部点击收起
+       *     是既有交互。
        *
-       * 触发按钮本身不算"外部"：它有自己的开关逻辑，若把它的点击也当成外部点击，
-       * 会出现"点一下先关再开"的一闪。
+       * Escape 两种 scope 都保留（键盘用户必须有一个不依赖精确点击的退出方式）。
        */
       react.useEffect(() => {
         if (!open) return undefined
+        const closesOnOutside = scope !== 'workspace'
         const onPointerDown = (event) => {
           const node = rootRef.current
           if (node !== null && node.contains(event.target)) return
@@ -1847,13 +1928,13 @@ window.__ModuleLoader__.load({
         const onKeyDown = (event) => {
           if (event.key === 'Escape') panelStore.set(false)
         }
-        document.addEventListener('mousedown', onPointerDown, true)
+        if (closesOnOutside) document.addEventListener('mousedown', onPointerDown, true)
         document.addEventListener('keydown', onKeyDown)
         return () => {
-          document.removeEventListener('mousedown', onPointerDown, true)
+          if (closesOnOutside) document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open])
+      }, [open, scope])
 
       // 两种语义分别取数据：
       //   * 会话内的"本轮改动"仍然走 `/changes`（它的基线是这一轮开始时的快照，与项目级
@@ -1893,6 +1974,8 @@ window.__ModuleLoader__.load({
       if (!open) return null
 
       const title = scope === 'workspace' ? t('projectTitle') : t('title')
+      /** 切换项目的那一瞬间：面板里只说这一句，不显示上一个项目的数据。 */
+      const switchingBlock = statusBlock(t('switchingProject'))
       const projectFiles = snapshot?.files ?? []
       const turnSummary = summarize(turn.state.result)
       // 头栏与文件列表用的是**同一个数字**（scope==='workspace' 时就是快照的 files）。
@@ -1910,10 +1993,12 @@ window.__ModuleLoader__.load({
               scope: 'workspace',
               empty: snapshot.empty === true,
               branch: snapshot.branch,
+              /** 差异基线：按需取单文件差异时带上它（HEAD 变了缓存自然失效）。 */
               revision: snapshot.head,
               files: snapshot.files,
-              diff: snapshot.diff,
-              diffOversized: snapshot.diffOversized,
+              // **不再有 `diff`**：项目级快照是元数据级的，逐行差异由 `LazyFileDiff` 按需取
+              // （见 /workspace-file 与 LazyFileDiff 的说明）。这里保留 `diffOversized` 的
+              // 位置也没有意义——"整份差异太大"这件事不存在了。
             }
       const activeResult = scope === 'workspace' ? projectResult : turn.state.result
       const activePhase =
@@ -2116,7 +2201,9 @@ window.__ModuleLoader__.load({
                     react.createElement(
                       LogErrorBoundary,
                       { t, workspace: workspacePath },
-                      react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
+                      switching
+                        ? switchingBlock
+                        : react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
                     ),
                   )
                 : react.createElement(
@@ -2131,11 +2218,15 @@ window.__ModuleLoader__.load({
                     // 会话内那个标签讲的是"本轮改了什么"（基线与本轮开始时的快照比较），
                     // 而暂存与提交是**仓库**级动作：它动的是索引与历史，与"本轮"没有关系。
                     // 把提交框放进会话标签里会让人以为提交只针对本轮，那是错的。
-                    react.createElement(StagingSection, {
+                    switching
+                      ? switchingBlock
+                      : react.createElement(StagingSection, {
                       t,
                       workspace: workspacePath,
-                      // 同一份共享快照：分组、数量、清单、差异全部来自它。
+                      // 同一份共享快照：分组、数量、清单全部来自它。
                       snapshot,
+                      // 逐行差异的基线（HEAD）；按需取单文件差异时带上它。
+                      revision: snapshot?.head ?? '',
                       // 写操作成功后 store 会自己 invalidate + refresh（见 StagingSection.run）；
                       // 这里只需要再通知 Log 页签"历史变了"。
                       onCommitted: () => {
@@ -2154,6 +2245,7 @@ window.__ModuleLoader__.load({
                 message: activeMessage,
                 workspace,
                 sessionId,
+                revision: activeResult?.revision ?? '',
                 onChanged: reload,
               }),
             ),
@@ -2199,6 +2291,35 @@ window.__ModuleLoader__.load({
       return { dir: value.slice(0, cut), base: value.slice(cut + 1) }
     }
 
+    /** 没有会话来源时的空选择器钩子：形状与"没有会话"一致（返回 undefined）。 */
+    const absentSessions = (selector) => (typeof selector === 'function' ? selector(undefined) : undefined)
+
+    /**
+     * 取一个"**可能缺席**的标准钩子"，并在**首次渲染时锁定**这个选择。
+     *
+     * 为什么必须锁定：这些调用点原来写成
+     * `typeof props.useSessions === 'function' ? props.useSessions(sel) : undefined`——
+     * 那是**条件调用**。`useSessions` 的真身（渲染器用的是
+     * `useSyncExternalStoreWithSelector`）内部要占若干个 hook 槽，一旦它在两次渲染之间
+     * 出现或消失，这个组件调用的 hook 数量就变了：React 抛 #310
+     * "Rendered more/fewer hooks than during the previous render"，并把**整棵子树卸掉**
+     * ——现象与"面板/入口突然消失"完全一样，很难与数据问题区分开。
+     *
+     * 锁定之后"用真身还是用空实现"在同一个实例上恒定，hook 数量因而恒定。代价是"服务在
+     * 本组件挂载之后才出现"时，这一份要等下次挂载才用得上真身；真实渲染器不会走到那种
+     * 时序——插件在 `inject` 里声明了 `sessions`/`workspaces`，渲染器在挂载前就把 root
+     * source 备好了。
+     *
+     * @param candidate - `props.useSessions` 之类的候选（可能 undefined）。
+     * @param fallback - 缺席时用的空实现。
+     * @returns 选定的钩子（同一实例上恒定）。
+     */
+    function useLatchedHook(candidate, fallback) {
+      const ref = react.useRef(null)
+      if (ref.current === null) ref.current = typeof candidate === 'function' ? candidate : fallback
+      return ref.current
+    }
+
     /**
      * 读取**当前会话**的工作区。
      *
@@ -2217,14 +2338,37 @@ window.__ModuleLoader__.load({
      * @returns 工作区路径；没有当前会话或该会话还没有 cwd 时 undefined。
      */
     function useCurrentWorkspace(props) {
-      // 会话存储：`inject` 里声明了 sessions，钩子会随之注入。
-      return typeof props?.useSessions === 'function'
-        ? props.useSessions((state) => {
-            const current = state?.current
-            if (current === undefined) return undefined
-            return asPath(state?.byId?.[current]?.cwd)
-          })
-        : undefined
+      // **无条件**取钩子（缺席时用空实现），见 useLatchedHook：条件调用会让 hook 数量可变。
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      return useSessions((state) => {
+        const current = state?.current
+        if (current === undefined) return undefined
+        return asPath(state?.byId?.[current]?.cwd)
+      })
+    }
+
+    /**
+     * 当前**是否存在**一个被选中的会话。
+     *
+     * 与 `useCurrentWorkspace` 分开成一个布尔值，是为了让调用方能区分两种完全不同的
+     * `undefined`（见 HeroChangesTrigger 里工作区解析的说明）：
+     *   * 根本没有当前会话（全新状态）→ 允许用兜底工作区；
+     *   * 有当前会话、但它的 cwd 还没加载出来 → **必须停在"正在切换项目"**，
+     *     不许临时退回上一个会话的目录。
+     *
+     * 返回布尔而不是对象：`useSyncExternalStore` 的选择器每次渲染都要给出**同一个引用**
+     * （否则 React 会警告 "The result of getSnapshot should be cached" 并可能死循环），
+     * 布尔与字符串这类原始值天然满足。
+     *
+     * @param props - 槽注入的属性。
+     * @returns 有当前会话则 true。
+     */
+    function useHasCurrentSession(props) {
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      return useSessions((state) => {
+        const current = state?.current
+        return current !== undefined && current !== null && current !== ''
+      })
     }
 
     /**
@@ -2236,13 +2380,12 @@ window.__ModuleLoader__.load({
      * @returns 工作区路径数组。
      */
     function useWorkspaceList(props) {
-      return typeof props?.useWorkspaces === 'function'
-        ? props.useWorkspaces((state) => {
-            const items = state?.items
-            if (!Array.isArray(items)) return []
-            return items.map((item) => asPath(item?.path ?? item?.root)).filter((value) => value !== undefined)
-          })
-        : []
+      const useWorkspaces = useLatchedHook(props?.useWorkspaces, absentSessions)
+      return useWorkspaces((state) => {
+        const items = state?.items
+        if (!Array.isArray(items)) return []
+        return items.map((item) => asPath(item?.path ?? item?.root)).filter((value) => value !== undefined)
+      })
     }
 
     /**
@@ -2324,22 +2467,45 @@ window.__ModuleLoader__.load({
       // **当前会话的工作区**排在第一位：切换对话或新建对话后，面板必须立刻跟到那个
       // 对话所属的项目上。后面几项只在"还没有当前会话"（全新状态）时兜底。
       const session = useCurrentWorkspace(props)
+      /**
+       * 当前**有没有**一个被选中的会话。
+       *
+       * 这一个布尔值是为了区分两种完全不同的 `undefined`——它们以前长得分不开，于是切换
+       * 项目时会走出一条错误的回退路径（A → hostCurrent(A) → candidates(X) → B）：
+       *   * **根本没有当前会话**（全新状态）：允许用宿主工作区 / 候选第一项兜底；
+       *   * **已经切到新会话、但它的 cwd 还没加载出来**：必须停在"正在切换项目…"，
+       *     绝不能临时回退到上一个会话的目录——那会让用户在 B 的会话里看到 A 的项目，
+       *     而且右上角数字也跟着 A 走（"切项目后数据串了"的一类现象）。
+       */
+      const hasCurrentSession = useHasCurrentSession(props)
 
       // 诊断快照：这块面板的状态分布在"当前会话 / 宿主的当前值 / 宿主给的名单 /
       // 注入的钩子"四处，出问题时从界面上只能看到"对不上项目"，无法判断是哪一环出错。
       // 挂到 window 上后，脚本可以一眼看清每一环的实际值。
       if (typeof window !== 'undefined') {
-        window.__dshDesktopReviewPanel = { roots, hostCurrent, fromHooks, session }
+        window.__dshDesktopReviewPanel = { roots, hostCurrent, fromHooks, session, hasCurrentSession }
       }
 
-      // 优先级：当前会话的 cwd > 宿主给的当前工作区 > 候选第一项。
-      //
-      // 为什么当前会话优先：工作区是**会话的属性**，不是外壳的属性。用户在界面里可以
-      // 让每个对话属于不同项目，而外壳启动时的 `--workspace` 只是其中一个，所以
-      // `process.cwd()` 只能在没有当前会话时用（例如刚打开、还没进对话）。
-      //
-      // 不再保留任何"用户手动选定"的状态：工作区不可编辑，面板始终跟随当前对话。
-      const workspace = session ?? hostCurrent ?? candidates[0]
+      /**
+       * 工作区解析（**顺序是有意义的**）：
+       *   1. 有当前会话 → 只用它的 cwd（还没有就是 undefined，进入"正在切换项目"）；
+       *   2. 没有当前会话 → 宿主给的当前工作区 → 候选第一项。
+       *
+       * 为什么当前会话优先：工作区是**会话的属性**，不是外壳的属性。用户在界面里可以
+       * 让每个对话属于不同项目，而外壳启动时的 `--workspace` 只是其中一个，所以
+       * `process.cwd()` 只能在没有当前会话时用（例如刚打开、还没进对话）。
+       *
+       * 不再保留任何"用户手动选定"的状态：工作区不可编辑，面板始终跟随当前对话。
+       */
+      const workspace = hasCurrentSession ? session : (hostCurrent ?? candidates[0])
+      /**
+       * 处在"已经切到新会话、但它的 cwd 还没到"的那一瞬间。
+       *
+       * 这一帧**不发任何请求、也不显示上一个项目的数据**：入口与抽屉都显示"正在切换项目…"。
+       * 少了这个状态，界面就会先显示 A 的（或某个候选目录的）数据再跳到 B——那正是
+       * "切项目后右上角数字/文件列表对不上"的来源。
+       */
+      const switching = hasCurrentSession && session === undefined
       /**
        * 改动数量**就是共享快照里的文件数**。
        *
@@ -2350,7 +2516,7 @@ window.__ModuleLoader__.load({
        * 本项目级入口**只订阅、不打开面板**也有轮询，理由与以前一致：这个数字要在用户
        * 没打开面板时也保持新鲜（否则"有没有改动"这件事要等到点开才知道）。
        */
-      const snapshot = useWorkspaceGitSnapshot(workspace)
+      const snapshot = useWorkspaceGitSnapshot(switching ? undefined : workspace)
       // 数字直接就是快照的文件数——不是"再算一遍"，也不是另一条路由的结果。
       const count = snapshot !== undefined && snapshot.phase === 'ready' ? snapshot.files.length : null
 
@@ -2358,7 +2524,18 @@ window.__ModuleLoader__.load({
       // 此前这里直接 return null，结果在"还没有任何会话与登记工作区"的状态下入口彻底
       // 消失，用户看到的是"这个功能不存在"。
       const hasChanges = typeof count === 'number' && count > 0
-
+      /**
+       * 面板里的东西全部交给错误边界。
+       *
+       * 结构与以前不同（这一条是硬要求）：入口按钮与面板**不再是同一条会一起崩的子树**。
+       *   * `ProjectChangesTriggerButton` 是入口本身——只要插件挂载成功，它就必须一直在；
+       *   * `ProjectGitPanelErrorBoundary` 只包住面板，面板内部（Changes / Log / 暂存区 /
+       *     提交图）任何渲染期异常都只让面板显示"Git 面板加载失败 + 详细错误 + 重新加载 +
+       *     关闭"，**不会**把入口一起带走。
+       * 以前两者是兄弟但同在一个函数组件里，任何一处抛错都会让 React 卸载整棵
+       * `HeroChangesTrigger` 子树（外层槽位的边界再把它换成错误占位），表现就是
+       * "抽屉和右上角入口一起消失"——看起来像面板被关掉了。
+       */
       return react.createElement(
         'div',
         {
@@ -2379,52 +2556,90 @@ window.__ModuleLoader__.load({
             display: 'inline-flex',
           },
         },
-        react.createElement(
-          'button',
-          {
-            type: 'button',
-            title: t('projectTitle'),
-            'aria-expanded': open,
-            onClick: () => panelStore.set(!open),
-            style: {
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '7px',
-              padding: '0 11px',
-              height: '30px',
-              borderRadius: '8px',
-              border: '1px solid var(--dsw-alias-border-l1, #eceef2)',
-              background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
-              color: hasChanges || open ? ACCENT : 'var(--dsw-alias-label-secondary)',
-              fontSize: '12px',
-              fontFamily: UI_FONT,
-              fontWeight: 500,
-              whiteSpace: 'nowrap',
-              cursor: 'pointer',
-            },
-          },
-          react.createElement(
-            'svg',
-            { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
-            react.createElement('path', {
-              d: 'M3 4.5h10M3 8h10M3 11.5h6',
-              stroke: 'currentColor',
-              strokeWidth: 1.3,
-              strokeLinecap: 'round',
-            }),
-          ),
-          react.createElement(
-            'span',
-            null,
-            workspace === undefined ? t('projectTitle') : count === null ? t('projectIdle') : t('files', { count }),
-          ),
-        ),
-        react.createElement(ReviewPanel, {
+        react.createElement(ProjectChangesTriggerButton, {
           t,
+          open,
+          count,
+          hasChanges,
+          switching,
           workspace,
-          scope: 'workspace',
-          anchor,
+          onToggle: () => panelStore.set(!open),
         }),
+        react.createElement(
+          ProjectGitPanelErrorBoundary,
+          {
+            t,
+            workspace,
+            onClose: () => panelStore.set(false),
+          },
+          react.createElement(ReviewPanel, {
+            t,
+            workspace,
+            scope: 'workspace',
+            anchor,
+            switching,
+          }),
+        ),
+      )
+    }
+
+    /**
+     * 右上角那个"项目改动"入口按钮。
+     *
+     * 单独成一个组件是**故障隔离**的一部分（见 HeroChangesTrigger 末尾的说明）：它与面板
+     * 不在同一条会被一起卸载的子树上，因此面板内部崩溃时它照常显示。
+     *
+     * @param props - `{ t, open, count, hasChanges, switching, onToggle }`。
+     * @returns React 元素。
+     */
+    function ProjectChangesTriggerButton(props) {
+      const { t, open, count, hasChanges, switching, workspace } = props
+      const onToggle = typeof props?.onToggle === 'function' ? props.onToggle : () => undefined
+      /** 文案：切换项目的瞬间说清楚在等什么，而不是显示上一个项目的数字。 */
+      const label =
+        switching === true
+          ? t('switchingProject')
+          : workspace === undefined
+            ? t('projectTitle')
+            : typeof count === 'number'
+              ? t('files', { count })
+              : t('projectIdle')
+      return react.createElement(
+        'button',
+        {
+          type: 'button',
+          title: t('projectTitle'),
+          'aria-expanded': open,
+          'data-review-trigger-button': '',
+          onClick: onToggle,
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '7px',
+            padding: '0 11px',
+            height: '30px',
+            borderRadius: '8px',
+            border: '1px solid var(--dsw-alias-border-l1, #eceef2)',
+            background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
+            color: hasChanges || open ? ACCENT : 'var(--dsw-alias-label-secondary)',
+            fontSize: '12px',
+            fontFamily: UI_FONT,
+            fontWeight: 500,
+            whiteSpace: 'nowrap',
+            cursor: 'pointer',
+          },
+        },
+        react.createElement(
+          'svg',
+          { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+          react.createElement('path', {
+            d: 'M3 4.5h10M3 8h10M3 11.5h6',
+            stroke: 'currentColor',
+            strokeWidth: 1.3,
+            strokeLinecap: 'round',
+          }),
+        ),
+        react.createElement('span', null, label),
       )
     }
 
@@ -3020,13 +3235,13 @@ window.__ModuleLoader__.load({
         setDeselectedFiles((current) => current.filter((path) => paths.has(path)))
       }, [knownPathsKey])
 
-      // 阶段守卫必须在最前：加载中/无工作区/非仓库/出错这四种情况都不该继续往下算分组。
-      if (snapshot === undefined) return statusBlock(t('noWorkspace'))
-      if (snapshot.phase === 'idle' || snapshot.phase === 'loading') return statusBlock(t('loading'))
-      if (snapshot.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
-      if (snapshot.phase === 'error') return statusBlock(snapshot.error ?? '', 'error')
-      // 尚无任何提交的仓库：没有 HEAD 可比较，说"改动"会误导（用户会以为文件丢了）。
-      if (snapshot.empty === true) return statusBlock(t('workspaceEmpty'))
+      // ---- 以下都是"纯计算"，不是 hook ------------------------------------------
+      // **阶段守卫被刻意放在所有 hook 之后、渲染之前**：以前它写在 hook 中间，于是
+      // `snapshot.phase` 从 loading 变成 ready 的那一帧会多调用一个 useMemo，React 直接抛
+      // #310 "Rendered more hooks than during the previous render" 并把整棵子树卸掉——
+      // 现象就是"切换项目之后抽屉与右上角入口一起消失"。规则很简单：
+      // **任何 hook 都不许出现在这些 return 之后**（本文件里所有函数组件都按这条改过）。
+      // 另外逐行差异已改为按需取（见 LazyFileDiff），这里不再需要 splitByFile 那个 hook。
 
       /**
        * 分组标题右侧的"全选/取消全选"勾选框。
@@ -3083,11 +3298,13 @@ window.__ModuleLoader__.load({
           // 点文件 → 展开逐行差异（IDEA 的改动列表就是这个交互）。差异与文件列表来自
           // 同一份快照，因此不可能出现"列表里有这个文件、差异区却是别人的改动"。
           if (diffOpen === entry.path) {
-            nodes.push(react.createElement(FileDiff, {
+            nodes.push(react.createElement(LazyFileDiff, {
               key: `diff:${side}:${entry.path}`,
               t,
               file: entry,
-              diff: byFile.get(entry.path) ?? '',
+              workspace,
+              // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
+              revision: props.revision ?? snapshot?.head ?? '',
               margin: '0 0 6px 8px',
             }))
           }
@@ -3117,8 +3334,6 @@ window.__ModuleLoader__.load({
       const untrackedPaths = files.filter((entry) => entry.untracked === true).map((entry) => entry.path)
       const untrackedCount = untrackedPaths.length
       const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
-      /** 逐行差异：与文件列表**同一份快照**里的 `diff`，按文件切分。 */
-      const byFile = react.useMemo(() => splitByFile(snapshot?.diff ?? ''), [snapshot?.diff])
       // 已勾选（准备"加入 git"）的未跟踪文件。
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
@@ -3449,6 +3664,16 @@ window.__ModuleLoader__.load({
         { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
         react.createElement('path', { d: 'M8 3.5v9M3.5 8h9', strokeLinecap: 'round' }),
       )
+
+      // ---- 阶段守卫（**必须在所有 hook 之后**，见上面的说明）----------------------
+      if (snapshot === undefined) return statusBlock(t('noWorkspace'))
+      // 首次进入一个工作区：还没有任何数据 → 加载态。已经在显示旧数据的刷新（`refreshing`）
+      // 不会走到这里——那份数据继续显示，用户看不到闪烁（stale-while-revalidate）。
+      if (snapshot.phase === 'idle' || snapshot.phase === 'loading') return statusBlock(t('loading'))
+      if (snapshot.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
+      if (snapshot.phase === 'error') return statusBlock(snapshot.error ?? '', 'error')
+      // 尚无任何提交的仓库：没有 HEAD 可比较，说"改动"会误导（用户会以为文件丢了）。
+      if (snapshot.empty === true) return statusBlock(t('workspaceEmpty'))
 
       return react.createElement(
         'div',
@@ -3906,13 +4131,126 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 工作区里**单个文件**的差异缓存。
+     *
+     * 键里带 `workspace` + `revision`(HEAD) + `path`，因此：
+     *   * 切项目不会串（A 的差异永远不会被 B 读到）；
+     *   * HEAD 一变（提交、切换分支、amend）旧条目自然失效——键对不上；
+     *   * 同一文件反复展开不会重复请求。
+     *
+     * 有上限并按键序淘汰最旧的一条：一次会话里点开几百个文件的差异是可能的，而每份差异
+     * 最多 512 KB（host 侧 `MAX_DIFF_BYTES`），不设上限就是一处无界内存增长。
+     */
+     const WORKSPACE_DIFF_CACHE_MAX = 64
+     const workspaceDiffCache = new Map()
+
+     /**
+      * 读缓存；命中时把它移到队尾（最近使用）。
+      * @param key - 缓存键。
+      * @returns 缓存的响应，或 undefined。
+      */
+     function readWorkspaceDiffCache(key) {
+       if (!workspaceDiffCache.has(key)) return undefined
+       const value = workspaceDiffCache.get(key)
+       workspaceDiffCache.delete(key)
+       workspaceDiffCache.set(key, value)
+       return value
+     }
+
+     /**
+      * 写缓存（超出上限时淘汰最旧的一条）。
+      * @param key - 缓存键。
+      * @param value - host 的响应。
+      */
+     function writeWorkspaceDiffCache(key, value) {
+       workspaceDiffCache.set(key, value)
+       while (workspaceDiffCache.size > WORKSPACE_DIFF_CACHE_MAX) {
+         const oldest = workspaceDiffCache.keys().next()
+         if (oldest.done === true) break
+         workspaceDiffCache.delete(oldest.value)
+       }
+     }
+
+     /**
+      * **按需**取一个文件的逐行差异（项目级更改页签用）。
+      *
+      * 存在的理由：全仓库统一差异在真实仓库里是 45.9 MB / 数秒，而用户一次只看一两个
+      * 文件。打开 Changes 页签时**一个差异都不取**（这一条有测试钉住），点开哪一行才取
+      * 那一行。
+      *
+      * 三种"迟到"都要挡住，否则会出现"文件 A 的差异显示在文件 B 下面"：
+      *   * 令牌（`token`）：展开→收起→再展开，旧响应不许写进来；
+      *   * 缓存键（`cacheKey`）：只有键仍等于当前渲染所用的键才采用这份结果；
+      *   * 键里带 workspace/HEAD：切项目后旧响应天然对不上。
+      *
+      * @param props - `{ t, file, workspace, revision, margin, onStats }`。
+      * @returns React 元素。
+      */
+     function LazyFileDiff(props) {
+       const { t, file, workspace, revision } = props
+       const path = typeof file?.path === 'string' ? file.path : ''
+       const cacheKey = `${workspace ?? ''}\u0000${revision ?? ''}\u0000${path}`
+       const [state, setState] = react.useState({ key: '', phase: 'idle' })
+       const token = react.useRef(0)
+       const onStats = typeof props?.onStats === 'function' ? props.onStats : undefined
+
+       react.useEffect(() => {
+         if (path === '' || typeof workspace !== 'string' || workspace === '') return undefined
+         const cached = readWorkspaceDiffCache(cacheKey)
+         if (cached !== undefined) {
+           setState({ key: cacheKey, phase: 'ready', result: cached })
+           if (onStats !== undefined) onStats(path, cached)
+           return undefined
+         }
+         const mine = (token.current += 1)
+         setState({ key: cacheKey, phase: 'loading' })
+         void (async () => {
+           try {
+             const result = await call('workspace-file', {
+               workspace,
+               path,
+               ...(typeof revision === 'string' && revision !== '' ? { revision } : {}),
+               ...(file?.untracked === true ? { untracked: true } : {}),
+             })
+             if (token.current !== mine) return
+             writeWorkspaceDiffCache(cacheKey, result)
+             setState({ key: cacheKey, phase: 'ready', result })
+             if (onStats !== undefined) onStats(path, result)
+           } catch (cause) {
+             if (token.current !== mine) return
+             const error = cause instanceof Error ? cause : new Error(String(cause))
+             setState({ key: cacheKey, phase: 'error', message: String(error.detail ?? error.message) })
+           }
+         })()
+         return undefined
+         // 依赖里只放原始值：`file` 每次渲染都是新对象，放进去会变成"每渲染一次发一次请求"。
+       }, [cacheKey, path, workspace, revision, file?.untracked, onStats])
+
+       // 键对不上的那一份（切换文件/切换项目）在渲染时**当它不存在**，避免用上一个文件的
+       // 差异画这一行（与 GraphCommitDetail 的 state.revision 是同一套做法）。
+       const current = state.key === cacheKey ? state : { phase: 'loading' }
+       if (current.phase === 'idle' || current.phase === 'loading') return statusBlock(t('loading'))
+       if (current.phase === 'error') return statusBlock(current.message, 'error')
+       const result = current.result
+       // 二进制不需要额外说明：host 回的就是 `Binary files … differ`，FileDiff 自己认得出。
+       // 超长截断要说一句，否则用户以为文件只有这么点改动。
+       return react.createElement(FileDiff, {
+         t,
+         file,
+         diff: typeof result?.diff === 'string' ? result.diff : '',
+         margin: props.margin,
+         ...(result?.truncated === true ? { note: t('truncated') } : {}),
+       })
+     }
+
+    /**
      * 一个文件的逐行差异（含顶部那条固定信息：状态、路径、增删行数）。
      *
      * 抽成独立组件是因为它有**两个使用者**：会话内的文件列表（`FileList`）与项目级的
      * 更改页签（`StagingSection` 的行展开）。两处必须长得一样——差异视图是最不该出现
      * "这个入口能看、那个入口不能看"的地方，而复制一份必然漂移。
      *
-     * @param props - `{ t, file, diff, margin }`。
+     * @param props - `{ t, file, diff, margin, note }`。
      * @returns React 元素。
      */
     function FileDiff(props) {
@@ -3940,6 +4278,15 @@ window.__ModuleLoader__.load({
             react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? 0}`),
           ),
         ),
+        // 按需取差异时可能被截断（host 侧 MAX_DIFF_BYTES）：必须说明，否则用户以为文件
+        // 只有这么点改动。会话内的整份差异则在列表级统一提示（见 FileList 的 truncated）。
+        typeof props?.note === 'string' && props.note !== ''
+          ? react.createElement(
+              'div',
+              { 'data-review-diff-note': '', style: { padding: '6px 10px', color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: '11.5px' } },
+              props.note,
+            )
+          : null,
         isBinaryDiff(diff)
           ? react.createElement(
               'div',
@@ -3977,9 +4324,38 @@ window.__ModuleLoader__.load({
       const [confirming, setConfirming] = react.useState('')
       const [busy, setBusy] = react.useState('')
       const [trouble, setTrouble] = react.useState('')
+      /**
+       * 按需取回的差异里数出来的增删行数（路径 → `{ added, removed }`）。
+       *
+       * 为什么需要：项目级快照是**元数据级**的（不生成全仓库差异），未跟踪文件因此拿不到
+       * 行数（`git diff HEAD` 里没有它），行上只能显示 `·`。点开那个文件时我们本来就要取
+       * 它的差异——顺手数一遍，行上的数字就补齐了，不需要再为它跑一条 numstat。
+       */
+      const [loadedStats, setLoadedStats] = react.useState({})
       const onChanged = typeof props?.onChanged === 'function' ? props.onChanged : () => undefined
       const { files, added, removed } = summarize(result)
-      const byFile = react.useMemo(() => splitByFile(result?.diff ?? ''), [result?.diff])
+      /**
+       * 会话内的"本轮改动"仍然带着整份差异（`/changes` 一次给出，列表与差异同源）；
+       * **项目级**的改动不再带差异——那些由 `LazyFileDiff` 按需取（见它的说明）。
+       */
+      const lazy = result?.scope === 'workspace'
+      const byFile = react.useMemo(() => (lazy ? new Map() : splitByFile(result?.diff ?? '')), [lazy, result?.diff])
+
+      /** 从一份差异文本里数增删行（`+++`/`---` 文件头不算）。 */
+      const noteStats = react.useCallback((path, diffResult) => {
+        const text = typeof diffResult?.diff === 'string' ? diffResult.diff : ''
+        let plus = 0
+        let minus = 0
+        for (const line of text.split('\n')) {
+          if (line.startsWith('+') && !line.startsWith('+++')) plus += 1
+          else if (line.startsWith('-') && !line.startsWith('---')) minus += 1
+        }
+        setLoadedStats((current) =>
+          current[path] !== undefined && current[path].added === plus && current[path].removed === minus
+            ? current
+            : { ...current, [path]: { added: plus, removed: minus } },
+        )
+      }, [])
 
       /**
        * 还原单个文件到基线（本轮）或 HEAD（工作区）。
@@ -4034,7 +4410,7 @@ window.__ModuleLoader__.load({
         // 不说的话，用户看到的是一列点不开的文件——而真正的原因是仓库里有个没被
         // `.gitignore` 覆盖的大目录（实测：`tmp/` 下 6,635 个日志文件、45.9 MB 差异）。
         // 这条提示同时也是给用户的修复建议：把那个目录加进 .gitignore。
-        result?.diffOversized === true
+        result?.diffOversized === true && lazy !== true
           ? react.createElement(
               'div',
               {
@@ -4081,6 +4457,10 @@ window.__ModuleLoader__.load({
         ),
         files.map((file) => {
           const diff = byFile.get(file.path) ?? ''
+          // 行上的增删数字：优先用"已经取回该文件差异后数出来的"那一份（未跟踪文件在快照里
+          // 没有行数），其次才是快照给的 numstat。
+          const stats = loadedStats[file.path] ?? { added: file.added, removed: file.removed }
+          const known = typeof stats.added === 'number' || typeof stats.removed === 'number'
           const open = expanded === file.path
           const working = busy === file.path
           const status = file.status?.[0] ?? '?'
@@ -4190,9 +4570,19 @@ window.__ModuleLoader__.load({
                     'data-review-stats': '',
                     style: { whiteSpace: 'nowrap', fontSize: '11.5px', flexShrink: 0, fontFamily: CODE_FONT },
                   },
-                  react.createElement('span', { style: { color: ADDED } }, `+${file.added ?? 0}`),
+                  // 行数未知（未跟踪文件，且还没点开过）时给 `·` 而不是 `+0 −0`：后者会被读成
+                  // "这个文件没有增删"，而事实是"还没算过"（点开就补上）。
+                  known
+                    ? react.createElement(
+                        'span',
+                        { style: { color: ADDED } },
+                        `+${stats.added ?? 0}`,
+                      )
+                    : react.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, '·'),
                   ' ',
-                  react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? 0}`),
+                  known
+                    ? react.createElement('span', { style: { color: REMOVED } }, `−${stats.removed ?? 0}`)
+                    : react.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, '·'),
                 ),
                 // 暂存状态：哪个文件已经进了索引。
                 //
@@ -4285,7 +4675,17 @@ window.__ModuleLoader__.load({
               ),
             ),
             open
-              ? react.createElement(FileDiff, { t, file, diff })
+              ? lazy
+                ? react.createElement(LazyFileDiff, {
+                    // key 带上路径：切换文件就是换实例，"展开状态/迟到响应"一并重置。
+                    key: `lazy:${file.path}`,
+                    t,
+                    file,
+                    workspace: props.workspace,
+                    revision: props.revision,
+                    onStats: noteStats,
+                  })
+                : react.createElement(FileDiff, { t, file, diff })
               : null,
           )
         }),
@@ -4313,10 +4713,11 @@ window.__ModuleLoader__.load({
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       // 标签正文的注入按会话作用域做，因此 sessionId 可直接使用。
       const sessionId = props?.sessionId
-      const workspace =
-        typeof props?.useSessions === 'function' && sessionId !== undefined
-          ? props.useSessions((state) => state?.byId?.[sessionId]?.cwd)
-          : undefined
+      // **无条件**取钩子；"有没有 sessionId"交给选择器表达（见 useLatchedHook）。
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      const workspace = useSessions((state) =>
+        sessionId === undefined ? undefined : asPath(state?.byId?.[sessionId]?.cwd),
+      )
 
       const { state, reload } = useChanges(workspace, sessionId)
 
@@ -4536,7 +4937,12 @@ window.__ModuleLoader__.load({
      * @returns React 元素。
      */
     function GraphBranchTree(props) {
-      const { t, commits, hasMore, ref, onPickRef } = props
+      // **不能用 `ref` 当这个"当前筛选的分支名"**：`ref` 是 React 在 createElement 里的保留键，
+      // 它永远不会进 props（`props.ref` 恒为 undefined），于是高亮判定 `ref === row.name`
+      // 永远为假——筛选生效后分支树上看不出选中的是哪一行；而传字符串更会触发
+      // "Element ref was specified as a string but no owner was set"（生产包里就是
+      // Minified React error #290）。业务字段一律换名。
+      const { t, commits, hasMore, selectedRef, onPickRef } = props
       const head = []
       const local = []
       const remote = []
@@ -4582,8 +4988,8 @@ window.__ModuleLoader__.load({
                       padding: '4px 10px',
                       border: 'none',
                       borderRadius: '5px',
-                      background: ref === row.name ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
-                      color: ref === row.name ? ACCENT : 'inherit',
+                      background: selectedRef === row.name ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
+                      color: selectedRef === row.name ? ACCENT : 'inherit',
                       fontFamily: UI_FONT,
                       fontSize: '12.5px',
                       textAlign: 'left',
@@ -5170,36 +5576,20 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * 记录一次 Log 页签里的渲染失败。
-     *
-     * 关键是**不要把它藏起来**：以前没有错误边界，一次渲染期的 TypeError 会让 React 卸载
-     * 整棵 `HeroChangesTrigger` 子树——用户看到的是"点了 Log，抽屉和右上角入口一起消失了"，
-     * 完全看不出发生了什么。加了边界之后异常不会再把面板带走，但也因此更容易被"吞掉"，
-     * 所以这里把组件名、字段、堆栈一并落到 console 与 `window.__dshDesktopReviewLogError`
-     * （脚本与用户报障都能直接读到），界面上也原样显示。
-     *
-     * @param error - 抛出的值。
-     * @param componentStack - React 给的组件栈（指出是哪个组件炸的）。
-     * @param workspace - 当前工作区，用于区分是哪个项目的数据。
-     * @returns 诊断详情（同时挂到 window 上）。
-     */
-    function reportLogError(error, componentStack, workspace) {
+    /** 两个错误边界共用的诊断落点（console + `window` 上一个键）。 */
+    function reportRenderError(options) {
       const detail = {
-        scope: 'dsh-client-ui-review:log',
-        message: error instanceof Error ? error.message : String(error),
+        scope: options.scope,
+        message: options.error instanceof Error ? options.error.message : String(options.error),
         // 没有 Error 对象时也留一条可读的栈，方便定位是哪一帧的数据。
-        stack: error instanceof Error ? String(error.stack ?? '') : '',
-        componentStack: typeof componentStack === 'string' ? componentStack : '',
-        workspace: typeof workspace === 'string' ? workspace : '',
+        stack: options.error instanceof Error ? String(options.error.stack ?? '') : '',
+        componentStack: typeof options.componentStack === 'string' ? options.componentStack : '',
+        workspace: typeof options.workspace === 'string' ? options.workspace : '',
         at: new Date().toISOString(),
       }
       try {
-        // 这条是给开发者看的诊断日志（组件栈、字段、工作区都在里面）：翻成别的语言对排查
-        // 没有帮助，因此显式豁免本地化检查；界面上的降级文案走 t()。
-        const crashTag = '[dsh-review:log] 提交图渲染失败' // i18n-allow
         // eslint-disable-next-line no-console -- 故意保留：这是唯一的现场证据。
-        console.error(crashTag, detail.message, {
+        console.error(options.tag, detail.message, {
           componentStack: detail.componentStack,
           workspace: detail.workspace,
           stack: detail.stack,
@@ -5208,11 +5598,62 @@ window.__ModuleLoader__.load({
         // console 不可用（例如宿主接管了它）不影响降级渲染。
       }
       try {
-        window.__dshDesktopReviewLogError = detail
+        window[options.key] = detail
       } catch {
         // 非浏览器环境。
       }
       return detail
+    }
+
+    /**
+     * 记录一次 Log 页签里的渲染失败。
+     *
+     * 关键是**不要把它藏起来**：一次渲染期的 TypeError 会让 React 卸载整棵子树——用户
+     * 看到的是"点了 Log，抽屉和右上角入口一起消失了"，完全看不出发生了什么。加了边界之后
+     * 异常不会再把面板带走，但也因此更容易被"吞掉"，所以这里把组件名、字段、堆栈一并落到
+     * console 与 `window.__dshDesktopReviewLogError`（脚本与用户报障都能直接读到），
+     * 界面上也原样显示。
+     *
+     * @param error - 抛出的值。
+     * @param componentStack - React 给的组件栈（指出是哪个组件炸的）。
+     * @param workspace - 当前工作区，用于区分是哪个项目的数据。
+     * @returns 诊断详情（同时挂到 window 上）。
+     */
+    function reportLogError(error, componentStack, workspace) {
+      // 这两条是给开发者看的诊断日志（组件栈、字段、工作区都在里面）：翻成别的语言对排查
+      // 没有帮助，因此显式豁免本地化检查；界面上的降级文案走 t()。
+      const logTag = '[dsh-review:log] 提交图渲染失败' // i18n-allow
+      return reportRenderError({
+        key: '__dshDesktopReviewLogError',
+        tag: logTag,
+        scope: 'dsh-client-ui-review:log',
+        error,
+        componentStack,
+        workspace,
+      })
+    }
+
+    /**
+     * 记录一次**项目 Git 面板**（抽屉整体）的渲染失败。
+     *
+     * 与 Log 那一层是两级的：Log 边界管的是提交图，这一层管的是整个抽屉——包括 Changes
+     * 页签、暂存区、提交框。面板层捕获意味着"这里有 bug，但入口还在、关掉面板就能继续用"。
+     *
+     * @param error - 抛出的值。
+     * @param componentStack - React 给的组件栈。
+     * @param workspace - 当前工作区。
+     * @returns 诊断详情。
+     */
+    function reportPanelError(error, componentStack, workspace) {
+      const panelTag = '[dsh-review:panel] 项目 Git 面板渲染失败' // i18n-allow
+      return reportRenderError({
+        key: '__dshDesktopReviewPanelError',
+        tag: panelTag,
+        scope: 'dsh-client-ui-review:panel',
+        error,
+        componentStack,
+        workspace,
+      })
     }
 
     /**
@@ -5356,6 +5797,156 @@ window.__ModuleLoader__.load({
     const LogErrorBoundary = createLogErrorBoundary()
 
     /**
+     * 构造**项目 Git 面板**（整个抽屉）的错误边界。
+     *
+     * 这一层与 Log 那一层是"两级"的关系，缺一不可：
+     *   * 本层包住整个 `ReviewPanel`，因此 Changes 页签、暂存区、提交框里的渲染期异常
+     *     都只会让**面板**显示降级页，而右上角入口（`ProjectChangesTriggerButton`，
+     *     本层的兄弟）照常存在——这正是"入口永远不消失"这条硬要求的落点；
+     *   * `LogErrorBoundary` 更细一层，让提交图出错时连 Changes 页签都不用降级。
+     *
+     * 与 `createLogErrorBoundary` 同一套写法（类组件 + 工厂），原因也相同：React 只有
+     * `getDerivedStateFromError` 这一条捕获路径，而测试桩里的 `react` 可能是部分实现，
+     * 直接 `extends react.Component` 会在加载期就抛。
+     *
+     * @returns 边界组件（类组件，或退化后的透传函数组件）。
+     */
+    function createProjectGitPanelBoundary() {
+      const Base = typeof react.Component === 'function' ? react.Component : null
+      if (Base === null) {
+        const Passthrough = function ProjectGitPanelErrorBoundary(props) {
+          return props?.children ?? null
+        }
+        Passthrough.displayName = 'ProjectGitPanelErrorBoundary'
+        return Passthrough
+      }
+      return class ProjectGitPanelErrorBoundary extends Base {
+        constructor(props) {
+          super(props)
+          this.state = { error: null, detail: null, nonce: 0 }
+          this.onRetry = this.onRetry.bind(this)
+          this.onClose = this.onClose.bind(this)
+        }
+
+        /** 渲染期抛出的异常：记下来，下一次渲染走降级分支。 */
+        static getDerivedStateFromError(error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) }
+        }
+
+        /** 渲染之后 React 把组件栈送过来，这时才拿得到"是哪个组件炸的"。 */
+        componentDidCatch(error, info) {
+          this.setState({ detail: reportPanelError(error, info?.componentStack, this.props?.workspace) })
+        }
+
+        /** 「重新加载」：清掉错误，让面板整棵重新挂载（数据也会重新取一次）。 */
+        onRetry() {
+          this.setState((prev) => ({ error: null, detail: null, nonce: prev.nonce + 1 }))
+        }
+
+        /** 「关闭」：收起抽屉。入口仍然在，用户可以再打开。 */
+        onClose() {
+          this.setState({ error: null, detail: null })
+          if (typeof this.props?.onClose === 'function') this.props.onClose()
+        }
+
+        /**
+         * @returns 正常情况下是包着 children 的容器；出错时是带诊断信息的降级页。
+         */
+        render() {
+          const t = typeof this.props?.t === 'function' ? this.props.t : (key) => key
+          if (this.state.error !== null) {
+            const detail = this.state.detail
+            const message = this.state.error.message
+            const stack = this.state.error.stack ?? ''
+            const button = (key, label, onClick, accent) =>
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  key,
+                  'data-review-panel-error-action': key,
+                  onClick,
+                  style: {
+                    padding: '5px 12px',
+                    borderRadius: '6px',
+                    border: `1px solid ${BORDER}`,
+                    background: 'transparent',
+                    color: accent === true ? ACCENT : 'inherit',
+                    fontFamily: UI_FONT,
+                    fontSize: '12.5px',
+                    cursor: 'pointer',
+                  },
+                },
+                label,
+              )
+            return react.createElement(
+              'div',
+              {
+                'data-review-panel-error': '',
+                role: 'alert',
+                style: {
+                  position: 'fixed',
+                  top: '84px',
+                  right: '14px',
+                  zIndex: 9998,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  boxSizing: 'border-box',
+                  width: 'min(460px, calc(100vw - 28px))',
+                  maxHeight: 'min(60vh, 460px)',
+                  overflowY: 'auto',
+                  padding: '14px',
+                  borderRadius: '12px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-base, #fff)',
+                  color: 'var(--dsw-alias-label-primary, #202124)',
+                  fontFamily: UI_FONT,
+                  fontSize: '12.5px',
+                  boxShadow: '0 12px 36px rgba(0,0,0,.12)',
+                },
+              },
+              react.createElement('div', { style: { fontWeight: 600, color: REMOVED } }, t('panelCrashedTitle')),
+              react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary, #5f6368)' } }, t('panelCrashedHint')),
+              react.createElement(
+                'pre',
+                {
+                  'data-review-panel-error-detail': '',
+                  style: {
+                    margin: 0,
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    background: 'var(--dsw-alias-bg-module-platform, #f0f1f3)',
+                    color: 'inherit',
+                    fontFamily: CODE_FONT,
+                    fontSize: '11.5px',
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                    maxHeight: '220px',
+                    overflowY: 'auto',
+                  },
+                },
+                `${t('logErrorDetail')}\n${message}${detail?.componentStack ? `\n\n${detail.componentStack.trim()}` : ''}${stack ? `\n\n${stack}` : ''}`,
+              ),
+              react.createElement(
+                'div',
+                { style: { display: 'flex', gap: '8px' } },
+                button('reload', t('panelReload'), this.onRetry, true),
+                button('close', t('close'), this.onClose, false),
+              ),
+            )
+          }
+          // 重试与关闭都不需要换 key：React 捕获渲染期异常时已经卸载了抛错的子树，
+          // 重试时 children 是全新挂载的实例（与 LogErrorBoundary 同一条理由）。
+          return this.props?.children ?? null
+        }
+      }
+    }
+
+    /** 项目 Git 面板用的边界实例（见 createProjectGitPanelBoundary）。 */
+    const ProjectGitPanelErrorBoundary = createProjectGitPanelBoundary()
+
+    /**
      * 提交图：三栏视图（分支树 / 提交列表 / 提交详情）。
      *
      * **纯展示 + 数据组件**：工作区与文案都由 props 给（`{ t, workspace, refreshToken }`）。
@@ -5385,11 +5976,12 @@ window.__ModuleLoader__.load({
        * "按树中位置分配 hook 槽"的桩渲染器写的测试都会把父子两级的槽串到一起（实测）。
        * 一个组件、两条取值路径，既省一层也避免了这类坑。
        */
-      const { sessionId, useSessions } = props ?? {}
-      const sessionWorkspace =
-        typeof useSessions === 'function' && sessionId !== undefined
-          ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
-          : undefined
+      const { sessionId } = props ?? {}
+      // **无条件**取钩子；"有没有 sessionId"交给选择器表达（见 useLatchedHook）。
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      const sessionWorkspace = useSessions((state) =>
+        sessionId === undefined ? undefined : asPath(state?.byId?.[sessionId]?.cwd),
+      )
       const explicitWorkspace = typeof props?.workspace === 'string' && props.workspace !== '' ? props.workspace : undefined
       /** 没有会话时的兜底工作区（宿主启动时的工作区）。只在需要时才去问。 */
       const [fallbackWorkspace, setFallbackWorkspace] = react.useState(undefined)
@@ -5673,7 +6265,8 @@ window.__ModuleLoader__.load({
                 t,
                 commits: fresh.commits,
                 hasMore: fresh.hasMore,
-                ref: fresh.ref,
+                // 名字里带 ref 但**不是** React 的 ref（见 GraphBranchTree 的说明）。
+                selectedRef: fresh.ref,
                 onPickRef: (name) => update({ ref: fresh.ref === name ? '' : name }),
               }),
             ),
@@ -5846,17 +6439,17 @@ window.__ModuleLoader__.load({
      */
     function ReviewChip(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { sessionId, useSessions } = props ?? {}
+      const { sessionId } = props ?? {}
 
-      const workspace =
-        typeof useSessions === 'function' && sessionId !== undefined
-          ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
-          : undefined
-
-      const running =
-        typeof useSessions === 'function' && sessionId !== undefined
-          ? useSessions((state) => Boolean(state?.byId?.[sessionId]?.isRunning))
-          : false
+      // **无条件**取钩子，"有没有 sessionId / 有没有会话源"交给选择器表达
+      // （见 useLatchedHook：条件调用会让 hook 数量可变 → React #310）。
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      const workspace = useSessions((state) =>
+        sessionId === undefined ? undefined : asPath(state?.byId?.[sessionId]?.cwd),
+      )
+      const running = useSessions((state) =>
+        sessionId === undefined ? false : state?.byId?.[sessionId]?.isRunning === true,
+      )
 
       const [count, setCount] = react.useState(null)
       const [trouble, setTrouble] = react.useState('')
@@ -5877,7 +6470,10 @@ window.__ModuleLoader__.load({
         let alive = true
         const tick = async () => {
           try {
-            const result = await call('changes', { workspace, sessionId })
+            // **只要元数据**：这里只把 `files.length` 显示成一个数字，而全仓库统一差异在
+            // 真实仓库里是 45.9 MB / 数秒。轮询路径必须能明确表达"不要差异正文"，否则
+            // "后台每 10 秒重算一次全仓库差异"会一直存在（那份正文只有点开某个文件才需要）。
+            const result = await call('changes', { workspace, sessionId, metadataOnly: true })
             if (!alive) return
             if (result?.noBaseline === true && !running) {
               // 空闲时补记：agent 不在运行就不可能产生改动，因此这一刻正是"下一轮开始前"。
@@ -6221,6 +6817,8 @@ window.__ModuleLoader__.load({
     // Log 页签的错误边界也导出：它是"图炸了不能把抽屉和右上角入口一起带走"这条要求的
     // 唯一落点，测试要能直接驱动它（抛一个错进去、断言降级页与重试）。
     exports.__logErrorBoundaryForTest = LogErrorBoundary
+    // 面板级边界也导出：它是"入口永远不消失"这条硬要求的落点（面板崩了只降级面板本体）。
+    exports.__projectGitPanelBoundaryForTest = ProjectGitPanelErrorBoundary
     // 规范化层导出给测试：host 数据缺字段/给错类型是这次崩溃的根因，`normalizeCommit` /
     // `normalizeGraphPage` / `normalizeCommitDetail` 是唯一入口，必须能被直接断言。
     exports.__graphNormalizeForTest = {

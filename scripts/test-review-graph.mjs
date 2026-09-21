@@ -226,12 +226,22 @@ try {
   checkTrue('   每个文件都带 staged 标记', (res.body.files ?? []).every((f) => typeof f.staged === 'boolean'))
   checkTrue('   每个文件都带 unstaged 标记', (res.body.files ?? []).every((f) => typeof f.unstaged === 'boolean'))
   checkTrue('   每个文件都带 untracked 标记', (res.body.files ?? []).every((f) => typeof f.untracked === 'boolean'))
-  // 此刻工作区里**已跟踪**的那些改动全都是未暂存的（测试的前面几节没有 add 过东西）。
-  // 未跟踪的文件（`??`）要单独看：它们的 X 列是 `?`，语义上不是"已暂存"，标记为
-  // `untracked: true`，因此断言必须把这部分排除在外。
+  // 此刻工作区里**已跟踪**的那些改动全都是未暂存的（测试的前面几节没有 add 过东西）
+  // ——**除了 `d.txt`**：夹具在第 66 行故意做了 `git rm --cached d.txt`（"取消暂存一个
+  // 已提交的文件"），索引里因此留着一条**已暂存的删除**。它必须被如实报成 `staged: true`
+  // （IDEA 也是这样：索引说删了，那就是一条待提交的改动）。
+  //
+  // 这条断言以前是"所有已跟踪改动都未暂存"，而旧实现会**漏掉** d.txt：它用
+  // `add -A` 出来的临时树与 HEAD 比较，而 d.txt 在工作区里还在，于是被 add 回临时树、
+  // 差异为空——一条已暂存的删除就此消失。新实现直接读 status，不再有这个问题。
   const trackedFiles = (res.body.files ?? []).filter((f) => f.untracked !== true)
   checkTrue('   有已跟踪的改动可供断言', trackedFiles.length > 0)
-  checkTrue('   已跟踪的改动都标记为未暂存', trackedFiles.every((f) => f.unstaged === true && f.staged === false))
+  const stagedDeletion = trackedFiles.find((f) => f.path === 'd.txt')
+  check('   故意暂存的删除（rm --cached d.txt）被如实报成 staged', `${stagedDeletion?.staged}/${stagedDeletion?.unstaged}`, 'true/false')
+  const rest = trackedFiles.filter((f) => f.path !== 'd.txt')
+  const oddOnes = rest.filter((f) => !(f.unstaged === true && f.staged === false))
+  checkTrue('   其余已跟踪的改动都标记为未暂存', oddOnes.length === 0)
+  if (oddOnes.length > 0) console.log(`      不符合的条目: ${JSON.stringify(oddOnes).slice(0, 400)}`)
   // 暂存之后同一个文件必须变成 staged。
   await post('stage', { paths: ['a.txt'] })
   res = await get('workspace')

@@ -265,6 +265,10 @@ nsis:
   - `Log`：**分支树 / 提交图 / 详情** 三栏，单击一条提交只在右侧显示它的详情与改动文件（不再在原位置展开），点文件看这次提交对该文件的差异；两条分栏可拖动调整宽度并记忆，窄窗口可以把分支树或详情收起来；顶部有刷新与搜索
 - 入口上的改动数字与抽屉里的文件列表**来自同一份共享快照**（同一个轮询），因此不会出现"外面显示 0、进去却有文件"；`stage / unstage / revert / commit` 成功后统一让快照失效并重取一次
 - **`Log` 页签渲染失败只降级这一页**：提交图的字段全部先在取数处规范化（`/graph`、`/commit-detail` 少给或多给字段都不会进渲染层），外面还包了一层错误边界——图炸了只会让 Log 页签显示带组件与字段的诊断信息与「重新加载 Log」，抽屉、`Changes` 页签与右上角入口都不会被带走。（曾经的实机现象是：点 `Log` 之后整块抽屉连右上角入口一起消失，看起来像面板被关掉，实际是渲染期异常被槽位级的错误边界替换掉了整个入口。）
+- **入口按钮与面板是两条互不连累的子树**：右上角按钮（`ProjectChangesTriggerButton`）与面板（`ProjectGitPanelErrorBoundary` → `ReviewPanel`）分开，面板内部（Changes / Log / 暂存区 / 提交框）任何渲染期异常都只让**面板**显示「Git 面板加载失败 + 详细错误 + 重新加载 + 关闭」，入口永远在。`Log` 页签里还有更细的一层边界。
+- **切项目是一次明确的三段**：`A → 正在切换项目… → B`。只要**存在**当前会话就以它的 cwd 为准；会话还在换、cwd 未到时显示「正在切换项目…」，**不会**退回上一个会话（或外壳）的目录。实现上靠 `useHasCurrentSession` 把"没有当前会话"与"有会话但 cwd 未到"区分开。所有 hook 无条件调用且都在阶段守卫之前（`check-react-rules.mjs` 静态钉住），因此切项目不会触发 React #310。
+- **项目级 Git 抽屉不是 popover**：点左侧项目、点聊天正文、点主界面其它区域**都不会**把它关掉——只有 X 按钮、Escape、再点一次右上角入口才关。会话内那个审查标签沿用点外部关闭。
+- **逐行差异按需取**：`/workspace` 是**元数据级**快照（`status --porcelain=v2` 一次拿文件与索引态 + `diff --numstat HEAD` 拿行数），**不含**全仓库统一差异；点开某个文件时走 `/workspace-file` 只算那一个文件（未跟踪文件用 `--no-index` 比空文件）。缓存键是 `workspace + HEAD + 路径`，因此切项目、提交后旧差异都会失效；迟到的响应有令牌与键双重把关。实测（6,639 个改动/未跟踪路径的仓库）：轮询 10 个 git 进程 / 6.3s → **2 个进程 / 0.32s**，全仓库差异正文（38.7 MB）不再产生。
 - **只有文件模式变化（如 `chmod`）的文件不算改动**：Windows 上仓库若带 `core.fileMode=true`，git 会把 `100755` 的脚本记成 `100644`，产生一条行数 `0/0`、内容一字未变的"修改"。宿主侧统一用 `-c core.fileMode=false` 拍快照，并额外滤掉这类条目
 
 两个入口都带无障碍标注（`aria-label`、`aria-expanded`、`aria-haspopup`），可用键盘操作并有可见的焦点环。
@@ -539,6 +543,11 @@ node scripts/test-review-overlay-hooks.mjs   # 项目级入口：inject 不遮�
 node scripts/test-gitbar-workspace-race.mjs  # 切换项目时的竞态：迟到的旧响应不许覆盖新工作区
 node scripts/test-review-workspace-race.mjs  # 共享快照与提交图的竞态、外部数字与抽屉列表同源
 node scripts/test-review-log-tab-crash.mjs   # 点 Log 不许把抽屉与右上角入口一起带走（host 数据缺字段 + 错误边界）
+node scripts/test-review-project-git.mjs     # 切项目的状态机：hook 数量不许变、入口永不消失、正在切换项目、面板级降级
+node scripts/test-review-lazy-diff.mjs       # 逐行差异按需取：不点不取、点一次只取一次、缓存键含 workspace/HEAD
+node scripts/check-react-rules.mjs           # 静态挡住 React #310（hook 顺序）与 #290（把 ref 当业务字段传）
+node scripts/measure-workspace-snapshot.mjs  # 实测项目级快照的进程数与耗时（重构前 vs 重构后）
+node scripts/test-project-git-smoke.mjs      # **真实 Electron/CDP 冒烟**（需要带远程调试端口的实例，见下）
 node scripts/test-gitbar-branch-interaction.mjs # 分支行交互：单击开菜单 / 双击切换 / 右键同菜单
 node scripts/test-gitbar-branch-sync.mjs      # 补算契约（syncExact）与"只补算可见行"的有界性
 node scripts/test-gitbar-branch-perf.mjs     # 分支列表的子进程上界（300 分支不许起 300 个 git）
@@ -547,6 +556,18 @@ node scripts/check-plugin-i18n.mjs       # 插件里没有硬编码文案
 ```
 
 > 其中 `test-review-sidebar.mjs`、`test-ui-typography.cjs` 这类会启动 Electron 并从 CDP 驱动界面的脚本，需要图形环境；在受限沙箱里 Electron 起不来，应放到本机桌面会话中运行。
+
+> **为什么还要一个"真实 React"测试**：仓库里绝大多数客户端测试用的是自制的假 React（自己的 `createElement` / `useState` / `useEffect`）。它抓不到两类只有真渲染器才报的错——`#290`（`ref` 被当业务字段传给函数组件）与 `#300/#310`（Rules of Hooks）。两者在实机上的表现都是**整个入口被卸载**，也就是"切项目或点 Log 之后抽屉和右上角入口一起消失"。因此：
+>
+> * `scripts/check-react-rules.mjs` 用静态规则把这两类形状挡在没有 Electron 的地方；
+> * `scripts/test-project-git-smoke.mjs` 跑真实渲染器，并把 `window.onerror` / `unhandledrejection` / `console.error` 全部收上来，出现 React minified error 即失败。它需要一个带远程调试端口的实例：
+>
+>   ```bash
+>   npm start -- --remote-debugging-port=9333     # 另开一个终端
+>   node scripts/test-project-git-smoke.mjs       # DSH_CDP_PORT 可换端口
+>   ```
+>
+>   它会找两个"会话/项目"来做 A→B→A（可用 `DSH_SMOKE_SESSIONS="项目A标题|项目B标题"` 指定）。
 
 > 会移动工作区状态的测试（分支切换、审查）一律使用**一次性临时仓库**——绝不能拿真实仓库当试验场。
 

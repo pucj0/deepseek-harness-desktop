@@ -418,6 +418,192 @@ function parsePorcelain(raw) {
 }
 
 /**
+ * `porcelain=v2` 的一条记录 → 界面认识的条目。
+ *
+ * v2 的两列 `XY` 与 v1 的语义相同，但**未修改用 `.` 而不是空格**。界面上的分组判定
+ * （客户端的 `classifyEntry`）一直按"空格 = 干净"写，因此这里把 `.` 换回空格，
+ * 让两套格式共用同一处判定——否则"已暂存 / 更改"的分组会因为一个点而全错。
+ *
+ * 展示用的字母取"工作区那一列"优先：用户看到的内容差异更接近它（例如 `MM` 取 `M`、
+ * `AM` 取 `M`、`A.` 取 `A`）。两列都干净（重命名之外的罕见情形）时退回 `M`。
+ *
+ * @param path - 仓库内相对路径。
+ * @param xy - 两列状态，例如 `M.`、`.M`、`MM`、`R.`。
+ * @returns `{ path, status, index, worktree, staged, unstaged, untracked }`。
+ */
+function entryFromXY(path, xy) {
+  const index = typeof xy === 'string' && xy.length >= 1 ? xy[0] : '.'
+  const worktree = typeof xy === 'string' && xy.length >= 2 ? xy[1] : '.'
+  const letter = worktree !== '.' ? worktree : index
+  return {
+    path,
+    status: letter === '.' || letter === ' ' ? 'M' : letter,
+    // 与 v1 对齐：未修改是空格。
+    index: index === '.' ? ' ' : index,
+    worktree: worktree === '.' ? ' ' : worktree,
+    staged: index !== '.' && index !== ' ',
+    unstaged: worktree !== '.' && worktree !== ' ',
+    untracked: false,
+  }
+}
+
+/**
+ * 解析 `git status --porcelain=v2 --branch -z --untracked-files=all`。
+ *
+ * **为什么换成 v2**：项目级快照只需要"有哪些文件、各自的索引/工作区状态、当前分支与
+ * HEAD"。以前那条路由为了拿到同样的信息，先 `git add -A` + `write-tree` 造一棵临时索引树
+ * （6,639 个改动路径的仓库上约 4 秒），再算一份**全仓库统一差异**（同一仓库 45.9 MB）——
+ * 而右上角那个数字只需要文件个数。v2 一条命令就给出全部状态，且不产生任何差异正文。
+ *
+ * `-z` 而不是普通模式：NUL 分隔下 git **完全不做引号转义**，含空格、中文、引号的路径
+ * 都是原样字节，不需要再实现一套 C 风格反转义（v1 的 `parsePorcelain` 只处理了最简单的
+ * 两种转义，非 ASCII 路径会被 `core.quotePath` 加引号，那是个潜在的坑）。
+ *
+ * 记录形状（实测确认，见 `scripts/test-review-workspace-status.mjs`）：
+ *   `# branch.oid <oid>|(initial)`   `# branch.head <name>|(detached)`
+ *   `# branch.upstream <name>`       `# branch.ab +<ahead> -<behind>`
+ *   `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
+ *   `2 <XY> <sub> … <X><score> <path>` + 紧跟一段 NUL 字段 = 原路径（重命名/复制）
+ *   `u <XY> …×9 <path>`（冲突）   `? <path>`（未跟踪）   `! <path>`（被忽略）
+ *
+ * @param raw - 命令原文。
+ * @returns `{ branch, head, detached, initial, upstream, ahead, behind, files }`。
+ */
+function parseStatusV2(raw) {
+  const fields = String(raw).split('\0')
+  let branch = ''
+  let head = ''
+  let detached = false
+  let initial = false
+  let upstream = ''
+  let ahead = 0
+  let behind = 0
+  const files = []
+  for (let i = 0; i < fields.length; i += 1) {
+    const line = fields[i]
+    if (line === '') continue
+    if (line.startsWith('# ')) {
+      const body = line.slice(2)
+      const cut = body.indexOf(' ')
+      const key = cut < 0 ? body : body.slice(0, cut)
+      const value = cut < 0 ? '' : body.slice(cut + 1)
+      if (key === 'branch.oid') {
+        if (value === '(initial)') initial = true
+        else head = value
+      } else if (key === 'branch.head') {
+        if (value === '(detached)') detached = true
+        else branch = value
+      } else if (key === 'branch.upstream') upstream = value
+      else if (key === 'branch.ab') {
+        const match = /^\+(\d+) -(\d+)$/u.exec(value)
+        if (match !== null) {
+          ahead = Number(match[1])
+          behind = Number(match[2])
+        }
+      }
+      continue
+    }
+    const kind = line[0]
+    if (kind === '?') {
+      // 未跟踪：它没有索引/工作区两列（v2 把 X 记成 `?`），因此显式给三个布尔值，
+      // 而不是让客户端从字母去猜。
+      files.push({ path: line.slice(2), status: 'A', index: '?', worktree: '?', staged: false, unstaged: false, untracked: true })
+      continue
+    }
+    if (kind === '!') continue
+    if (kind === '1') {
+      const parts = line.split(' ')
+      files.push(entryFromXY(parts.slice(8).join(' '), parts[1] ?? '..'))
+      continue
+    }
+    if (kind === '2') {
+      const parts = line.split(' ')
+      // **先取路径再跳过原路径**：`-z` 下重命名是两条 NUL 记录，不跳过就会多出一条
+      // 名字是旧路径的"幽灵文件"。
+      const path = parts.slice(9).join(' ')
+      i += 1
+      files.push(entryFromXY(path, parts[1] ?? '..'))
+      continue
+    }
+    if (kind === 'u') {
+      const parts = line.split(' ')
+      files.push(entryFromXY(parts.slice(10).join(' '), parts[1] ?? '..'))
+      continue
+    }
+  }
+  return { branch, head, detached, initial, upstream, ahead, behind, files }
+}
+
+/**
+ * `git diff --numstat` 的一行 → `{ path, added, removed }`。
+ *
+ * 只取增删行数（不含正文），因此它是"元数据级"的命令：即使仓库有几千个改动文件，
+ * 输出也只有几十 KB。重命名在 numstat 里是 `old => new` 甚至
+ * `dir/{old => new}.ts` 的紧凑写法，这里把它还原成**新路径**，与 status 的路径对齐
+ * ——不对齐的话那一行的增删数字会静默丢失（显示成 `·`），而这是最难发现的一类错。
+ *
+ * @param line - numstat 的一行。
+ * @returns `{ path, added, removed }` 或 null。
+ */
+function parseNumstatLine(line) {
+  const parts = line.split('\t')
+  if (parts.length < 3) return null
+  const rawPath = parts.slice(2).join('\t')
+  // `a/{old => new}/b.ts` → `a/new/b.ts`；`old => new` → `new`。
+  const compact = /^(.*)\{(.*) => (.*)\}(.*)$/u.exec(rawPath)
+  const path =
+    compact === null
+      ? (rawPath.includes(' => ') ? rawPath.slice(rawPath.lastIndexOf(' => ') + 4) : rawPath)
+      : `${compact[1]}${compact[3]}${compact[4]}`
+  return {
+    path,
+    added: parts[0] === '-' ? null : Number(parts[0]),
+    removed: parts[1] === '-' ? null : Number(parts[1]),
+  }
+}
+
+/**
+ * 把 numstat 的增删行数并到 status 得到的文件列表上，并丢掉**没有内容差异**的条目。
+ *
+ * 三类条目在这里被处理：
+ *   * **未跟踪文件**：`git diff HEAD` 里没有它（还没进版本库），保留，`added/removed` 为
+ *     `null`（界面上显示 `·`，点开时才按需取差异，见 `/workspace-file`）；
+ *   * **有内容差异的已跟踪文件**：带上 numstat 的行数；
+ *   * **已跟踪、但 numstat 里根本没有它的文件**：**丢弃**。
+ *
+ * 最后一类为什么必须丢：`status` 报"改了"而 `diff HEAD` 说"没差异"的情形在 Windows 上是
+ * 真实存在的——最典型的是 `core.autocrlf=true` 时 `git restore --source HEAD --worktree`
+ * 之后，工作区文件变成 CRLF，`status` 因为 stat 缓存仍报 `M`，而 `diff --numstat HEAD`
+ * 是**空的**（内容按 git 的规范化后完全一致）。这正是本插件自己的 `revert` 会走的那条路：
+ * 不丢的话，"还原"之后那个文件还挂在改动列表里，用户会以为还原失败。旧实现碰不到这个坑
+ * 只是因为它走"临时索引树 vs HEAD"的比较，天然按内容判定。
+ *
+ * 另有 `isMetadataOnly` 兜住"numstat 是 0/0 的纯模式变化"（索引里已经记着另一个 mode 的
+ * 仓库会出现），规则与旧实现一致。
+ *
+ * @param files - status 解析出的文件条目。
+ * @param numstat - `git diff --numstat HEAD` 的原文。
+ * @returns 新的文件数组（不改入参）。
+ */
+function withLineCounts(files, numstat) {
+  const counts = new Map()
+  for (const line of String(numstat).split('\n')) {
+    const entry = parseNumstatLine(line)
+    if (entry !== null) counts.set(entry.path, entry)
+  }
+  const merged = []
+  for (const file of files) {
+    const count = counts.get(file.path)
+    if (count === undefined) {
+      if (file.untracked === true) merged.push({ ...file, added: null, removed: null })
+      continue
+    }
+    merged.push({ ...file, added: count.added, removed: count.removed })
+  }
+  return merged.filter((file) => !isMetadataOnly(file))
+}
+
+/**
  * 解析外壳允许被操作的工作区集合。
  *
  * 与 gitbar 同样的安全边界：只接受应用登记过的工作区，否则任何能访问本机回环地址的
@@ -513,21 +699,28 @@ function diffBufferFor(fileCount) {
  * 实测复现过：带该标志时快照树保持 100755、差异为空；不带时树变成 100644。
  * 界面上的表现就是"根本没改过的文件也被列成改动"，这正是用户反馈的现象。
  *
+ * 另外带上 **`-c core.quotePath=false`**：默认配置下 git 会把**非 ASCII**（中文文件名很
+ * 常见）与含特殊字符的路径按 C 风格转义成 `"\346\226\207..."`，于是我们自己按路径做的
+ * 匹配（numstat ↔ status、差异切片）会静默失配——表现是"中文名的文件不显示行数/差异"。
+ * `-z` 输出的那些路由本来就不转义，这条让不带 `-z` 的（numstat、name-status）也一致。
+ *
  * @param args - 参数数组（不含 `git`）。
  * @param cwd - 仓库目录。
  * @param env - 额外环境变量（用于传入临时 index）。
  * @param maxBuffer - stdout 上限，默认 `GIT_MAX_BUFFER`。
  * @param timeoutMs - 超时，默认 `GIT_TIMEOUT_MS`（联网操作用 `GIT_NETWORK_TIMEOUT_MS`）。
+ * @param allowExit - 允许"退出码 1 且 stdout 非空"，用于 `--no-index` 这类**用退出码
+ *   表达"有差异"**的命令：那种情况下 stdout 就是要展示的差异，不是失败。
  * @returns stdout。
  */
-function git(args, cwd, env, maxBuffer = GIT_MAX_BUFFER, timeoutMs = GIT_TIMEOUT_MS) {
+function git(args, cwd, env, maxBuffer = GIT_MAX_BUFFER, timeoutMs = GIT_TIMEOUT_MS, allowExit = false) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      ['-c', 'core.fileMode=false', '-C', cwd, ...args],
+      ['-c', 'core.fileMode=false', '-c', 'core.quotePath=false', '-C', cwd, ...args],
       { timeout: timeoutMs, windowsHide: true, maxBuffer, env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
-        if (error !== null) {
+        if (error !== null && !(allowExit && error.code === 1 && String(stdout) !== '')) {
           reject(new Error(String(stderr).trim() || error.message))
           return
         }
@@ -882,6 +1075,41 @@ async function readUnifiedDiff(cwd, from, to, fileCount) {
 }
 
 /**
+ * 工作区里**单个文件**相对 HEAD 的差异。
+ *
+ * 与全仓库统一差异的区别是代价：真实仓库里那份是 45.9 MB / 数秒，而用户一次只看一两个
+ * 文件；因此这里只对**一个路径**算差异，缓冲也按单文件估（`diffBufferFor(1)`）。
+ *
+ * 未跟踪文件要走 `--no-index` 与空文件比：它还没进版本库，`git diff HEAD -- <path>`
+ * 对它一个字都不给（这正是"点了未跟踪文件看不到内容"的原因）。`--no-index` 在有差异时
+ * 退出码是 1，那是正常结果（见 `git()` 的 `allowExit`）。
+ *
+ * 二进制与超长内容的处理与 `/commit-file` 一致：识别 `Binary files … differ`，并在
+ * `MAX_DIFF_BYTES` 处截断（界面按 `truncated` 提示）。
+ *
+ * @param cwd - 工作区路径。
+ * @param revision - 已校验的提交 SHA，或 `HEAD`。
+ * @param path - 已校验的相对路径（正斜杠）。
+ * @param untracked - 该文件当前是否未跟踪（来自同一次 status 快照）。
+ * @returns `{ diff, truncated, binary }`。
+ */
+async function readWorkspaceFileDiff(cwd, revision, path, untracked) {
+  const raw = untracked
+    ? await git(
+        ['diff', '--no-index', '--unified=3', '--', '/dev/null', path],
+        cwd,
+        undefined,
+        diffBufferFor(1),
+        GIT_TIMEOUT_MS,
+        true,
+      )
+    : await git(['diff', '--unified=3', revision, '--', path], cwd, undefined, diffBufferFor(1))
+  const binary = /^Binary files |^GIT binary patch/mu.test(raw)
+  const truncated = raw.length > MAX_DIFF_BYTES
+  return { diff: truncated ? raw.slice(0, MAX_DIFF_BYTES) : raw, truncated, binary }
+}
+
+/**
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
@@ -1000,20 +1228,24 @@ function createReviewHandler() {
           git(['diff', '--numstat', stored.revision, current], workspace),
           git(['diff', '--name-status', stored.revision, current], workspace),
         ])
-        // 文件数先由 numstat 得到，再据此估算统一差异的缓冲（见 readUnifiedDiff）。
-        const { diff, oversized } = await readUnifiedDiff(
-          workspace,
-          stored.revision,
-          current,
-          stat.split('\n').length,
-        )
+        // `metadataOnly`：只要"改了哪些文件、各几行"，**不要差异正文**。
+        //
+        // 输入框上方那个改动数字每 10 秒轮询一次，而全仓库统一差异在真实仓库里是
+        // 45.9 MB / 数秒——那份正文只有在用户点开某个文件时才需要。轮询路径必须能
+        // 明确地"只要元数据"，否则"后台每 10 秒重算一次全仓库差异"这件事会一直存在。
+        const metadataOnly = payload.metadataOnly === true || url.searchParams.get('metadataOnly') === '1'
+        const { diff, oversized } = metadataOnly
+          ? { diff: '', oversized: false }
+          : await readUnifiedDiff(workspace, stored.revision, current, stat.split('\n').length)
         // 索引态一并取回：会话内的"本轮修改"列表同样要能看出哪些已暂存（见 indexStates）。
         const porcelain = await git(['status', '--porcelain'], workspace).catch(() => '')
 
         // --numstat 给出每条文件的新增/删除行数，与 --name-status 的顺序一致。
-        const payload = describeDiff({ stat, names, diff })
+        // 注意别把这个局部量叫 `payload`：那会**遮蔽**请求体，而同一个块作用域里的
+        // `payload.metadataOnly`（见上）在声明之前就是 TDZ，整套读取直接 500。
+        const described = describeDiff({ stat, names, diff })
         const states = indexStates(porcelain)
-        const files = payload.files.map((file) => ({
+        const files = described.files.map((file) => ({
           ...file,
           ...(states.get(file.path) ?? { staged: false, unstaged: true, untracked: false }),
         }))
@@ -1022,65 +1254,109 @@ function createReviewHandler() {
           scope: 'turn',
           revision: stored.revision,
           takenAt: stored.takenAt,
-          ...payload,
+          ...described,
           files,
           ...(oversized ? { diffOversized: true } : {}),
         })
         return
       }
 
-      // ---- 工作区级差异：基线取 HEAD（项目级面板用，不需要会话）------------
+      // ---- 工作区级**轻量**快照：文件清单 + 索引态 + 分支（项目级面板用）--------
       //
       // 与 /changes 的区别在于语义：那个回答"本轮改了什么"（基线是本轮开始时的快照），
       // 这个回答"这个项目现在有什么改动"（基线是 HEAD）。项目页还没有任何一轮对话，
       // 所以那里只能用后者。
+      //
+      // **这条路由是轮询路径，因此只做元数据级的工作**：
+      //   * `status --porcelain=v2 --branch -z -uall` 一次拿到分支/HEAD/每个文件的状态；
+      //   * `diff --numstat HEAD` 拿每个文件的增删**行数**（不含正文，几十 KB）。
+      // 以前它还会 `add -A` + `write-tree` 造临时索引树、再算一份**全仓库统一差异**，
+      // 而右上角那个数字只需要文件个数：6,639 个改动路径的仓库上那是 4 秒 + 45.9 MB，
+      // 且每 10 秒重来一次（实测就是"切过去要等很久"的根因）。
+      // 单文件的逐行差异改为点了才取（见 /workspace-file）。
       if (url.pathname === `${ROUTE_PREFIX}/workspace`) {
         if (!(await isRepo(workspace))) {
           sendJson(response, 200, { isRepo: false })
           return
         }
-        const revision = (await git(['rev-parse', 'HEAD'], workspace).catch(() => '')).trim()
-        if (revision === '') {
-          // 尚无提交的仓库：没有 HEAD 可比较。
-          sendJson(response, 200, { isRepo: true, empty: true, files: [], diff: '', truncated: false })
-          return
-        }
-        const current = await currentTree(workspace, `${sessionId}-workspace`)
-        const [stat, names, porcelain, branchRaw] = await Promise.all([
-          git(['diff', '--numstat', revision, current], workspace),
-          git(['diff', '--name-status', revision, current], workspace),
-          // 顺带把 `status --porcelain` 的索引/工作区两列取回来（见 indexStates）。
-          //
-          // 为什么要一起给：界面上"已暂存 / 更改 / 未跟踪"三个分组与下面那份文件列表
-          // **是同一批文件**，而它们此前来自两条不同的路由（`/status` 与 `/workspace`），
-          // 各自独立发起、各自缓存——只要工作区在中途被切换或某一边先返回，就会出现
-          // "分组里是 A 项目的文件、列表里是 B 项目的文件"这种对不上的界面（实际反馈）。
-          // 让一次请求同时给出内容与索引态，两边就不可能不一致。
-          git(['status', '--porcelain'], workspace),
-          // 当前分支名。抽屉头栏要显示"我在哪个分支上提交"，而它必须与这份快照**同一时刻**
-          // ——单独再问一次 `/history` 拿分支名就会出现"文件是旧的、分支是新的"这种错配
-          // （那正是这次要合并掉的两套轮询之一）。游离 HEAD 时 symbolic-ref 失败，留空。
-          git(['symbolic-ref', '--short', '-q', 'HEAD'], workspace).catch(() => ''),
+        const [statusRaw, numstat] = await Promise.all([
+          git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], workspace, undefined, GIT_MAX_BUFFER_LARGE),
+          // `HEAD` 不存在（尚无提交）时这条会失败；那不是错误，只是没有可比对的基线。
+          git(['diff', '--numstat', 'HEAD'], workspace).catch(() => ''),
         ])
-        const { diff, oversized } = await readUnifiedDiff(workspace, revision, current, stat.split('\n').length)
-        const payload = describeDiff({ stat, names, diff })
-        // 把"已暂存 / 只有工作区改动"的判断直接附在文件上（见 indexStates 的说明）。
-        const states = indexStates(porcelain)
-        const files = payload.files.map((file) => ({
-          ...file,
-          ...(states.get(file.path) ?? { staged: false, unstaged: true, untracked: false }),
-        }))
+        const parsed = parseStatusV2(statusRaw)
+        // 尚无提交的仓库：`git diff HEAD` 会失败，`numstat` 是空串。这时不能按 numstat
+        // 过滤（否则已暂存的文件会被全部丢掉），直接保留 status 的结果，由 `empty` 让界面
+        // 显示"尚无提交"。
+        const files = parsed.initial
+          ? parsed.files.map((file) => ({ ...file, added: null, removed: null }))
+          : withLineCounts(parsed.files, numstat)
         sendJson(response, 200, {
           isRepo: true,
           scope: 'workspace',
-          revision,
-          /** 当前分支名（游离 HEAD 时为空串）；`head` 是 HEAD 的提交对象。 */
-          branch: branchRaw.trim(),
-          head: revision,
-          ...payload,
+          /** 当前分支名（游离 HEAD 时为空串）。 */
+          branch: parsed.branch,
+          /** HEAD 的提交对象；尚无提交时为空串（`empty` 为 true）。 */
+          head: parsed.head,
+          detached: parsed.detached,
+          upstream: parsed.upstream,
+          ahead: parsed.ahead,
+          behind: parsed.behind,
+          // 尚无提交的仓库：没有 HEAD 可比较，界面说"改动"会误导（用户会以为文件丢了）。
+          empty: parsed.initial || parsed.head === '',
           files,
-          ...(oversized ? { diffOversized: true } : {}),
+          changedFiles: files.length,
         })
+        return
+      }
+
+      // ---- 工作区里**单个文件**的差异（点了才取）-----------------------------
+      //
+      // 与 /commit-file 对称：那条是"某次提交里这个文件改了什么"，这条是"工作区里这个
+      // 文件相对 HEAD 改了什么"。分开的理由是**代价**：全仓库统一差异在真实仓库里是
+      // 45.9 MB / 数秒，而用户一次只看一两个文件。
+      //
+      // 未跟踪文件不在 `git diff HEAD` 里（它还没进版本库），要用 `--no-index` 与空文件
+      // 比；`--no-index` 在"有差异"时退出码是 1，那是正常结果而不是失败（见 git() 的
+      // allowExit）。
+      if (url.pathname === `${ROUTE_PREFIX}/workspace-file`) {
+        if (!(await isRepo(workspace))) {
+          sendJson(response, 200, { isRepo: false })
+          return
+        }
+        const filePath = payload.path ?? url.searchParams.get('path')
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const requested = payload.revision ?? url.searchParams.get('revision')
+        const revision = typeof requested === 'string' && REVISION_PATTERN.test(requested) ? requested : 'HEAD'
+        const normalized = normalizePath(filePath)
+        const absolute = resolve(workspace, normalized)
+        try {
+          // 未跟踪文件必须**真的在工作区里**：`git diff --no-index /dev/null <缺失路径>` 会
+          // 以 git 自己的错误退出，而那会被当成 500。先判一次，直接给 404。
+          if (payload.untracked === true && !existsSync(absolute)) {
+            sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
+            return
+          }
+          const result = await readWorkspaceFileDiff(workspace, revision, normalized, payload.untracked === true)
+          // 差异为空**且**工作区里没有这个路径 → 这个路径不存在（状态过期、或刚被删掉），
+          // 那是 404 而不是"没有改动"。`git diff HEAD -- <不存在的路径>` 本身是**成功但空**
+          // 的，光看 git 的退出码分不出来。
+          if (result.diff === '' && !existsSync(absolute)) {
+            sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
+            return
+          }
+          sendJson(response, 200, { isRepo: true, path: normalized, ...result })
+        } catch (error) {
+          // 路径不在仓库里（用户刚删掉、或状态已过期）：这是 404 而不是 500。
+          if (/did not match|no such path|exists on disk, but not in|unknown revision|bad revision|could not access/iu.test(String(error?.message ?? error))) {
+            sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
+            return
+          }
+          throw error
+        }
         return
       }
 
@@ -1560,6 +1836,7 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/baseline`,
     `${ROUTE_PREFIX}/changes`,
     `${ROUTE_PREFIX}/workspace`,
+    `${ROUTE_PREFIX}/workspace-file`,
     `${ROUTE_PREFIX}/revert`,
     `${ROUTE_PREFIX}/history`,
     `${ROUTE_PREFIX}/roots`,

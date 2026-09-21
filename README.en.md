@@ -298,6 +298,28 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   the top-right entry all stay put. The observed symptom used to be the whole drawer *and* the entry
   vanishing on a `Log` click, which reads as "the panel closed itself" but is really a render-time
   exception taking the whole slot entry down through the slot-level error boundary.
+- **The entry button and the panel are two subtrees that cannot take each other down.** The
+  top-right button (`ProjectChangesTriggerButton`) and the panel
+  (`ProjectGitPanelErrorBoundary` → `ReviewPanel`) are separate: any render-time exception inside
+  the panel (Changes / Log / staging / the commit box) only makes the **panel** show
+  "Git panel failed to load + details + Reload + Close", and the entry stays. The `Log` tab has a
+  finer boundary of its own.
+- **Switching projects is an explicit three-step**: `A → switching project… → B`. As long as a
+  current session exists its cwd wins; while the session is switching and the cwd has not arrived
+  the panel says "Switching project…" and **never** falls back to the previous session's (or the
+  shell's) directory. Every hook is called unconditionally and before any phase guard
+  (`check-react-rules.mjs` pins this statically), so a project switch cannot trip React #310.
+- **The project Git drawer is not a popover.** Clicking a project on the left, the chat body, or
+  anywhere else in the shell does **not** close it — only the X button, Escape, or the top-right
+  entry again. The in-session review tab keeps the click-outside behaviour.
+- **Per-file diffs are lazy.** `/workspace` is a **metadata-level** snapshot
+  (`status --porcelain=v2` once for files plus index state, `diff --numstat HEAD` for line counts)
+  with **no** repository-wide unified diff; clicking a file calls `/workspace-file`, which diffs
+  that one path (untracked files go through `--no-index` against an empty file). The cache key is
+  `workspace + HEAD + path`, so switching projects or committing invalidates it, and late
+  responses are guarded by both a token and the key. Measured on a repo with 6,639
+  changed/untracked paths: polling went from 10 git processes / 6.3 s to **2 processes / 0.32 s**,
+  and the 38.7 MB repository-wide diff is no longer produced at all.
 - **A file whose only change is its mode (a `chmod`) is not a change.** On Windows, a repo with
   `core.fileMode=true` makes git record a `100755` script as `100644` — a `0/0` "modification"
   with identical content. The host snapshots with `-c core.fileMode=false` and additionally
@@ -588,6 +610,11 @@ was verified rather than assumed:
 | `scripts/test-gitbar-workspace-race.mjs` | switching projects: a late response from the old workspace must never land |
 | `scripts/test-review-workspace-race.mjs` | shared-snapshot and commit-graph races; the entry's number and the drawer's list come from one snapshot |
 | `scripts/test-review-log-tab-crash.mjs` | clicking Log must not take the drawer and the top-right entry down with it (missing host fields + an error boundary) |
+| `scripts/test-review-project-git.mjs` | the project-switch state machine: the hook count must never change, the entry never disappears, "switching project…", panel-level crash isolation |
+| `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
+| `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |
+| `scripts/measure-workspace-snapshot.mjs` | real measurements of the project snapshot: git processes and wall time, before vs after |
+| `scripts/test-project-git-smoke.mjs` | **real Electron/CDP smoke test** (needs an instance started with `--remote-debugging-port=9333`) |
 | `scripts/test-gitbar-branch-interaction.mjs` | branch rows: single click opens the menu, double click switches, right click opens the same menu |
 | `scripts/test-gitbar-branch-perf.mjs` | the process ceiling for branch listing (300 branches must not mean 300 `git` processes) |
 | `scripts/test-gitbar-branch-sync.mjs` | the enrichment contract (`syncExact`) and the boundedness of "only visible rows" |
@@ -602,6 +629,25 @@ was verified rather than assumed:
 
 > Tests that start Electron and drive the UI over CDP — `test-review-sidebar.mjs`,
 > `test-ui-typography.cjs` — need a graphical session; they cannot run in a restricted sandbox.
+
+> **Why a "real React" test exists at all.** Most client tests here run against a hand-written fake
+> React (`createElement` / `useState` / `useEffect` of our own). It cannot catch the two errors that
+> only a real renderer raises — `#290` (`ref` passed to a function component as a business prop) and
+> `#300/#310` (Rules of Hooks). Both show up on a real machine as **the whole entry being unmounted**,
+> i.e. "after switching projects or clicking Log, the drawer and the top-right entry disappear".
+> So:
+>
+> * `scripts/check-react-rules.mjs` blocks those two shapes statically, without Electron;
+> * `scripts/test-project-git-smoke.mjs` runs the real renderer and collects `window.onerror` /
+>   `unhandledrejection` / `console.error`, failing on any React minified error. It needs an
+>   instance with a remote debugging port:
+>
+>   ```bash
+>   npm start -- --remote-debugging-port=9333     # in another terminal
+>   node scripts/test-project-git-smoke.mjs       # DSH_CDP_PORT overrides the port
+>   ```
+>
+>   It looks for two sessions/projects to drive A→B→A (`DSH_SMOKE_SESSIONS="ProjectA title|ProjectB title"` names them explicitly).
 
 ### Release notes
 

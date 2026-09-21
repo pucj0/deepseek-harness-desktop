@@ -477,6 +477,33 @@ window.__ModuleLoader__.load({
       return gate
     }
 
+    /** 没有会话来源时的空选择器钩子：形状与"没有会话"一致（返回 undefined）。 */
+    const absentSessions = (selector) => (typeof selector === 'function' ? selector(undefined) : undefined)
+
+    /**
+     * 取一个"**可能缺席**的标准钩子"，并在**首次渲染时锁定**这个选择。
+     *
+     * 为什么必须锁定：调用点原来写成
+     * `typeof props.useSessions === 'function' ? props.useSessions(sel) : undefined`——
+     * 那是**条件调用**。`useSessions` 的真身（渲染器的
+     * `useSyncExternalStoreWithSelector`）内部要占若干个 hook 槽，一旦它在两次渲染之间
+     * 出现或消失，本组件调用的 hook 数量就变了：React 抛 #310
+     * "Rendered more/fewer hooks than during the previous render"，并把**整棵子树卸掉**
+     * ——现象与"徽章/面板突然消失"完全一样，很难与数据问题区分。
+     *
+     * 与 review 插件里那份是**同一份实现的孪生拷贝**（两个插件是各自独立的 bundle，
+     * 拿不到彼此的作用域）：两边的规则必须一致。
+     *
+     * @param candidate - `props.useSessions` 之类的候选（可能 undefined）。
+     * @param fallback - 缺席时用的空实现。
+     * @returns 选定的钩子（同一实例上恒定）。
+     */
+    function useLatchedHook(candidate, fallback) {
+      const ref = react.useRef(null)
+      if (ref.current === null) ref.current = typeof candidate === 'function' ? candidate : fallback
+      return ref.current
+    }
+
     /**
      * 请求 host 侧的 git 路由。
      * @param path - 相对 API 前缀的路径，如 'status'。
@@ -722,16 +749,27 @@ window.__ModuleLoader__.load({
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       // `sessionId` 与 `useSessions` 由渲染器按会话作用域自动注入（不需要自己写进
       // inject）——会话作用域的槽都会收到它们。
-      const { sessionId, useSessions } = props ?? {}
+      const { sessionId } = props ?? {}
 
       // 本会话的工作区。这是必须在**每个会话**里读的：用户可以在应用内为会话选择
       // 项目，它与外壳启动时的 `--workspace` 是两回事。用外壳那个会让徽章显示上一个
       // 仓库的分支（实测踩到过：外壳是 mmsm-amis、会话切到 scheduler-service-task，
       // 徽章却一直显示 mmsm-amis 的分支）。
-      const workspace =
-        typeof useSessions === 'function' && sessionId !== undefined
-          ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
-          : undefined
+      //
+      // **钩子必须无条件调用**：原来写成
+      // `typeof useSessions === 'function' && sessionId !== undefined ? useSessions(...) : undefined`，
+      // 那是条件调用——`useSessions` 真身内部占多个 hook 槽，一旦它在两次渲染之间出现或
+      // 消失，本组件的 hook 数量就变了，React 抛 #310 并把整棵子树卸掉（现象与"徽章/
+      // 面板突然消失"一样）。现在把"有没有源 / 有没有 sessionId"全部交给选择器表达，
+      // 钩子用 useLatchedHook 在首次渲染锁定（见它的说明）。
+      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
+      const workspace = useSessions((state) => {
+        if (sessionId === undefined) return undefined
+        const cwd = state?.byId?.[sessionId]?.cwd
+        // 只接受非空字符串：选择器必须返回**原始值**，每次渲染给出同一个引用，
+        // 否则 useSyncExternalStore 会警告 "The result of getSnapshot should be cached"。
+        return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+      })
 
       /**
        * **一次工作区一份状态**。
@@ -1060,6 +1098,33 @@ window.__ModuleLoader__.load({
         }
       }, [open])
 
+      /**
+       * 单击/双击的定时器、菜单归属与"一次双击一次 checkout"的守卫。
+       *
+       * 这几个 ref **必须声明在文档级 mousedown 监听之前**：那个 effect 的依赖数组里要用
+       * `clearMenuTimer`，而 `const` 在声明前求值会抛 "Cannot access before initialization"。
+       */
+      const menuTimer = react.useRef(0)
+      const clearMenuTimer = react.useCallback(() => {
+        if (menuTimer.current !== 0) {
+          clearTimeout(menuTimer.current)
+          menuTimer.current = 0
+        }
+      }, [])
+      // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
+      react.useEffect(() => clearMenuTimer, [clearMenuTimer])
+      /**
+       * 刚才那次"面板内 mousedown"关掉的是哪个分支的菜单。
+       *
+       * 存在的理由：document 的 mousedown 是**捕获阶段**、并且发生在 click 之前，所以
+       * "菜单 A 正开着，用户再点 A 那一行"这个动作到 click 里时 `menu` 已经是 null 了
+       * ——光看 state 分不清"再点一次要关掉"与"第一次点要打开"。这个 ref 把那次关闭的信息
+       * 带过 mousedown→click 的边界（同一 tick 内不会被清掉）。
+       */
+      const justClosedForRef = react.useRef('')
+      /** 一次双击只允许发起一次 checkout（双击事件可能被重复派发）。 */
+      const checkoutPendingRef = react.useRef(false)
+
       react.useEffect(() => {
         if (!open) return undefined
 
@@ -1072,16 +1137,29 @@ window.__ModuleLoader__.load({
             setOpen(false)
             return
           }
-          // 点了面板内部的**其它地方**：只收起右键菜单。菜单本身要靠这条"关掉自己"，
-          // 否则它会一直浮在列表上，用户点任何一行都会觉得点错了东西。
+          // 点了面板内部的**其它地方**（列表空白、分组标题、搜索框…）：收起右键菜单，
+          // 并**取消待弹的单击定时器**。
+          //
+          // 取消定时器这一条是必须的：单击是"延迟 200ms 再弹菜单"，如果只 setMenu(null)
+          // 而不管那个定时器，用户点一下别处之后 200ms 菜单还会自己冒出来——看起来就是
+          // "菜单怎么都关不掉"。
+          clearMenuTimer()
+          if (menu !== null) {
+            // 记下"刚才被这次 mousedown 关掉的是哪个分支的菜单"：同一行的 click 紧随其后，
+            // 它据此判断这是"再点一次关掉"而不是"重新打开"（详见 onBranchClick）。
+            justClosedForRef.current = menu.branch.name
+          }
           setMenu(null)
         }
         const onKeyDown = (event) => {
           if (event.key !== 'Escape') return
           // Esc 逐层退出：先收右键菜单，再收对话框，最后关面板。一次全关会让用户
           // 在只想去掉那层小菜单时丢掉整个面板的状态。
-          if (menu !== null) setMenu(null)
-          else if (dialog !== null) setDialog(null)
+          if (menu !== null || menuTimer.current !== 0) {
+            clearMenuTimer()
+            justClosedForRef.current = ''
+            setMenu(null)
+          } else if (dialog !== null) setDialog(null)
           else {
             setOpen(false)
             triggerRef.current?.focus()
@@ -1094,32 +1172,15 @@ window.__ModuleLoader__.load({
           document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open, menu, dialog])
+      }, [open, menu, dialog, clearMenuTimer])
 
       const search = query.trim().toLowerCase()
       const visible = branches.filter((branch) => branch.name.toLowerCase().includes(search))
 
       /**
-       * 单击/双击的定时器与操作菜单（IDEA 风格交互）。
-       *
-       * 交互约定（与 IDEA 的 Git 分支弹窗一致）：
-       *   单击  —— 选中这一行 + 打开它的操作菜单，**不** checkout；
-       *   双击  —— 切换到这个分支（远程分支沿用 host 的"建本地跟踪分支"逻辑）；
-       *   右键  —— 打开与单击**完全相同**的那个菜单。
-       *
-       * 为什么单击要延迟：双击在浏览器里必然先派发 click，所以"单击就弹菜单"会让双击
-       * 先弹一次菜单再切换（闪一下）。因此单击等 SINGLE_CLICK_MS 再弹；第二次 click
-       * 一进来就取消它，交给 dblclick 去 checkout。
+       * 单击要延迟（见上面那段说明），实现落在 onBranchClick 里。
+       * 定时器与几个守卫 ref 声明在文档级监听之前（那里就要用到 clearMenuTimer）。
        */
-      const menuTimer = react.useRef(0)
-      const clearMenuTimer = react.useCallback(() => {
-        if (menuTimer.current !== 0) {
-          clearTimeout(menuTimer.current)
-          menuTimer.current = 0
-        }
-      }, [])
-      // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
-      react.useEffect(() => clearMenuTimer, [clearMenuTimer])
 
       /** 在某个位置为某个分支打开操作菜单。 */
       const openMenuFor = react.useCallback((branch, x, y) => {
@@ -1129,6 +1190,14 @@ window.__ModuleLoader__.load({
       /**
        * 单击一行分支。
        *
+       * 完整的状态机（与 IDEA 的分支弹窗一致）：
+       *   * **这一行没有菜单** → 选中它，并在 `SINGLE_CLICK_MS` 之后弹菜单；
+       *   * **这一行的菜单正开着** → **立即关闭**，且不再排新的弹出（否则 200ms 后它又
+       *     冒出来，用户会觉得菜单关不掉）。判断依据是 `justClosedForRef`：mousedown
+       *     （捕获阶段）已经把菜单关掉了，`menu` 在这个 click 里必然是 null；
+       *   * **别的一行** → 上一个菜单立即关闭（同样是 mousedown 做的），这一行照常延迟弹；
+       *   * **双击的第二下** → 取消待弹定时器，交给 dblclick 去 checkout（避免菜单闪现）。
+       *
        * `event.currentTarget.getBoundingClientRect()` 优先：菜单要贴着**被点的那一行**
        * （IDEA 里菜单就从那一行展开）。拿不到矩形时退回事件坐标，再拿不到就退到左上角
        * ——BranchContextMenu 自己会把位置收进视口。
@@ -1136,6 +1205,28 @@ window.__ModuleLoader__.load({
       const onBranchClick = react.useCallback(
         (event, entry) => {
           setSelectedBranch(entry.name)
+          /**
+           * 这一次点击是不是"关掉刚才那个菜单"？
+           *
+           * 两条判据都留着，是刻意的：
+           *   * `justClosedForRef` —— 真实浏览器里 document 的 mousedown（捕获阶段）先跑，
+           *     它已经把菜单关掉了，所以到 click 里 `menu` 必然是 null。这个 ref 把那次
+           *     关闭的信息带过来（见它的说明）；
+           *   * `menu` —— 程序化 click（脚本、无障碍工具、某些触摸路径）可能**没有**
+           *     mousedown，这时 `menu` 还是上一帧的值。少了这一条，那种情况下再点同一行
+           *     会"重新排一次弹出"，表现就是菜单怎么都关不掉。
+           */
+          const alreadyOpen = menu !== null && menu.branch.name === entry.name
+          if (justClosedForRef.current === entry.name || alreadyOpen) {
+            justClosedForRef.current = ''
+            clearMenuTimer()
+            setMenu(null)
+            return
+          }
+          justClosedForRef.current = ''
+          // 点的是**别的一行**：上一个菜单立即关掉（mousedown 通常已经关了，这里是兜底），
+          // 只允许目标那一行的菜单存在。
+          if (menu !== null) setMenu(null)
           if (menuTimer.current !== 0) {
             // 这是双击的第二下：取消单击菜单，让 dblclick 去执行 checkout。
             clearMenuTimer()
@@ -1149,7 +1240,7 @@ window.__ModuleLoader__.load({
             openMenuFor(entry, x, y)
           }, SINGLE_CLICK_MS)
         },
-        [clearMenuTimer, openMenuFor],
+        [clearMenuTimer, menu, openMenuFor],
       )
 
       /**
@@ -1157,14 +1248,22 @@ window.__ModuleLoader__.load({
        *
        * 当前分支双击**什么都不做**（IDEA 也是这样：切到自己没有意义，而"点了没反应"
        * 至少不会误触发一个操作）。单击仍然可以打开菜单，因此当前分支并非不可操作。
+       *
+       * 三件事的顺序是有意的：先取消待弹的定时器（菜单**绝不会**闪现）→ 立即关掉已开的
+       * 菜单（用户在等待 checkout，不该还浮着一个菜单）→ 再发切换请求。`checkoutPendingRef`
+       * 挡住同一次双击里的重复派发：切换是写操作，重复发一次会真的多跑一次 git。
        */
       const onBranchDoubleClick = react.useCallback(
         (entry) => {
-          // 双保险：即便某次双击只派发了一次 click，也不会留下一个待弹的菜单。
           clearMenuTimer()
+          justClosedForRef.current = ''
           setMenu(null)
           if (entry.current === true || busy) return
-          void switchTo(entry.name)
+          if (checkoutPendingRef.current) return
+          checkoutPendingRef.current = true
+          void switchTo(entry.name).finally(() => {
+            checkoutPendingRef.current = false
+          })
         },
         [busy, clearMenuTimer, switchTo],
       )
@@ -1360,6 +1459,16 @@ window.__ModuleLoader__.load({
               onActivate: onBranchDoubleClick,
               onContextMenu: onBranchContextMenu,
               onAbort: (kind) => void run('op/abort', { kind }),
+              /**
+               * 分支列表被滚动：收起操作菜单并取消待弹的单击定时器。
+               *
+               * 菜单由本组件持有（SourcePanel 是受控的展示组件），所以这件事必须由这里做。
+               */
+              onListScroll: () => {
+                clearMenuTimer()
+                justClosedForRef.current = ''
+                setMenu(null)
+              },
             })
           : null,
 
@@ -1435,7 +1544,7 @@ window.__ModuleLoader__.load({
     function SourcePanel(props) {
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
-        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible,
+        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll,
       } = props
 
       /**
@@ -1949,6 +2058,13 @@ window.__ModuleLoader__.load({
             'data-desktop-branch-list': '',
             style: { minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', paddingTop: '2px' },
             'aria-busy': loading || busy,
+            // 滚动列表时收起菜单并取消待弹的定时器：菜单是贴着某一行的，滚走之后它就
+            // 悬在一个已经不在那儿的分支上。**只收菜单，不关面板**（用户是在列表里找分支）。
+            // 顺带把"视口里现在是哪些行"重新报一次（补算候选跟着滚动走）。
+            onScroll: () => {
+              reportVisible()
+              if (typeof onListScroll === 'function') onListScroll()
+            },
           },
           loading || visible.length === 0
             ? react.createElement(
@@ -2062,6 +2178,23 @@ window.__ModuleLoader__.load({
         boxShadow: '0 10px 30px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.06)',
       }
 
+      /**
+       * 包一层"先关菜单、再执行动作"。
+       *
+       * 每一条菜单项都要走它：点菜单项时菜单必须**立即消失**，而不是等动作跑完（
+       * `checkout` / `merge` 这些可能几秒）。尤其是 checkout——请求发出去之前菜单就该没了，
+       * 否则用户会以为自己点的是别的分支。以前菜单项直接调 `onSwitch` / `onDialog`，
+       * 而"点面板内部"那条 mousedown 判定对菜单内部是**豁免**的（否则点菜单项会先被关掉），
+       * 于是菜单会一直浮在正在执行的写操作上面。
+       *
+       * @param action - 真正要执行的动作。
+       * @returns 供 onClick 使用的处理器。
+       */
+      const act = (action) => () => {
+        onClose()
+        action()
+      }
+
       const item = (key, label, onClick, options) =>
         react.createElement(
           'button',
@@ -2107,29 +2240,29 @@ window.__ModuleLoader__.load({
       // 菜单，如果当前分支那一份菜单少一项，同一个位置上的条目就会随分支变化而上下移动，
       // 用户靠位置记忆点操作时很容易点错。禁用项保留了菜单的形状，也解释了"为什么不能点"。
       items.push(
-        item('checkout', t('menuCheckout'), () => onSwitch(entry.name), {
+        item('checkout', t('menuCheckout'), act(() => onSwitch(entry.name)), {
           disabled: entry.current,
           title: entry.current ? t('currentBranch') : undefined,
         }),
       )
-      items.push(item('new-from', t('menuNewFrom', { name: entry.name }), () => onDialog({ kind: 'create', branch: entry })))
+      items.push(item('new-from', t('menuNewFrom', { name: entry.name }), act(() => onDialog({ kind: 'create', branch: entry }))))
       items.push(separator('sep1'))
       items.push(
-        item('merge', t('menuMergeInto', { name: entry.name }), () => onDialog({ kind: 'merge', branch: entry }), {
+        item('merge', t('menuMergeInto', { name: entry.name }), act(() => onDialog({ kind: 'merge', branch: entry })), {
           // 合并到自己没有意义，而 git 也会报"Already up to date"——那种"点了没反应"
           // 比禁用更让人困惑。
           disabled: entry.name === current,
         }),
       )
       items.push(
-        item('rebase', t('menuRebaseOnto', { name: entry.name }), () => onDialog({ kind: 'rebase', branch: entry }), {
+        item('rebase', t('menuRebaseOnto', { name: entry.name }), act(() => onDialog({ kind: 'rebase', branch: entry })), {
           disabled: entry.name === current,
         }),
       )
       items.push(separator('sep2'))
-      items.push(item('push', t('menuPush'), () => onDialog({ kind: 'push', branch: entry })))
+      items.push(item('push', t('menuPush'), act(() => onDialog({ kind: 'push', branch: entry }))))
       items.push(
-        item('rename', t('menuRename'), () => onDialog({ kind: 'rename', branch: entry }), {
+        item('rename', t('menuRename'), act(() => onDialog({ kind: 'rename', branch: entry })), {
           // 远程分支不能重命名：本地改名只会把跟踪引用换个名字，远端那个分支纹丝不动，
           // 结果是一个名字与远端对不上的本地分支——比不做更糟。
           disabled: entry.isRemote,
@@ -2137,7 +2270,7 @@ window.__ModuleLoader__.load({
         }),
       )
       items.push(
-        item('delete', t('menuDelete'), () => onDialog({ kind: 'delete', branch: entry }), {
+        item('delete', t('menuDelete'), act(() => onDialog({ kind: 'delete', branch: entry })), {
           disabled: entry.current,
           danger: true,
         }),

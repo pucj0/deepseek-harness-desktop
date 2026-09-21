@@ -325,8 +325,19 @@ const find = (attr, value, nodes) =>
   ) ?? null
 const findAll = (attr, nodes) =>
   (nodes ?? collectHostNodes(render(Hero, heroProps, rootKey).tree, rootKey)).filter((node) => node.props?.[attr] !== undefined)
-/** 入口按钮上的文案（含文件数）。 */
-const badgeText = (nodes) => textOf(find('data-review-trigger', undefined, nodes) ?? find('data-review-trigger') ?? null)
+/**
+ * 入口按钮上的文案（含文件数）。
+ *
+ * 必须**展开整棵子树**再取文本：入口按钮现在是一个独立组件
+ * （`ProjectChangesTriggerButton`，与面板做故障隔离），而 `textOf` 只认已经展开的宿主节点
+ * ——直接对 `[data-review-trigger]` 那个 div 调 textOf 会得到空串（组件元素的 props.children
+ * 是 undefined），断言会全部误红。
+ */
+const badgeText = (nodes) => {
+  const node = find('data-review-trigger', undefined, nodes) ?? find('data-review-trigger')
+  if (node === null || node === undefined) return ''
+  return collectHostNodes(node, 'badge').map((entry) => textOf(entry)).join(' ')
+}
 const badge = (nodes) => find('data-review-trigger', undefined, nodes) ?? find('data-review-trigger')
 
 /** 打开抽屉（入口按钮自己就是开关）。 */

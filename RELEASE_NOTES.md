@@ -1,3 +1,96 @@
+# 1.4.7
+
+本次继续收口**项目级 Git**（右上角入口 + 项目改动抽屉 + 分支徽章）：修掉三处让"入口/抽屉整个
+消失"的渲染期崩溃、把入口与面板彻底隔离开，并把 `Changes` 页签的**全仓库差异**改成按文件按需取
+——切项目的等待从秒级降到百毫秒级。另外修了分支操作菜单"关不掉"的状态机。
+
+## 修复
+
+- **切换项目后项目 Git 入口与抽屉一起消失（Rules of Hooks）。** `StagingSection` 里有一个
+  `useMemo`（按文件切分差异）写在**阶段守卫之后**：加载中那一帧只调用 15 个 hook，数据到手
+  变成 16 个，React 抛 `#310 Rendered more hooks than during the previous render` 并**卸载整棵
+  抛错子树**——而那棵子树的根正是右上角入口组件，外层槽位的错误边界再把它整体换成错误占位。
+  现在：那个 `useMemo` 随"全仓库差异"一起去掉（见下），阶段守卫整体移到**所有 hook 之后**；
+  并且顺带修掉全插件另外**6 处条件调用 hook**（`typeof useSessions === 'function' ? useSessions(...) : ...`
+  这种写法在"源出现/消失"时会让 hook 数量变化），统一改成首次渲染锁定的 `useLatchedHook`。
+  新增 `scripts/check-react-rules.mjs` 静态拦截这一类形状，客户端回归测试里也加了"hook 数量
+  必须恒定"的校验（等价于真渲染器的 #310）。
+- **点 `Log` 时报 React #290。** 分支树收到的是 `ref: fresh.ref`——`ref` 是 React 的**保留键**，
+  传给函数组件既不进 props（`props.ref === undefined`，于是"筛选命中的那一行高亮"一直是一段
+  死代码），又触发 `Element ref was specified as a string but no owner was set`。业务字段改名为
+  `selectedRef`；静态检查里加了一条"不许把 `ref` 当业务字段传给组件"的规则。
+- **入口按钮与面板现在是两条互不连累的子树。** 右上角按钮（`ProjectChangesTriggerButton`）与
+  面板（`ProjectGitPanelErrorBoundary` → `ReviewPanel`）拆开：面板内部（Changes / Log / 暂存区 /
+  提交框）任何渲染期异常都只让**面板**显示「Git 面板加载失败 + 详细错误 + 重新加载 + 关闭」，
+  入口永远在。`Log` 页签里保留更细的一层边界。
+- **切项目不再临时回退到上一个项目。** 以前 `session ?? hostCurrent ?? candidates[0]` 无法区分
+  "根本没有当前会话"与"已经切到新会话、但 cwd 还没加载出来"，于是会先显示上一个项目（或外壳
+  目录）的数据再跳到新项目——右上角数字与列表因此看起来"对不上"。现在保留 `hasCurrentSession`：
+  有会话就只认它的 cwd，cwd 未到则显示「正在切换项目…」，**不发请求、不显示任何旧数据**；
+  只有确实没有当前会话时才允许兜底。
+- **分支操作菜单"关不掉"。** 同一行再点一次会先被 document 的 mousedown 关掉、随后那个 200ms
+  的"单击延迟弹菜单"定时器又把它冒出来。现在：同一行再点一次**立即关闭且不再重弹**；点别的一行
+  旧菜单立即消失、最终只留目标那一行的菜单；点列表空白/分组标题、滚动列表都会关菜单**并取消
+  待弹定时器**；双击清定时器 → 关菜单 → 最多一次 checkout（没有菜单闪现）；Esc 先只关菜单；
+  点菜单项（含「签出」）**先关菜单再执行动作**。
+
+## 变更
+
+- **项目级快照改成元数据级。** `/workspace` 以前为了"改了 N 个文件"这个数字要建一棵临时索引树
+  （`read-tree` + `add -A` + `write-tree`）**再算一份全仓库统一差异**（实测 38.7 MB）；现在只用
+  `status --porcelain=v2 --branch -z --untracked-files=all`（一次拿到分支/HEAD/每个文件的索引与
+  工作区状态）+ `diff --numstat HEAD`（只有行数、没有正文）。入口数字与 `Changes` 的三个分组仍然
+  来自**同一份** `files`。
+- **逐行差异按需取。** 新增 `POST /review/workspace-file`（`{workspace, path, revision, untracked}`）：
+  点开哪个文件才算哪个文件（未跟踪文件走 `--no-index` 与空文件比），单个文件仍有大小上限与
+  `truncated`，二进制照常给 binary 提示。客户端缓存键是 `workspace + HEAD + 路径`，因此切项目、
+  提交、切换分支后旧差异自然失效；迟到响应有令牌与键双重把关，不会把 A 文件的差异画到 B 下面。
+  `Changes` 页签里那条"依赖全仓库差异"的路径（`splitByFile(snapshot.diff)`）随之删除。
+- **快照状态机补全。** 每个工作区明确 `idle / loading / ready / error / notrepo`；已有数据时刷新走
+  **stale-while-revalidate**（保持 `ready` + `refreshing`，不清空列表，不再闪成空白）；失败时
+  有数据就保留数据并标出 `refreshError`，没数据才进 `error`——不会永远停在"正在读取差异"；
+  每次请求带 `workspace + generation + requestId`，旧工作区/旧请求的响应一律静默丢弃。
+- **项目级 Git 抽屉不再是 popover。** 点左侧项目、点聊天正文、点主界面其它区域都**不会**把它
+  关掉——只有 X 按钮、Escape、再点一次右上角入口才关。会话内那个审查标签仍按点外部关闭。
+- **轮询路径明确"只要元数据"。** 输入框上方的改动数字每 10 秒轮询 `/changes`，现在带
+  `metadataOnly: true`，不再让那条路由在后台反复计算全仓库统一差异。
+
+## 性能（真实仓库：6,639 个改动/未跟踪条目）
+
+| | 之前 | 现在 |
+|---|---|---|
+| 轮询一次的 git 进程数 | **10** | **2** |
+| 轮询一次的耗时 | **6.26 s**（冷索引首轮实测 163 s） | **0.32 s** |
+| 轮询产出的差异正文 | 全仓库统一差异 **38.7 MB** | **0** |
+| 点开一个文件 | 复用整份差异 | **1 个进程 / 95 ms / 1 KB** |
+
+用 `scripts/measure-workspace-snapshot.mjs` 可复现（只读，临时索引落在系统 temp）。
+
+## 校验
+
+- 新增 `scripts/check-react-rules.mjs`：静态拦截 React **#310**（hook 在 early return 之后 /
+  条件调用）与 **#290**（把 `ref` 当业务字段传给函数组件）——这两类只有真实渲染器才报，假 React
+  单测抓不到。变异验证：把 `byFile` 放回守卫之后、把 `ref` 改回业务字段，都会变红。
+- 新增 `scripts/test-review-project-git.mjs`（61 项）：假 React **逐组件比较 hook 数量与顺序**，
+  覆盖 A ready → B loading（入口/抽屉在、不显示 A 的文件）→ B ready → 回 A、"正在切换项目"
+  且不发请求、面板级降级 + 重新加载 + 关闭、按需差异请求、快照状态机（SWR / 失败保留数据 /
+  `requestId`）。
+- 新增 `scripts/test-review-lazy-diff.mjs`（38 项）：不点不取、点一次只取一次、折叠不取、
+  缓存命中、换 HEAD / 换 workspace 重取、迟到响应不串文件、loading 与 error 态。
+- 新增 `scripts/test-project-git-smoke.mjs`：**真实 Electron + CDP 冒烟**（case A 切项目、
+  case B 点 Log 不出 #290、case C Log/Changes/切项目循环 5 次、case D 快速 A→B→A），监听
+  `window.onerror` / `unhandledrejection` / `console.error`，出现 React minified error 即失败；
+  并校验页面加载的是修好之后的 bundle。需要一个带远程调试端口的实例：
+  `npm start -- --remote-debugging-port=9333`。
+- `test-gitbar-branch-interaction` 从 25 项扩到 **45 项**（新增第 5 节：菜单关闭状态机）。
+- `test-review-host` 从 51 项扩到 **72 项**（新增 `/workspace` 不带差异正文、`/workspace-file`
+  单文件差异、未跟踪文件、非 ASCII / 带空格路径、`/changes` 的 `metadataOnly`）。
+- 21 个 Node 测试脚本合计 **1387 项**断言全部通过；`check-react-rules`、`check-plugin-i18n`、
+  `check-imports`、`check-readme`、`check-version`、`test-plugin-sync`、`test-i18n`、类型检查
+  全部通过。
+
+---
+
 # 1.4.6
 
 本次修掉两个"看起来像别的问题"的实机故障：**点开项目改动抽屉的 `Log` 页签之后，整块抽屉连同

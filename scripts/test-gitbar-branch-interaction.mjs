@@ -386,6 +386,76 @@ console.log('=== 4. 右键：与单击**同一套**菜单 ===')
   nodes = await settle()
   check('   点「从它新建分支」打开了对话框', find('data-desktop-sc-dialog', 'create', nodes) !== null, 'true')
   check('   起点预填被右键的分支', find('data-desktop-sc-field', 'from', nodes)?.props?.value, 'develop')
+  // 点菜单项必须**立即**把菜单收掉（不能等动作跑完）。
+  check('   点菜单项后菜单立刻关闭', find('data-desktop-sc-menu', 'develop', nodes), null)
+}
+
+console.log('')
+console.log('=== 5. 关闭状态机：再点同一行立即关闭、且不许自己重新弹出来 ===')
+{
+  // 面板此刻可能被上一节的对话框挡住；清掉对话框状态并确保面板打开。
+  nodes = await ensurePanel()
+  await sleep(260)
+  // 5a. 同一行再点一次 = 关闭，且 200ms 之后**不得**重新出现。
+  nodes = await closeMenu()
+  clickRow(rowOf('develop', nodes))
+  await sleep(260)
+  nodes = await current()
+  check('5a) 第一次单击打开了菜单', find('data-desktop-sc-menu', 'develop', nodes) !== null, 'true')
+  clickRow(rowOf('develop', nodes))
+  const afterSecondClick = await current()
+  check('   再点同一行后菜单立即消失', find('data-desktop-sc-menu', 'develop', afterSecondClick), null)
+  await sleep(320)
+  nodes = await current()
+  check('   超过单击延迟后也没有重新出现', find('data-desktop-sc-menu', 'develop', nodes), null)
+
+  // 5b. 点另一行：上一个菜单必须消失，最终只允许目标那一行的菜单存在。
+  clickRow(rowOf('develop', nodes))
+  await sleep(260)
+  nodes = await current()
+  check('5b) develop 的菜单已打开', find('data-desktop-sc-menu', 'develop', nodes) !== null, 'true')
+  clickRow(rowOf('origin/develop', nodes))
+  const afterSwitch = await current()
+  check('   点另一行后旧菜单立即消失', find('data-desktop-sc-menu', 'develop', afterSwitch), null)
+  await sleep(300)
+  nodes = await current()
+  const menus = findAll('data-desktop-sc-menu', nodes)
+  check('   最终只有一个菜单', menus.length, 1)
+  check('   而且是新点那一行的', menus[0]?.props?.['data-desktop-sc-menu'], 'origin/develop')
+  check('   选中项也跟着换了', rowOf('origin/develop', nodes)?.props?.['data-desktop-branch-selected'], 'true')
+
+  // 5c. 滚动列表：关闭菜单，并取消待弹的定时器。
+  nodes = await closeMenu()
+  const list = findAll('data-desktop-branch-list', nodes)[0]
+  checkTrue('5c) 找得到分支列表容器', list !== undefined)
+  clickRow(rowOf('develop', nodes))
+  list.props.onScroll()
+  await sleep(320)
+  nodes = await current()
+  check('   滚动后没有菜单（待弹定时器也被取消）', menus.length === 0 || find('data-desktop-sc-menu', 'develop', nodes) === null, 'true')
+  check('   滚动不关面板', panelOpen(nodes), 'true')
+
+  // 5d. Escape：只收菜单，面板留着。
+  clickRow(rowOf('develop', nodes))
+  await sleep(260)
+  nodes = await current()
+  check('5d) 菜单已打开', find('data-desktop-sc-menu', 'develop', nodes) !== null, 'true')
+  nodes = await closeMenu()
+  check('   Esc 收掉了菜单', find('data-desktop-sc-menu', 'develop', nodes), null)
+  check('   但面板还开着', panelOpen(nodes), 'true')
+
+  // 5e. 菜单里的「签出」：请求发出之前菜单就已经收掉了。
+  posts.length = 0
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  const checkout = find('data-desktop-sc-menu', 'develop', nodes).props.children.find(
+    (child) => child?.props?.['data-desktop-sc-menuitem'] === 'checkout',
+  )
+  checkout.props.onClick()
+  const sameFrame = await current()
+  check('5e) 点「签出」的同一帧菜单就没了', find('data-desktop-sc-menu', 'develop', sameFrame), null)
+  await sleep(40)
+  check('   而且真的发出了 checkout', posts.length >= 1, 'true')
 }
 
 console.log('')
