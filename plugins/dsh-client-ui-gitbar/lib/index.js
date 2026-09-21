@@ -82,6 +82,24 @@ const GIT_NETWORK_TIMEOUT_MS = 180000
 const MAX_BRANCHES = 2000
 
 /**
+ * 精确领先/落后（`/branch/sync`）一次最多算多少个分支。
+ *
+ * 这是"按需补算"这条路径上的**硬上界**：客户端只会为"当前可见/选中"的分支请求它，
+ * 而这里是最后一层防线——即使客户端被改坏或恶意请求，也不会出现"一次请求启动上千个
+ * git 进程"这种把机器拖垮的形状。
+ */
+const SYNC_MAX_NAMES = 64
+
+/**
+ * 精确领先/落后时的并发上限。
+ *
+ * 每个 `rev-list` 都是**一个独立的 git.exe**。早先的实现对每个有上游的分支都起一个
+ * （`Promise.all` 不限并发），300 个分支就是 300 个进程同时抢 CPU——这正是"分支列表
+ * 加载慢"的直接原因。这里把同时活着的进程数钉在 4 个。
+ */
+const SYNC_CONCURRENCY = 4
+
+/**
  * 运行一条 git 命令。
  *
  * **一律带上 `-c core.fileMode=false`**：Windows 表达不了可执行位，而仓库若带着
@@ -258,7 +276,11 @@ async function readStatus(cwd) {
 }
 
 /**
- * 计算一个分支相对其上游的领先/落后提交数。
+ * 计算一个分支相对其上游的领先/落后提交数——**精确值，每调用一次起一个 git 进程**。
+ *
+ * 因此它只出现在两条路径上（见 listBranches 与 readBranchSync 的说明）：
+ *   1. `/branch/sync`：为"当前可见/选中"的分支按需补算，并发上限 SYNC_CONCURRENCY；
+ *   2. 没有第二条——首屏分支列表**不再**走它。
  *
  * **不能只看 `%(upstream:track)`。** 那个字段只在**本地远程跟踪引用**（`refs/remotes/…`）
  * 已经存在并且已过期时才报 `[behind N]`；本地跟踪引用缺失时它安静地给出空字符串，
@@ -353,7 +375,7 @@ const REF_FORMAT = [
 ].join('\x1f')
 
 /**
- * 列出分支，带上界面分组与同步状态所需的全部字段。
+ * 列出分支，带上界面分组所需的全部字段。
  *
  * 只列本地是不够的。实测一个真实仓库：本地 4 个分支、远程 27 个——团队协作时大部分
  * 分支只存在于远程，用户想在界面上切换却看不到它们，会直接得出"这个功能没用"的结论。
@@ -362,11 +384,29 @@ const REF_FORMAT = [
  * 提交时间与上游状态，两次调用会让"最近"分组与"本地/远程"两个列表取到不同时刻的快照，
  * 在同一次刷新里自相矛盾。
  *
+ * **首屏只起 1 个 git 进程。** 这是这一版最重要的性质：ahead/behind 先用 for-each-ref
+ * 的 `%(upstream:track)` 展示（`syncExact: false`），精确值由客户端对**可见**分支发
+ * `/branch/sync` 异步补算。此前的写法是"对每个有上游的分支各跑一次 rev-list"，300 个
+ * 分支就有 300 个 git.exe 同时启动，而 `MAX_BRANCHES` 又是在 enrichment **之后**才截断
+ * ——那既慢又把机器打满（实测"分支列表要等好几秒"）。现在的顺序是：
+ *
+ *     for-each-ref（1 个进程） → 解析 → 排序 → 截断 → 返回
+ *                                                    ↑ 到此为止，没有任何按分支数的进程
+ *
+ * 排序与截断必须发生在补算之前：否则给第 2001 个分支白算一次。
+ *
+ * 每个条目带 `syncExact`：
+ *   true   没有上游，0/0 是精确的（没什么可算）；
+ *   false  数字来自 track，是"先展示"的值，精确值由 `/branch/sync` 后补。
+ *
+ * 当前分支的精确 ahead/behind 由 `/status`（`# branch.ab`）给出——那是 git 自己算的，
+ * 客户端用它覆盖当前分支那一行；`/branches` 因此不需要为它额外起一个进程。
+ *
  * 切换远程分支时用 `git switch <短名>`：git 会自动创建同名的本地跟踪分支，这正是
  * 用户在 IDE 里期待的行为，不需要 `-b` 或 `--track`。
  *
  * @param cwd - 工作区路径。
- * @returns 分支条目数组，本地在前。
+ * @returns `{ branches, counts: { local, remote }, truncated }`，本地在前。
  */
 async function listBranches(cwd) {
   const raw = await git(['for-each-ref', `--format=${REF_FORMAT}`, 'refs/heads/', 'refs/remotes/'], cwd)
@@ -398,13 +438,15 @@ async function listBranches(cwd) {
       ahead,
       behind,
       // 两边各有提交：界面要提示"已分叉"，那与单纯的"落后"需要不同的动作。
-      diverged: false,
+      diverged: ahead > 0 && behind > 0,
+      // 这两个数字是不是精确值（见函数头）。没有上游时 0/0 就是精确的。
+      syncExact: upstreamName === '',
       // 已提交时间：界面按它排「最近」分组。ISO-8601 带时区，客户端 new Date() 可直接解析。
       committedAt: (date ?? '').trim(),
       hash: (object ?? '').trim(),
       subject: (subject ?? '').trim(),
       // 下面两个是内部字段，不入响应：
-      //   ref   —— 完整引用，第二遍算领先/落后时要用它当"分支尖端"（见 readUpstreamCounts）
+      //   ref   —— 完整引用，补算精确领先/落后时要用它当"分支尖端"（见 readUpstreamCounts）
       //   track —— `%(upstream:track)` 原文，只用于判定 `[gone]` 与兜底数字。
       // 它们是给人类看的文本，让客户端解析等于把 git 的输出格式变成前后端契约。
       ref: refname,
@@ -413,57 +455,132 @@ async function listBranches(cwd) {
     ;(isRemote ? remote : local).push(entry)
   }
 
-  // 第二遍：领先/落后。**必须另起一次（可并发的）查询**——见 readUpstreamCounts 的说明，
-  // `%(upstream:track)` 在本地跟踪引用缺失时会给出空字符串，据此显示会与 `git status`
-  // 矛盾。只对**有上游**的条目做，没有上游的分支省掉一次进程。
-  const withUpstream = [...local, ...remote].filter((entry) => entry.upstream !== '')
-  const counted = await Promise.all(
-    withUpstream.map(async (entry) => [entry, await readUpstreamCounts(cwd, entry.upstream, entry.ref, entry.track)]),
-  )
-  for (const [entry, result] of counted) {
-    entry.ahead = result.ahead
-    entry.behind = result.behind
-    entry.diverged = result.diverged
-    // `[gone]` 优先：rev-list 失败同样说明上游引用不存在。
-    entry.upstreamGone = entry.upstreamGone || result.gone
-  }
-  // 内部字段别流到客户端。
-  for (const entry of [...local, ...remote]) {
-    delete entry.track
-    delete entry.ref
-  }
-
-  // 本地在前（用户最常切的是本地），各自按名字排序，最后按上限截断。
+  // 本地在前（用户最常切的是本地），各自按名字排序，**先截断再返回**——补算完全在
+  // 客户端按可见性发起，host 这里不再为任何分支起第二个进程。
   const byName = (a, b) => a.name.localeCompare(b.name)
   local.sort(byName)
   remote.sort(byName)
-  const all = [...local, ...remote].slice(0, MAX_BRANCHES)
-  return { branches: all, local: local.length, remote: remote.length }
+  const all = [...local, ...remote]
+  const truncated = all.length > MAX_BRANCHES
+  // 内部字段别流到客户端。
+  for (const entry of all) {
+    delete entry.track
+    delete entry.ref
+  }
+  return {
+    branches: all.slice(0, MAX_BRANCHES),
+    counts: { local: local.length, remote: remote.length },
+    truncated,
+  }
+}
+
+/**
+ * 为指定的一批分支补算**精确**的领先/落后（`/branch/sync`）。
+ *
+ * 为什么由客户端挑名字：只有它知道哪些行此刻真的可见（分组折叠、搜索过滤、滚动都在
+ * 客户端）。host 端只负责两件事——**限制规模**（SYNC_MAX_NAMES）与**限制并发**
+ * （SYNC_CONCURRENCY），因此 300 个分支的仓库也不会出现进程雪崩。
+ *
+ * 名字一律重新解析：客户端给的名字先在这一次 for-each-ref（1 个进程）里查回它自己的
+ * 完整引用与上游，查不到的（已删除、被过滤掉、伪造的）直接跳过。这样即使名字是伪造的，
+ * 也不会成为"客户端能指定任意 rev"的入口（见本文件头部的安全约束）。
+ *
+ * @param cwd - 工作区路径。
+ * @param names - 客户端请求的分支短名（本地或远程）。
+ * @returns `{ sync: { [name]: { ahead, behind, diverged, upstreamGone, exact } } }`。
+ */
+async function readBranchSync(cwd, names) {
+  const wanted = new Set()
+  for (const name of names) {
+    if (typeof name === 'string' && name !== '') wanted.add(name)
+    if (wanted.size >= SYNC_MAX_NAMES) break
+  }
+  if (wanted.size === 0) return { sync: {} }
+
+  const raw = await git(['for-each-ref', `--format=${REF_FORMAT}`, 'refs/heads/', 'refs/remotes/'], cwd)
+  const targets = []
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+    const [refname, short, , symref, upstream, track] = line.split('\x1f')
+    if (refname === undefined || (symref ?? '').trim() !== '') continue
+    const isRemote = refname.startsWith('refs/remotes/')
+    const prefix = isRemote ? 'refs/remotes/' : 'refs/heads/'
+    const name = String(short ?? '').trim() !== '' ? String(short).trim() : refname.slice(prefix.length)
+    if (!wanted.has(name)) continue
+    const upstreamName = (upstream ?? '').trim()
+    if (upstreamName === '') {
+      // 没有上游：0/0 本来就是精确的，不必为它起进程。
+      targets.push([name, undefined])
+      continue
+    }
+    targets.push([name, { upstream: upstreamName, ref: refname, track: (track ?? '').trim() }])
+  }
+
+  const sync = {}
+  // 受限并发的工作队列。用"固定数量的工人从同一个游标取活"而不是 `Promise.all`：
+  // 后者的并发数等于数组长度，正是要避免的形状。
+  let cursor = 0
+  const worker = async () => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= targets.length) return
+      const [name, target] = targets[index]
+      if (target === undefined) {
+        sync[name] = { ahead: 0, behind: 0, diverged: false, upstreamGone: false, exact: true }
+        continue
+      }
+      const result = await readUpstreamCounts(cwd, target.upstream, target.ref, target.track)
+      sync[name] = {
+        ahead: result.ahead,
+        behind: result.behind,
+        diverged: result.diverged,
+        upstreamGone: result.gone,
+        exact: true,
+      }
+    }
+  }
+  const workers = []
+  for (let i = 0; i < Math.min(SYNC_CONCURRENCY, targets.length); i += 1) workers.push(worker())
+  await Promise.all(workers)
+  return { sync }
 }
 
 /**
  * 列出远端名与它们的地址。
  *
  * 界面的"推送"需要知道有哪些远端可选；只有一个远端时客户端可以自动选中，
- * 多个时让用户选。`get-url` 而不是 `-v`：后者对同名多地址会输出多行。
+ * 多个时让用户选。
+ *
+ * **一次 `git config --get-regexp` 拿全部**，而不是 `git remote` + 每个远端一次
+ * `remote get-url`：后者在远端多的仓库上是 1+N 个进程，而这里恒为 1 个。输出形如
+ * `remote.origin.url https://…`，按第一个空白切成"键 / 值"。正则结尾的 `\.url$`
+ * 天然排除 `remote.<name>.pushurl`（它结尾是 `hurl`，不是 `.url`）。
+ *
+ * 没有配置任何远端时 `--get-regexp` 以非零退出（"没有任何匹配"不是错误），因此这里
+ * 把失败当作空列表。
  *
  * @param cwd - 工作区路径。
  * @returns `{ name, url }` 数组。
  */
 async function listRemotes(cwd) {
-  const names = (await git(['remote'], cwd))
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '')
+  let raw = ''
+  try {
+    raw = await git(['config', '--get-regexp', '^remote\\..*\\.url$'], cwd)
+  } catch {
+    return []
+  }
   const remotes = []
-  for (const name of names) {
-    let url = ''
-    try {
-      url = (await git(['remote', 'get-url', name], cwd)).trim()
-    } catch {
-      // 取不到地址不影响选择远端，留空即可。
-    }
-    remotes.push({ name, url })
+  const seen = new Set()
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+    const match = /^remote\.(.+)\.url\s+(.+)$/u.exec(line.trim())
+    if (match === null) continue
+    const name = match[1]
+    // 同一个远端配了多个 url 时只取第一个：下游（push 的目标、选择器）只需要一个。
+    if (seen.has(name)) continue
+    seen.add(name)
+    remotes.push({ name, url: match[2] })
   }
   return remotes
 }
@@ -575,11 +692,19 @@ function resolveRequestWorkspace(requestUrl, allowedRoots) {
 }
 
 /**
- * 把一个"写操作"包成统一形状：成功回新的状态与分支列表，失败回稳定的 code。
+ * 把一个"写操作"包成统一形状：成功回**新的状态**（+远端列表），失败回稳定的 code。
  *
  * 统一形状的理由：写操作会改变 HEAD / 分支集合 / 工作区三者中的任意组合，客户端无论
- * 执行哪一个，回来都要刷新同样的三样东西。让每个路由各自决定回什么，就会出现"切分支
+ * 执行哪一个，回来都要刷新同样的几样东西。让每个路由各自决定回什么，就会出现"切分支
  * 后分支列表是旧的"这类只在某个路径上出现的 bug。
+ *
+ * **分支列表不在这个响应里。** 这是有意的：写操作（checkout/merge/rebase/…）之后用户
+ * 最想立刻看到的是"现在在哪个分支、工作区什么状态"，而分支列表即使只起一个
+ * `for-each-ref` 也要多等一次进程；如果它需要精确领先/落后就更慢。因此这里只回
+ * `readStatus`（一次 `status --porcelain=v2 --branch`）与远端列表，并带
+ * `branchesStale: true` 告诉客户端"你手上的分支列表已经过期了，自己去刷"。
+ * 客户端据此 invalidate 分支那一份状态并异步重取——刷新发生在它自己的加载态里，
+ * 不阻塞写操作的反馈。
  *
  * `code` 必须与 git 的英文原文分开：host 不知道界面语言，客户端按 code 渲染当前语言的
  * 短句，git 原文只放在 `detail` 里作为权威信息原样展示（翻译它反而失真）。
@@ -593,10 +718,12 @@ function resolveRequestWorkspace(requestUrl, allowedRoots) {
 async function runWrite(workspace, response, run, onError) {
   try {
     const extra = (await run()) ?? {}
+    // 状态与远端列表互不依赖，并发取。
+    const [status, remotes] = await Promise.all([readStatus(workspace), listRemotes(workspace)])
     sendJson(response, 200, {
-      ...(await readStatus(workspace)),
-      branches: (await listBranches(workspace)).branches,
-      remotes: await listRemotes(workspace),
+      ...status,
+      remotes,
+      branchesStale: true,
       ...extra,
     })
   } catch (error) {
@@ -649,7 +776,9 @@ function asRef(value) {
  *
  * 路由形状：
  *   GET  /status                 当前分支与工作区状态
- *   GET  /branches               分支列表（含分组与同步所需字段）+ 远端列表
+ *   GET  /branches               分支列表（含分组与同步所需字段，**不含**精确领先/落后）
+ *   GET  /remotes                远端名与地址
+ *   GET  /branch/sync            为指定分支补算精确的领先/落后（限规模与并发）
  *   POST /checkout               切换分支 / 签出标记或修订（可选 stash）
  *   POST /branch/create          新建分支（可选切过去）
  *   POST /branch/rename          重命名分支
@@ -690,10 +819,28 @@ function createGitHandler() {
           return
         }
         if (path === `${ROUTE_PREFIX}/branches`) {
-          const { branches, local, remote } = await listBranches(workspace)
-          // 一次性把远端列表也给出去：界面上的"推送"要立刻知道有哪些远端，
-          // 而它们几乎不变，跟着分支列表一起回来后端可以省一次往返。
-          sendJson(response, 200, { branches, counts: { local, remote }, remotes: await listRemotes(workspace) })
+          // 首屏分支列表**只起一个 git 进程**（for-each-ref），精确的领先/落后由
+          // `/branch/sync` 对可见分支按需补算（见 listBranches 的说明）。
+          const { branches, counts, truncated } = await listBranches(workspace)
+          sendJson(response, 200, { branches, counts, ...(truncated ? { truncated: true } : {}) })
+          return
+        }
+        if (path === `${ROUTE_PREFIX}/remotes`) {
+          // 远端列表单独一条路由：它只在需要时（面板打开、推送对话框）取一次，
+          // 不拖慢分支列表（见 listRemotes 的说明）。
+          sendJson(response, 200, { remotes: await listRemotes(workspace) })
+          return
+        }
+        if (path === `${ROUTE_PREFIX}/branch/sync`) {
+          // 精确领先/落后补算。`?names=a,b,c`——**只读，所以是 GET**：它不改变仓库，
+          // 用 POST 会让"读/写"这条分界线在客户端的请求记录里消失（而这个文件里
+          // 其它读接口都是 GET）。
+          //
+          // 用逗号分隔而不是重复的 `name=` 参数：分支名的字符集（REF_PATTERN）里
+          // **没有逗号**，因此切分无歧义，而 URL 也不会因为几十个分支名变得很长。
+          const raw = url.searchParams.get('names') ?? ''
+          const names = raw === '' ? [] : raw.split(',')
+          sendJson(response, 200, await readBranchSync(workspace, names))
           return
         }
         sendJson(response, 404, { error: 'not found' })
@@ -1192,6 +1339,8 @@ export function apply(ctx) {
   const routes = [
     `${ROUTE_PREFIX}/status`,
     `${ROUTE_PREFIX}/branches`,
+    `${ROUTE_PREFIX}/remotes`,
+    `${ROUTE_PREFIX}/branch/sync`,
     `${ROUTE_PREFIX}/checkout`,
     `${ROUTE_PREFIX}/branch/create`,
     `${ROUTE_PREFIX}/branch/rename`,

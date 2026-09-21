@@ -21,6 +21,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { extractReleaseNotes } from './release-notes.mjs'
 import { next, readVersion, writeVersion } from './version.mjs'
 
 const args = process.argv.slice(2)
@@ -45,11 +46,13 @@ function gitWithProxy(...argv) {
 /**
  * 校验本版本的发布说明已经写好。
  *
- * 约定：`RELEASE_NOTES.md` 的**第一个标题**必须写明本次版本号（如 `# 1.0.9`），
- * CI 会把整篇填进 Release 正文的「本次更新」一节。
+ * 约定：`RELEASE_NOTES.md` 是**累积的变更日志**（新版本写在新的一节 `# <版本>`，旧版本用
+ * `---` 分隔留在下面），CI 只把**本版本的那一节**填进 Release 正文。
  *
- * 做成硬性检查是因为"忘了写"从外部看不出来：Release 照常发出，只是没有更新内容，
- * 而用户正是来看这个的。
+ * 这一步以前只检查"第一个标题里有没有这个版本号"，于是踩过一次很显眼的坑：正文里被塞进了
+ * 整份变更日志（v1.4.4 的 Release 带着 1.4.3、1.4.2……一直回到 1.3.1）。现在改为真正
+ * **取出那一节**再校验，取不到、或者短得不像话，都在打标签之前拒掉。
+ *
  * @param version - 即将发布的版本号。
  */
 function assertReleaseNotes(version) {
@@ -59,20 +62,24 @@ function assertReleaseNotes(version) {
     process.exit(1)
   }
   const text = readFileSync(path, 'utf8')
-  const heading = /^#\s+(.+)$/mu.exec(text)
-  if (heading === null) {
-    console.error('\nRELEASE_NOTES.md 里没有标题（应以 `# <版本>` 开头）。')
-    process.exit(1)
-  }
-  // 允许标题里带「（待发布）」这类后缀，只要版本号出现在标题里即可。
-  if (!heading[1].includes(version)) {
+  let body
+  try {
+    body = extractReleaseNotes(text, version)
+  } catch (error) {
     console.error('')
-    console.error(`RELEASE_NOTES.md 的标题是「${heading[1].trim()}」，与本次要发布的 ${version} 不一致。`)
-    console.error(`请先把标题改成：# ${version}`)
+    console.error(error.message)
+    console.error(`请先在 RELEASE_NOTES.md 顶部写上「# ${version}」那一节。`)
     console.error('')
     process.exit(1)
   }
-  console.log(`发布说明: RELEASE_NOTES.md（标题「${heading[1].trim()}」）`)
+  if (body.length < 200) {
+    console.error('')
+    console.error(`RELEASE_NOTES.md 里 ${version} 那一节只有 ${body.length} 个字符，像是没写完。`)
+    console.error('它会被原样填进 Release 正文，而用户正是来看这个的。')
+    console.error('')
+    process.exit(1)
+  }
+  console.log(`发布说明: RELEASE_NOTES.md 的 ${version} 一节（${body.length} 字符）`)
 }
 
 const current = readVersion()

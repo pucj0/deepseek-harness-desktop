@@ -180,45 +180,33 @@ globalThis.setInterval = () => 0
 globalThis.clearInterval = () => {}
 
 // ---- 假 host ---------------------------------------------------------------------
-/** `/status`：一份"两组都有内容、有已暂存行"的最小负载。 */
-const STATUS = {
-  isRepo: true,
-  branch: 'main',
-  tracked: [
-    { path: 'src/app.ts', index: 'M', worktree: ' ', staged: true, unstaged: false },
-    { path: 'docs/readme.md', index: ' ', worktree: 'M', staged: false, unstaged: true },
-  ],
-  trackedCount: 2,
-  untrackedCount: 1,
-  untrackedPaths: ['src/new.ts'],
-  untrackedTruncated: false,
-}
-/** `/workspace`：`FileList` 的数据源。 */
+/**
+ * `/workspace`：**唯一**的数据源。
+ *
+ * 一个文件同时有已暂存与未暂存改动（`both` 那种形状）会让它在两组里各出现一行，这里用
+ * 三个文件覆盖三组：已暂存、未暂存、未跟踪。
+ */
 const WORKSPACE = {
   isRepo: true,
   scope: 'workspace',
+  branch: 'main',
+  head: 'a'.repeat(40),
   files: [
     { path: 'src/app.ts', status: 'M', added: 3, removed: 1, staged: true, unstaged: false, untracked: false },
     { path: 'docs/readme.md', status: 'M', added: 5, removed: 2, staged: false, unstaged: true, untracked: false },
+    { path: 'src/new.ts', status: 'A', added: 1, removed: 0, staged: false, unstaged: false, untracked: true },
   ],
   diff: '',
   truncated: false,
-}
-const HISTORY = {
-  isRepo: true,
-  branch: 'main',
-  commits: [{ hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'tester', date: '2026-01-02', subject: 'second commit' }],
 }
 
 globalThis.fetch = async (url) => {
   const target = String(url)
   const payload = target.includes('/workspace')
     ? WORKSPACE
-    : target.includes('/history')
-      ? HISTORY
-      : target.includes('/roots')
-        ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
-        : STATUS
+    : target.includes('/roots')
+      ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
+      : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
 
@@ -265,6 +253,10 @@ const Panel = loaded.__reviewPanelForTest
 check('导出了抽屉本体', typeof Panel, 'function')
 
 const panelProps = { t: (key) => key, workspace: 'F:\\code\\projA', sessionId: 's1', scope: 'workspace' }
+// 快照 store 是抽屉里**唯一**的数据源。假渲染器的 `useSyncExternalStore` 只读快照、不订阅，
+// 因此不会自动触发 store 的首次加载——这里显式写入一份，等价于"打开抽屉时 store 已经拿到
+// 了这一次 `/workspace` 的结果"。
+loaded.__gitSnapshotForTest.set('F:\\code\\projA', WORKSPACE)
 let tree = render(Panel, panelProps, 'style').tree
 for (let pass = 0; pass < 8; pass += 1) {
   const queued = []
@@ -283,12 +275,12 @@ console.log('=== 1. 头栏：标题 + 分支 + 计数 + 图标动作 ===')
   const title = rowsOf(nodes, 'data-review-title')[0]
   has('头栏里有标题容器', title !== undefined)
   has('标题容器里有标题文案', textOf(title ?? null).includes('projectTitle'))
-  // 分支徽标：整个抽屉里"我在哪个分支上提交"是第一个要回答的问题。
-  //
-  // 这里只断言"未读到分支时**不渲染**这块空壳"。分支名确实渲染成 `main` 由
-  // test-review-overlay-hooks.mjs 负责——那里走的是完整挂载链路，`history.state` 已经
-  // 落定；而这个桩里嵌套组件的状态只在被展开时才更新，面板那一层读到的可能还是加载中。
-  check('没有分支信息时不渲染空徽标', rowsOf(nodes, 'data-review-branch').length, 0)
+  // 分支徽标：整个抽屉里"我在哪个分支上提交"是第一个要回答的问题。分支名现在与文件列表
+  // 来自**同一份快照**（host 在 `/workspace` 里一并给出），因此不可能出现"文件是新的、
+  // 分支是旧的"这种错配。
+  const branchBadge = rowsOf(nodes, 'data-review-branch')[0]
+  has('有分支徽标', branchBadge !== undefined)
+  check('分支徽标显示当前分支', textOf(branchBadge ?? null).includes('main'), 'true')
   has('头栏里有计数徽标', rowsOf(nodes, 'data-review-count').length >= 1)
   has('仍有刷新按钮（title 是脚本依赖）', nodes.some((n) => n.props?.title === 'refresh'))
   has('仍有收起按钮（title 是脚本依赖）', nodes.some((n) => n.props?.title === 'collapse'))
@@ -296,10 +288,10 @@ console.log('=== 1. 头栏：标题 + 分支 + 计数 + 图标动作 ===')
 }
 
 console.log('')
-console.log('=== 2. 提交区：一张卡片 + 主次按钮 + 快捷键提示 ===')
+console.log('=== 2. 提交区：固定在底部 + 主次按钮 + 快捷键提示 ===')
 {
   const cards = rowsOf(nodes, 'data-staging-commit-card')
-  check('提交区是一张卡片', cards.length, 1)
+  check('提交区只有一块', cards.length, 1)
   const card = cards[0]
   has('卡片里有提交信息框', collectHostNodes(card).some((n) => n.props?.['data-staging-message'] !== undefined))
   has('卡片里有提交按钮', collectHostNodes(card).some((n) => n.props?.['data-staging-commit'] !== undefined))
@@ -391,7 +383,7 @@ console.log('=== 4. 样式块：现代观感层真的注入了 ===')
     '[data-staging-row]:hover',
     '[data-staging-group-head]',
     '[data-review-untracked-bar]',
-    '[data-review-commit] + [data-review-commit]',
+    '[data-graph-splitter]:hover',
   ]) {
     has(`样式里有 ${selector}`, css.includes(selector))
   }

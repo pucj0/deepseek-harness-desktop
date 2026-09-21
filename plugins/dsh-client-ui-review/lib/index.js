@@ -1046,7 +1046,7 @@ function createReviewHandler() {
           return
         }
         const current = await currentTree(workspace, `${sessionId}-workspace`)
-        const [stat, names, porcelain] = await Promise.all([
+        const [stat, names, porcelain, branchRaw] = await Promise.all([
           git(['diff', '--numstat', revision, current], workspace),
           git(['diff', '--name-status', revision, current], workspace),
           // 顺带把 `status --porcelain` 的索引/工作区两列取回来（见 indexStates）。
@@ -1057,6 +1057,10 @@ function createReviewHandler() {
           // "分组里是 A 项目的文件、列表里是 B 项目的文件"这种对不上的界面（实际反馈）。
           // 让一次请求同时给出内容与索引态，两边就不可能不一致。
           git(['status', '--porcelain'], workspace),
+          // 当前分支名。抽屉头栏要显示"我在哪个分支上提交"，而它必须与这份快照**同一时刻**
+          // ——单独再问一次 `/history` 拿分支名就会出现"文件是旧的、分支是新的"这种错配
+          // （那正是这次要合并掉的两套轮询之一）。游离 HEAD 时 symbolic-ref 失败，留空。
+          git(['symbolic-ref', '--short', '-q', 'HEAD'], workspace).catch(() => ''),
         ])
         const { diff, oversized } = await readUnifiedDiff(workspace, revision, current, stat.split('\n').length)
         const payload = describeDiff({ stat, names, diff })
@@ -1070,6 +1074,9 @@ function createReviewHandler() {
           isRepo: true,
           scope: 'workspace',
           revision,
+          /** 当前分支名（游离 HEAD 时为空串）；`head` 是 HEAD 的提交对象。 */
+          branch: branchRaw.trim(),
+          head: revision,
           ...payload,
           files,
           ...(oversized ? { diffOversized: true } : {}),

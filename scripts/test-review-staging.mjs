@@ -144,27 +144,34 @@ globalThis.clearInterval = () => {}
 
 // ---- 假 host ---------------------------------------------------------------------
 //
-// 状态刻意覆盖 porcelain 的四种形状（已用真实 git 验证过）：
-//   `A  new-staged.txt`  只有已暂存
-//   ` M unstaged.txt`    只有未暂存
-//   `MM both.txt`        **两边都有**（同一个文件会出现在两组里）
-//   `?? untracked-N.txt` 未跟踪
-const STATUS = {
+// 数据形状与**共享快照**一致：宿主在 `/workspace` 里一次给出文件列表 + 每个文件的索引态
+// （`staged` / `unstaged` / `untracked`），界面上的三个分组与逐行标记全部由这一份数据算出。
+// 因此这里的夹具必须覆盖 porcelain 的四种形状（已用真实 git 验证过）：
+//   `new-staged.txt`  只有已暂存（A ）
+//   `unstaged.txt`    只有未暂存（ M）
+//   `both.txt`        **两边都有**（MM）——它会同时出现在 Staged 与 Changes 两组里
+//   三个 untracked-*.txt  未跟踪（??）
+const FILES = [
+  { path: 'new-staged.txt', status: 'A', added: 5, removed: 0, staged: true, unstaged: false, untracked: false },
+  { path: 'unstaged.txt', status: 'M', added: 2, removed: 1, staged: false, unstaged: true, untracked: false },
+  { path: 'both.txt', status: 'M', added: 3, removed: 3, staged: true, unstaged: true, untracked: false },
+  { path: 'untracked-1.txt', status: 'A', added: 1, removed: 0, staged: false, unstaged: false, untracked: true },
+  { path: 'untracked-2.txt', status: 'A', added: 1, removed: 0, staged: false, unstaged: false, untracked: true },
+  { path: 'untracked-3.txt', status: 'A', added: 1, removed: 0, staged: false, unstaged: false, untracked: true },
+]
+
+const SNAPSHOT = {
   isRepo: true,
   branch: 'main',
-  tracked: [
-    { path: 'new-staged.txt', index: 'A', worktree: ' ' },
-    { path: 'unstaged.txt', index: ' ', worktree: 'M' },
-    { path: 'both.txt', index: 'M', worktree: 'M' },
-  ],
-  trackedCount: 3,
-  untrackedCount: 25,
-  untrackedPaths: ['untracked-1.txt', 'untracked-2.txt', 'untracked-3.txt'],
-  untrackedTruncated: true,
+  head: 'a'.repeat(40),
+  files: FILES,
+  diff: '',
+  truncated: false,
 }
 
 const posts = []
-let statusResponse = () => STATUS
+/** 当前 `/workspace` 的响应（测试中途会改它，造"干净""非仓库""请求失败"三种状态）。 */
+let workspaceResponse = () => SNAPSHOT
 let writeError = null
 /** 记录每一次请求的 `{ route, body, url }`，供"发到哪条路由、带了什么"的断言使用。 */
 const requests = []
@@ -190,7 +197,7 @@ const fetchBase = async (url, init) => {
   // 必须按**路由**判断，不能按 method 判断。早先按 method 判断，于是读 status 也被当成
   // 写操作，返回了 `{ isRepo: true }`（没有 tracked/untracked），面板于是显示"工作区干净"，
   // 而真实界面是对的。
-  if (route === 'status') return { ok: true, text: async () => JSON.stringify(statusResponse()) }
+  if (route === 'workspace') return { ok: true, text: async () => JSON.stringify(workspaceResponse()) }
   if (route === 'file-history') return { ok: true, text: async () => JSON.stringify(FILE_HISTORY) }
   if (route === 'untracked') return { ok: true, text: async () => JSON.stringify({ isRepo: true, paths: [], total: 0, truncated: false }) }
   posts.push({ route, body })
@@ -255,13 +262,27 @@ check('   undefined 不抛错', JSON.stringify(classify(undefined)), '{"staged":
 
 // ---- 渲染 ------------------------------------------------------------------------
 const Staging = loaded.__stagingSectionForTest
+const snapshotStore = loaded.__gitSnapshotForTest
+const WORKSPACE = 'F:\\code\\projA'
 const mountProps = {
   t: (key, params) => {
     if (params === undefined) return key
     return Object.entries(params).reduce((text, [name, value]) => text.split(`{${name}}`).join(String(value)), key)
   },
-  workspace: 'F:\\code\\projA',
+  workspace: WORKSPACE,
   onCommitted: () => undefined,
+  /**
+   * 快照用 **getter** 传：组件每次渲染都从共享 store 现读一次，因此"写操作之后 store 重取
+   * 了新快照"这件事会像真实界面一样反映到下一次渲染里（静态对象做不到这一点）。
+   */
+  get snapshot() {
+    return snapshotStore.get(WORKSPACE)
+  },
+}
+
+/** 直接往 store 里写一份快照（等价于 host 回了一次 `/workspace`）。 */
+function setSnapshot(payload) {
+  snapshotStore.set(WORKSPACE, payload)
 }
 
 let mountSeq = 0
@@ -325,47 +346,53 @@ async function toggleCheck(node, next) {
   return true
 }
 
-async function mount() {
+async function mount(options) {
   rootKey = `staging${mountSeq++}`
   settledNodes = []
+  if (options?.reload === true) {
+    // 走一次**真实请求**，让 store 自己进入错误态（用于"读接口失败"的场景：那条路径只有
+    // 真的发一次请求才会走到，直接写快照是写不出错误态的）。
+    await snapshotStore.invalidate(WORKSPACE)
+  } else {
+    setSnapshot(workspaceResponse())
+  }
   await settle()
 }
 
 console.log('')
-console.log('=== 2. 已跟踪改动合成一组 ===')
+console.log('=== 2. 三个分组：Staged / Changes / Unversioned ===')
 await mount()
 check('2) 区块已渲染', find('data-staging') !== null, 'true')
 {
   const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
-  // 只有两组：已跟踪的改动（**不**再按索引态拆开）+ 未跟踪。
-  // 拆分会让 `MM` 的文件出现两行、还得让用户判断该提交哪一个；索引现在是内部细节，
-  // 因为提交时会自动 add。
-  check('   两组：更改 + 未跟踪', groups.join(','), 'unstaged,untracked')
+  // 三组，与 IDEA 的 Git 工具窗一致：索引里有什么（Staged）、工作区还剩什么（Changes）、
+  // 还没进版本管理的新文件（Unversioned）。分组全部由**同一份快照**过滤得出。
+  check('   三组：已暂存 + 更改 + 未跟踪', groups.join(','), 'staged,unstaged,untracked')
   const rows = findAll('data-staging-row')
   const trackedRows = rows.filter((r) => r.props['data-staging-side'] !== 'untracked').map((r) => r.props['data-staging-row'])
-  check('   已跟踪改动每个文件一行（去重）', trackedRows.join(','), 'new-staged.txt,both.txt,unstaged.txt')
-  // `MM` 的 both.txt 只出现一次——这是"不再重复"的直接证据。
-  check('   `MM` 的文件不重复', trackedRows.filter((p) => p === 'both.txt').length, 1)
-  // 但它在索引里已有改动这件事仍要看得出来：那一行的动作按钮是"取消暂存"（−），
-  // 而纯工作区改动的行是"暂存"（+）。
-  const actionOf = (path) => {
-    const row = findAll('data-staging-row').find((n) => n.props['data-staging-row'] === path)
+  // 已跟踪的每个文件至少一行；`MM` 的 both.txt 在两组里各出现一次（IDEA 也是这样）。
+  check('   已跟踪改动覆盖全部文件', [...new Set(trackedRows)].join(','), 'new-staged.txt,both.txt,unstaged.txt')
+  check('   `MM` 的文件在两组里各一行', trackedRows.filter((p) => p === 'both.txt').length, 2)
+  // 每一行显示的动作必须与它所在的分组一致：Staged 组是"取消暂存"，Changes 组是"暂存"。
+  const actionOf = (path, side) => {
+    const row = findAll('data-staging-row').find(
+      (n) => n.props['data-staging-row'] === path && (side === undefined || n.props['data-staging-side'] === side),
+    )
     if (row === undefined) return '(no-row)'
     const btn = collectHostNodes(row, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
     return btn?.props?.['data-staging-row-action'] ?? '(none)'
   }
-  check('   索引里已有改动 -> 行内动作是取消暂存', actionOf('both.txt'), 'unstage')
-  check('   纯工作区改动 -> 行内动作是暂存', actionOf('unstaged.txt'), 'stage')
+  check('   Staged 组的行内动作是取消暂存', actionOf('both.txt', 'staged'), 'unstage')
+  check('   Changes 组的行内动作是暂存', actionOf('both.txt', 'unstaged'), 'stage')
+  check('   纯工作区改动 -> 行内动作是暂存', actionOf('unstaged.txt', 'unstaged'), 'stage')
 }
 // 未跟踪组默认**展开**（见下面第 3 节）：这一版把它做成可勾选后"加入 git"，
 // 默认折叠会让这个功能看不见。
 check('   未跟踪组默认展开', find('data-staging-untracked-list') !== null, 'true')
-// 未跟踪组的计数必须用 host 给的**总数**（25），不是本地样本的 3 条：界面上"6,636 个文件"
-// 这个数字本身就是用户想知道的第一件事。
+// 未跟踪组的计数与列出的行数**同源**（都来自快照里的文件），因此必然相等。
 {
-  // 用整棵树的文本：`textOf(find(...))` 读的是没有异步状态的另一次渲染（见 viewText 的说明）。
   const titleText = viewText().replace(/\s+/gu, '')
-  check('   未跟踪计数用 host 给的总数（25，不是样本的 3）', titleText.includes('untrackedTitle25'), 'true')
+  check('   未跟踪计数就是快照里的 3 个', titleText.includes('untrackedTitle3'), 'true')
 }
 
 console.log('')
@@ -375,7 +402,8 @@ console.log('=== 3. 未跟踪列表：勾选 + 加入 git ===')
 // 因此只在真的被截断时才提示。
 check('3) 列表默认展开', find('data-staging-untracked-list') !== null, 'true')
 check('   列出全部 3 条', findAll('data-staging-row').filter((r) => r.props['data-staging-side'] === 'untracked').length, 3)
-checkTrue('   说明还有 22 个没显示', textOf(find('data-staging-untracked-truncated')).includes('untrackedTruncated'))
+// 3 条远低于渲染上限（50），因此**不该**出现"只列出前 N 个"的提示。
+check('   未超上限时不提示截断', find('data-staging-untracked-truncated'), null)
 // 每条未跟踪文件都要有勾选框：这正是"把未跟踪文件加入 git"的入口（参考 IDEA）。
 check('   每条都有勾选框', findAll('data-staging-pick').length, 3)
 // 默认**不勾选**（IDEA 里新文件也不会自动进暂存区），因此"加入 git"按钮初始禁用。
@@ -424,7 +452,7 @@ console.log('=== 4. 单文件暂存 / 取消暂存 ===')
   const button = collectHostNodes(row, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
   await click(button)
   check('4) 发出 stage', posts.map((p) => p.route).join(','), 'stage')
-  check('   只暂存这一个文件', JSON.stringify(posts[0].body), JSON.stringify({ workspace: 'F:\\code\\projA', paths: ['unstaged.txt'] }))
+  check('   只暂存这一个文件', JSON.stringify(posts[0].body), JSON.stringify({ workspace: WORKSPACE, paths: ['unstaged.txt'] }))
   checkTrue('   暂存后给出提示', textOf(find('data-staging-notice')).includes('stagedNotice'))
 }
 {
@@ -433,18 +461,51 @@ console.log('=== 4. 单文件暂存 / 取消暂存 ===')
   const button = collectHostNodes(row, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
   await click(button)
   check('   取消暂存走 unstage 路由', posts.map((p) => p.route).join(','), 'unstage')
-  check('   请求体', JSON.stringify(posts[0].body), JSON.stringify({ workspace: 'F:\\code\\projA', paths: ['new-staged.txt'] }))
+  check('   请求体', JSON.stringify(posts[0].body), JSON.stringify({ workspace: WORKSPACE, paths: ['new-staged.txt'] }))
   check('   按钮动作标记是 unstage', button?.props?.['data-staging-row-action'], 'unstage')
 }
 
 console.log('')
-console.log('=== 5. 批量按钮 ===')
+console.log('=== 4b. 行内还原：确认之后才发请求，并统一刷新快照 ===')
+{
+  await mount()
+  posts.length = 0
+  const before = requests.filter((r) => r.route === 'workspace').length
+  const revertButton = find('data-staging-revert', 'unstaged.txt')
+  checkTrue('4b) 有还原入口', revertButton !== null)
+  await click(revertButton)
+  // 还原会改写工作区，必须先弹确认框；**确认之前一个请求都不该发**。
+  check('   弹出了确认框', find('data-review-revert-dialog', 'unstaged.txt') !== null, 'true')
+  check('   确认前不发请求', posts.length, 0)
+  // 确认框里的「还原」按钮：按文案键找（字典桩原样回显键名）。
+  const confirm = collectHostNodes(find('data-review-revert-dialog', 'unstaged.txt'), 'probe').find(
+    (n) => n.props?.type === 'button' && textOf(n).includes('revert') && !textOf(n).includes('revertCancel'),
+  )
+  checkTrue('   确认框里有还原按钮', confirm !== undefined)
+  posts.length = 0
+  confirm.props.onClick()
+  await settle()
+  check('   发出 revert', posts.map((p) => p.route).join(','), 'revert')
+  check('   只还原这一个文件', JSON.stringify(posts[0]?.body?.paths), '["unstaged.txt"]')
+  check('   还原源是 HEAD（scope=workspace）', posts[0]?.body?.scope, 'workspace')
+  check('   成功后重新取快照（统一 invalidate）', requests.filter((r) => r.route === 'workspace').length > before, 'true')
+  check('   确认框已关闭', find('data-review-revert-dialog'), null)
+}
+
+console.log('')
+console.log('=== 5. 分组级批量按钮 ===')
 // 注意桩里的 `body` 已经 JSON.parse 过了，这里直接读对象，不要再 parse 一次。
 {
   posts.length = 0
+  // Staged 组的批量动作是"全部取消暂存"。
+  await click(find('data-staging-action', 'unstage-all'))
+  check('5) 全部取消暂存：自定义组里的全部文件', JSON.stringify(posts[0]?.body?.paths), '["new-staged.txt","both.txt"]')
+}
+{
+  posts.length = 0
+  // Changes 组的批量动作是"全部暂存"。
   await click(find('data-staging-action', 'stage-all'))
-  // 现在只有一组已跟踪改动，因此"全部暂存"就是这一组里的全部文件。
-  check('5) 全部暂存：这一组里的全部文件', JSON.stringify(posts[0]?.body?.paths), '["new-staged.txt","both.txt","unstaged.txt"]')
+  check('   全部暂存：更改组里的全部文件', JSON.stringify(posts[0]?.body?.paths), '["unstaged.txt","both.txt"]')
 }
 {
   posts.length = 0
@@ -511,31 +572,31 @@ console.log('=== 8. 未知 code 不吞掉原始错误 ===')
 console.log('')
 console.log('=== 9. 空仓库与干净工作区 ===')
 {
-  statusResponse = () => ({ isRepo: true, branch: 'main', tracked: [], trackedCount: 0, untrackedCount: 0, untrackedPaths: [], untrackedTruncated: false })
+  workspaceResponse = () => ({ isRepo: true, branch: 'main', head: 'a'.repeat(40), files: [], diff: '', truncated: false })
   await mount()
   checkTrue('9) 干净时给出空态', viewText().includes('noStagedOrChanged'))
   check('   没有任何分组', findAll('data-staging-group').length, 0)
   check('   提交按钮禁用', find('data-staging-commit')?.props?.disabled, true)
 }
 {
-  statusResponse = () => ({ isRepo: false })
+  workspaceResponse = () => ({ isRepo: false })
   await mount()
   checkTrue('   非仓库给出提示', viewText().includes('notRepo'))
 }
 {
-  statusResponse = () => STATUS
+  workspaceResponse = () => SNAPSHOT
   globalThis.fetch = (() => {
     const original = globalThis.fetch
     return async (url, init) => {
       // 按**路由**判断而不是按 method：本插件的 `call` 只发 POST，读接口也是 POST，
       // 用 `init.method === undefined` 当"读请求"的判据永远不会命中。
-      if (String(url).includes('/review/status')) {
+      if (String(url).includes('/review/workspace')) {
         return { ok: false, text: async () => JSON.stringify({ error: 'boom', code: 'workspaceNotAllowed', detail: 'workspace must be one of the workspaces known to this app' }) }
       }
       return original(url, init)
     }
   })()
-  await mount()
+  await mount({ reload: true })
   {
     // 读接口失败时走的也是与"非仓库"同一个 `statusBlock` 分支（上一条已经断言它能渲染出
     // 文案），这里确认走到的是**错误态**而不是把失败当成"工作区干净"。
@@ -544,29 +605,29 @@ console.log('=== 9. 空仓库与干净工作区 ===')
     checkTrue('   失败态渲染出提示块', all.length > 0)
     check('   没有把失败误当成"工作区干净"', text.includes('noStagedOrChanged'), false)
     check('   没有渲染出任何分组', all.filter((n) => n.props?.['data-staging-group'] !== undefined).length, 0)
+    checkTrue('   提示里带上了原因', text.includes('workspace must be one of the workspaces known to this app'))
   }
 }
 
 console.log('')
 console.log('=== 9b. 提交：默认全选、一步到位、可排除 ===')
 {
-  statusResponse = () => STATUS
+  workspaceResponse = () => SNAPSHOT
   globalThis.fetch = fetchBase
   await mount()
-  // 已跟踪改动只显示**一组**（不再拆"已暂存 / 未暂存"）：同一个文件两处都有改动时
-  // 会出现两行重复，还得让用户判断该提交哪一个。索引现在只是内部细节。
+  // 三组都在，且 `MM` 的文件在两组里各出现一次（这是"分组回答不同问题"的直接证据）。
   const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
-  check('9b) 已跟踪改动只有一组', groups.filter((g) => g !== 'untracked').join(','), 'unstaged')
-  // `MM` 的文件只出现一次（这是"不再重复"的直接证据）。
+  check('9b) 三组都在', groups.join(','), 'staged,unstaged,untracked')
   const bothRows = findAll('data-staging-row').filter((n) => n.props['data-staging-row'] === 'both.txt' && n.props['data-staging-side'] !== 'untracked')
-  check('   `MM` 的文件只出现一次', bothRows.length, 1)
-  check('   每个已跟踪文件一个勾选框', findAll('data-staging-file-pick').length, 3)
+  check('   `MM` 的文件在两组里各一行', bothRows.length, 2)
+  // 已跟踪文件按路径去重后共 3 个，每个一个勾选框。
+  check('   每个已跟踪文件一个勾选框', findAll('data-staging-file-pick').length, 4)
   // **默认全部勾选** —— 这是"不用先加暂存"的核心：提交直接一步到位。
   check(
     '   默认全部勾选',
-    findAll('data-staging-file-pick')
+    [...new Set(findAll('data-staging-file-pick')
       .filter((n) => n.props.checked === true)
-      .map((n) => n.props['data-staging-file-pick'])
+      .map((n) => n.props['data-staging-file-pick']))]
       .sort()
       .join(','),
     'both.txt,new-staged.txt,unstaged.txt',
@@ -617,17 +678,21 @@ console.log('=== 9b. 提交：默认全选、一步到位、可排除 ===')
   check('   提交并推送发出 commit', posts[0]?.route, 'commit')
   check('   带 push: true', posts[0]?.body?.push, true)
 
-  // 组级全选 / 取消全选。全部取消后没有任何选中 → 提交按钮禁用（那是明确的意图）。
+  // 组级全选 / 取消全选。两个已跟踪分组都要取消，才真的没有任何选中 → 提交按钮禁用
+  // （那是明确的意图）。`MM` 的文件在两组里各有一行，但勾选状态按**路径**记录，
+  // 因此取消任一组都会把它一起取消——这里两组各点一次，覆盖全部三个路径。
   await toggleCheck(find('data-staging-group-pick', 'unstaged'), false)
+  await toggleCheck(find('data-staging-group-pick', 'staged'), false)
   check('   取消全选后没有勾选', findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length, 0)
   find('data-staging-message').props.onChange({ target: { value: 'feat: 全不选' } })
   await settle()
   check('   全不选时提交禁用', find('data-staging-commit')?.props?.disabled, true)
   checkTrue('   提示说明要先勾选', textOf(find('data-staging-hint')).includes('noSelection'))
   await toggleCheck(find('data-staging-group-pick', 'unstaged'), true)
+  await toggleCheck(find('data-staging-group-pick', 'staged'), true)
   check(
-    '   再全选回来',
-    findAll('data-staging-file-pick').filter((n) => n.props.checked === true).length,
+    '   再全选回来（按路径去重后 3 个）',
+    new Set(findAll('data-staging-file-pick').filter((n) => n.props.checked === true).map((n) => n.props['data-staging-file-pick'])).size,
     3,
   )
 }

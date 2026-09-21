@@ -48,9 +48,13 @@ window.__ModuleLoader__.load({
         --dsh-review-row-bg: var(--dsw-alias-interactive-bg-hover);
         --dsh-review-row-border: var(--dsw-alias-border-l2);
       }
-      .dsh-review-history + .dsh-review-history {
-        border-top: 1px solid var(--dsw-alias-border-l1, #eceef2);
+
+      /* ---- Log 页签（提交图）---- */
+      /* 两条分栏手柄：默认透明、悬停才显形——常显会与 1px 的分割线叠成两条。 */
+      [data-graph-splitter]:hover {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .18));
       }
+      [data-graph-toolbar] input::placeholder { color: var(--dsw-alias-label-tertiary); }
 
       /* ---- 面板外观：参照 IDEA 的 Git 工具窗口 ---- */
 
@@ -288,8 +292,8 @@ window.__ModuleLoader__.load({
         font-family: ${UI_FONT}; font-size: 11.5px;
       }
 
-      /* 提交历史：每行之间一条淡线，最后一条不留。 */
-      [data-review-commit] + [data-review-commit] { border-top: 1px solid var(--dsh-review-line); }
+      /* Log 页签工具条里的搜索框：焦点环与占位符颜色（内联样式写不出伪类）。 */
+      [data-graph-toolbar] input:focus { outline: 2px solid color-mix(in srgb, ${ACCENT} 25%, transparent); outline-offset: -1px; }
 
       /* 移动/窄视口：抽屉本身是 fixed 全高，窄屏下靠缩进换空间。 */
       @media (max-width: 560px) {
@@ -623,10 +627,20 @@ window.__ModuleLoader__.load({
       resize: '拖动调整面板宽度（双击复位）',
       refresh: '刷新',
       changesTitle: '改动',
+      // ---- 抽屉顶部的两个页签（IDEA 的 Git 工具窗就是这两个）----
+      changesTab: 'Changes',
+      logTab: 'Log',
+      // ---- Log 页签里的三栏与工具栏 ----
+      graphSearchPlaceholder: '搜索提交信息 / 作者 / 哈希',
+      graphNoMatches: '已加载的提交里没有匹配项。',
+      graphCollapseTree: '收起分支树',
+      graphCollapseDetail: '收起详情',
       revert: '还原',
       revertConfirm: '确认还原',
       revertConfirmTitle: '确认还原这个文件？',
       revertConfirmBody: '文件内容将恢复为基线状态；本轮新建的文件会被删除。',
+      revertConfirmBodyWorkspace: '文件内容将恢复为 HEAD 的样子；未跟踪的新文件会被删除。',
+      revertedNotice: '已还原 {path}',
       reverting: '还原中…',
       revertFailed: '还原失败：{message}',
       historyTitle: '最近提交',
@@ -736,10 +750,18 @@ window.__ModuleLoader__.load({
       resize: 'Drag to resize (double-click to reset)',
       refresh: 'Refresh',
       changesTitle: 'Changes',
+      changesTab: 'Changes',
+      logTab: 'Log',
+      graphSearchPlaceholder: 'Search message / author / hash',
+      graphNoMatches: 'No match among the loaded commits.',
+      graphCollapseTree: 'Collapse branch tree',
+      graphCollapseDetail: 'Collapse details',
       revert: 'Revert',
       revertConfirm: 'Confirm revert',
       revertConfirmTitle: 'Revert this file?',
       revertConfirmBody: 'Its content goes back to the baseline; a file created this turn is deleted.',
+      revertConfirmBodyWorkspace: 'Its content goes back to HEAD; a new untracked file is deleted.',
+      revertedNotice: 'Reverted {path}',
       reverting: 'Reverting…',
       revertFailed: 'Revert failed: {message}',
       historyTitle: 'Recent commits',
@@ -998,6 +1020,417 @@ window.__ModuleLoader__.load({
      * @param diff - 单个文件的差异片段。
      * @returns 是二进制则 true。
      */
+    // =================================================================================
+    // 2b. 工作区世代闸门 + 工作区 Git 快照 store
+    // =================================================================================
+
+    /**
+     * 工作区世代闸门（workspace generation gate）。
+     *
+     * **这是 `dsh-client-ui-gitbar/lib/client.js` 里同名实现的孪生副本**，语义逐条对齐，
+     * 唯一的差别是注释里提到的调用点。不能抽成共享文件：客户端 bundle 的契约是"一个插件
+     * 只有一个脚本"，模块加载器只认它自己的基线表，同目录的其它文件在浏览器里取不到
+     * （与 `graph-layout.js` 必须内联是同一个原因）。
+     *
+     * 它解决的是一整类 bug：异步请求在 workspace 改变之后才返回，把**旧项目**的数据写进
+     * 新项目的状态里。界面上的表现是"切了项目/切换了对话，看到的还是上一个项目的
+     * 数字、文件或提交"，而且时有时无（取决于两个请求谁先回来）。
+     *
+     * 做法是把"这次请求属于哪个工作区、第几代、第几号"记在请求上，响应回来时只有仍然属于
+     * 当前代、且仍是该状态分片最新的一次请求才允许落地。四条硬约束：
+     *   1. workspace 改变**立即**换代（在 render 期，不等 effect）；
+     *   2. loading 也走同一条判定（否则旧请求的 `finally` 会把加载态关掉）；
+     *   3. 同一工作区、同一类请求 single-flight（定时轮询在慢仓库上会重叠）；
+     *   4. 写操作抢占它要写的状态分片（更早发起的读不许覆盖它）。
+     *
+     * @returns 闸门对象；每个使用它的组件一个（见 useWorkspaceGate）。
+     */
+    function createWorkspaceGate() {
+      let workspace
+      let generation = 0
+      let nextId = 0
+      const inflight = new Map()
+      const latestOfSlice = new Map()
+
+      const isCurrent = (ticket) =>
+        ticket.generation === generation && Object.is(ticket.workspace, workspace)
+
+      return {
+        sync(next) {
+          if (Object.is(next, workspace)) return false
+          workspace = next
+          generation += 1
+          inflight.clear()
+          return true
+        },
+        get workspace() {
+          return workspace
+        },
+        get generation() {
+          return generation
+        },
+        isCurrent,
+        accept(ticket) {
+          if (!isCurrent(ticket)) return false
+          return ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
+        },
+        run(kind, task, options) {
+          const slices = Array.isArray(options?.slices) ? options.slices : [kind]
+          const coalesce = options?.coalesce === true
+          const key = `${generation}\u0000${kind}`
+          if (coalesce) {
+            const hit = inflight.get(key)
+            if (hit !== undefined) return hit
+          }
+          const ticket = { workspace, generation, id: (nextId += 1), kind, slices }
+          for (const slice of slices) latestOfSlice.set(slice, ticket.id)
+          const promise = Promise.resolve()
+            .then(task)
+            .then(
+              (value) => ({ ok: true, value, ticket }),
+              (cause) => ({ ok: false, cause, ticket }),
+            )
+          const entry = { ticket, promise }
+          if (coalesce) {
+            inflight.set(key, entry)
+            void promise.then(() => {
+              if (inflight.get(key) === entry) inflight.delete(key)
+            })
+          }
+          return entry
+        },
+      }
+    }
+
+    /**
+     * 给一个组件取它的工作区闸门，并在 render 期完成换代（见 createWorkspaceGate）。
+     * @param workspace - 当前工作区路径。
+     * @returns 稳定的闸门对象。
+     */
+    function useWorkspaceGate(workspace) {
+      const ref = react.useRef(null)
+      // 判 null 也判 undefined：`useRef()` 不带参数（或某些实现）给的是 undefined。
+      if (ref.current === null || ref.current === undefined) ref.current = createWorkspaceGate()
+      const gate = ref.current
+      gate.sync(workspace)
+      return gate
+    }
+
+    /** 快照多久没更新就算过期：抽屉打开时据此决定要不要立刻刷一次。 */
+    const SNAPSHOT_STALE_MS = 5000
+    /** 快照的轮询间隔。 */
+    const SNAPSHOT_POLL_MS = POLL_MS
+
+    /**
+     * 未跟踪文件最多渲染多少行。
+     *
+     * 实测一个真实仓库有 6,636 个未跟踪文件：全量渲染会让这块面板变成一堵墙（每行还有
+     * 勾选框、差异按钮、历史按钮）。**分组标题上的数量仍然显示完整总数**，因此
+     * "分组数量与文件列表一致"这条要求不受影响——这是"只显示前 N 个"的视图截断，
+     * 不是另一份数据。
+     */
+    const UNTRACKED_RENDER_LIMIT = 50
+
+    /**
+     * 把一个文件的暂存/未暂存状态翻译成 porcelain 的 XY 两列。
+     *
+     * 宿主在 `/workspace` 里同时给了"文件列表（来自 diff）"与"索引态（来自 status）"，
+     * 但索引态是 `{ staged, unstaged, untracked }` 三个布尔值；而界面上的行、徽标与分组
+     * 一直都按 porcelain 的两列（`classifyEntry`）判断。这里补上那一层翻译，让
+     * **分组判定只有一处实现**（`classifyEntry`），不必为这套新数据再写第二套规则。
+     *
+     * @param file - `/workspace` 返回的文件条目。
+     * @returns 带 `index`/`worktree` 的条目。
+     */
+    function entryOfFile(file) {
+      const status = typeof file?.status === 'string' && file.status !== '' ? file.status[0] : 'M'
+      const untracked = file?.untracked === true
+      if (untracked) {
+        return { path: file.path, index: '?', worktree: '?', status: file.status, added: file.added, removed: file.removed, untracked: true }
+      }
+      return {
+        path: file.path,
+        index: file.staged === true ? status : ' ',
+        worktree: file.unstaged === true ? status : ' ',
+        status: file.status,
+        added: file.added,
+        removed: file.removed,
+        untracked: false,
+      }
+    }
+
+    /**
+     * 工作区级 Git 快照的**共享 store**（每个工作区一份）。
+     *
+     * 为什么必须共享：这个数字在界面上出现两次——项目页右上角的入口按钮显示"改了 N 个
+     * 文件"，点开抽屉后是同一批文件的清单。此前两者各自轮询（入口每 10 秒打一次
+     * `/workspace`，抽屉里的"变更"区块走 `/status`），于是很自然地出现"外面显示 0，
+     * 进去却有文件"：两次请求之间工作区变了、或者两条路由本来就不是同一份数据。
+     *
+     * 现在只有**一份**数据、**一个**轮询：
+     *   * 入口按钮的数字 = `snapshot.changedFiles` = `snapshot.files.length`；
+     *   * 抽屉里的文件列表 = 同一份 `snapshot.files`；
+     *   * 各分组的数量由同一份 `files` 现场过滤得出，因此"分组数量与列表"不可能对不上；
+     *   * 写操作（stage/unstage/revert/commit/checkout）成功后统一 `invalidate`，
+     *     由 store 自己重取一次——调用方不各自缓存。
+     *
+     * 生命周期：第一个订阅者到来时开始轮询（并立刻拉一次），最后一个离开时停止并丢弃
+     * 计时器。数据本身留在 map 里（切回来时可以立刻显示上次的快照 + 后台刷新），但
+     * **每一次写入都带 workspace 与 generation**，因此 A→B→A 的快速切换不会出现
+     * "B 的数据落到 A 上"。
+     */
+    const gitSnapshots = (() => {
+      /** workspace → 记录。 */
+      const records = new Map()
+
+      /**
+       * 一份"空"快照（还没取到数据，或者刚被重置）。
+       *
+       * `refresh` / `invalidate` 是**挂在快照上**的，因为调用方（组件、脚本）拿到的就是这份
+       * 快照对象：`snapshot.refresh()` 立刻重取一次，`snapshot.invalidate()` 标记过期并重取。
+       * 两个函数在同一个 record 上是稳定的引用，因此不会破坏
+       * `useSyncExternalStore` 的"引用不变就不重渲染"这条约定。
+       *
+       * @param record - 所属记录。
+       * @returns 快照对象。
+       */
+      const emptySnapshot = (record) => ({
+        workspace: record.workspace,
+        generation: record.generation,
+        phase: 'idle',
+        branch: '',
+        head: '',
+        files: [],
+        changedFiles: 0,
+        staged: 0,
+        unstaged: 0,
+        untracked: 0,
+        diff: '',
+        diffOversized: false,
+        empty: false,
+        error: '',
+        updatedAt: 0,
+        refresh: () => load(record),
+        invalidate: () => invalidateRecord(record),
+      })
+
+      const ensure = (workspace) => {
+        let record = records.get(workspace)
+        if (record === undefined) {
+          record = {
+            workspace,
+            generation: 0,
+            snapshot: null,
+            listeners: new Set(),
+            inflight: null,
+            timer: 0,
+          }
+          records.set(workspace, record)
+          record.snapshot = emptySnapshot(record)
+        }
+        return record
+      }
+
+      const emit = (record) => {
+        for (const listener of [...record.listeners]) listener()
+      }
+
+      /** 用一次路由响应构造新的快照对象（**引用必须变**，useSyncExternalStore 靠它比较）。 */
+      const commit = (record, payload) => {
+        if (payload?.isRepo === false) {
+          record.snapshot = { ...emptySnapshot(record), generation: record.generation, phase: 'notrepo', updatedAt: Date.now() }
+          emit(record)
+          return
+        }
+        const rawFiles = Array.isArray(payload?.files) ? payload.files : []
+        const files = rawFiles.map((file) => ({ ...file, ...entryOfFile(file) }))
+        // 三组数量与文件列表**同源**：全部由这一份 files 现场算出。把它们做成独立字段
+        // 只是省去调用方各自 filter 一遍，不会引入第二个数据来源。
+        const stagedFiles = files.filter((file) => classifyEntry(file).staged)
+        const unstagedFiles = files.filter((file) => file.untracked !== true && classifyEntry(file).unstaged)
+        const untrackedFiles = files.filter((file) => file.untracked === true)
+        record.snapshot = {
+          workspace: record.workspace,
+          generation: record.generation,
+          phase: 'ready',
+          branch: typeof payload?.branch === 'string' ? payload.branch : '',
+          head: typeof payload?.head === 'string' ? payload.head : '',
+          files,
+          changedFiles: files.length,
+          staged: stagedFiles.length,
+          unstaged: unstagedFiles.length,
+          untracked: untrackedFiles.length,
+          diff: typeof payload?.diff === 'string' ? payload.diff : '',
+          diffOversized: payload?.diffOversized === true,
+          empty: payload?.empty === true,
+          error: '',
+          updatedAt: Date.now(),
+          // 快照自带"重取 / 失效重取"两个入口（见 emptySnapshot 的说明）。
+          refresh: () => load(record),
+          invalidate: () => invalidateRecord(record),
+        }
+        emit(record)
+      }
+
+      /** 拉一次快照。single-flight：同一个工作区同时只会有一个在途请求。 */
+      const load = (record) => {
+        if (record.inflight !== null) return record.inflight
+        const generation = record.generation
+        const promise = (async () => {
+          try {
+            const payload = await call('workspace', { workspace: record.workspace })
+            // 换代之后回来的响应一律丢弃：它属于上一个"代"的工作区（见 createWorkspaceGate）。
+            if (record.generation !== generation) return
+            commit(record, payload)
+          } catch (cause) {
+            if (record.generation !== generation) return
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            record.snapshot = {
+              ...record.snapshot,
+              generation: record.generation,
+              phase: 'error',
+              error: error.detail ?? error.message,
+              updatedAt: Date.now(),
+            }
+            emit(record)
+          } finally {
+            if (record.inflight === promise) record.inflight = null
+          }
+        })()
+        record.inflight = promise
+        return promise
+      }
+
+      const startPolling = (record) => {
+        if (record.timer !== 0) return
+        record.timer = setInterval(() => void load(record), SNAPSHOT_POLL_MS)
+      }
+      const stopPolling = (record) => {
+        if (record.timer === 0) return
+        clearInterval(record.timer)
+        record.timer = 0
+      }
+
+      /**
+       * 让一个工作区的快照过期并立刻重取。
+       *
+       * "过期"的做法是**换代**（`generation += 1`）：在途的响应回来时对不上代，于是被丢弃
+       * ——这正是"写操作之后旧读不许覆盖新状态"的机制，与 `createWorkspaceGate` 里那一套
+       * 是同一条原则。数据仍然显示着（避免刷新时闪成空白），只有 `updatedAt` 归零表示它
+       * 已经不可信。
+       *
+       * @param record - 工作区记录。
+       * @returns 重取完成（或失败）的 promise。
+       */
+      const invalidateRecord = (record) => {
+        record.generation += 1
+        record.inflight = null
+        record.snapshot = { ...record.snapshot, generation: record.generation, updatedAt: 0 }
+        return load(record)
+      }
+
+      return {
+        /** 订阅：第一个订阅者启动轮询（并立刻拉一次），最后一个离开时停掉。 */
+        subscribe(workspace, listener) {
+          const record = ensure(workspace)
+          record.listeners.add(listener)
+          if (record.listeners.size === 1) {
+            startPolling(record)
+            void load(record)
+          }
+          return () => {
+            record.listeners.delete(listener)
+            if (record.listeners.size === 0) stopPolling(record)
+          }
+        },
+        /** 当前快照（引用稳定：没变化时返回同一个对象）。 */
+        get(workspace) {
+          return ensure(workspace).snapshot
+        },
+        /** 重新拉一次（single-flight 会合并并发调用）。 */
+        refresh(workspace) {
+          return load(ensure(workspace))
+        },
+        /** 让当前快照过期：换代（丢弃在途响应）后立刻重取一次。 */
+        invalidate(workspace) {
+          return invalidateRecord(ensure(workspace))
+        },
+        /** 面板打开时调用：过期就补一次刷新。 */
+        refreshIfStale(workspace) {
+          const record = ensure(workspace)
+          if (Date.now() - record.snapshot.updatedAt < SNAPSHOT_STALE_MS) return Promise.resolve(record.snapshot)
+          return load(record)
+        },
+        /** 只给测试用：直接写入一份快照（免去伪造 host 响应）。 */
+        __setForTest(workspace, payload) {
+          const record = ensure(workspace)
+          record.generation += 1
+          if (payload === null) {
+            record.snapshot = emptySnapshot(record)
+            return
+          }
+          commit(record, payload)
+        },
+        /** 只给测试用：丢掉所有工作区的记录（订阅者、计时器、在途请求全部清零）。 */
+        __resetForTest() {
+          for (const record of records.values()) stopPolling(record)
+          records.clear()
+        },
+        /** 只给测试用：有没有在途请求。 */
+        __inflight(workspace) {
+          return ensure(workspace).inflight !== null
+        },
+      }
+    })()
+
+    /**
+     * 让某个工作区的 Git 快照失效并重取。
+     *
+     * 这是**跨插件**的入口：gitbar 那边 checkout/merge 之后也会改变工作区，它通过
+     * `window.__dshDesktopGitSnapshot` 拿到这个函数（见 apply）。两个插件是各自独立的
+     * bundle，拿不到彼此的作用域，因此用 window 上一个带插件前缀的键对接。
+     *
+     * @param workspace - 工作区路径。
+     */
+    function invalidateGitSnapshot(workspace) {
+      if (typeof workspace !== 'string' || workspace === '') return Promise.resolve()
+      return gitSnapshots.invalidate(workspace)
+    }
+
+    /**
+     * 订阅某个工作区的 Git 快照。
+     *
+     * 返回值就是 store 里那一份快照对象本身（引用稳定），因此直接读它的字段即可：
+     * `workspace`、`generation`、`phase`、`branch`、`head`、`files`、`changedFiles`、
+     * `staged`、`unstaged`、`untracked`、`updatedAt`，以及 `refresh()` / `invalidate()`
+     * 两个动作（写操作成功后统一调 `invalidate()`，它会让当前快照换代并重取一次）。
+     *
+     * @param workspace - 工作区路径；undefined 时返回 undefined（不订阅任何东西）。
+     * @returns 快照对象或 undefined。
+     */
+    function useWorkspaceGitSnapshot(workspace) {
+      const subscribe = react.useCallback(
+        (listener) => {
+          if (typeof workspace !== 'string' || workspace === '') return () => undefined
+          return gitSnapshots.subscribe(workspace, listener)
+        },
+        [workspace],
+      )
+      const getSnapshot = react.useCallback(
+        () => (typeof workspace === 'string' && workspace !== '' ? gitSnapshots.get(workspace) : undefined),
+        [workspace],
+      )
+      return react.useSyncExternalStore(subscribe, getSnapshot)
+    }
+
+    /**
+     * 判断一段差异是否是"二进制内容"而非行级差异。
+     *
+     * git 对二进制文件只输出 `Binary files … differ`，没有可直接渲染的行。若不识别它，
+     * 界面就会把这句话当成一行普通文本显示，看起来像是乱码或坏数据。
+     * @param diff - 单个文件的差异片段。
+     * @returns 是二进制则 true。
+     */
     function isBinaryDiff(diff) {
       return /^Binary files .* differ$/mu.test(diff) || /^GIT binary patch$/mu.test(diff)
     }
@@ -1210,37 +1643,51 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 读取本轮改动数据的共用钩子。
+     * 读取本轮改动数据的共用钩子（会话作用域）。
+     *
+     * 竞态处理与工作区级的那套**同一机制**（见 createWorkspaceGate）：请求带票据，
+     * 回来时只有仍属于当前工作区/当前代、且仍是"这一片状态最新的一次请求"才允许落地。
+     * 以前这里是无保护的 `await call(...)` + `setState`——切换对话后旧会话的响应会把新会话
+     * 的差异盖掉，界面于是显示另一个项目的文件。
+     *
      * @param workspace - 会话的工作区。
      * @param sessionId - 会话标识。
      * @returns `{ state, reload }`。
      */
     function useChanges(workspace, sessionId) {
-      const [state, setState] = react.useState({ phase: 'loading' })
+      const gate = useWorkspaceGate(workspace)
+      const generation = gate.generation
+      const [state, setState] = react.useState({ generation: -1, phase: 'loading' })
 
       const reload = react.useCallback(async () => {
         // **没有工作区时必须进入明确的错误态，不能直接 return。**
         //
         // 此前这里只是 `return`，`state` 就永远停在初值 `phase: 'loading'` —— 界面表现是
         // 永久"正在读取差异…"，而真实原因是"不知道该看哪个项目"（刚切换对话、工作区还没
-        // 解析出来）。这与 `useWorkspaceChanges` 里已经修过的那处是同一个坑，只是漏改了这个。
+        // 解析出来）。
         if (workspace === undefined || sessionId === undefined) {
-          setState({ phase: 'error', message: 'noWorkspace' })
+          setState({ generation: gate.generation, phase: 'error', message: 'noWorkspace' })
           return
         }
-        try {
-          const result = await call('changes', { workspace, sessionId })
-          setState({ phase: 'ready', result })
-        } catch (cause) {
-          setState({ phase: 'error', message: String(cause.message ?? cause) })
-        }
-      }, [workspace, sessionId])
+        const { ticket, promise } = gate.run('changes', () => call('changes', { workspace, sessionId }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        setState(
+          outcome.ok
+            ? { generation: ticket.generation, phase: 'ready', result: outcome.value }
+            : { generation: ticket.generation, phase: 'error', message: String(outcome.cause?.message ?? outcome.cause) },
+        )
+      }, [gate, workspace, sessionId, generation])
 
       react.useEffect(() => {
         void reload()
       }, [reload])
 
-      return { state, reload }
+      // 换代（换了工作区/对话）后旧数据立即作废：这一帧就回到加载态，绝不显示上一个
+      // 项目的差异。
+      const fresh = state.generation === generation ? state : { generation, phase: 'loading' }
+      return { state: fresh, reload }
     }
 
     /**
@@ -1259,302 +1706,14 @@ window.__ModuleLoader__.load({
       return { files, added, removed }
     }
 
-    /**
-     * 读取工作区级改动（相对 HEAD，不需要会话）。
-     *
-     * 项目页还没有任何一轮对话，因此"本轮改动"在那里无意义；这里读的是这个项目当前
-     * 有哪些未提交改动。
-     * @param workspace - 工作区路径。
-     * @returns `{ state, reload }`。
-     */
-    function useWorkspaceChanges(workspace) {
-      const [state, setState] = react.useState({ phase: 'loading' })
-
-      const reload = react.useCallback(async () => {
-        if (workspace === undefined) {
-          // 没有工作区就明确说出来。此前这里直接返回，界面停在"正在读取差异…"，
-          // 看起来像卡住，而实际原因是"不知道该看哪个项目"。
-          setState({ phase: 'error', message: 'noWorkspace' })
-          return
-        }
-        try {
-          const result = await call('workspace', { workspace })
-          setState({ phase: 'ready', result })
-        } catch (cause) {
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          // 把失败原因带上：这类错误此前只让界面停在"加载中"，看不出是权限、路径还是
-          // 网络问题（实际排查中就因此多绕了几圈）。
-          setState({ phase: 'error', message: error.detail ?? error.message })
-        }
-      }, [workspace])
-
-      react.useEffect(() => {
-        void reload()
-      }, [reload])
-
-      return { state, reload }
-    }
-
-    /**
-     * 读取工作区的提交历史（最近若干条）。
-     *
-     * 项目面板只显示"当前有什么改动"不够——用户还需要"最近发生过什么"。
-     * @param workspace - 工作区路径。
-     * @returns `{ state, reload }`。
-     */
-    function useHistory(workspace) {
-      const [state, setState] = react.useState({ phase: 'loading' })
-
-      const reload = react.useCallback(async () => {
-        if (workspace === undefined) {
-          setState({ phase: 'error', message: 'noWorkspace' })
-          return
-        }
-        try {
-          const result = await call('history', { workspace, limit: 20 })
-          setState({ phase: 'ready', result })
-        } catch (cause) {
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          setState({ phase: 'error', message: error.detail ?? error.message })
-        }
-      }, [workspace])
-
-      react.useEffect(() => {
-        void reload()
-      }, [reload])
-
-      return { state, reload }
-    }
-
-    /**
-     * 提交历史列表：一次显示固定条数，不翻页。
-     *
-     * 刻意不做分页/无限滚动：面板的用途是"快速回顾最近发生了什么"，而不是替代 git 客户端。
-     * 需要更早的历史时，用户会在终端里用 git log。
-     * @param props - `{ t, result, phase, message, workspace }`。
-     */
-    function HistoryList(props) {
-      const { t, result, phase, message } = props
-      if (phase === 'loading') {
-        return statusBlock(t('loading'))
-      }
-      if (phase === 'error') {
-        // `noWorkspace` 是内部代号，翻成给用户看的话。
-        return statusBlock(message === 'noWorkspace' ? t('noWorkspace') : message, 'error')
-      }
-      if (result?.isRepo === false) {
-        return statusBlock(t('notRepo', { name: projectName(props.workspace) }))
-      }
-      const commits = result?.commits ?? []
-      if (commits.length === 0) {
-        return statusBlock(t('noHistory'))
-      }
-      // 提交行参照 IDEA 的 Log：左边一条竖线 + 节点圆点，右边是标题 + 哈希/作者/日期。
-      // **每一行都可以点开**，展开后显示这次提交改了哪些文件、点文件看具体差异
-      // （见 HistoryCommitRow / CommitChangesPanel）。
-      return react.createElement(
-        'div',
-        { style: { display: 'flex', flexDirection: 'column' } },
-        commits.map((commit, index) =>
-          react.createElement(HistoryCommitRow, {
-            key: commit.hash,
-            t,
-            workspace: props.workspace,
-            commit,
-            index,
-            last: index === commits.length - 1,
-          }),
-        ),
-      )
-    }
-
-    /**
-     * 「最近提交」里的一条提交：**点击展开**这次提交改了哪些文件。
-     *
-     * 与主区域的提交图共用 `CommitSummary` / `CommitFileList`，因此两处显示的
-     * 信息与交互完全一致（包括"在 N 个分支中"和点文件才取差异）。
-     *
-     * @param props - `{ t, workspace, commit, index, last }`。
-     * @returns React 元素。
-     */
-    function HistoryCommitRow(props) {
-      const { t, workspace, commit, index, last } = props
-      const [open, setOpen] = react.useState(false)
-
-      return react.createElement(
-        'div',
-        { 'data-review-commit': commit.hash, style: { display: 'flex', flexDirection: 'column' } },
-        react.createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsh-review-history',
-            'data-review-commit-toggle': commit.hash,
-            'aria-expanded': open,
-            // 保留完整哈希与作者：脚本与用户都靠 title 辨认（既有断言依赖它）。
-            title: `${commit.hash}\n${commit.author} · ${commit.date}`,
-            onClick: () => setOpen((value) => !value),
-            style: {
-              display: 'flex',
-              gap: '10px',
-              width: '100%',
-              boxSizing: 'border-box',
-              padding: '8px 2px',
-              border: 'none',
-              background: open ? `color-mix(in srgb, ${ACCENT} 6%, transparent)` : 'transparent',
-              borderRadius: '6px',
-              color: 'inherit',
-              fontFamily: UI_FONT,
-              fontSize: '12.5px',
-              lineHeight: 1.5,
-              textAlign: 'left',
-              cursor: 'pointer',
-            },
-          },
-          // 轴线与节点。最后一条不画下半段，避免悬空一截。
-          react.createElement(
-            'div',
-            { style: { position: 'relative', flex: '0 0 auto', width: '10px' } },
-            react.createElement('div', {
-              style: {
-                position: 'absolute',
-                left: '4px',
-                top: index === 0 ? '7px' : 0,
-                bottom: last ? 'auto' : 0,
-                height: last ? '1px' : 'auto',
-                width: '1.5px',
-                background: 'var(--dsw-alias-border-l2, #d8d8e0)',
-              },
-            }),
-            react.createElement('div', {
-              style: {
-                position: 'absolute',
-                left: 0,
-                top: '2px',
-                width: '9px',
-                height: '9px',
-                borderRadius: '50%',
-                border: `2px solid ${ACCENT}`,
-                background: 'var(--dsw-alias-bg-base, #fff)',
-                boxSizing: 'border-box',
-              },
-            }),
-          ),
-          react.createElement(
-            'div',
-            { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0, flex: '1 1 auto' } },
-            react.createElement(
-              'span',
-              { style: { color: 'var(--dsw-alias-label-primary)', minWidth: 0, overflowWrap: 'anywhere' } },
-              commit.subject,
-            ),
-            react.createElement(
-              'div',
-              { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } },
-              react.createElement(
-                'span',
-                {
-                  style: {
-                    padding: '0 5px',
-                    borderRadius: '4px',
-                    background: `color-mix(in srgb, ${ACCENT} 10%, transparent)`,
-                    color: ACCENT,
-                    fontFamily: CODE_FONT,
-                    lineHeight: '16px',
-                  },
-                },
-                commit.short,
-              ),
-              react.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, `${commit.author} · ${commit.date}`),
-            ),
-          ),
-          // 展开指示：一个会转的小箭头，让"这一行可以点"这件事看得出来。
-          react.createElement(
-            'span',
-            { style: { flexShrink: 0, alignSelf: 'flex-start', color: 'var(--dsw-alias-label-tertiary)', display: 'flex' } },
-            react.createElement(
-              'svg',
-              { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': 'true', style: { transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .12s ease' } },
-              react.createElement('path', { d: 'M6 4l4 4-4 4', strokeLinecap: 'round', strokeLinejoin: 'round' }),
-            ),
-          ),
-        ),
-        open
-          ? react.createElement(CommitChangesPanel, { t, workspace, revision: commit.hash })
-          : null,
-      )
-    }
-
-    /**
-     * 一次提交的改动面板：元信息 + 文件列表（点文件展开它的差异）。
-     *
-     * 抽屉里的"最近提交"用它；主区域的提交图用同一对 `CommitSummary` / `CommitFileList`，
-     * 因此两处的行为不会漂移。
-     *
-     * @param props - `{ t, workspace, revision }`。
-     * @returns React 元素。
-     */
-    function CommitChangesPanel(props) {
-      const { t, workspace, revision } = props
-      const [state, setState] = react.useState({ phase: 'loading' })
-
-      react.useEffect(() => {
-        let alive = true
-        setState({ phase: 'loading' })
-        void (async () => {
-          try {
-            const result = await call('commit-detail', { workspace, revision })
-            if (alive) setState({ phase: 'ready', result })
-          } catch (cause) {
-            const error = cause instanceof Error ? cause : new Error(String(cause))
-            if (alive) setState({ phase: 'error', message: error.detail ?? error.message })
-          }
-        })()
-        return () => {
-          alive = false
-        }
-      }, [workspace, revision])
-
-      const commit = state.result?.commit
-      const files = state.result?.files ?? []
-      // 外壳始终渲染：`data-review-commit-changes` 是"这条提交被展开了"的锚点，
-      // 加载中/出错时也必须带着它，否则脚本与用户都只能靠"文件行出现了没有"来猜。
-      return react.createElement(
-        'div',
-        {
-          'data-review-commit-changes': revision,
-          style: {
-            margin: '0 0 6px 20px',
-            padding: '8px 10px',
-            borderRadius: '6px',
-            border: `1px solid ${BORDER}`,
-            background: 'var(--dsw-alias-bg-module-platform, #f7f8fa)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-          },
-        },
-        state.phase === 'loading'
-          ? statusBlock(t('loading'))
-          : state.phase === 'error'
-            ? statusBlock(state.message, 'error')
-            : [
-                react.createElement(CommitSummary, {
-                  key: 'summary',
-                  t,
-                  commit,
-                  containingBranches: state.result?.containingBranches ?? [],
-                }),
-                react.createElement(
-                  'div',
-                  { key: 'title', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-                  react.createElement('span', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', textTransform: 'uppercase' } }, t('changesTitle')),
-                  react.createElement('span', { 'data-review-commit-file-count': '', style: { fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)' } }, t('graphFiles', { count: files.length })),
-                ),
-                react.createElement(CommitFileList, { key: 'files', t, files, workspace, revision }),
-              ],
-      )
-    }
+    // 说明：工作区级改动**不再有各自的 hook**。
+    //
+    // 这里此前是 `useWorkspaceChanges` / `useHistory` 两个独立的 hook，各自 useState +
+    // 各自轮询。它们的竞态（切换工作区后旧响应覆盖新数据）与"两份数据对不上"是同一个
+    // 根因：**同一件事有多个数据源**。现在工作区级的 Git 数据只有一处——模块级的
+    // `gitSnapshots`（见上文），组件通过 `useWorkspaceGitSnapshot(workspace)` 订阅它；
+    // 提交历史则统一由 Log 标签页里的提交图（`CommitGraphView`）负责，不再另打一条
+    // `/history`。
 
     /**
      * 常驻的右侧面板。
@@ -1677,21 +1836,106 @@ window.__ModuleLoader__.load({
         }
       }, [open])
 
-      // 两种语义分别取数据：本轮改动需要会话，工作区改动不需要。
+      // 两种语义分别取数据：
+      //   * 会话内的"本轮改动"仍然走 `/changes`（它的基线是这一轮开始时的快照，与项目级
+      //     的 HEAD 基线是两件事，不能合并）；
+      //   * **工作区级的一切只有一份数据**——模块级的共享快照（见 gitSnapshots）。
       const turn = useChanges(scope === 'workspace' ? undefined : workspace, sessionId)
-      const workspaceChanges = useWorkspaceChanges(scope === 'workspace' ? workspace : undefined)
-      // 历史只在项目级取：会话内的标签与提交历史无关，没必要多打一次 git。
-      const history = useHistory(scope === 'workspace' ? workspace : undefined)
-      const active = scope === 'workspace' ? workspaceChanges.state : turn.state
+      const snapshot = useWorkspaceGitSnapshot(scope === 'workspace' ? workspace : undefined)
+      /**
+       * 当前标签页。IDEA 的 Git 工具窗是 `Changes | Log` 两个页签，这里照搬：
+       * 从前的做法是在同一列里自上而下叠"暂存区 → 更改 → 文件列表 → 历史"，提交记录还要
+       * 在原位置手风琴式展开——文件一多就要滚很久才能看到历史，而历史一展开又把文件列表
+       * 挤下去。两个页签把这两件事彻底分开。
+       */
+      const [tab, setTab] = react.useState('changes')
+      /**
+       * 提交成功后用来把 Log 页签里的提交图顶一页新的。
+       *
+       * 用"信号"而不是"命令"：Log 页签可能根本没挂载（用户停在 Changes 页签），此时不该
+       * 为了一次提交去打一条 `/graph`；等到他切过去时，图自己的 effect 会拉最新的一页。
+       */
+      const [logToken, setLogToken] = react.useState(0)
+      const workspacePath = typeof workspace === 'string' ? workspace : ''
+
+      /**
+       * 打开抽屉时：快照过期就先刷一次。
+       *
+       * **不引入第二份缓存**：抽屉里的列表始终是 store 里那一份（可能略旧，但一定是同一个
+       * 数据源）。过期的判定用 `updatedAt`，"过期"只意味着"再问一次 host"，不是"换一份
+       * 数据来显示"。
+       */
+      react.useEffect(() => {
+        if (!open || scope !== 'workspace' || workspacePath === '') return undefined
+        void gitSnapshots.refreshIfStale(workspacePath)
+        return undefined
+      }, [open, scope, workspacePath])
 
       if (!open) return null
 
-      const { files, added, removed } = summarize(active.result)
       const title = scope === 'workspace' ? t('projectTitle') : t('title')
-      const reload = scope === 'workspace' ? workspaceChanges.reload : turn.reload
-      // 当前分支：从**已有的**历史响应里取，不额外打一次 git。
-      const historyResult = history.state.result
-      const branch = typeof historyResult?.branch === 'string' ? historyResult.branch.trim() : ''
+      const projectFiles = snapshot?.files ?? []
+      const turnSummary = summarize(turn.state.result)
+      // 头栏与文件列表用的是**同一个数字**（scope==='workspace' 时就是快照的 files）。
+      const fileCount = scope === 'workspace' ? projectFiles.length : turnSummary.files.length
+      const reload = scope === 'workspace' ? () => void gitSnapshots.refresh(workspacePath) : turn.reload
+      // 当前分支取自**这份快照自己**（host 在 `/workspace` 里一并给了），因此不存在
+      // "文件是旧的、分支是新的"这种错配。
+      const branch = scope === 'workspace' ? (snapshot?.branch ?? '') : ''
+      /** 工作区级快照 → `FileList` 认识的形状（会话标签仍用 `/changes` 的原始响应）。 */
+      const projectResult =
+        snapshot === undefined
+          ? undefined
+          : {
+              isRepo: snapshot.phase !== 'notrepo',
+              scope: 'workspace',
+              empty: snapshot.empty === true,
+              branch: snapshot.branch,
+              revision: snapshot.head,
+              files: snapshot.files,
+              diff: snapshot.diff,
+              diffOversized: snapshot.diffOversized,
+            }
+      const activeResult = scope === 'workspace' ? projectResult : turn.state.result
+      const activePhase =
+        scope === 'workspace'
+          ? snapshot === undefined || snapshot.phase === 'idle' || snapshot.phase === 'loading'
+            ? 'loading'
+            : snapshot.phase === 'error'
+              ? 'error'
+              : 'ready'
+          : turn.state.phase
+      const activeMessage = scope === 'workspace' ? (snapshot?.error ?? '') : turn.state.message
+
+      /** 一个页签按钮。 */
+      const tabButton = (key, label) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            role: 'tab',
+            'data-review-tab': key,
+            'aria-selected': tab === key,
+            onClick: () => setTab(key),
+            style: {
+              position: 'relative',
+              padding: '7px 10px',
+              border: 'none',
+              // 选中态用下划线而不是填充色块：IDEA 的页签就是这样，而且它不会让相邻标签
+              // 的宽度随选中项变化。
+              borderBottom: `2px solid ${tab === key ? ACCENT : 'transparent'}`,
+              marginBottom: '-1px',
+              background: 'transparent',
+              color: tab === key ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              fontWeight: tab === key ? 600 : 400,
+              cursor: 'pointer',
+            },
+          },
+          label,
+        )
 
       return react.createElement(
         'aside',
@@ -1767,7 +2011,7 @@ window.__ModuleLoader__.load({
                   branch,
                 ),
           ),
-          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
+          react.createElement('span', { 'data-review-count': '' }, String(fileCount)),
           react.createElement('span', { style: { flex: 1 } }),
           // 刷新：IDEA 的工具窗左上角也有这个动作；这里放在右侧，靠近"关闭"。
           react.createElement(
@@ -1813,63 +2057,78 @@ window.__ModuleLoader__.load({
           ),
         ),
         // 工作区选择器已移除：工作区跟随当前对话，不可编辑、也不展示路径。
-        react.createElement(
-          'div',
-          { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 20px 18px' } },
-          // 暂存与提交只在**项目级**面板出现。
-          //
-          // 会话内那个标签讲的是"本轮改了什么"（基线与本轮开始时的快照比较），而暂存与
-          // 提交是**仓库**级动作：它动的是索引与历史，与"本轮"没有关系。把提交框放进
-          // 会话标签里会让人以为提交只针对本轮，那是错的。
-          scope === 'workspace'
-            ? react.createElement(StagingSection, {
-                t,
-                workspace,
-                // 提交之后两边都要重取：暂存区变了（状态区块自己会重读），而改动差异与
-                // 提交历史也随之变化（由外层 reload 负责）。
-                onCommitted: () => {
-                  reload()
-                  history.reload()
-                },
-              })
-            : null,
-          scope === 'workspace'
-            ? react.createElement('div', { 'data-review-section-title': '' }, t('changesTitle'))
-            : null,
-          react.createElement(FileList, {
-            t,
-            result: active.result,
-            phase: active.phase,
-            message: active.message,
-            workspace,
-            sessionId,
-            onChanged: reload,
-          }),
-          // 提交历史只在项目级面板出现：会话内的标签讲的是"本轮"，与历史无关。
-          scope === 'workspace'
-            ? react.createElement(
+        //
+        // 项目级的两个页签**自己撑满剩余高度**（`flex: 1 1 auto; min-height: 0`）：
+        // 提交区要固定在底部，就不允许外层再套一层 `overflow: auto`——那样提交框会跟着
+        // 超长文件列表一起滚走（这正是要修掉的一处）。
+        scope === 'workspace'
+          ? react.createElement(
+              'div',
+              {
+                'data-review-tabs': '',
+                style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 },
+              },
+              react.createElement(
                 'div',
-                { style: { marginTop: '18px' } },
-                react.createElement(
-                  'div',
-                  { 'data-review-section-title': '' },
-                  t('historyTitle'),
-                  react.createElement(
-                    'span',
-                    { 'data-review-count': '' },
-                    String(history.state.result?.commits?.length ?? 0),
+                {
+                  role: 'tablist',
+                  'data-review-tablist': '',
+                  style: { display: 'flex', alignItems: 'center', gap: '2px', padding: '0 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 },
+                },
+                tabButton('changes', t('changesTab')),
+                tabButton('log', t('logTab')),
+              ),
+              tab === 'log'
+                ? react.createElement(
+                    'div',
+                    {
+                      key: 'log',
+                      'data-review-tab-body': 'log',
+                      style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+                    },
+                    // **复用**提交图，不重写一套：Log 页签要的"分支树 / 提交列表 / 详情"
+                    // 三栏与主区域的提交图是同一个视图，差别只在容器宽度与是否带外框。
+                    // `refreshToken` 让"提交成功"这类外部事件能把它顶一页新的回来。
+                    react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
+                  )
+                : react.createElement(
+                    'div',
+                    {
+                      key: 'changes',
+                      'data-review-tab-body': 'changes',
+                      style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+                    },
+                    // 暂存与提交只在**项目级**面板出现。
+                    //
+                    // 会话内那个标签讲的是"本轮改了什么"（基线与本轮开始时的快照比较），
+                    // 而暂存与提交是**仓库**级动作：它动的是索引与历史，与"本轮"没有关系。
+                    // 把提交框放进会话标签里会让人以为提交只针对本轮，那是错的。
+                    react.createElement(StagingSection, {
+                      t,
+                      workspace: workspacePath,
+                      // 同一份共享快照：分组、数量、清单、差异全部来自它。
+                      snapshot,
+                      // 写操作成功后 store 会自己 invalidate + refresh（见 StagingSection.run）；
+                      // 这里只需要再通知 Log 页签"历史变了"。
+                      onCommitted: () => {
+                        setLogToken((value) => value + 1)
+                      },
+                    }),
                   ),
-                ),
-                react.createElement(HistoryList, {
-                  t,
-                  result: history.state.result,
-                  phase: history.state.phase,
-                  message: history.state.message,
-                  workspace,
-                }),
-              )
-            : null,
-        ),
+            )
+          : react.createElement(
+              'div',
+              { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 20px 18px' } },
+              react.createElement(FileList, {
+                t,
+                result: activeResult,
+                phase: activePhase,
+                message: activeMessage,
+                workspace,
+                sessionId,
+                onChanged: reload,
+              }),
+            ),
       )
     }
 
@@ -2053,26 +2312,19 @@ window.__ModuleLoader__.load({
       //
       // 不再保留任何"用户手动选定"的状态：工作区不可编辑，面板始终跟随当前对话。
       const workspace = session ?? hostCurrent ?? candidates[0]
-      const [count, setCount] = react.useState(null)
-
-      react.useEffect(() => {
-        if (workspace === undefined) return undefined
-        let alive = true
-        const tick = async () => {
-          try {
-            const result = await call('workspace', { workspace })
-            if (alive) setCount(result?.isRepo === false ? null : (result?.files?.length ?? 0))
-          } catch {
-            if (alive) setCount(null)
-          }
-        }
-        void tick()
-        const timer = setInterval(() => void tick(), POLL_MS)
-        return () => {
-          alive = false
-          clearInterval(timer)
-        }
-      }, [workspace])
+      /**
+       * 改动数量**就是共享快照里的文件数**。
+       *
+       * 这一个 hook 就是"外面显示 0、进去却有文件"的根治点：入口与抽屉订阅的是同一个
+       * store、同一次请求的结果，因此两处不可能给出不同的数字；轮询也只有 store 那一份
+       * （以前这里自己每 10 秒打一次 `/workspace`，抽屉内部又走 `/status`）。
+       *
+       * 本项目级入口**只订阅、不打开面板**也有轮询，理由与以前一致：这个数字要在用户
+       * 没打开面板时也保持新鲜（否则"有没有改动"这件事要等到点开才知道）。
+       */
+      const snapshot = useWorkspaceGitSnapshot(workspace)
+      // 数字直接就是快照的文件数——不是"再算一遍"，也不是另一条路由的结果。
+      const count = snapshot !== undefined && snapshot.phase === 'ready' ? snapshot.files.length : null
 
       // 拿不到工作区时**也要渲染按钮**：面板会说明当前没有可用的工作区。
       // 此前这里直接 return null，结果在"还没有任何会话与登记工作区"的状态下入口彻底
@@ -2189,6 +2441,8 @@ window.__ModuleLoader__.load({
             onClick: (event) => event.stopPropagation(),
             role: 'dialog',
             'aria-modal': 'true',
+            // 稳定的锚点：脚本靠它判断"确认框开着、且对应哪个文件"。
+            'data-review-revert-dialog': path,
             style: {
               width: 'min(420px, calc(100vw - 48px))',
               borderRadius: '10px',
@@ -2205,7 +2459,9 @@ window.__ModuleLoader__.load({
           react.createElement(
             'div',
             { style: { color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' } },
-            t('revertConfirmBody'),
+            // 文案按**还原到哪**分开：本轮审查的基线是"这一轮开始时的快照"，而项目级更改
+            // 页签的基线是 HEAD。混用一句话会让用户在其中一个入口上读到不成立的解释。
+            t(props.bodyKey ?? 'revertConfirmBody'),
           ),
           react.createElement(
             'div',
@@ -2568,8 +2824,15 @@ window.__ModuleLoader__.load({
      * @returns React 元素。
      */
     function StagingSection(props) {
-      const { t, workspace } = props
-      const [state, setState] = react.useState({ phase: 'loading' })
+      const { t, workspace, snapshot } = props
+      /**
+       * **唯一的数据来源**：父组件从共享快照 store 订阅到的那一份。
+       *
+       * 这里刻意**不再自己 fetch**（此前它自己打 `/status`，于是外部入口与抽屉内部各有一份
+       * 轮询结果，出现"外面 0，进去有文件"）。文件列表、三个分组的数量、当前分支、以及
+       * 每个文件的逐行差异，全部来自这同一个 `snapshot`。
+       */
+      const files = Array.isArray(snapshot?.files) ? snapshot.files : []
       const [collapsed, setCollapsed] = react.useState({ staged: false, unstaged: false, untracked: false })
       /**
        * 已勾选、准备"加入 git"的未跟踪文件。
@@ -2591,62 +2854,56 @@ window.__ModuleLoader__.load({
       const [deselectedFiles, setDeselectedFiles] = react.useState([])
       /** 正在查看变更记录的文件路径（空串表示没有）。 */
       const [history, setHistory] = react.useState('')
+      /** 正在展开逐行差异的文件路径（空串表示没有）。 */
+      const [diffOpen, setDiffOpen] = react.useState('')
+      /** 正在等待确认还原的文件路径（空串表示没有）。 */
+      const [confirming, setConfirming] = react.useState('')
       const [message, setMessage] = react.useState('')
       const [busy, setBusy] = react.useState(false)
       const [trouble, setTrouble] = react.useState(null)
       const [notice, setNotice] = react.useState('')
       const onCommitted = typeof props?.onCommitted === 'function' ? props.onCommitted : () => undefined
+
       /**
-       * 当前正在读取的工作区。
+       * 当前工作区。用来丢弃**过期请求**的收尾：切换工作区之后，上一个工作区那次仍在飞的
+       * 请求回来时不能动新工作区的界面状态（busy/错误提示都属于"这次操作"）。
        *
-       * 用来丢弃**过期响应**：切换对话/工作区后，上一个工作区那次仍在飞的请求回来时会把
-       * 新工作区的数据覆盖掉，界面于是短暂（有时是长期）显示另一个项目的文件——这正是
-       * "切换了对话/切换了工作空间就直接获取不出来、对不上"的来源。异步结果落地前先
-       * 核对它属于哪一次请求。
+       * 数据本身由 store 的 generation 把关（见 gitSnapshots），这里只需要管组件自己的
+       * 那几个开关。
        */
-      const wanted = react.useRef(workspace)
+      const workspaceRef = react.useRef(workspace)
+      workspaceRef.current = workspace
 
-      /** 重新读一次状态。 */
-      const reload = react.useCallback(async () => {
-        if (typeof workspace !== 'string' || workspace === '') {
-          setState({ phase: 'noworkspace' })
-          return
-        }
-        const mine = workspace
-        try {
-          const result = await call('status', { workspace })
-          if (wanted.current !== mine) return
-          if (result?.isRepo === false) {
-            setState({ phase: 'notrepo' })
-            return
-          }
-          setState({ phase: 'ready', result })
-        } catch (cause) {
-          if (wanted.current !== mine) return
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          setTrouble(error.detail ?? error.message)
-          setState({ phase: 'error' })
-        }
-      }, [workspace])
-
+      // 换工作区：清掉所有"逐文件/逐次操作"的临时状态。旧项目的选择、展开项、错误提示
+      // 留到新项目里只会造成误解（"这个文件我什么时候勾的？"）。
       react.useEffect(() => {
-        // 工作区变了：记下新的期望值，并让界面立刻回到"加载中"而不是继续显示旧项目的
-        // 文件——否则切换项目时会看到上一个项目的列表停留一会儿。
-        wanted.current = workspace
-        setState({ phase: 'loading' })
+        setDeselectedFiles([])
+        setChosenUntracked([])
+        setHistory('')
+        setDiffOpen('')
+        setConfirming('')
         setTrouble(null)
         setNotice('')
-        void reload()
-      }, [workspace, reload])
+        setBusy(false)
+      }, [workspace])
 
       /**
-       * 跑一次写操作，然后把状态重新读一遍。
+       * 跑一次写操作，成功后**统一让当前工作区的快照失效并重取**。
+       *
+       * 这是"stage/unstage/add/revert/commit 成功后统一 invalidate"的唯一落点：界面各处
+       * 不各自维护缓存，因此不存在"某个入口还显示旧数字"的可能。
        *
        * 与 gitbar 那边同一套约定：host 只回稳定的 code，短句由这里按 code 渲染，
        * git 原文放在 `detail` 里原样展示。
+       *
+       * @param route - 路由名（`stage` / `unstage` / `commit` / …）。
+       * @param body - 请求体。
+       * @param onSuccess - 成功后的提示文案（可选）。
+       * @returns 响应体；失败时 undefined。
        */
       const run = react.useCallback(
         async (route, body, onSuccess) => {
+          const mine = workspace
           setBusy(true)
           setTrouble(null)
           setNotice('')
@@ -2655,8 +2912,11 @@ window.__ModuleLoader__.load({
             // fetch 的 init）。写成 `call(route, { method, headers, body })` 会把那一整包
             // 当成请求体发出去，服务端收到的 `paths` 就是 undefined —— 表现是"点了暂存
             // 没反应"，而路由本身完全正常（实测踩到过）。
-            const result = await call(route, { workspace, ...body })
-            await reload()
+            const result = await call(route, { workspace: mine, ...body })
+            // 写操作成功了：让共享快照失效并重取一次。**在这一处**做，因此所有调用方
+            // （暂存、取消暂存、加入 git、提交、还原）都不可能忘记刷新。
+            await gitSnapshots.invalidate(mine).catch(() => undefined)
+            if (workspaceRef.current !== mine) return result ?? true
             if (typeof onSuccess === 'string') setNotice(onSuccess)
             // **返回响应体而不是布尔**：提交那条路由要在成功里区分"已提交并推送"与
             // "已提交但推送失败"（`pushed` / `pushError`），布尔会把这条信息丢掉。
@@ -2664,15 +2924,17 @@ window.__ModuleLoader__.load({
             return result ?? true
           } catch (cause) {
             const error = cause instanceof Error ? cause : new Error(String(cause))
+            if (workspaceRef.current !== mine) return undefined
             const code = typeof error.code === 'string' ? error.code : ''
             const key = code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : ''
             setTrouble({ key, detail: typeof error.detail === 'string' ? error.detail : '', code })
             return undefined
           } finally {
-            setBusy(false)
+            // 旧工作区的请求不许关掉新工作区的 busy（同一个坑：`finally` 覆盖了状态）。
+            if (workspaceRef.current === mine) setBusy(false)
           }
         },
-        [workspace, reload],
+        [workspace],
       )
 
       /**
@@ -2716,19 +2978,22 @@ window.__ModuleLoader__.load({
 
       // 已跟踪改动默认全部算作已勾选，"提交"因此一步到位、不需要先暂存（详见下面
       // commitPaths 处的说明）。这里把"不再存在的路径"从取消集合里清掉，避免它无限增长。
-      const knownPathsKey = (state.result?.tracked ?? [])
-        .map((entry) => entry.path)
-        .join('\u0000')
+      //
+      // 快照是唯一的数据源，因此"哪些路径还存在"也来自它——不再有第二条路由与此处的
+      // 判定不一致的可能。
+      const knownPathsKey = files.map((entry) => entry.path).join('\u0000')
       react.useEffect(() => {
         const paths = new Set(knownPathsKey === '' ? [] : knownPathsKey.split('\u0000'))
         setDeselectedFiles((current) => current.filter((path) => paths.has(path)))
       }, [knownPathsKey])
 
       // 阶段守卫必须在最前：加载中/无工作区/非仓库/出错这四种情况都不该继续往下算分组。
-      if (state.phase === 'loading') return statusBlock(t('loading'))
-      if (state.phase === 'noworkspace') return statusBlock(t('noWorkspace'))
-      if (state.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
-      if (state.phase === 'error') return statusBlock(trouble?.detail ?? '', 'error')
+      if (snapshot === undefined) return statusBlock(t('noWorkspace'))
+      if (snapshot.phase === 'idle' || snapshot.phase === 'loading') return statusBlock(t('loading'))
+      if (snapshot.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
+      if (snapshot.phase === 'error') return statusBlock(snapshot.error ?? '', 'error')
+      // 尚无任何提交的仓库：没有 HEAD 可比较，说"改动"会误导（用户会以为文件丢了）。
+      if (snapshot.empty === true) return statusBlock(t('workspaceEmpty'))
 
       /**
        * 分组标题右侧的"全选/取消全选"勾选框。
@@ -2771,9 +3036,8 @@ window.__ModuleLoader__.load({
         })
       }
 
-      /** 渲染一组行，并在需要时在其下方插入变更记录面板。 */
       /**
-       * 渲染一组行，并在需要时在其下方插入变更记录面板。
+       * 渲染一组行，并在需要时在其下方插入差异 / 变更记录面板。
        *
        * @param entries - 文件条目数组。
        * @param sideOf - 由条目算出该行显示哪种暂存动作的函数（`'staged'` → 取消暂存）。
@@ -2783,6 +3047,17 @@ window.__ModuleLoader__.load({
         for (const entry of entries) {
           const side = typeof sideOf === 'function' ? sideOf(entry) : sideOf
           nodes.push(fileRow(entry, side))
+          // 点文件 → 展开逐行差异（IDEA 的改动列表就是这个交互）。差异与文件列表来自
+          // 同一份快照，因此不可能出现"列表里有这个文件、差异区却是别人的改动"。
+          if (diffOpen === entry.path) {
+            nodes.push(react.createElement(FileDiff, {
+              key: `diff:${side}:${entry.path}`,
+              t,
+              file: entry,
+              diff: byFile.get(entry.path) ?? '',
+              margin: '0 0 6px 8px',
+            }))
+          }
           if (history === entry.path) {
             nodes.push(react.createElement(FileHistory, {
               key: `history:${side}:${entry.path}`,
@@ -2796,16 +3071,22 @@ window.__ModuleLoader__.load({
       }
 
       // ---- 暂存与提交（更改区块）----
-
-      const result = state.result ?? {}
-      const tracked = Array.isArray(result.tracked) ? result.tracked : []
-      const staged = tracked.filter((entry) => classifyEntry(entry).staged)
-      const unstaged = tracked.filter((entry) => classifyEntry(entry).unstaged)
-      const untrackedCount = Number(result.untrackedCount ?? 0)
-      const untrackedPaths = Array.isArray(result.untrackedPaths) ? result.untrackedPaths : []
+      //
+      // 三组全部由**同一份 snapshot.files** 过滤得出（每个文件的 `staged`/`unstaged`/
+      // `untracked` 由 host 在同一次 `/workspace` 请求里随文件一起给出，见 indexStates）。
+      // 因此分组标题上的数字与组内行数永远一致——"外面 0、进去却有文件"那类问题在这里被
+      // 结构性排除：不可能再出现"分组来自 A 请求、清单来自 B 请求"。
+      //
+      // 同一个文件同时有已暂存与未暂存改动（porcelain 的 `MM`）时会出现在两组里——这是
+      // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
+      const staged = files.filter((entry) => classifyEntry(entry).staged)
+      const unstaged = files.filter((entry) => entry.untracked !== true && classifyEntry(entry).unstaged)
+      const untrackedPaths = files.filter((entry) => entry.untracked === true).map((entry) => entry.path)
+      const untrackedCount = untrackedPaths.length
       const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
-      // 已勾选（准备"加入 git"）的未跟踪文件。用 Set 而不是数组：勾选/取消是逐个发生的，
-      // 列表可能几百行，`includes` 会让每次点击都变成一次线性扫描。
+      /** 逐行差异：与文件列表**同一份快照**里的 `diff`，按文件切分。 */
+      const byFile = react.useMemo(() => splitByFile(snapshot?.diff ?? ''), [snapshot?.diff])
+      // 已勾选（准备"加入 git"）的未跟踪文件。
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
       // 提交按钮为什么禁用，要在界面上说清楚：灰着而不给理由，用户只会反复点它。
@@ -2818,12 +3099,12 @@ window.__ModuleLoader__.load({
       // 未跟踪的文件不默认算在内：把 `git add .` 的语义强加给一次普通提交，会把构建产物
       // 之类的东西一起提交进去。要带上它们就勾一下（那是明确的意图）。
       const allTrackedPaths = [...new Set([...staged, ...unstaged].map((entry) => entry.path))]
-      /** 完整的已跟踪文件列表（按路径去重），界面只显示这一组。 */
-      const byPath = new Map()
-      for (const entry of [...staged, ...unstaged]) {
-        if (!byPath.has(entry.path)) byPath.set(entry.path, entry)
+      /** 按路径去重：同一个文件可能在两组里各出现一次。 */
+      const dedupe = (entries) => {
+        const byPath = new Map()
+        for (const entry of entries) if (!byPath.has(entry.path)) byPath.set(entry.path, entry)
+        return [...byPath.values()]
       }
-      const allTracked = [...byPath.values()]
       /** 一行该显示哪种暂存动作：索引里已有改动 → 取消暂存，否则 → 暂存。 */
       const sideOf = (entry) => (classifyEntry(entry).staged ? 'staged' : 'unstaged')
       /**
@@ -2876,8 +3157,35 @@ window.__ModuleLoader__.load({
           }),
           react.createElement(StatusBadge, { letter: side === 'staged' ? entry.index : entry.worktree }),
           react.createElement(
-            'span',
-            { title: entry.path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
+            'button',
+            {
+              type: 'button',
+              // 点路径展开逐行差异：IDEA 里点文件名就是看 diff。用 button 而不是 span，
+              // 这样键盘可聚焦（Tab 能到、回车能开）。
+              'data-staging-diff-toggle': entry.path,
+              'data-review-file': '',
+              'aria-expanded': diffOpen === entry.path,
+              title: `${entry.path}\n${t(STATUS_KEYS[entry.status?.[0] ?? ''] ?? 'statusOther')}`,
+              onClick: () => setDiffOpen((current) => (current === entry.path ? '' : entry.path)),
+              style: {
+                flex: '1 1 auto',
+                minWidth: 0,
+                display: 'block',
+                padding: '2px 4px',
+                border: 'none',
+                borderRadius: '5px',
+                background: diffOpen === entry.path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
+                color: 'inherit',
+                fontFamily: CODE_FONT,
+                fontSize: '12.5px',
+                textAlign: 'left',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                direction: 'rtl',
+                cursor: 'pointer',
+              },
+            },
             `\u200e${entry.path}`,
           ),
           react.createElement(
@@ -2947,6 +3255,46 @@ window.__ModuleLoader__.load({
             },
             side === 'staged' ? '−' : '+',
           ),
+          // 「还原」（IDEA 里叫 Rollback）：把这一行恢复成 HEAD 的样子。
+          //
+          // 它是**破坏性的写操作**，因此走确认弹窗而不是"再点一次"（见 ConfirmRevertDialog
+          // 的说明）；成功之后由 `run` 统一 invalidate 快照，界面与入口数字一起更新。
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-revert': entry.path,
+              'data-review-icon-button': '',
+              'data-review-level': 'off',
+              disabled: busy,
+              onClick: () => setConfirming(entry.path),
+              title: t('revert'),
+              'aria-label': t('revert'),
+              style: {
+                flexShrink: 0,
+                width: '22px',
+                height: '22px',
+                padding: 0,
+                border: 'none',
+                borderRadius: '4px',
+                background: 'transparent',
+                color: 'var(--dsw-alias-label-tertiary)',
+                fontFamily: UI_FONT,
+                lineHeight: 1,
+              },
+            },
+            react.createElement(
+              'svg',
+              { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M3.5 5.5h6.2A3.3 3.3 0 0 1 13 8.8v0A3.3 3.3 0 0 1 9.7 12H6.5M3.5 5.5l2.2-2.2M3.5 5.5l2.2 2.2',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }),
+            ),
+          ),
         )
       }
 
@@ -2983,8 +3331,33 @@ window.__ModuleLoader__.load({
           }),
           react.createElement(StatusBadge, { letter: '?' }),
           react.createElement(
-            'span',
-            { title: path, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' } },
+            'button',
+            {
+              type: 'button',
+              'data-staging-diff-toggle': path,
+              'data-review-file': '',
+              'aria-expanded': diffOpen === path,
+              title: path,
+              onClick: () => setDiffOpen((current) => (current === path ? '' : path)),
+              style: {
+                flex: '1 1 auto',
+                minWidth: 0,
+                display: 'block',
+                padding: '2px 4px',
+                border: 'none',
+                borderRadius: '5px',
+                background: diffOpen === path ? `color-mix(in srgb, ${ACCENT} 8%, transparent)` : 'transparent',
+                color: 'inherit',
+                fontFamily: CODE_FONT,
+                fontSize: '12.5px',
+                textAlign: 'left',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                direction: 'rtl',
+                cursor: 'pointer',
+              },
+            },
             `\u200e${path}`,
           ),
           // 未跟踪的文件同样能看变更记录：通常是空的（还没提交过），但"以后有没有"这件事
@@ -3046,12 +3419,40 @@ window.__ModuleLoader__.load({
 
       return react.createElement(
         'div',
-        { 'data-staging': '', style: { display: 'flex', flexDirection: 'column', fontFamily: UI_FONT } },
+        {
+          'data-staging': '',
+          // 三层结构（视觉顺序）：文件分组（可滚动）→ 提示/错误 → 提交区（固定底部）。
+          //
+          // 实现方式值得说明：用 flex 的 `order` 把它排到底部，而**DOM 顺序保持不变**
+          // （提交卡片仍然在最前）。这样做有两个好处：
+          //   * 屏幕阅读器与"读屏顺序"仍把提交框当作这块面板的主动作（原设计意图）；
+          //   * 提交卡片天然在滚动容器**之外**，因此超长文件列表滚到底也不会把它带走
+          //     （这正是要修的现象：以前整块内容共用一个滚动区）。
+          style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontFamily: UI_FONT },
+        },
+        // 分区头：文件总数 + 总增删行数。与下面的文件列表**同源**（同一份快照），
+        // 因此"外面显示 3、里面列出 5"这种对不上在结构上不可能发生。
+        react.createElement(
+          'div',
+          { 'data-review-section-title': '', style: { order: 0, flexShrink: 0, margin: '2px 4px 6px' } },
+          t('changesTitle'),
+          react.createElement('span', { style: { flex: 1 } }),
+          react.createElement('span', { 'data-review-count': '' }, String(files.length)),
+          react.createElement(
+            'span',
+            {
+              'data-review-total-stats': '',
+              style: { fontWeight: 400, fontSize: '11.5px', fontFamily: CODE_FONT, whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0 },
+            },
+            react.createElement('span', { style: { color: ADDED } }, `+${files.reduce((sum, file) => sum + (file.added ?? 0), 0)}`),
+            ' ',
+            react.createElement('span', { style: { color: REMOVED } }, `−${files.reduce((sum, file) => sum + (file.removed ?? 0), 0)}`),
+          ),
+        ),
         // ---- 提交卡片 ----
         //
-        // 做成一张"卡片"而不是一条普通表单：提交是这块面板的主动作，读屏顺序上它必须
-        // 第一个被看到，视觉上也要与下面的文件清单分开（此前三者都是同样的白底 + 细线，
-        // 分不出主次）。
+        // 做成一张"卡片"而不是一条普通表单：提交是这块面板的主动作，视觉上也要与下面的
+        // 文件清单分开（此前三者都是同样的白底 + 细线，分不出主次）。
         react.createElement(
           'div',
           {
@@ -3060,12 +3461,12 @@ window.__ModuleLoader__.load({
               display: 'flex',
               flexDirection: 'column',
               gap: '8px',
-              margin: '2px 2px 10px',
-              padding: '10px',
-              border: `1px solid ${BORDER}`,
-              borderRadius: '10px',
-              background: 'var(--dsw-alias-bg-base, #fff)',
-              boxShadow: '0 1px 2px rgba(16,24,40,.04)',
+              // 固定在底部：不参与上面的滚动，也不被文件列表挤走（`order` 见根节点的说明）。
+              order: 3,
+              flexShrink: 0,
+              margin: '10px 2px 2px',
+              paddingTop: '10px',
+              borderTop: `1px solid ${BORDER}`,
             },
           },
           react.createElement('textarea', {
@@ -3073,8 +3474,10 @@ window.__ModuleLoader__.load({
             'data-review-input': '',
             value: message,
             rows: 2,
-            placeholder: t('commitMessage', { branch: result.branch ?? '' }),
-            'aria-label': t('commitMessage', { branch: result.branch ?? '' }),
+            // 提交信息的占位文案里带上当前分支：分支取自**这份快照自己**（与文件列表同一次
+            // 请求），因此不会出现"文件是新的、分支是旧的"。
+            placeholder: t('commitMessage', { branch: snapshot?.branch ?? '' }),
+            'aria-label': t('commitMessage', { branch: snapshot?.branch ?? '' }),
             spellCheck: false,
             disabled: busy,
             onChange: (event) => setMessage(event.target.value),
@@ -3174,6 +3577,9 @@ window.__ModuleLoader__.load({
               {
                 'data-staging-error': trouble.code === '' ? 'unknown' : trouble.code,
                 style: {
+                  // 与提交区同层（order 2）：提示要紧贴着它解释的那个动作。
+                  order: 2,
+                  flexShrink: 0,
                   margin: '8px 2px 0',
                   padding: '7px 9px',
                   borderRadius: '8px',
@@ -3194,7 +3600,7 @@ window.__ModuleLoader__.load({
           ? null
           : react.createElement(
               'div',
-              { 'data-staging-notice': '', style: { margin: '8px 2px 0', padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ADDED} 7%, transparent)`, border: `1px solid color-mix(in srgb, ${ADDED} 20%, transparent)`, color: ADDED, fontSize: '12px' } },
+              { 'data-staging-notice': '', style: { order: 2, flexShrink: 0, margin: '8px 2px 0', padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ADDED} 7%, transparent)`, border: `1px solid color-mix(in srgb, ${ADDED} 20%, transparent)`, color: ADDED, fontSize: '12px' } },
               notice,
             ),
 
@@ -3204,6 +3610,9 @@ window.__ModuleLoader__.load({
               {
                 'data-review-clean': '',
                 style: {
+                  order: 1,
+                  flex: '1 1 auto',
+                  minHeight: 0,
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
@@ -3229,14 +3638,49 @@ window.__ModuleLoader__.load({
             )
           : react.createElement(
               'div',
-              { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-              // ---- 更改（已跟踪的改动，**一组**）----
+              {
+                'data-staging-scroll': '',
+                // 滚动只发生在这一层：提交区（order 3）在它之外，因此永远贴底不动。
+                style: { order: 1, flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', padding: '0 2px 6px' },
+              },
+              // ---- 已暂存（Staged）----
               //
-              // 刻意不再拆成"已暂存 / 未暂存"两组：同一个文件两处都有改动（`MM`）时会
-              // 出现在两个列表里，既有重复行，也让"到底该提交哪个"变成用户的负担。
-              // 现在索引是内部细节——提交时会自动 add，所以列表只回答"改了什么"。
-              // 索引里已有的改动用状态徽标（A/M/D）与行首的已暂存标记区分。
-              allTracked.length === 0
+              // 与下面的「更改」分开：IDEA 的 Git 工具窗就是 `Staged / Changes / Unversioned`
+              // 三组，而它们的动作不同（已暂存的行只能"取消暂存"，未暂存的行才能"暂存"）。
+              // 以前合成一组是"索引对用户不可见"的折中，代价是"我到底暂存了什么"无从回答。
+              dedupe(staged).length === 0
+                ? null
+                : react.createElement(
+                    'div',
+                    { 'data-staging-group': 'staged' },
+                    react.createElement(StagingGroupHeader, {
+                      t,
+                      id: 'staged',
+                      label: t('stagedTitle'),
+                      count: dedupe(staged).length,
+                      collapsed: collapsed.staged,
+                      onToggle: () => setCollapsed((value) => ({ ...value, staged: !value.staged })),
+                      action: react.createElement(
+                        'div',
+                        { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                        groupPick('staged', dedupe(staged).map((entry) => entry.path)),
+                        react.createElement(
+                          StagingIconButton,
+                          {
+                            t,
+                            id: 'unstage-all',
+                            label: t('unstageAll'),
+                            disabled: busy,
+                            onClick: () => void run('unstage', { paths: dedupe(staged).map((entry) => entry.path) }),
+                          },
+                          bulkIcon,
+                        ),
+                      ),
+                    }),
+                    collapsed.staged ? null : renderRows(dedupe(staged), 'staged'),
+                  ),
+              // ---- 更改（Changes：未暂存的工作区改动）----
+              dedupe(unstaged).length === 0
                 ? null
                 : react.createElement(
                     'div',
@@ -3245,13 +3689,13 @@ window.__ModuleLoader__.load({
                       t,
                       id: 'unstaged',
                       label: t('unstagedTitle'),
-                      count: allTracked.length,
+                      count: dedupe(unstaged).length,
                       collapsed: collapsed.unstaged,
                       onToggle: () => setCollapsed((value) => ({ ...value, unstaged: !value.unstaged })),
                       action: react.createElement(
                         'div',
                         { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-                        groupPick('unstaged', allTrackedPaths),
+                        groupPick('unstaged', dedupe(unstaged).map((entry) => entry.path)),
                         react.createElement(
                           StagingIconButton,
                           {
@@ -3260,13 +3704,13 @@ window.__ModuleLoader__.load({
                             label: t('stageAll'),
                             disabled: busy,
                             // 仍然保留"只暂存不提交"这条路：有人习惯先把改动摆进索引再逐次提交。
-                            onClick: () => void run('stage', { paths: allTrackedPaths }),
+                            onClick: () => void run('stage', { paths: dedupe(unstaged).map((entry) => entry.path) }),
                           },
                           bulkIcon,
                         ),
                       ),
                     }),
-                    collapsed.unstaged ? null : renderRows(allTracked, sideOf),
+                    collapsed.unstaged ? null : renderRows(dedupe(unstaged), 'unstaged'),
                   ),
               // ---- 未跟踪（可以勾选后"加入 git"）----
               untrackedCount === 0
@@ -3277,8 +3721,8 @@ window.__ModuleLoader__.load({
                     react.createElement(StagingGroupHeader, {
                       t,
                       id: 'untracked',
-                      // 数量用 host 给的**总数**，不是列出的条数：界面上"6,636 个文件"这个
-                      // 数字本身就是用户想知道的第一件事，用它列出的条数会把它说小。
+                      // 数量用**完整**条数（不是折叠/截断后列出的条数）：界面上"6,636 个文件"
+                      // 这个数字本身就是用户想知道的第一件事，用列出的条数会把它说小。
                       label: t('untrackedTitle'),
                       count: untrackedCount,
                       collapsed: collapsed.untracked,
@@ -3325,26 +3769,41 @@ window.__ModuleLoader__.load({
                           react.createElement(
                             'div',
                             { key: 'list', 'data-staging-untracked-list': '' },
-                            untrackedPaths.flatMap((path) => {
+                            untrackedPaths.slice(0, UNTRACKED_RENDER_LIMIT).flatMap((path) => {
                               const row = untrackedRow(path, chosenUntracked.includes(path))
-                              if (history !== path) return [row]
-                              return [
-                                row,
-                                react.createElement(FileHistory, {
+                              const nodes = [row]
+                              // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
+                              if (diffOpen === path) {
+                                nodes.push(react.createElement(FileDiff, {
+                                  key: `diff:untracked:${path}`,
+                                  t,
+                                  file: files.find((entry) => entry.path === path) ?? { path, status: 'A' },
+                                  diff: byFile.get(path) ?? '',
+                                  margin: '0 0 6px 8px',
+                                }))
+                              }
+                              if (history === path) {
+                                nodes.push(react.createElement(FileHistory, {
                                   key: `history:untracked:${path}`,
                                   t,
                                   workspace,
                                   path,
-                                }),
-                              ]
+                                }))
+                              }
+                              return nodes
                             }),
-                            result.untrackedTruncated === true
+                            // 只渲染前 UNTRACKED_RENDER_LIMIT 条：实测一个真实仓库有 6,636 个
+                            // 未跟踪文件，全量渲染会让这块面板变成一堵墙（而且每一行都有
+                            // 勾选框与按钮）。**数量仍然显示完整总数**（见分组标题），
+                            // 因此"数量与列表一致"这条要求不受影响——列表是被明确标注为
+                            // "只显示前 N 个"的视图，不是数据源。
+                            untrackedCount > UNTRACKED_RENDER_LIMIT
                               ? react.createElement(
                                   'div',
                                   { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: '11.5px', color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
                                   t('untrackedTruncated', {
-                                    count: untrackedPaths.length,
-                                    rest: Math.max(0, untrackedCount - untrackedPaths.length),
+                                    count: UNTRACKED_RENDER_LIMIT,
+                                    rest: untrackedCount - UNTRACKED_RENDER_LIMIT,
                                   }),
                                 )
                               : null,
@@ -3392,6 +3851,82 @@ window.__ModuleLoader__.load({
                           ),
                         ],
                   ),
+            ),
+        // 还原确认弹窗：还原会改写工作区（**唯一**这类操作），必须由用户明确决定。
+        // 与错误/提示区块一样用 `order` 让它排在最后，但它是 fixed 定位的遮罩层，顺序无关。
+        confirming === ''
+          ? null
+          : react.createElement(ConfirmRevertDialog, {
+              t,
+              path: confirming,
+              busy,
+              // 项目级的还原源是 HEAD，与本轮审查（基线快照）不同，因此换一句准确的解释。
+              bodyKey: 'revertConfirmBodyWorkspace',
+              onCancel: () => setConfirming(''),
+              onConfirm: () => {
+                const path = confirming
+                setConfirming('')
+                void run('revert', { paths: [path], scope: 'workspace' }, t('revertedNotice', { path }))
+              },
+            }),
+      )
+    }
+
+    /**
+     * 一个文件的逐行差异（含顶部那条固定信息：状态、路径、增删行数）。
+     *
+     * 抽成独立组件是因为它有**两个使用者**：会话内的文件列表（`FileList`）与项目级的
+     * 更改页签（`StagingSection` 的行展开）。两处必须长得一样——差异视图是最不该出现
+     * "这个入口能看、那个入口不能看"的地方，而复制一份必然漂移。
+     *
+     * @param props - `{ t, file, diff, margin }`。
+     * @returns React 元素。
+     */
+    function FileDiff(props) {
+      const { t, file, diff } = props
+      const status = file?.status?.[0] ?? '?'
+      const color = STATUS_COLORS[status] ?? 'var(--dsw-alias-label-secondary)'
+      return react.createElement(
+        'div',
+        { 'data-review-diff': '', 'data-review-diff-path': file?.path ?? '', style: { margin: props.margin ?? '2px 0 8px' } },
+        react.createElement(
+          'div',
+          { 'data-review-diff-header': '' },
+          react.createElement('span', { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } }, status),
+          react.createElement(
+            'span',
+            { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: CODE_FONT } },
+            file?.path ?? '',
+          ),
+          react.createElement('span', { style: { flex: 1 } }),
+          react.createElement(
+            'span',
+            { 'data-review-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT } },
+            react.createElement('span', { style: { color: ADDED } }, `+${file?.added ?? 0}`),
+            ' ',
+            react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? 0}`),
+          ),
+        ),
+        isBinaryDiff(diff)
+          ? react.createElement(
+              'div',
+              { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: '12px' } },
+              t('binaryDiff'),
+            )
+          : react.createElement(
+              'div',
+              {
+                style: {
+                  // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
+                  fontSize: '12px',
+                  lineHeight: 1.55,
+                  fontFamily: CODE_FONT,
+                  fontVariantLigatures: 'none',
+                  // 横向溢出才滚动；纵向交给外层容器，避免嵌套滚动条。
+                  overflowX: 'auto',
+                },
+              },
+              renderDiff(diff),
             ),
       )
     }
@@ -3717,54 +4252,7 @@ window.__ModuleLoader__.load({
               ),
             ),
             open
-              ? react.createElement(
-                  'div',
-                  { style: { margin: '2px 0 8px' } },
-                  // 差异区顶部固定一条信息（路径 + 增删），长差异滚动时不会迷失在行里。
-                  react.createElement(
-                    'div',
-                    { 'data-review-diff': '' },
-                    react.createElement(
-                      'div',
-                      { 'data-review-diff-header': '' },
-                      react.createElement('span', { 'data-review-status': '', title: t(STATUS_KEYS[status] ?? 'statusOther'), style: { color, background: `color-mix(in srgb, ${color} 14%, transparent)` } }, status),
-                      react.createElement(
-                        'span',
-                        { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: CODE_FONT } },
-                        file.path,
-                      ),
-                      react.createElement('span', { style: { flex: 1 } }),
-                      react.createElement(
-                        'span',
-                        { 'data-review-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT } },
-                        react.createElement('span', { style: { color: ADDED } }, `+${file.added ?? 0}`),
-                        ' ',
-                        react.createElement('span', { style: { color: REMOVED } }, `−${file.removed ?? 0}`),
-                      ),
-                    ),
-                    isBinaryDiff(diff)
-                      ? react.createElement(
-                          'div',
-                          { style: { color: 'var(--dsw-alias-label-secondary)', padding: '10px', fontFamily: UI_FONT, fontSize: '12px' } },
-                          t('binaryDiff'),
-                        )
-                      : react.createElement(
-                          'div',
-                          {
-                            style: {
-                              // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
-                              fontSize: '12px',
-                              lineHeight: 1.55,
-                              fontFamily: CODE_FONT,
-                              fontVariantLigatures: 'none',
-                              // 横向溢出才滚动；纵向交给抽屉整体，避免嵌套滚动条。
-                              overflowX: 'auto',
-                            },
-                          },
-                          renderDiff(diff),
-                        ),
-                  ),
-                )
+              ? react.createElement(FileDiff, { t, file, diff })
               : null,
           )
         }),
@@ -4361,25 +4849,157 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 分栏宽度的持久化键。 */
+    const GRAPH_TREE_WIDTH_KEY = 'dsh.review.graphTreeWidth'
+    const GRAPH_DETAIL_WIDTH_KEY = 'dsh.review.graphDetailWidth'
+    /** 分栏宽度的取值范围。上限随视口收窄（见 clampGraphPane），避免把中间那栏挤没。 */
+    const GRAPH_TREE_MIN = 120
+    const GRAPH_DETAIL_MIN = 200
+    const GRAPH_TREE_DEFAULT = 200
+    const GRAPH_DETAIL_DEFAULT = 320
+
     /**
-     * 提交图：主区域里的三栏视图（分支树 / 提交列表 / 提交详情）。
+     * 分栏宽度：读/写 localStorage，并按视口夹取。
      *
-     * 挂在 `main` 槽上，由 `sidebar.panellist` 里那个图标打开。这与右侧抽屉（`shell.overlay`
-     * 上的自绘浮层）是两条独立的路径：抽屉宽度有限，画不下三栏；而这个视图需要整块主区域。
+     * 拖动调整宽度**必须持久化**：IDEA 里这个宽度是跟着用户的，重开一次窗口就复位会让人
+     * 每次都要重新拖。夹取上限是"视口的三分之一"，这样窄窗口下中间那栏仍然有可用宽度
+     * ——三栏硬挤的结果是每一栏都读不了（实际反馈里"窗口一小就什么都看不见"）。
      *
-     * @param props - 槽注入的属性，含渲染器提供的标准钩子。
+     * @param which - `'tree'` 或 `'detail'`。
+     * @param value - 期望宽度。
+     * @returns 夹取后的宽度。
+     */
+    function clampGraphPane(which, value) {
+      const min = which === 'tree' ? GRAPH_TREE_MIN : GRAPH_DETAIL_MIN
+      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
+      const max = Math.max(min, Math.min(420, Math.round(viewport / 3)))
+      const raw = Number.isFinite(value) ? value : (which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
+      return Math.max(min, Math.min(max, Math.round(raw)))
+    }
+
+    /** 两个分栏的宽度与折叠状态的持久化（与抽屉宽度同一套做法）。 */
+    const graphPaneStore = {
+      /**
+       * @param which - `'tree'` 或 `'detail'`；`'collapsed'` 读折叠状态。
+       * @returns 持久化值（读不到时给默认值）。
+       */
+      get(which) {
+        if (which === 'collapsed') {
+          try {
+            const raw = window.localStorage.getItem('dsh.review.graphCollapsed')
+            if (raw === null) return { tree: false, detail: false }
+            const parsed = JSON.parse(raw)
+            return { tree: parsed?.tree === true, detail: parsed?.detail === true }
+          } catch {
+            return { tree: false, detail: false }
+          }
+        }
+        const key = which === 'tree' ? GRAPH_TREE_WIDTH_KEY : GRAPH_DETAIL_WIDTH_KEY
+        let stored = Number.NaN
+        try {
+          stored = Number(window.localStorage.getItem(key))
+        } catch {
+          // 隐私模式等：读不到就用默认宽度，不影响功能。
+        }
+        // **必须排除 null / 0**：`localStorage.getItem` 在没有记录时返回 null，而
+        // `Number(null)` 是 0（有限值！），直接交给夹取会得到"最小值 120px"——新用户第一次
+        // 打开时左右两栏都贴到最窄（实测踩到过）。`panelWidthStore` 里同一处也是这么判的。
+        return clampGraphPane(which, Number.isFinite(stored) && stored > 0 ? stored : Number.NaN)
+      },
+      /**
+       * @param which - `'tree'` / `'detail'` / `'collapsed'`。
+       * @param value - 要写入的值。
+       */
+      set(which, value) {
+        try {
+          if (which === 'collapsed') {
+            window.localStorage.setItem('dsh.review.graphCollapsed', JSON.stringify(value))
+            return
+          }
+          window.localStorage.setItem(which === 'tree' ? GRAPH_TREE_WIDTH_KEY : GRAPH_DETAIL_WIDTH_KEY, String(value))
+        } catch {
+          // 写失败不影响本次会话（宽度只在这次打开期间生效）。
+        }
+      },
+    }
+
+    /**
+     * 拖动分栏手柄。
+     *
+     * 与抽屉的宽度手柄同一套做法（见 ReviewPanel.startResize）：`mousemove`/`mouseup` 挂在
+     * document 上，指针移出手柄也不会断；拖动期间给 body 打标记禁掉文本选择。
+     *
+     * @param which - `'tree'` 或 `'detail'`。
+     * @param width - 当前宽度。
+     * @param onChange - 拖动过程中的回调（每帧）。
+     * @returns 鼠标按下的处理器。
+     */
+    function startGraphResize(which, width, onChange) {
+      return (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault()
+        const startX = event.clientX
+        const startWidth = width
+        document.body.dataset.reviewDragging = '1'
+        const onMove = (moveEvent) => {
+          // 左栏向右拖是变宽；右栏向左拖是变宽。
+          const delta = which === 'tree' ? moveEvent.clientX - startX : startX - moveEvent.clientX
+          onChange(clampGraphPane(which, startWidth + delta))
+        }
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('mouseup', onUp)
+          delete document.body.dataset.reviewDragging
+          onChange((final) => {
+            graphPaneStore.set(which, final)
+            return final
+          })
+        }
+        document.addEventListener('mousemove', onMove)
+        document.addEventListener('mouseup', onUp)
+      }
+    }
+
+    /**
+     * 提交图：三栏视图（分支树 / 提交列表 / 提交详情）。
+     *
+     * **纯展示 + 数据组件**：工作区与文案都由 props 给（`{ t, workspace, refreshToken }`）。
+     * 这样同一个视图有两个宿主：
+     *   * 主区域（`CommitGraphPanel` 从渲染器注入的会话钩子里解析工作区）；
+     *   * 项目改动抽屉的 **Log 页签**（工作区就是抽屉自己的工作区）。
+     * 抽屉**复用**它而不是另写一套：三栏的泳道图、虚拟滚动、提交详情、文件级差异都在这里，
+     * 重写一份必然漂移。
+     *
+     * 交互（对齐 IDEA 的 Git Log）：
+     *   * 单击一条提交 → 只改选中项，右侧同步显示它的详情（**不再原位展开**）；
+     *   * 右侧点一个改动文件 → 看这一次提交对该文件的差异（`GraphCommitDetail` 内部实现）；
+     *   * 顶部分栏手柄可拖动调整宽度，并持久化；
+     *   * 顶部有刷新与搜索；窄窗口可以把分支树或详情收起来（折叠状态也持久化）。
+     *
+     * @param props - `{ t, workspace, refreshToken }`。
      * @returns React 元素。
      */
     function CommitGraphView(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { sessionId, useSessions, usePanelInfo } = props ?? {}
-      // 工作区跟当前会话走；没有会话时退回宿主工作区（与项目改动面板同一套优先级）。
+      /**
+       * 工作区可以**由调用方直接给**（抽屉的 Log 页签知道自己在哪个项目上），也可以由本组件
+       * 自己解析（主区域的槽位只有渲染器注入的会话钩子）。
+       *
+       * 两种来源放在同一个组件里，而不是再套一层包装组件：套一层会让"面板 → 图"多出一级
+       * 组件，而这级组件在自己的返回树里正好是**唯一的孩子**——React 没问题，但所有用
+       * "按树中位置分配 hook 槽"的桩渲染器写的测试都会把父子两级的槽串到一起（实测）。
+       * 一个组件、两条取值路径，既省一层也避免了这类坑。
+       */
+      const { sessionId, useSessions } = props ?? {}
       const sessionWorkspace =
         typeof useSessions === 'function' && sessionId !== undefined
           ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
           : undefined
+      const explicitWorkspace = typeof props?.workspace === 'string' && props.workspace !== '' ? props.workspace : undefined
+      /** 没有会话时的兜底工作区（宿主启动时的工作区）。只在需要时才去问。 */
       const [fallbackWorkspace, setFallbackWorkspace] = react.useState(undefined)
       react.useEffect(() => {
+        if (explicitWorkspace !== undefined) return undefined
         let alive = true
         void (async () => {
           try {
@@ -4392,86 +5012,249 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
         }
-      }, [])
-      const workspace = sessionWorkspace ?? fallbackWorkspace
+      }, [explicitWorkspace])
+      const workspace = explicitWorkspace ?? sessionWorkspace ?? fallbackWorkspace
+      /** 外部要求重新加载的信号（例如提交成功）：值变化即重拉第一页。 */
+      const refreshToken = props?.refreshToken ?? 0
 
-      const [commits, setCommits] = react.useState([])
-      const [hasMore, setHasMore] = react.useState(false)
-      const [phase, setPhase] = react.useState('loading')
-      const [errorMessage, setErrorMessage] = react.useState('')
-      const [selected, setSelected] = react.useState('')
-      const [ref, setRef] = react.useState('')
+      const gate = useWorkspaceGate(workspace)
+      const generation = gate.generation
+      /**
+       * 这一次工作区的加载状态。**全部字段都代际化**（含过滤 ref 与选中项）：
+       * 换了工作区之后，这一帧读到的就是新那一份的初值，因此既不会显示上一个项目的提交，
+       * 也不会带着上一个项目的过滤条件去请求。
+       */
+      const [state, setState] = react.useState({
+        generation: -1,
+        phase: 'idle',
+        commits: [],
+        hasMore: false,
+        error: '',
+        ref: '',
+        selected: '',
+      })
+      const fresh =
+        state.generation === generation
+          ? state
+          : { generation, phase: 'loading', commits: [], hasMore: false, error: '', ref: '', selected: '' }
+
+      /**
+       * 只写当前代。
+       *
+       * 基准必须按**当前代**重建，而不是"不是这一代就丢弃"：初值那一份的 generation 是 -1
+       * （"还没有任何一代的数据"），如果直接丢弃，第一次响应就永远写不进去，界面会一直停在
+       * 加载态。重建基准则天然等价于"换代时把这一份状态初始化成空"。
+       */
+      const update = react.useCallback(
+        (changes) => {
+          setState((prev) => {
+            const base =
+              prev.generation === generation
+                ? prev
+                : { generation, phase: 'idle', commits: [], hasMore: false, error: '', ref: '', selected: '' }
+            return { ...base, ...changes }
+          })
+        },
+        [generation],
+      )
+
+      const [query, setQuery] = react.useState('')
       const [scrollTop, setScrollTop] = react.useState(0)
       const [viewport, setViewport] = react.useState(600)
       const scrollRef = react.useRef(null)
 
-      /** 拉第一页（或换筛选后重拉）。 */
-      const reload = react.useCallback(async () => {
-        if (workspace === undefined) return
-        setPhase('loading')
-        setErrorMessage('')
-        try {
-          const result = await fetchGraph(workspace, { ref })
-          if (result?.isRepo === false) {
-            setPhase('notRepo')
-            setCommits([])
+      /** 分栏宽度与折叠状态（持久化，见 graphPaneStore）。 */
+      const [treeWidth, setTreeWidth] = react.useState(() => graphPaneStore.get('tree'))
+      const [detailWidth, setDetailWidth] = react.useState(() => graphPaneStore.get('detail'))
+      const [collapsed, setCollapsed] = react.useState(() => graphPaneStore.get('collapsed'))
+      const togglePane = react.useCallback((which) => {
+        setCollapsed((current) => {
+          const next = { ...current, [which]: !current[which] }
+          graphPaneStore.set('collapsed', next)
+          return next
+        })
+      }, [])
+
+      // 视口变化时把宽度收进允许区间（否则窗口缩小后分栏会占满整屏，而手柄已经贴边）。
+      react.useEffect(() => {
+        const onResize = () => {
+          setTreeWidth((value) => clampGraphPane('tree', value))
+          setDetailWidth((value) => clampGraphPane('detail', value))
+        }
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [])
+
+      /**
+       * 拉第一页。
+       *
+       * 三处竞态保护（对应曾经真实出现的现象）：
+       *   1. `gate.accept` —— 切换工作区后回来的响应一律丢弃；
+       *   2. `slices: ['graph']` —— 重新加载会**抢占**这一片状态，因此一个更早发出的
+       *      `loadMore` 不会在这一页之后追加（否则会把两个筛选条件的提交混在一起）；
+       *   3. `coalesce` —— 同一条件并发只会有一个请求在飞（点两次刷新不会发两次）。
+       */
+      const reload = react.useCallback(
+        async (refValue) => {
+          if (workspace === undefined) return
+          const filterRef = typeof refValue === 'string' ? refValue : ''
+          const { ticket, promise } = gate.run(
+            `graph:${filterRef}`,
+            () => fetchGraph(workspace, { ref: filterRef }),
+            { coalesce: true, slices: ['graph'] },
+          )
+          if (!gate.isCurrent(ticket)) return
+          if (gate.accept(ticket)) update({ phase: 'loading', error: '' })
+          const outcome = await promise
+          if (!gate.accept(ticket)) return
+          if (!outcome.ok) {
+            const error = outcome.cause
+            update({ phase: 'error', error: String(error?.detail ?? error?.message ?? error) })
             return
           }
-          setCommits(result.commits ?? [])
-          setHasMore(result.hasMore === true)
-          setPhase('ready')
-        } catch (cause) {
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          setErrorMessage(error.detail ?? error.message)
-          setPhase('error')
-        }
-      }, [workspace, ref])
+          const result = outcome.value
+          if (result?.isRepo === false) {
+            update({ phase: 'notRepo', commits: [], hasMore: false })
+            return
+          }
+          update({ phase: 'ready', commits: result.commits ?? [], hasMore: result.hasMore === true })
+        },
+        [gate, workspace, generation, update],
+      )
 
       react.useEffect(() => {
-        void reload()
-      }, [reload])
+        // 过滤条件与刷新信号变化都会重拉第一页。
+        void reload(fresh.ref)
+        // `fresh.ref` 与 `refreshToken` 一起构成"什么时候该重拉"。
+      }, [reload, fresh.ref, refreshToken])
 
       /** 追加下一页。 */
       const loadMore = react.useCallback(async () => {
-        if (workspace === undefined || !hasMore) return
-        try {
-          const result = await fetchGraph(workspace, { skip: commits.length, ref })
-          setCommits((current) => [...current, ...(result.commits ?? [])])
-          setHasMore(result.hasMore === true)
-        } catch (cause) {
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          setErrorMessage(error.detail ?? error.message)
-          setPhase('error')
+        if (workspace === undefined || fresh.hasMore !== true) return
+        const skip = fresh.commits.length
+        const filterRef = fresh.ref
+        const { ticket, promise } = gate.run(
+          `graph-more:${skip}:${filterRef}`,
+          () => fetchGraph(workspace, { skip, ref: filterRef }),
+          // 与 reload 共用 `graph` 分片：新一轮加载一旦开始，这一页就作废。
+          { slices: ['graph'] },
+        )
+        if (!gate.accept(ticket)) return
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        if (!outcome.ok) {
+          const error = outcome.cause
+          update({ phase: 'error', error: String(error?.detail ?? error?.message ?? error) })
+          return
         }
-      }, [workspace, commits.length, hasMore, ref])
+        update({
+          commits: [...fresh.commits, ...(outcome.value?.commits ?? [])],
+          hasMore: outcome.value?.hasMore === true,
+        })
+      }, [gate, workspace, generation, update, fresh.commits, fresh.hasMore, fresh.ref])
+
+      /** 搜索：在**已加载**的提交里过滤（标题 / 作者 / 哈希）。 */
+      const keyword = query.trim().toLowerCase()
+      const visibleCommits =
+        keyword === ''
+          ? fresh.commits
+          : fresh.commits.filter((commit) =>
+              `${commit.subject ?? ''}\n${commit.author ?? ''}\n${commit.hash ?? ''}\n${commit.short ?? ''}`
+                .toLowerCase()
+                .includes(keyword),
+            )
 
       // 布局用 useMemo：它是这份视图里最贵的一步（O(提交数 × 列数)），而滚动会让组件
       // 重渲染。不 memo 的话每一帧都要重算一遍泳道，滚动会明显掉帧。
-      const layout = react.useMemo(() => layoutGraph(commits), [commits])
+      const layout = react.useMemo(() => layoutGraph(visibleCommits), [visibleCommits])
 
       const onScroll = react.useCallback((event) => {
         setScrollTop(event.target.scrollTop)
         setViewport(event.target.clientHeight)
       }, [])
 
-      if (phase === 'loading') {
+      if (workspace === undefined) {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('noWorkspace')))
+      }
+      if (fresh.phase === 'loading' || fresh.phase === 'idle') {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('graphLoading')))
       }
-      if (phase === 'notRepo') {
-        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notRepo', { name: projectName(workspace ?? '') })))
+      if (fresh.phase === 'notRepo') {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notRepo', { name: projectName(workspace) })))
       }
-      if (phase === 'error') {
-        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(errorMessage, 'error'))
+      if (fresh.phase === 'error') {
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(fresh.error, 'error'))
       }
+
+      /** 一个工具栏图标按钮（刷新、收起分栏）。 */
+      const iconButton = (key, label, onClick, children, active) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            'data-graph-tool': key,
+            title: label,
+            'aria-label': label,
+            'aria-pressed': active === true,
+            onClick,
+            style: {
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              width: '22px',
+              height: '22px',
+              padding: 0,
+              border: `1px solid ${active === true ? `color-mix(in srgb, ${ACCENT} 45%, transparent)` : 'transparent'}`,
+              borderRadius: '4px',
+              background: active === true ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
+              color: active === true ? ACCENT : GRAPH_DIM,
+              cursor: 'pointer',
+            },
+          },
+          children,
+        )
+
+      const refreshGlyph = react.createElement(
+        'svg',
+        { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+        react.createElement('path', { d: 'M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5.5H10', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+      )
+      const toolIcon = (path) =>
+        react.createElement(
+          'svg',
+          { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+          react.createElement('path', { d: path, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        )
+
+      /** 一条分栏之间的可拖动手柄。 */
+      const splitter = (which, width, setWidth) =>
+        react.createElement('div', {
+          key: `split:${which}`,
+          'data-graph-splitter': which,
+          role: 'separator',
+          'aria-orientation': 'vertical',
+          'aria-label': t(which === 'tree' ? 'graphCollapseTree' : 'graphCollapseDetail'),
+          onMouseDown: startGraphResize(which, width, (next) => {
+            if (typeof next === 'function') setWidth((current) => next(current))
+            else setWidth(next)
+          }),
+          onDoubleClick: () =>
+            setWidth(() => {
+              const reset = clampGraphPane(which, which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
+              graphPaneStore.set(which, reset)
+              return reset
+            }),
+          style: { flex: '0 0 4px', cursor: 'col-resize', background: 'transparent' },
+        })
 
       return react.createElement(
         'div',
         {
           'data-graph-view': '',
           style: {
-            display: 'grid',
-            // 三栏：分支树固定 200px、提交列表自适应、详情固定 320px。
-            gridTemplateColumns: '200px minmax(0, 1fr) 320px',
+            display: 'flex',
             height: '100%',
             minHeight: 0,
             background: 'var(--dsw-alias-bg-base, #fff)',
@@ -4480,44 +5263,48 @@ window.__ModuleLoader__.load({
           },
         },
         // ---- 左：分支树 ----
-        react.createElement(
-          'div',
-          { style: { borderRight: `1px solid ${BORDER}`, minHeight: 0, display: 'flex', flexDirection: 'column' } },
-          react.createElement(GraphBranchTree, {
-            t,
-            commits,
-            hasMore,
-            ref,
-            onPickRef: (name) => setRef((current) => (current === name ? '' : name)),
-          }),
-        ),
+        collapsed.tree
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-graph-pane': 'tree', style: { flex: `0 0 ${treeWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${BORDER}` } },
+              react.createElement(GraphBranchTree, {
+                t,
+                commits: fresh.commits,
+                hasMore: fresh.hasMore,
+                ref: fresh.ref,
+                onPickRef: (name) => update({ ref: fresh.ref === name ? '' : name }),
+              }),
+            ),
+        collapsed.tree ? null : splitter('tree', treeWidth, setTreeWidth),
         // ---- 中：提交列表 ----
         react.createElement(
           'div',
-          { style: { minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          { 'data-graph-pane': 'list', style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
           react.createElement(
             'div',
             {
+              'data-graph-toolbar': '',
               style: {
                 display: 'flex',
                 alignItems: 'center',
-                gap: '8px',
-                padding: '8px 12px',
+                gap: '6px',
+                padding: '5px 8px',
                 borderBottom: `1px solid ${BORDER}`,
                 flexShrink: 0,
                 fontSize: '12px',
               },
             },
-            react.createElement('span', { style: { fontWeight: 600 } }, t('graphTitle')),
-            react.createElement('span', { 'data-graph-count': '', style: { color: GRAPH_DIM } }, t('graphFiles', { count: commits.length })),
-            ref === ''
+            react.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, t('graphTitle')),
+            react.createElement('span', { 'data-graph-count': '', style: { color: GRAPH_DIM, flexShrink: 0 } }, t('graphFiles', { count: visibleCommits.length })),
+            fresh.ref === ''
               ? null
               : react.createElement(
                   'button',
                   {
                     type: 'button',
                     'data-graph-clear-ref': '',
-                    onClick: () => setRef(''),
+                    onClick: () => update({ ref: '' }),
                     style: {
                       padding: '1px 6px',
                       borderRadius: '4px',
@@ -4527,13 +5314,44 @@ window.__ModuleLoader__.load({
                       fontFamily: UI_FONT,
                       fontSize: '11.5px',
                       cursor: 'pointer',
+                      flexShrink: 0,
                     },
                   },
-                  `${t('graphFilterRef')}: ${ref} ✕`,
+                  `${t('graphFilterRef')}: ${fresh.ref} ✕`,
                 ),
+            // 搜索：过滤**已加载**的提交。文案里不承诺"搜索全部历史"——那需要另一条路由，
+            // 而这里要解决的是"一屏几十条里找刚看到的那条"。
+            react.createElement('input', {
+              type: 'search',
+              value: query,
+              'data-graph-search': '',
+              placeholder: t('graphSearchPlaceholder'),
+              'aria-label': t('graphSearchPlaceholder'),
+              autoComplete: 'off',
+              spellCheck: false,
+              onChange: (event) => setQuery(event.target.value),
+              onKeyDown: (event) => event.stopPropagation(),
+              style: {
+                flex: '1 1 auto',
+                minWidth: 0,
+                height: '22px',
+                boxSizing: 'border-box',
+                padding: '0 6px',
+                border: `1px solid ${BORDER}`,
+                borderRadius: '4px',
+                background: 'transparent',
+                color: 'inherit',
+                fontFamily: UI_FONT,
+                fontSize: '11.5px',
+              },
+            }),
             layout.truncated
-              ? react.createElement('span', { 'data-graph-truncated': '', style: { marginLeft: 'auto', color: GRAPH_DIM, fontSize: '11.5px' } }, t('graphTruncatedLanes'))
+              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: '11.5px', flexShrink: 0 } }, t('graphTruncatedLanes'))
               : null,
+            // 收起/展开两侧分栏：窄窗口下唯一能保住"中间那栏还能读"的办法。
+            iconButton('tree', t('graphCollapseTree'), () => togglePane('tree'), toolIcon('M2.5 3.5h11M2.5 8h11M2.5 12.5h11'), collapsed.tree),
+            iconButton('detail', t('graphCollapseDetail'), () => togglePane('detail'), toolIcon('M3.5 2.5v11M8 2.5h5.5v11H8z'), collapsed.detail),
+            iconButton('refresh', t('refresh'), () => void reload(fresh.ref), refreshGlyph),
           ),
           react.createElement(
             'div',
@@ -4543,18 +5361,19 @@ window.__ModuleLoader__.load({
               onScroll,
               style: { minHeight: 0, flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' },
             },
-            commits.length === 0
-              ? statusBlock(t('graphNoCommits'))
+            visibleCommits.length === 0
+              ? statusBlock(keyword === '' ? t('graphNoCommits') : t('graphNoMatches'))
               : react.createElement(GraphCommitList, {
                   t,
-                  commits,
+                  commits: visibleCommits,
                   layout,
-                  selected,
-                  onSelect: (hash) => setSelected(hash),
+                  selected: fresh.selected,
+                  // 单击只改选中项：右侧详情跟着变，**不在原位展开**（IDEA 的行为）。
+                  onSelect: (hash) => update({ selected: hash }),
                   scrollTop,
                   viewportHeight: viewport,
                 }),
-            hasMore
+            fresh.hasMore
               ? react.createElement(
                   'div',
                   { style: { padding: '8px 12px' } },
@@ -4582,14 +5401,19 @@ window.__ModuleLoader__.load({
               : null,
           ),
         ),
+        collapsed.detail ? null : splitter('detail', detailWidth, setDetailWidth),
         // ---- 右：提交详情 ----
-        react.createElement(
-          'div',
-          { style: { borderLeft: `1px solid ${BORDER}`, minHeight: 0, display: 'flex', flexDirection: 'column' } },
-          react.createElement(GraphCommitDetail, { t, workspace, revision: selected }),
-        ),
+        collapsed.detail
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-graph-pane': 'detail', style: { flex: `0 0 ${detailWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${BORDER}` } },
+              react.createElement(GraphCommitDetail, { t, workspace, revision: fresh.selected }),
+            ),
       )
     }
+
+    /**
 
     /**
      * 侧栏里的提交图图标。
@@ -4776,6 +5600,31 @@ window.__ModuleLoader__.load({
       // 就可以在渲染进程里直接调用并看到抛出的原因——定位这个问题时正是靠它。
       if (typeof window !== 'undefined') window.__dshDesktopReview = ctx.sidebarRight
 
+      /**
+       * 跨插件的 Git 快照失效入口。
+       *
+       * gitbar 会在 checkout / merge / rebase 之后改变工作区，它需要让这里的快照失效，
+       * 否则项目页入口上的数字会停在被切换之前的那个项目状态上（"切了分支，改动数还是
+       * 旧的"）。两个插件是各自独立的 bundle，拿不到彼此的模块作用域，因此用 window 上
+       * 一个带插件前缀的键对接：**只有一个方法**，契约最小。
+       *
+       * gitbar 那侧用可选链调用（`window.__dshDesktopGitSnapshot?.invalidate?.(cwd)`），
+       * 因此这个插件没加载时它什么也不会发生——两个插件的加载顺序无关紧要。
+       */
+      if (typeof window !== 'undefined') {
+        const previous = window.__dshDesktopGitSnapshot
+        window.__dshDesktopGitSnapshot = {
+          invalidate: (workspace) => invalidateGitSnapshot(workspace),
+          /** 只读诊断：让脚本能看到某个工作区当前的快照（不暴露写入口）。 */
+          peek: (workspace) => (typeof workspace === 'string' && workspace !== '' ? gitSnapshots.get(workspace) : undefined),
+        }
+        // 卸载时还原（若之前没有别的实现就删掉，避免留下一个指向已卸载模块的函数）。
+        ctx.effect(() => () => {
+          if (window.__dshDesktopGitSnapshot !== undefined && previous === undefined) delete window.__dshDesktopGitSnapshot
+          else if (previous !== undefined) window.__dshDesktopGitSnapshot = previous
+        }, 'review: git snapshot bridge')
+      }
+
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'review: dictionaries')
 
       ctx.effect(
@@ -4949,6 +5798,27 @@ window.__ModuleLoader__.load({
     // 直接断言比隔着界面点更可靠。
     exports.__stagingClassifyForTest = classifyEntry
     exports.__stagingSectionForTest = StagingSection
+    // 共享快照 store 也导出给测试：竞态（A→B→A 之后必须是 A）、"外部数字 == 抽屉里的
+    // files.length"这两条要求，直接对着 store 断言比隔着组件点更可靠，也能把"有没有
+    // 第二个数据源"这件事钉死。
+    exports.__gitSnapshotForTest = {
+      /** 直接写入一份快照（免去伪造 host 响应）。 */
+      set: (workspace, payload) => gitSnapshots.__setForTest(workspace, payload),
+      /** 丢掉所有工作区的记录（测试之间互不干扰）。 */
+      reset: () => gitSnapshots.__resetForTest(),
+      /** 读取当前快照。 */
+      get: (workspace) => gitSnapshots.get(workspace),
+      /** 让快照失效（等价于写操作成功后的那次 invalidate）。 */
+      invalidate: (workspace) => gitSnapshots.invalidate(workspace),
+      /** 有没有在途请求（single-flight 的断言点）。 */
+      inflight: (workspace) => gitSnapshots.__inflight(workspace),
+      /** 订阅（返回取消函数）。 */
+      subscribe: (workspace, listener) => gitSnapshots.subscribe(workspace, listener),
+    }
+    // 工作区闸门与提交图也导出：前者是这条要求的核心机制（换代/丢弃/合并），后者是
+    // Log 页签与主区域共用的那个视图，都需要能被单独驱动。
+    exports.__workspaceGateForTest = createWorkspaceGate
+    exports.__commitGraphViewForTest = CommitGraphView
     // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
     // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
     exports.__fileListForTest = FileList

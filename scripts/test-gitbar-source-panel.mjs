@@ -508,6 +508,22 @@ async function mount() {
     return true
   }
 
+  /**
+   * 双击某个分支行。
+   *
+   * IDEA 风格交互下**只有双击才切换分支**（单击是选中 + 打开操作菜单），因此凡是
+   * "点一下就该 checkout"的断言都必须走这里。真实的双击在浏览器里会先派发两次 click
+   * 再派发 dblclick；专门的交互测试（`scripts/test-gitbar-branch-interaction.mjs`）
+   * 覆盖那条完整序列，这里只需要表达"用户双击了"。
+   */
+  const dblClickRow = async (branchName) => {
+    const node = findRow(branchName)
+    if (node === null || typeof node.props?.onDoubleClick !== 'function') return false
+    node.props.onDoubleClick({ stopPropagation() {}, preventDefault() {} })
+    await settle()
+    return true
+  }
+
   /** 点分支徽章。
    *
    * 用 `title`（永远是 `Git: <分支>…`）定位那个按钮，比按孩子序号取更难被布局改动打破。
@@ -598,6 +614,7 @@ async function mount() {
     findByText,
     click,
     clickRow,
+    dblClickRow,
     clickBadge,
     openPanel,
     panelOpen,
@@ -714,7 +731,10 @@ const menuState = async (branchName) => {
 }
 const mainMenu = await menuState('main')
 // 当前分支：不能签出自己、不能合并/变基到自己、不能删除自己。
-check('   main（当前分支）：没有签出项', mainMenu.has('checkout'), false)
+//
+// 注意「签出」是**存在但禁用**而不是消失：单击任何一行都会打开这个菜单（IDEA 风格），
+// 条目随分支增减会让同一个位置上的动作上下移动，用户靠位置记忆点操作时就会点错。
+check('   main（当前分支）：签出项存在但被禁用', mainMenu.get('checkout'), true)
 check('   main：合并到自己被禁用', mainMenu.get('merge'), true)
 check('   main：变基到自己被禁用', mainMenu.get('rebase'), true)
 check('   main：删除自己被禁用', mainMenu.get('delete'), true)
@@ -749,7 +769,10 @@ await ui.openPanel()
 check('8) 前置：面板打开且列出了分支', `${ui.panelOpen()}/${ui.findAll('data-desktop-branch-option').length}`, 'true/5')
 posts.length = 0
 await ui.clickRow('develop')
-check('8) 发出 checkout', posts.map((p) => p.route).join(','), 'checkout')
+// 单击**不是** checkout：IDEA 风格下它只选中并打开操作菜单。
+check('8) 单击不产生 checkout', posts.length, 0)
+await ui.dblClickRow('develop')
+check('   双击发出 checkout', posts.map((p) => p.route).join(','), 'checkout')
 check('   请求体是分支名', JSON.stringify(posts[0]?.body), '{"branch":"develop"}')
 check('   成功后关闭面板', ui.panelOpen(), false)
 
@@ -761,7 +784,7 @@ nextWriteError = {
   detail: 'error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt',
 }
 await ui.openPanel()
-await ui.clickRow('develop')
+await ui.dblClickRow('develop')
 // 失败时面板必须保持打开，否则用户看不到原因。
 check('9) 失败后面板仍打开', ui.panelOpen(), true)
 check('   错误区带 code 标记', ui.find('data-desktop-sc-error', 'localChanges') === null, 'false')
@@ -928,7 +951,7 @@ console.log('=== 18. 未知 code 不吞掉原始错误 ===')
 writeErrorAlways = { error: 'weird', code: 'somethingNew', detail: 'raw git words' }
 ui = await mount()
 await ui.clickBadge()
-await ui.clickRow('develop')
+await ui.dblClickRow('develop')
 check('18) 落到通用短句', textOf(ui.find('data-desktop-sc-error')).includes('error_unknown'), 'true')
 check('   仍然显示 git 原文', textOf(ui.find('data-desktop-sc-error')).includes('raw git words'), 'true')
 // 未知 code 不能在界面上留下一个"看起来已知"的分类。

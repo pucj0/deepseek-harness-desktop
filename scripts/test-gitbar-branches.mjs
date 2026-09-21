@@ -212,7 +212,14 @@ try {
   check('   没有上游的分支 upstream 为空串', res.body.branches.find((b) => b.name === 'origin/main').upstream, '')
   check('   counts.local', res.body.counts.local, 2)
   checkTrue('   counts.remote >= 1', res.body.counts.remote >= 1)
-  checkTrue('   remotes 含 origin', res.body.remotes.some((r) => r.name === 'origin'))
+  // 远端列表**不在** `/branches` 里了：它改由 `/remotes` 单独给（见 host 侧 listRemotes 的
+  // 说明——一次 `git config --get-regexp` 拿全部，而不是"1 + 远端数"个进程）。
+  // 因此这里断言两条路由都能拿到该拿的东西。
+  checkTrue('   /branches 不再夹带 remotes', res.body.remotes === undefined)
+  const remotes = await get('remotes')
+  check('   GET /remotes 200', remotes.status, 200)
+  checkTrue('   remotes 含 origin', remotes.body.remotes.some((r) => r.name === 'origin'))
+  checkTrue('   remotes 带地址', String(remotes.body.remotes.find((r) => r.name === 'origin').url).length > 0)
 
   // =========================================================================
   console.log('')
@@ -248,7 +255,13 @@ try {
   check('4) 新建（不切换）-> 200', res.status, 200)
   check('   created', res.body.created, 'feature/new')
   check('   未切换分支', await headBranch(), 'main')
-  checkTrue('   响应里已含新分支（客户端据此直接刷新）', res.body.branches.some((b) => b.name === 'feature/new'))
+  // 写操作的响应里**不再有分支列表**：它只回最新状态 + `branchesStale: true`，分支列表由
+  // 客户端据此异步重取（这样 checkout/merge 之后立刻能看到结果，不必等一轮分支枚举）。
+  // 因此这里断言的是"过期信号 + 下一次 GET 能拿到新分支"这条链。
+  checkTrue('   写响应不回分支列表', res.body.branches === undefined)
+  check('   写响应标记分支已过期', res.body.branchesStale, true)
+  res = await get('branches')
+  checkTrue('   重新 GET 已含新分支', res.body.branches.some((b) => b.name === 'feature/new'))
 
   res = await post('branch/create', { name: 'feature/new', from: 'develop', checkout: false })
   check('4) 重名 -> 409', res.status, 409)
@@ -274,6 +287,8 @@ try {
   console.log('=== 5. 重命名分支 ===')
   res = await post('branch/rename', { from: 'from-commit', to: 'renamed' })
   check('5) 重命名 -> 200', res.status, 200)
+  // 同上：列表不在写响应里，重新取一次才是权威。
+  res = await get('branches')
   checkTrue('   旧名已消失', !res.body.branches.some((b) => b.name === 'from-commit'))
   checkTrue('   新名已存在', res.body.branches.some((b) => b.name === 'renamed'))
 
@@ -509,6 +524,8 @@ try {
   // **先 fetch**：远端跟踪引用是本地事实，没有 fetch 就没有 `origin/develop` 这一行。
   res = await post('remote', { action: 'fetch' })
   check('10) 再次 fetch -> 200', res.status, 200)
+  checkTrue('   写响应标记分支已过期', res.body.branchesStale, true)
+  res = await get('branches')
   checkTrue('   origin/develop 已在列表里', res.body.branches.some((b) => b.name === 'origin/develop'))
   res = await post('branch/delete', { name: 'origin/develop', remote: true })
   check('10) 删除远端分支 -> 200', res.status, 200)

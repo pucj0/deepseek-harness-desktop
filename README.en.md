@@ -235,11 +235,19 @@ composer card visually — the background extends behind the card and reuses the
 - Shows the current branch, the uncommitted change count, and ahead/behind (`master*  ↑2 ↓1`)
 - Click to open the branch switcher; a **search box** sits at the top — focused and
   cleared on open, filtering as you type
+- Branch rows behave the way IDEA's do: a **single click** selects the row and opens its
+  action menu (the ~200 ms delay is what tells a single click from a double), a **double
+  click** switches, and a **right click** opens exactly the same menu
 - Shows "Loading branches…" while the list is fetched, and distinguishes
   "No matching branches" from "no branches at all"
 - The list puts **local branches first, remotes after**, tags remote entries, marks the
   current branch with a checkmark; switching to a remote branch creates the matching
   tracking branch automatically
+- The first paint of the branch list spawns exactly **one git process** (a single
+  `for-each-ref`); ahead/behind starts from the upstream data it already carries, and only
+  the **currently visible** branches are enriched asynchronously (concurrency capped at 4).
+  Hundreds of branches therefore never mean hundreds of `git rev-list` processes, and the
+  current branch's ahead/behind always comes from `git status`, so it is exact
 - The menu flips above or below depending on viewport height, and its width and position
   stay inside the window; only the result list scrolls, the search box stays pinned
 - If uncommitted changes would be overwritten, git refuses the switch — the menu **stays
@@ -267,9 +275,20 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   one both move it; the panel itself has no workspace picker and never shows an absolute path
 - **Resizable**: drag the left edge (double-click to reset; focus it and use ←/→, or Home to
   reset). The width is remembered per app
-- The list follows IDEA's Git tool window: a status badge (A/M/D/R), a path with the directory
-  dimmed and the file name emphasised, right-aligned added/removed counts, an inline diff with
-  line numbers and add/remove backgrounds when expanded, and recent commits below
+- Two tabs at the top, like IDEA's Git tool window:
+  - `Changes`: **Staged / Changes / Unversioned** groups (all filtered from one snapshot, so a
+    group's count always equals the rows listed), click a file for an inline diff with line
+    numbers and add/remove backgrounds, and per-row stage / unstage / revert / file history.
+    The message box and **Commit / Commit and Push** are pinned to the bottom and never scroll
+    away with a long file list
+  - `Log`: **branch tree / commit graph / commit details**, three panes. A single click on a
+    commit only changes the selection and shows its details (and changed files) on the right —
+    no inline expansion; click a changed file for that commit's diff of it. The two splitters
+    are draggable and remembered, narrow windows can collapse the tree or the details, and the
+    toolbar has refresh and search
+- The change count on the entry and the file list inside the drawer come from the **same shared
+  snapshot** (one poll), so "shows 0 outside, has files inside" cannot happen; `stage /
+  unstage / revert / commit` all invalidate that snapshot and refetch once
 - **A file whose only change is its mode (a `chmod`) is not a change.** On Windows, a repo with
   `core.fileMode=true` makes git record a `100755` script as `100644` — a `0/0` "modification"
   with identical content. The host snapshots with `-c core.fileMode=false` and additionally
@@ -557,6 +576,11 @@ was verified rather than assumed:
 | `scripts/test-gitbar-checkout.mjs` | branch switching (throwaway temp repo) |
 | `scripts/test-plugin-sync.mjs` | bundled plugins land in the runtime in use, including the "runtime was swapped" repair (no Electron needed) |
 | `scripts/test-review-overlay-hooks.mjs` | the project panel's overlay entry does not shadow the standard hooks, and its workspace follows the current session (no Electron needed) |
+| `scripts/test-gitbar-workspace-race.mjs` | switching projects: a late response from the old workspace must never land |
+| `scripts/test-review-workspace-race.mjs` | shared-snapshot and commit-graph races; the entry's number and the drawer's list come from one snapshot |
+| `scripts/test-gitbar-branch-interaction.mjs` | branch rows: single click opens the menu, double click switches, right click opens the same menu |
+| `scripts/test-gitbar-branch-perf.mjs` | the process ceiling for branch listing (300 branches must not mean 300 `git` processes) |
+| `scripts/test-release-notes.mjs` | a Release body carries only its own version's notes |
 | `scripts/probe-web.mjs` | boots the runtime headlessly and reports the URL it serves |
 | `scripts/probe-ui.mjs` | drives the live UI over CDP: dump controls, click, evaluate |
 | `scripts/list-slots.mjs`, `scripts/list-slot-kinds.mjs` | enumerate UI extension slots and their kinds |
@@ -567,6 +591,31 @@ was verified rather than assumed:
 
 > Tests that start Electron and drive the UI over CDP — `test-review-sidebar.mjs`,
 > `test-ui-typography.cjs` — need a graphical session; they cannot run in a restricted sandbox.
+
+### Release notes
+
+`RELEASE_NOTES.md` is an **accumulating changelog**: each version adds a section at the top
+(`# <version>`), older ones stay below separated by `---` so history remains readable.
+
+A Release body contains **only that version's section**. There is exactly one implementation of
+"which slice" (`scripts/release-notes.mjs`), shared by three callers:
+
+```bash
+node scripts/release-notes.mjs --extract 1.4.4   # CI uses this to build the body
+node scripts/release-notes.mjs --check           # verifies package.json's version has a section
+node scripts/release.mjs                         # also validates before tagging (missing or stub-thin section blocks the release)
+```
+
+The workflow used to paste the **whole file** into the body (`cat RELEASE_NOTES.md`), so v1.4.4's
+Release carried every note back to 1.3.1. That is fixed and pinned by
+`scripts/test-release-notes.mjs` (including "no other version's heading may appear"). The releases
+already published that way (v1.3.2–v1.4.4) have been trimmed back to their own notes; the repair
+script is:
+
+```bash
+node scripts/repair-release-notes.mjs          # dry-run by default
+node scripts/repair-release-notes.mjs --apply   # body only; tags and assets untouched, original text backed up first
+```
 
 ---
 

@@ -299,6 +299,12 @@ jobs:
       # 自然没有它。不要删。
       - uses: actions/checkout@v4
 
+      # 只为了跑 `scripts/release-notes.mjs`（纯 Node、无依赖）。runner 自带的 Node 版本
+      # 会随镜像变化，显式装一个可以让"取说明"这一步的输出长期稳定。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -332,22 +338,30 @@ jobs:
 
       # 取出本次的发布说明。
       #
-      # 说明写在仓库的 RELEASE_NOTES.md 里（release.mjs 会强制它存在且版本号匹配），
-      # 这里读进 step output 再填进 Release 正文。用文件而不是把正文硬编码在工作流里：
-      # 后者会让每个版本都显示同一段泛泛的介绍，用户看不到"本次更新了什么"。
+      # 说明写在仓库的 RELEASE_NOTES.md 里（release.mjs 会强制对应的一节存在且不像没写完），
+      # 这里用 `scripts/release-notes.mjs --extract <版本>` 取出**本版本的那一节**，
+      # 再填进 Release 正文。
+      #
+      # **不要再改回 `cat RELEASE_NOTES.md`。** 那个写法踩过一次很显眼的坑：这个文件是
+      # 累积的变更日志（旧版本用 `---` 分隔留在下面，方便用户回看历史），整篇塞进正文的
+      # 结果就是 v1.4.4 的 Release 里带着 1.4.3、1.4.2……一直回到 1.3.1 的全部说明——
+      # 用户点开"本次更新"看到的是一年半的更新日志。取哪一段的规则只有一份实现
+      # （scripts/release-notes.mjs），CI 与 release.mjs、以及回归测试共用它。
       - name: 读取发布说明
         id: notes
         run: |
-          if [ ! -f RELEASE_NOTES.md ]; then
-            echo "::error::缺少 RELEASE_NOTES.md"
+          version="${GITHUB_REF_NAME#v}"
+          echo "本次版本: $version"
+          if ! node scripts/release-notes.mjs --extract "$version" > notes.md; then
+            echo "::error::RELEASE_NOTES.md 里没有 $version 那一节"
             exit 1
           fi
-          echo "本次说明："
-          cat RELEASE_NOTES.md
+          echo "本次说明:"
+          cat notes.md
           # 多行内容要用 heredoc 形式写进 GITHUB_OUTPUT。
           {
             echo 'body<<RELEASE_NOTES_EOF'
-            cat RELEASE_NOTES.md
+            cat notes.md
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 

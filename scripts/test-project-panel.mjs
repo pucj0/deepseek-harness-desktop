@@ -83,8 +83,12 @@ const panel = JSON.parse(
         found: true,
         // 只回传断言用得上的片段，而不是全文：文本可能上千字符，整段回传会因为
         // 序列化体积被截断成 undefined（实测踩到，断言因此全假失败）。
-        hasHistoryTitle: (p.innerText || '').includes('最近提交'),
-        hasCommitRow: /\\d{7}/.test(p.innerText || ''),
+        //
+        // 注意：这段代码本身**在一个模板字符串里**，因此注释里不能出现反引号。
+        // 抽屉现在是 Changes / Log 两个页签：默认停在 Changes（改动清单 + 提交区），
+        // 提交记录在 Log 页签里（下面点过去再看）。
+        hasTabs: (p.innerText || '').includes('Changes') && (p.innerText || '').includes('Log'),
+        hasChangesPane: p.querySelector('[data-review-tab-body="changes"]') !== null,
         asksForWorkspace: (p.innerText || '').includes('当前没有可用的工作区'),
         // 工作区必须不可编辑、也不展示路径。
         hasPicker: p.querySelector('select') !== null,
@@ -105,17 +109,40 @@ check('面板在视口内（下）', panel.bottom <= panel.vh, 'true')
 
 console.log('')
 console.log('=== 内容 ===')
-// 关键需求：项目级要能看到 git 记录。
-check('面板含「最近提交」一节', panel.hasHistoryTitle, 'true')
-check('历史不再停留在加载中', !/最近提交 \| 正在读取差异/.test(panel.head + panel.tail), 'true')
+// 关键需求：项目级要能看到 git 记录。现在它分成两个页签：默认的 Changes 与提交记录所在的 Log。
+check('面板有 Changes | Log 两个页签', panel.hasTabs, 'true')
+check('默认停在 Changes 页签', panel.hasChangesPane, 'true')
 check('面板能确定工作区（未提示没有可用工作区）', panel.asksForWorkspace, 'false')
 // 关键需求：工作区跟随当前对话，面板既不可编辑、也不展示绝对路径。
 check('面板没有工作区选择器', panel.hasPicker, 'false')
 check('面板不展示工作区路径', panel.showsPath, 'false')
-// 提交历史必须真的有条目，而不只是有个标题。
-check('历史里有提交条目（短哈希）', panel.hasCommitRow, 'true')
 console.log(`  面板开头: ${panel.head}`)
 console.log(`  面板结尾: ${panel.tail}`)
+
+console.log('')
+console.log('=== Log 页签里的提交记录 ===')
+await evaluate(`document.querySelector('[data-review-tab="log"]')?.click(), true`)
+await wait(3000)
+const logTab = JSON.parse(
+  await evaluate(`
+    (() => {
+      const p = ${PANEL};
+      if (!p) return '{"found":false}';
+      return JSON.stringify({
+        found: true,
+        hasGraph: p.querySelector('[data-graph-view]') !== null,
+        hasDetailPane: p.querySelector('[data-graph-pane="detail"]') !== null,
+        hasCommitRow: /\\d{7}/.test(p.innerText || ''),
+        body: (p.innerText || '').replace(/\\n+/g, ' | ').slice(0, 200),
+      });
+    })()
+  `),
+)
+// 提交图必须真的渲染出来，而不只是切了个页签。
+check('Log 页签里有提交图', logTab.hasGraph, 'true')
+check('提交图是三栏（带详情栏）', logTab.hasDetailPane, 'true')
+check('提交图里有提交条目（短哈希）', logTab.hasCommitRow, 'true')
+console.log(`  Log 页签: ${logTab.body}`)
 
 socket.close()
 console.log('')

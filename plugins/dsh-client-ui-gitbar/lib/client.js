@@ -269,17 +269,163 @@ window.__ModuleLoader__.load({
     const POLL_MS = 15000
 
     /**
+     * 单击分支行之后**等多久**才弹出操作菜单（毫秒）。
+     *
+     * IDEA 的分支行是"单击选中、双击切换"：双击在浏览器里必然先派发两次 click，因此
+     * 单击必须等一小会儿才能确认它真的是单击。200ms 是这段延迟的经验值——短于 180ms
+     * 会在稍慢的双击上误弹菜单，长于 220ms 用户会觉得"点了没反应"。
+     *
+     * 第二次 click 一进来就取消这个定时器（见 BranchChip 的 onBranchClick），
+     * 因此正常的双击**不会**出现"菜单闪一下再切换"。
+     */
+    const SINGLE_CLICK_MS = 200
+
+    /**
+     * 一次为多少个分支补算精确的领先/落后。
+     *
+     * 只对**屏幕上真的能看见**的分支发这个请求（分组、搜索过滤之后的行），因此这个数字
+     * 是"一屏行数"的量级而不是"分支总数"的量级——300 个分支的仓库也只补算这些。
+     */
+    const SYNC_BATCH = 32
+
+    /**
+     * 工作区世代闸门（workspace generation gate）。
+     *
+     * **这个文件的另一半（`dsh-client-ui-review/lib/client.js`）里有一份孪生实现**，
+     * 差异只在注释里提到的调用点。不能抽成共享文件：客户端 bundle 的契约是"一个插件只有
+     * 一个脚本"，模块加载器只认它自己的基线表，同目录的其它文件在浏览器里取不到
+     * （见本文件头部的说明）。因此两处各留一份，且都保持同一套语义。
+     *
+     * 它解决的是一整类 bug：异步请求在 workspace 改变之后才返回，把**旧项目**的数据写进
+     * 新项目的状态里。界面上的表现是"切了项目，数字/分支/文件还是上一个项目的"，而且
+     * 时有时无（取决于两个请求谁先回来）。做法是把"这次请求属于哪个工作区、第几代、第几号"
+     * 记在请求上，响应回来时只有仍然属于当前代、且仍是该状态分片最新的一次请求才允许落地。
+     *
+     * 四条硬约束（每一条都对应一次真实的错误形状）：
+     *   1. workspace 改变**立即**换代。换代发生在 render 期（见 useWorkspaceGate），
+     *      不是等 effect——effect 在渲染之后才跑，中间那一帧旧数据就已经画出去了。
+     *   2. loading 也走同一条判定。否则旧请求的 `finally` 会把"正在加载"关掉，界面于是
+     *      显示新工作区的空数据（"进去什么都没有"）。
+     *   3. 同一工作区、同一类请求 single-flight。定时轮询在慢仓库上会重叠：上一个请求还没
+     *      回来下一个就发出去，多个 git 进程同时跑，而返回顺序与发起顺序无关。
+     *   4. 写操作**抢占**它要写的状态分片。写操作回的是最新状态，任何在它之前**发起**的读
+     *      都不允许覆盖它——哪怕那个读先返回。
+     *
+     * @returns 闸门对象；每个使用它的组件一个（见 useWorkspaceGate）。
+     */
+    function createWorkspaceGate() {
+      let workspace
+      let generation = 0
+      let nextId = 0
+      /** single-flight：`generation\u0000kind` → 在途条目。 */
+      const inflight = new Map()
+      /** 每个状态分片当前"最新一次请求"的 id；只有它允许写。 */
+      const latestOfSlice = new Map()
+
+      const isCurrent = (ticket) =>
+        ticket.generation === generation && Object.is(ticket.workspace, workspace)
+
+      return {
+        /** 记录当前工作区；变了就换代。返回是否发生了换代。 */
+        sync(next) {
+          if (Object.is(next, workspace)) return false
+          workspace = next
+          generation += 1
+          // 在途请求从这一刻起一律过期，直接丢掉引用，避免 map 无限增长。
+          inflight.clear()
+          return true
+        },
+        get workspace() {
+          return workspace
+        },
+        get generation() {
+          return generation
+        },
+        /** 这次响应还属于当前工作区/当前代吗？ */
+        isCurrent,
+        /** 这是该请求所写分片的最新一次请求吗？（当前代 + 最新号） */
+        accept(ticket) {
+          if (!isCurrent(ticket)) return false
+          return ticket.slices.every((slice) => latestOfSlice.get(slice) === ticket.id)
+        },
+        /**
+         * 发起一次请求。**永远不 reject**：成功/失败都以 `{ ok, value | cause, ticket }`
+         * 的形状返回，调用方只需判一次 `accept`，不必再包一层 try/catch——那层 catch
+         * 正是"旧工作区的错误写进新工作区"最容易漏掉的地方。
+         *
+         * @param kind - 请求种类（single-flight 的键，也是日志/诊断里的名字）。
+         * @param task - 真正发请求的函数。
+         * @param options - `coalesce`：同类请求合并；`slices`：这次响应要写哪些状态分片
+         *   （默认就是 kind 自己）。
+         * @returns `{ ticket, promise }`。
+         */
+        run(kind, task, options) {
+          const slices = Array.isArray(options?.slices) ? options.slices : [kind]
+          const coalesce = options?.coalesce === true
+          const key = `${generation}\u0000${kind}`
+          if (coalesce) {
+            const hit = inflight.get(key)
+            if (hit !== undefined) return hit
+          }
+          const ticket = { workspace, generation, id: (nextId += 1), kind, slices }
+          for (const slice of slices) latestOfSlice.set(slice, ticket.id)
+          const promise = Promise.resolve()
+            .then(task)
+            .then(
+              (value) => ({ ok: true, value, ticket }),
+              (cause) => ({ ok: false, cause, ticket }),
+            )
+          const entry = { ticket, promise }
+          if (coalesce) {
+            inflight.set(key, entry)
+            void promise.then(() => {
+              if (inflight.get(key) === entry) inflight.delete(key)
+            })
+          }
+          return entry
+        },
+      }
+    }
+
+    /**
+     * 给一个组件取它的工作区闸门，并在 render 期就完成换代。
+     *
+     * 为什么在 render 期同步：`workspace` 是从 `useSessions` 上读来的，用户切换项目时
+     * 它会在这一个 render 里就是新值。此刻换代之后，本帧读到的 generation 已经是新的，
+     * 于是"上一个工作区的数据"从**这一帧**起就不再被渲染（见各处 `state.generation ===
+     * generation ? state : 空状态` 的写法）——不需要等任何 effect 跑完。
+     *
+     * 同一个值重复 sync 是幂等的，因此 React 的严格模式双渲染、或一次切换引起的多次
+     * 渲染都不会多换代。
+     *
+     * @param workspace - 当前工作区路径。
+     * @returns 稳定的闸门对象。
+     */
+    function useWorkspaceGate(workspace) {
+      const ref = react.useRef(null)
+      // 判 null 也判 undefined：`useRef()` 不带参数（或某些实现）给的是 undefined。
+      if (ref.current === null || ref.current === undefined) ref.current = createWorkspaceGate()
+      const gate = ref.current
+      gate.sync(workspace)
+      return gate
+    }
+
+    /**
      * 请求 host 侧的 git 路由。
      * @param path - 相对 API 前缀的路径，如 'status'。
-     * @param options - `cwd` 是要查询的工作区；`init` 是额外的 fetch 选项。
+     * @param options - `cwd` 是要查询的工作区；`query` 是附加的查询参数；`init` 是
+     *   fetch 的额外选项。
      * @returns 解析后的 JSON；失败时抛出。
      */
     async function call(path, options) {
-      const { cwd, ...init } = options ?? {}
+      const { cwd, query, ...init } = options ?? {}
       // 必须带上工作区：会话可以有自己的项目，与外壳启动时的那个不同。
       // 不传的话 host 会用外壳工作区，于是切换项目后徽章仍显示上一个仓库的分支。
-      const query = typeof cwd === 'string' && cwd !== '' ? `?cwd=${encodeURIComponent(cwd)}` : ''
-      const response = await fetch(`${API}/${path}${query}`, {
+      const params = new URLSearchParams()
+      if (typeof cwd === 'string' && cwd !== '') params.set('cwd', cwd)
+      for (const [key, value] of Object.entries(query ?? {})) params.set(key, String(value))
+      const search = params.toString()
+      const response = await fetch(`${API}/${path}${search === '' ? '' : `?${search}`}`, {
         // 同源请求带上 cookie，服务端据此认证。
         credentials: 'same-origin',
         headers: { accept: 'application/json' },
@@ -520,17 +666,39 @@ window.__ModuleLoader__.load({
           ? useSessions((state) => state?.byId?.[sessionId]?.cwd)
           : undefined
 
-      const [status, setStatus] = react.useState(null)
-      const [branches, setBranches] = react.useState([])
-      const [remotes, setRemotes] = react.useState([])
+      /**
+       * **一次工作区一份状态**。
+       *
+       * 所有异步结果都带 `generation`：渲染时只有当它等于当前代才被采用，否则一律当成
+       * "上一个工作区的数据"丢弃。这样"切换项目后仍显示旧项目分支"在结构上就不可能发生
+       * ——包括 loading 与 busy 这两个容易被 `finally` 覆盖的开关（它们也住在这一份状态里，
+       * 因此旧请求的收尾写不进新的那一份）。
+       *
+       * 初值 `generation: -1`：第一次渲染必然是"没有当前代的数据"，于是先进入加载态而
+       * 不是显示空列表。
+       */
+      const [state, setState] = react.useState({ generation: -1 })
+      const gate = useWorkspaceGate(workspace)
+      const generation = gate.generation
+      /** 当前代的那一份；不是当前代就退化成空壳（这一帧就看不到旧数据）。 */
+      const fresh = state.generation === generation ? state : { generation }
+      const status = fresh.status ?? null
+      const branches = Array.isArray(fresh.branches) ? fresh.branches : []
+      const remotes = Array.isArray(fresh.remotes) ? fresh.remotes : []
+      const loading = fresh.branchesLoading === true
+      const busy = fresh.busy === true
+      const error = fresh.error ?? null
+      const notice = fresh.notice ?? ''
+
+      /** 搜索词（面板内的分支过滤）。 */
       const [query, setQuery] = react.useState('')
-      const [loading, setLoading] = react.useState(false)
       const [open, setOpen] = react.useState(false)
-      const [busy, setBusy] = react.useState(false)
-      /** 失败信息：`{ key, detail, code }`，key 是字典键。 */
-      const [error, setError] = react.useState(null)
-      /** 成功后的提示（例如"改动已存入 stash"）。 */
-      const [notice, setNotice] = react.useState('')
+      /**
+       * 单击选中的分支（IDEA 风格：单击只选中并开菜单，不 checkout）。
+       *
+       * 与"当前分支"是两件事：选中是**操作对象**，当前是**仓库状态**。
+       */
+      const [selectedBranch, setSelectedBranch] = react.useState('')
       /**
        * 上一次尝试切换的目标分支。
        *
@@ -538,7 +706,7 @@ window.__ModuleLoader__.load({
        * ——错误文本里只有文件名，没有分支名。
        */
       const [pendingBranch, setPendingBranch] = react.useState('')
-      /** 右键菜单：`{ x, y, branch }`；null 表示未打开。 */
+      /** 右键/操作菜单：`{ x, y, branch }`；null 表示未打开。 */
       const [menu, setMenu] = react.useState(null)
       /** 对话框：`{ kind, branch? }`；null 表示未打开。 */
       const [dialog, setDialog] = react.useState(null)
@@ -555,60 +723,90 @@ window.__ModuleLoader__.load({
        * 重渲染时要保持不变——否则每次重渲染都会重建对话框、把用户正在输入的内容清掉。
        */
       const [serial, setSerial] = react.useState(0)
-      /** 打开对话框：收起右键菜单，并换一个实例序号（见 serial 的说明）。 */
+      /** 打开对话框：收起操作菜单，并换一个实例序号（见 serial 的说明）。 */
       const openDialog = react.useCallback((next) => {
         setMenu(null)
         setSerial((value) => value + 1)
         setDialog(next)
       }, [])
 
-      const refresh = react.useCallback(async () => {
-        try {
-          const next = await call('status', { cwd: workspace })
-          setStatus(next)
-          setError(null)
-        } catch (cause) {
-          setError(describeError(cause))
-        }
-        // 依赖 workspace：会话换了项目就要重新查，否则徽章会停在旧仓库的分支上。
-      }, [workspace])
+      /**
+       * 把结果写进"某一次请求所属的那一代"状态。
+       *
+       * 调用方**必须**先过 `gate.accept(ticket)`：这里只负责"写进哪一代"，不负责判断
+       * 该不该写。分开的理由是两者回答的问题不同——"该不该写"是竞态判定（有唯一答案），
+       * "写进哪一代"是纯数据操作。混在一起时最容易漏掉的就是前者。
+       *
+       * @param ticket - 请求票据（提供 generation）。
+       * @param changes - 要合并进去的字段。
+       */
+      const patch = react.useCallback((ticket, changes) => {
+        setState((prev) => {
+          // 基准必须按票据的 generation 重建，不能拿一个别代的对象改：否则一次旧代的
+          // 合并会把新代已经写好的字段抹掉。
+          const base = prev.generation === ticket.generation ? prev : { generation: ticket.generation }
+          return { ...base, ...changes }
+        })
+      }, [])
 
-      /** 重新拉取分支与远端列表。写操作之后也走它（host 已经回了新列表，但整轮的
-       * 一次重取能让"别的窗口/终端刚改过"这件事一并收敛）。 */
+      /** 查一次当前分支与工作区状态。single-flight：同时在飞的同类请求只会有一个。 */
+      const refresh = react.useCallback(async () => {
+        const { ticket, promise } = gate.run('status', () => call('status', { cwd: workspace }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        if (outcome.ok) patch(ticket, { status: outcome.value, error: null })
+        else patch(ticket, { error: describeError(outcome.cause) })
+        // 依赖 generation：会话换了项目就要重新查，否则徽章会停在旧仓库的分支上。
+      }, [gate, workspace, generation, patch])
+
+      /**
+       * 重新拉取分支列表。
+       *
+       * 首屏只有一次 `for-each-ref`（见 host 侧 listBranches 的说明）；精确的领先/落后
+       * 由下面那个 effect 对**可见**分支补算，因此这个函数不等待任何按分支数的进程。
+       */
       const loadBranches = react.useCallback(async () => {
-        setLoading(true)
-        try {
-          const payload = await call('branches', { cwd: workspace })
-          // host 侧返回的是对象数组：`{ name, isRemote, current, upstream, ahead, behind… }`。
-          // 兼容旧的纯字符串形式，避免 host/client 版本不一致时列表整片消失。
-          const raw = Array.isArray(payload?.branches) ? payload.branches : []
-          setBranches(
-            raw.map((item) =>
-              typeof item === 'string' ? { name: item, isRemote: false, current: false } : item,
-            ),
-          )
-          setRemotes(Array.isArray(payload?.remotes) ? payload.remotes : [])
-          return true
-        } catch (cause) {
-          setError(describeError(cause))
+        const { ticket, promise } = gate.run('branches', () => call('branches', { cwd: workspace }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return false
+        patch(ticket, { branchesLoading: true })
+        const outcome = await promise
+        // 旧工作区的响应（或已被更晚的请求取代）一律静默丢弃：连 loading 都不许关。
+        if (!gate.accept(ticket)) return false
+        if (!outcome.ok) {
+          patch(ticket, { branchesLoading: false, error: describeError(outcome.cause) })
           return false
-        } finally {
-          setLoading(false)
         }
-      }, [workspace])
+        // host 侧返回的是对象数组：`{ name, isRemote, current, upstream, ahead, behind… }`。
+        // 兼容旧的纯字符串形式，避免 host/client 版本不一致时列表整片消失。
+        const raw = Array.isArray(outcome.value?.branches) ? outcome.value.branches : []
+        patch(ticket, {
+          branchesLoading: false,
+          branches: raw.map((item) =>
+            typeof item === 'string' ? { name: item, isRemote: false, current: false } : item,
+          ),
+        })
+        return true
+      }, [gate, workspace, generation, patch])
+
+      /** 拉远端列表（面板打开、推送对话框需要时才取）。 */
+      const loadRemotes = react.useCallback(async () => {
+        const { ticket, promise } = gate.run('remotes', () => call('remotes', { cwd: workspace }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        if (outcome.ok) patch(ticket, { remotes: Array.isArray(outcome.value?.remotes) ? outcome.value.remotes : [] })
+      }, [gate, workspace, generation, patch])
 
       // 首次拉取 + 定时对齐。
+      //
+      // 依赖 refresh（它随 generation 变化），因此**切换工作区会立刻重建这个 effect**：
+      // 旧 interval 被 clear，新工作区马上拉一次。再加上 gate 的 single-flight，
+      // 慢仓库上不会出现"上一个轮询还没回来下一个又发出去"的重叠。
       react.useEffect(() => {
-        let alive = true
-        const tick = () => {
-          if (alive) void refresh()
-        }
-        tick()
-        const timer = setInterval(tick, POLL_MS)
-        return () => {
-          alive = false
-          clearInterval(timer)
-        }
+        void refresh()
+        const timer = setInterval(() => void refresh(), POLL_MS)
+        return () => clearInterval(timer)
       }, [refresh])
 
       // 打开面板时才拉分支列表：分支多的仓库列一次不便宜，而用户可能从不点它。
@@ -617,44 +815,67 @@ window.__ModuleLoader__.load({
         setQuery('')
         setMenu(null)
         void loadBranches()
+        void loadRemotes()
         return undefined
-        // 依赖 workspace：会话换项目后，菜单里列出的必须是新仓库的分支。
-      }, [open, workspace, loadBranches])
+        // 依赖 generation：会话换项目后，菜单里列出的必须是新仓库的分支。
+      }, [open, generation, loadBranches, loadRemotes])
 
       /**
        * 执行一次写操作并整体替换状态。
        *
-       * **统一入口**的意义：host 的所有写路由都回同一形状（status + branches + remotes），
-       * 因此这里只需要一处"把响应铺回状态"，每个操作自己不再关心该刷新哪些字段。
-       * 返回 host 的响应，让调用方能读 `stash` / `detached` / `empty` 这类附加信息。
+       * **统一入口**的意义：host 的所有写路由都回同一形状（status + remotes），因此这里
+       * 只需要一处"把响应铺回状态"。返回 host 的响应，让调用方能读 `stash` / `detached` /
+       * `empty` 这类附加信息。
+       *
+       * 两处刻意的设计：
+       *   * `slices: ['status', 'branches']`——写操作**抢占**这两份状态。任何在它之前
+       *     发起的读都不再允许落地（哪怕先返回）：写回的是最新状态。
+       *   * 分支列表**不在写响应里**（host 回 `branchesStale: true`）。因此这里不 await
+       *     任何分支列表的补算，写操作的反馈立刻可见，分支列表由一次异步刷新收敛。
        */
       const run = react.useCallback(
         async (route, body) => {
-          setBusy(true)
-          setError(null)
-          setNotice('')
-          try {
-            const result = await send(route, workspace, body)
-            if (result?.isRepo === false) return result
+          const { ticket, promise } = gate.run(`write:${route}`, () => send(route, workspace, body), {
+            slices: ['status', 'branches'],
+          })
+          if (!gate.isCurrent(ticket)) return undefined
+          patch(ticket, { busy: true, error: null, notice: '' })
+          const outcome = await promise
+          // 工作区已经换了：这次写操作的收尾（包括 busy）一律不写进新的那一份。
+          if (!gate.isCurrent(ticket)) return undefined
+          if (!outcome.ok) {
+            patch(ticket, { busy: false, error: describeError(outcome.cause) })
+            return undefined
+          }
+          const result = outcome.value
+          if (gate.accept(ticket)) {
             // 写操作回的是最新状态：直接铺回去，界面立刻反映结果。
-            if (result !== null && typeof result === 'object' && 'branch' in result) setStatus(result)
-            if (Array.isArray(result?.branches)) setBranches(result.branches)
-            if (Array.isArray(result?.remotes)) setRemotes(result.remotes)
+            const changes = { busy: false }
+            if (result !== null && typeof result === 'object' && 'branch' in result) changes.status = result
+            if (Array.isArray(result?.remotes)) changes.remotes = result.remotes
             // 附加信息的提示文案。放在这里而不是每个操作里，是为了让"操作成功但需要
             // 额外告知"这件事只有一处实现。
-            if (result?.stash?.stashed === true) setNotice(t('stashed', { ref: result.stash.ref }))
-            else if (result?.detached === true) setNotice(t('detachedNotice'))
-            else if (result?.empty === true) setNotice(t('emptyCherryPick'))
-            else if (typeof result?.aborted === 'string') setNotice(t('aborted'))
-            return result
-          } catch (cause) {
-            setError(describeError(cause))
-            return undefined
-          } finally {
-            setBusy(false)
+            if (result?.stash?.stashed === true) changes.notice = t('stashed', { ref: result.stash.ref })
+            else if (result?.detached === true) changes.notice = t('detachedNotice')
+            else if (result?.empty === true) changes.notice = t('emptyCherryPick')
+            else if (typeof result?.aborted === 'string') changes.notice = t('aborted')
+            patch(ticket, changes)
+          } else {
+            // 已有更晚的请求接手这两份状态：只收起自己的 busy。
+            patch(ticket, { busy: false })
           }
+          // 分支列表过期：**异步**刷新，不阻塞这次写操作的返回。
+          if (result?.branchesStale === true) void loadBranches()
+          // 跨插件：checkout/merge/rebase 也会改变工作区，因此让 review 那份共享快照失效。
+          // 用可选链调用，因为两个插件各自独立加载——review 不在时这里什么也不做。
+          // （`window.__dshDesktopGitSnapshot` 由 dsh-client-ui-review 在 apply 时挂上。）
+          if (typeof window !== 'undefined') {
+            const bridge = window.__dshDesktopGitSnapshot
+            if (typeof bridge?.invalidate === 'function') void bridge.invalidate(workspace)
+          }
+          return result
         },
-        [workspace, t],
+        [gate, workspace, generation, patch, loadBranches, t],
       )
 
       const switchTo = react.useCallback(
@@ -676,8 +897,8 @@ window.__ModuleLoader__.load({
       const toggleOpen = react.useCallback(() => {
         setOpen((value) => {
           if (!value) {
-            setError(null)
-            setNotice('')
+            setQuery('')
+            setSelectedBranch('')
             setMenu(null)
           }
           return !value
@@ -772,9 +993,134 @@ window.__ModuleLoader__.load({
         }
       }, [open, menu, dialog])
 
+      const search = query.trim().toLowerCase()
+      const visible = branches.filter((branch) => branch.name.toLowerCase().includes(search))
+
+      /**
+       * 单击/双击的定时器与操作菜单（IDEA 风格交互）。
+       *
+       * 交互约定（与 IDEA 的 Git 分支弹窗一致）：
+       *   单击  —— 选中这一行 + 打开它的操作菜单，**不** checkout；
+       *   双击  —— 切换到这个分支（远程分支沿用 host 的"建本地跟踪分支"逻辑）；
+       *   右键  —— 打开与单击**完全相同**的那个菜单。
+       *
+       * 为什么单击要延迟：双击在浏览器里必然先派发 click，所以"单击就弹菜单"会让双击
+       * 先弹一次菜单再切换（闪一下）。因此单击等 SINGLE_CLICK_MS 再弹；第二次 click
+       * 一进来就取消它，交给 dblclick 去 checkout。
+       */
+      const menuTimer = react.useRef(0)
+      const clearMenuTimer = react.useCallback(() => {
+        if (menuTimer.current !== 0) {
+          clearTimeout(menuTimer.current)
+          menuTimer.current = 0
+        }
+      }, [])
+      // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
+      react.useEffect(() => clearMenuTimer, [clearMenuTimer])
+
+      /** 在某个位置为某个分支打开操作菜单。 */
+      const openMenuFor = react.useCallback((branch, x, y) => {
+        setMenu({ x, y, branch })
+      }, [])
+
+      /**
+       * 单击一行分支。
+       *
+       * `event.currentTarget.getBoundingClientRect()` 优先：菜单要贴着**被点的那一行**
+       * （IDEA 里菜单就从那一行展开）。拿不到矩形时退回事件坐标，再拿不到就退到左上角
+       * ——BranchContextMenu 自己会把位置收进视口。
+       */
+      const onBranchClick = react.useCallback(
+        (event, entry) => {
+          setSelectedBranch(entry.name)
+          if (menuTimer.current !== 0) {
+            // 这是双击的第二下：取消单击菜单，让 dblclick 去执行 checkout。
+            clearMenuTimer()
+            return
+          }
+          const rect = typeof event?.currentTarget?.getBoundingClientRect === 'function' ? event.currentTarget.getBoundingClientRect() : null
+          const x = rect === null ? (typeof event?.clientX === 'number' ? event.clientX : 12) : rect.left
+          const y = rect === null ? (typeof event?.clientY === 'number' ? event.clientY : 12) : rect.bottom + 2
+          menuTimer.current = setTimeout(() => {
+            menuTimer.current = 0
+            openMenuFor(entry, x, y)
+          }, SINGLE_CLICK_MS)
+        },
+        [clearMenuTimer, openMenuFor],
+      )
+
+      /**
+       * 双击一行分支：切换。
+       *
+       * 当前分支双击**什么都不做**（IDEA 也是这样：切到自己没有意义，而"点了没反应"
+       * 至少不会误触发一个操作）。单击仍然可以打开菜单，因此当前分支并非不可操作。
+       */
+      const onBranchDoubleClick = react.useCallback(
+        (entry) => {
+          // 双保险：即便某次双击只派发了一次 click，也不会留下一个待弹的菜单。
+          clearMenuTimer()
+          setMenu(null)
+          if (entry.current === true || busy) return
+          void switchTo(entry.name)
+        },
+        [busy, clearMenuTimer, switchTo],
+      )
+
+      const onBranchContextMenu = react.useCallback(
+        (event, entry) => {
+          event.preventDefault()
+          event.stopPropagation()
+          clearMenuTimer()
+          setSelectedBranch(entry.name)
+          openMenuFor(entry, event.clientX, event.clientY)
+        },
+        [clearMenuTimer, openMenuFor],
+      )
+
+      /**
+       * 为**当前可见**的分支补算精确的领先/落后。
+       *
+       * 首屏用的是 for-each-ref 的 `%(upstream:track)`（见 host 侧 listBranches），它通常
+       * 正确，但在本地跟踪引用缺失/过期时会安静地给 0/0。因此这里对可见行按需补算：
+       *   * 只发**可见**的名字（分组、搜索过滤之后的结果），并且上限 SYNC_BATCH；
+       *   * 只发有上游、且还没精确过的；
+       *   * 完全不阻塞列表出现——列表先画出来，数字后到。
+       *
+       * 依赖 `syncKey` 而不是 `visible` 数组本身：数组每次渲染都是新对象，用它当依赖会
+       * 变成"每渲染一次发一次请求"。
+       */
+      const syncKey = visible
+        .filter((entry) => entry.upstream !== '' && entry.syncExact !== true)
+        .slice(0, SYNC_BATCH)
+        .map((entry) => entry.name)
+        .join('\u0000')
+      react.useEffect(() => {
+        if (!open || syncKey === '') return undefined
+        const names = syncKey.split('\u0000')
+        const { ticket, promise } = gate.run('branch/sync', () => call('branch/sync', { cwd: workspace, query: { names: names.join(',') } }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return undefined
+        void promise.then((outcome) => {
+          if (!gate.accept(ticket) || !outcome.ok) return
+          const sync = outcome.value?.sync ?? {}
+          setState((prev) => {
+            if (prev.generation !== ticket.generation || !Array.isArray(prev.branches)) return prev
+            return {
+              ...prev,
+              branches: prev.branches.map((entry) =>
+                Object.hasOwn(sync, entry.name) ? { ...entry, ...sync[entry.name] } : entry,
+              ),
+            }
+          })
+        })
+        return undefined
+      }, [open, syncKey, gate, workspace, generation])
+
       if (status === null) {
         // 还没有数据时渲染 null 而不是占位骨架：这个位置空间很小，
         // 一个闪烁的骨架比"晚半秒出现"更惹眼。
+        //
+        // 切换工作区时这里也会命中（换代后当前代还没有 status）：宁可让徽章消失一瞬，
+        // 也不显示上一个项目的分支——那正是这次要根治的现象。
         return null
       }
 
@@ -785,8 +1131,6 @@ window.__ModuleLoader__.load({
       if (status.changedFiles > 0) flags.push(`*${status.changedFiles}`)
       if (status.ahead > 0) flags.push(`\u2191${status.ahead}`)
       if (status.behind > 0) flags.push(`\u2193${status.behind}`)
-      const search = query.trim().toLowerCase()
-      const visible = branches.filter((branch) => branch.name.toLowerCase().includes(search))
 
       return react.createElement(
         'div',
@@ -853,16 +1197,16 @@ window.__ModuleLoader__.load({
               setQuery,
               anchor,
               remotes,
-              onRefresh: () => void Promise.all([refresh(), loadBranches()]),
+              /** 单击选中的分支（与"当前分支"不同，见 selectedBranch 的说明）。 */
+              selected: selectedBranch,
+              onRefresh: () => void Promise.all([refresh(), loadBranches(), loadRemotes()]),
               onFetch: () => void run('remote', { action: 'fetch' }),
               onSwitch: (branch) => void switchTo(branch),
               onStashSwitch: () => void switchTo(pendingBranch, { stash: true }),
               onDialog: openDialog,
-              onContextMenu: (event, branch) => {
-                event.preventDefault()
-                event.stopPropagation()
-                setMenu({ x: event.clientX, y: event.clientY, branch })
-              },
+              onPick: onBranchClick,
+              onActivate: onBranchDoubleClick,
+              onContextMenu: onBranchContextMenu,
               onAbort: (kind) => void run('op/abort', { kind }),
             })
           : null,
@@ -939,7 +1283,7 @@ window.__ModuleLoader__.load({
     function SourcePanel(props) {
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
-        onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onContextMenu, onAbort,
+        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort,
       } = props
 
       /** 一行快捷操作。 */
@@ -976,9 +1320,41 @@ window.__ModuleLoader__.load({
           extra ?? null,
         )
 
+      /**
+       * 当前分支的领先/落后用 `/status` 的值覆盖。
+       *
+       * `/branches` 的 ahead/behind 来自 for-each-ref 的 `%(upstream:track)`（首屏够快），
+       * 而 `/status` 的 `# branch.ab` 是 git 自己按上游算出来的，**当前分支**这一行用它
+       * 才是准的（要求："当前分支的 ahead/behind 要准确"）。两者的数据源其实是同一批
+       * 引用，因此这里的覆盖不会与列表自相矛盾——覆盖完当前分支那一行与徽章上的
+       * ↑/↓ 标记也一致了。
+       *
+       * @param entry - 分支条目。
+       * @returns 补好同步字段的条目。
+       */
+      const withCurrentSync = (entry) => {
+        if (entry.current !== true || status === null || status.detached === true) return entry
+        if (typeof status.branch !== 'string' || status.branch === '' || status.branch !== entry.name) return entry
+        const upstream = entry.upstream !== '' ? entry.upstream : (typeof status.upstream === 'string' ? status.upstream : '')
+        if (upstream === '') return entry
+        const ahead = Number(status.ahead ?? 0)
+        const behind = Number(status.behind ?? 0)
+        return {
+          ...entry,
+          upstream,
+          ahead,
+          behind,
+          diverged: ahead > 0 && behind > 0,
+          upstreamGone: status.upstreamGone === true,
+          syncExact: true,
+        }
+      }
+
       /** 一行分支。 */
-      const row = (entry) => {
+      const row = (raw) => {
+        const entry = withCurrentSync(raw)
         const sync = syncLabel(entry, t)
+        const isSelected = selected === entry.name
         const { branch: upstreamBranch } = splitUpstream(entry.upstream)
         return react.createElement(
           'button',
@@ -987,9 +1363,14 @@ window.__ModuleLoader__.load({
             type: 'button',
             'data-desktop-branch-option': '',
             'data-desktop-branch-name': entry.name,
+            'data-desktop-branch-selected': isSelected ? 'true' : undefined,
             'aria-current': entry.current ? 'true' : undefined,
-            disabled: busy || entry.current,
-            onClick: () => onSwitch(entry.name),
+            // 当前分支**不禁用整行**：单击仍然要能打开它的操作菜单（新建分支、新建标签…），
+            // 只有那些"对自己没有意义"的动作在菜单里被禁用（见 BranchContextMenu）。
+            disabled: busy,
+            // IDEA 风格：单击选中并打开操作菜单（延迟见 SINGLE_CLICK_MS），双击才切换。
+            onClick: (event) => onPick(event, entry),
+            onDoubleClick: () => onActivate(entry),
             onContextMenu: (event) => onContextMenu(event, entry),
             title: `${entry.name}\n${t(entry.current ? 'currentBranch' : entry.isRemote ? 'remoteBranch' : 'localBranch')}${entry.upstream === '' ? '' : `\n${syncTitle(entry, t)}`}`,
             style: {
@@ -1001,18 +1382,22 @@ window.__ModuleLoader__.load({
               minHeight: '34px',
               textAlign: 'left',
               padding: '6px 8px',
-              border: 'none',
+              border: `1px solid ${isSelected ? `color-mix(in srgb, ${ACCENT} 35%, transparent)` : 'transparent'}`,
               borderRadius: '7px',
-              background: entry.current
-                ? `color-mix(in srgb, ${ACCENT} 8%, ${SURFACE})`
-                : 'var(--dsh-branch-option-bg, transparent)',
+              // 选中（单击、正在操作的对象）与当前分支（仓库状态）是两种高亮：前者用
+              // 描边加浅底，后者用强调色文字。两者同时出现时仍然分得清。
+              background: isSelected
+                ? `color-mix(in srgb, ${ACCENT} 12%, ${SURFACE})`
+                : entry.current
+                  ? `color-mix(in srgb, ${ACCENT} 8%, ${SURFACE})`
+                  : 'var(--dsh-branch-option-bg, transparent)',
               color: entry.current ? ACCENT : 'inherit',
-              opacity: 1,
+              opacity: busy ? 0.6 : 1,
               fontFamily: UI_FONT,
               fontSize: '13px',
               lineHeight: 1.4,
               fontWeight: entry.current ? 500 : 400,
-              cursor: busy || entry.current ? 'default' : 'pointer',
+              cursor: busy ? 'default' : 'pointer',
             },
           },
           // 当前分支用一个实心标记，其余用一个描边标记：位置固定，扫读时不会因为
@@ -1423,11 +1808,16 @@ window.__ModuleLoader__.load({
     // =========================================================================
 
     /**
-     * 分支行的右键菜单。
+     * 分支行的操作菜单（右键，以及单击分支行时打开的那一个）。
      *
-     * 条目与图片里的 VS Code 菜单对齐，但**按上下文启用/禁用**，因为几种操作在错误的
-     * 对象上没有意义：
-     *   * 当前分支不能"签出"自己；
+     * **单击与右键打开的是同一个组件、同一份条目**：两种入口表达的是同一个意图
+     * （"我要对这个分支做点什么"），各写一套菜单必然漂移（实测过：右键有「重命名」而
+     * 单击菜单没有，用户完全无法预期）。
+     *
+     * 条目按上下文启用/禁用，因为几种操作在错误的对象上没有意义：
+     *   * 当前分支不能"签出"自己（显示但禁用，见下面 items 处的说明）；
+     *   * 合并/变基到自己是空操作（git 会回 "Already up to date"，那种"点了没反应"
+     *     比禁用更让人困惑）；
      *   * 远程分支不能"重命名"（本地重命名它只会改名跟踪引用）；
      *   * 只有远程分支能"删除远端"；只有本地分支能"删除"。
      * 给出禁用项而不是隐藏，是为了让菜单的形状稳定——用户靠位置记忆点操作，
@@ -1503,7 +1893,17 @@ window.__ModuleLoader__.load({
       const separator = (key) => react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
 
       const items = []
-      if (!entry.current) items.push(item('checkout', t('menuCheckout'), () => onSwitch(entry.name)))
+      // 「签出」对当前分支**显示但禁用**，而不是隐藏。
+      //
+      // 这一条与"单击打开菜单"的交互是配套的：单击任何一行（包括当前分支）都会打开这个
+      // 菜单，如果当前分支那一份菜单少一项，同一个位置上的条目就会随分支变化而上下移动，
+      // 用户靠位置记忆点操作时很容易点错。禁用项保留了菜单的形状，也解释了"为什么不能点"。
+      items.push(
+        item('checkout', t('menuCheckout'), () => onSwitch(entry.name), {
+          disabled: entry.current,
+          title: entry.current ? t('currentBranch') : undefined,
+        }),
+      )
       items.push(item('new-from', t('menuNewFrom', { name: entry.name }), () => onDialog({ kind: 'create', branch: entry })))
       items.push(separator('sep1'))
       items.push(
