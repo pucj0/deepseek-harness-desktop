@@ -16,6 +16,8 @@ const INDEX = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'index.js')
 const HOST = INDEX
 /** gitbar 的客户端 bundle（级联菜单的几何在这里）。 */
 const GITBAR_CLIENT = join(ROOT, 'plugins', 'dsh-client-ui-gitbar', 'lib', 'client.js')
+/** 「AI 补充提交信息」的 host 半边（输出预算与 finish 语义在这里）。 */
+const COMMIT_MESSAGE = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'commit-message.js')
 
 const run = (script) => {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', script)], { encoding: 'utf8', cwd: ROOT })
@@ -155,8 +157,8 @@ mutate({
 mutate({
   file: CLIENT,
   label: '9) AI 结果无条件覆盖输入框 → "不覆盖"断言变红',
-  from: '          if (message.trim() === \'\') {\n            setMessage(text)\n            setAiNotice(t(\'aiCommitFilled\'))\n            return\n          }',
-  to: '          {\n            setMessage(text)\n            setAiNotice(t(\'aiCommitFilled\'))\n            return\n          }',
+  from: "          // 输入框是空的 → 直接填入（这正是\"一键补充\"要的）。\n          if (message.trim() === '') {\n            setMessage(text)\n            setAiNotice(truncated ? t('aiCommitTruncated') : t('aiCommitFilled'))\n            return\n          }",
+  to: "          if (true) {\n            setMessage(text)\n            setAiNotice(truncated ? t('aiCommitTruncated') : t('aiCommitFilled'))\n            return\n          }",
   script: 'test-review-staging.mjs',
 })
 
@@ -350,6 +352,44 @@ mutate({
   from: '      if (rightRoom >= width + margin) {\n        left = panel.right + gap\n        side = \'right\'',
   to: '      if (false) {\n        left = panel.right + gap\n        side = \'right\'',
   script: 'test-gitbar-branch-interaction.mjs',
+})
+
+// ===========================================================================
+// 1.5.3：AI 补充提交信息的 finish 语义（max-tokens 不再等于失败）
+// ===========================================================================
+
+mutate({
+  file: COMMIT_MESSAGE,
+  label: '20) 把 finish !== stop 重新当成硬失败 → max-tokens 有文本的断言变红',
+  // 这就是实机那条报错的写法：先判 finish、再读 blocks，于是 max-tokens 会把已经生成好的
+  // 提交信息整段丢掉。
+  from: "  const blocks = typeof assembler?.blocks === 'function' ? assembler.blocks() : []",
+  to: "  const earlyFinish = assembler?.finish\n  if (earlyFinish?.kind !== 'stop') {\n    const described = describeLlmFailure(earlyFinish.failure ?? { code: 'aiFailed', message: `finish=${String(earlyFinish?.kind)}` })\n    throw aiError(described.code, described.detail)\n  }\n  const blocks = typeof assembler?.blocks === 'function' ? assembler.blocks() : []",
+  script: 'test-review-commit-message.mjs',
+})
+
+mutate({
+  file: COMMIT_MESSAGE,
+  label: '20b) 输出预算退回 400 → 预算断言变红',
+  from: '  maxOutputTokens: 1024,',
+  to: '  maxOutputTokens: 400,',
+  script: 'test-review-commit-message.mjs',
+})
+
+mutate({
+  file: COMMIT_MESSAGE,
+  label: '20c) 系统指令去掉输出长度约束 → 约束断言变红',
+  from: "    'Output constraints:',",
+  to: "    'Ignored constraints:',",
+  script: 'test-review-commit-message.mjs',
+})
+
+mutate({
+  file: COMMIT_MESSAGE,
+  label: '20d) 让 failure 也走"有文本即成功" → 认证失败被伪装成成功的断言变红',
+  from: '  if (failure !== null && failure !== undefined) {',
+  to: '  if (false) {',
+  script: 'test-review-commit-message.mjs',
 })
 
 console.log('')

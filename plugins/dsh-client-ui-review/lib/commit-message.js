@@ -37,8 +37,18 @@ export const COMMIT_MESSAGE_LIMITS = Object.freeze({
   maxFileDiffChars: 3000,
   /** 整条提示词最多多少字符（超过就只留状态与行数）。 */
   maxTotalChars: 30000,
-  /** 输出上限：一条提交信息不需要更多。 */
-  maxOutputTokens: 400,
+  /**
+   * 输出预算。
+   *
+   * 曾经是 **400**，而那个值在实机上直接导致"AI 补充失败：finish=max-tokens"：一次提交信息
+   * 只有几十个 token，但**这条辅助请求走的是用户当前的默认模型**，部分模型会先花掉一段
+   * 推理 token（`reasoningTokens` 计入输出预算），400 因此过于紧张——模型明明已经把可用的
+   * 提交信息写完了，却在预算处被截断。
+   *
+   * 1024 是"够用且仍然很短"的量级：一条标题 + 三条要点大约 100~200 token，留出的余量足够
+   * 吃掉推理开销，又不会变成一次长文生成（需求明确不要抬到几千上万）。
+   */
+  maxOutputTokens: 1024,
   /** 这条辅助请求的超时。 */
   timeoutMs: 60000,
   /** 提交标题的字符上限（超过就截断，避免生成一整段话当标题）。 */
@@ -178,6 +188,18 @@ export function commitMessageSystemPrompt() {
     'Then, when there is more than one meaningful change, a blank line and a short "- " bullet list of what changed and why.',
     'Use the language of the commit subject wording the project already uses; if the surrounding text is Chinese, write the body in Chinese.',
     'Never invent files, APIs, or behavior that the diff does not show.',
+    '',
+    // 输出长度必须**从源头**约束：提示词里不写清楚，模型很自然地会写"标题 + 十几条 bullet +
+    // 解释 + 总结"，然后在输出预算处被截断（那正是 finish=max-tokens 的另一半原因）。
+    // 这几条与 COMMIT_MESSAGE_LIMITS.maxOutputTokens 是配套的，不要只改一边。
+    'Output constraints:',
+    '- Return exactly one concise subject line.',
+    '- Optionally add at most 3 bullet points.',
+    '- At most 8 lines total.',
+    '- At most 500 characters total.',
+    '- Do not explain your reasoning.',
+    '- Do not include analysis or preamble.',
+    'These constraints apply in every language, including Chinese.',
   ].join('\n')
 }
 
@@ -238,6 +260,65 @@ export function describeLlmFailure(cause) {
           ? '（模型响应超时）'
           : ''
   return { code, detail: `${detail === '' ? code : detail}${hint}`.slice(0, 500) }
+}
+
+/**
+ * 把"已经生成的文本"与 `finish` 状态一起翻译成这次生成的结果。
+ *
+ * ## 为什么必须先取文本、再判 finish
+ *
+ * 旧写法是 `if (finish?.kind !== 'stop') throw …`——把**所有**非 `stop` 的结束原因一律当成
+ * 硬失败。实机后果：模型因为输出预算用完而结束（`finish=max-tokens`）时，**明明已经把一条
+ * 可用的提交信息写完了**，却被整段丢弃，界面上只显示"AI 补充失败：finish=max-tokens"。
+ *
+ * 这两件事的语义完全不同，不能混为一谈：
+ *   * `max-tokens` —— 模型**成功生成**了内容，只是达到了输出预算；
+ *   * `error` / `aborted`（带 `failure`）—— 请求**失败**（认证、provider、超时、取消）。
+ *
+ * 因此顺序固定为：`blocks()` → 规范化 → 再根据 finish 与"是否已有可用文本"决定结果。
+ *
+ * @param assembler - `BlockAssembler`（或形状相同的替身）：需要 `blocks()` 与 `finish`。
+ * @returns `{ message, subject, bullets, truncated?, finishReason? }`。
+ * @throws code 为 `aiOutputLimit` / `aiEmpty` / 宿主失败 code 的错误。
+ */
+export function commitMessageFromAssembler(assembler) {
+  const blocks = typeof assembler?.blocks === 'function' ? assembler.blocks() : []
+  const rawText = blocks
+    .filter((block) => block?.type === 'text')
+    .map((block) => (typeof block.text === 'string' ? block.text : ''))
+    .join('\n')
+  const normalized = normalizeCommitMessage(rawText)
+
+  const finish = assembler?.finish
+  const kind = typeof finish?.kind === 'string' ? finish.kind : ''
+  // 真正的失败：`aborted` / `error` 带 `failure`（认证、provider、超时、取消）。这一条必须
+  // 先判——否则"认证失败但恰好吐了几个字"会被当成成功，把错误伪装掉。
+  const failure = finish?.failure
+  if (failure !== null && failure !== undefined) {
+    const described = describeLlmFailure(failure)
+    throw aiError(described.code, described.detail)
+  }
+  if (kind === 'error' || kind === 'aborted') {
+    throw aiError('aiFailed', `模型调用未完成（finish=${kind}）`)
+  }
+
+  // "可用文本"：非空，且至少有一个标题或一条要点。
+  //
+  // 为什么把"只有要点"也算可用：截断恰好发生在标题之后、要点中间时，那份要点列表仍然能
+  // 直接贴进提交框，丢掉它比留下它更糟。真正不可用的只有"什么都没有"。
+  const hasSubject = normalized.subject !== '' && !/^[-*•]\s*/u.test(normalized.subject)
+  const usable = normalized.message !== '' && (hasSubject || normalized.bullets.length > 0)
+
+  if (kind === 'max-tokens') {
+    if (!usable) throw aiError('aiOutputLimit', 'AI 生成内容超过长度限制，请重试。')
+    return { ...normalized, truncated: true, finishReason: 'max-tokens' }
+  }
+
+  if (!usable) throw aiError('aiEmpty', '模型没有返回任何文本')
+  // `finishReason` **总是**带上（`stop` 也带）：它回答"模型为什么停下"，是排查这类问题的
+  // 第一手信息（实机那次 `finish=max-tokens` 之所以难查，正是因为旧实现只把它折进一句
+  // 英文报错）。界面只按 `truncated` 决定提示，不解析这个字段。
+  return { ...normalized, finishReason: kind === '' ? 'stop' : kind }
 }
 
 /**
@@ -314,19 +395,10 @@ export function createCommitMessageGenerator(ctx, options = {}) {
       for await (const chunk of llm.stream(options2)) {
         assembler.push(chunk)
       }
-      const finish = assembler.finish
-      if (finish?.kind !== 'stop') {
-        const failure = finish?.failure
-        throw aiError(describeLlmFailure(failure ?? { code: 'aiFailed', message: `finish=${String(finish?.kind)}` }).code, describeLlmFailure(failure ?? { code: 'aiFailed', message: `finish=${String(finish?.kind)}` }).detail)
-      }
-      const blocks = assembler.blocks()
-      const text = blocks
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-      const normalized = normalizeCommitMessage(text)
-      if (normalized.message === '') throw aiError('aiEmpty', '模型没有返回任何文本')
-      return { ...normalized, model: { provider: selection.provider, model: selection.model }, promptStats: prompt.stats }
+      // **先取文本、再判 finish**（见 commitMessageFromAssembler 的说明）：max-tokens 与
+      // error 的语义不同，前者只要有可用文本就照常返回（带 `truncated`）。
+      const outcome = commitMessageFromAssembler(assembler)
+      return { ...outcome, model: { provider: selection.provider, model: selection.model }, promptStats: prompt.stats }
     } finally {
       call[Symbol.dispose]()
     }

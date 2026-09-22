@@ -1,3 +1,68 @@
+# 1.5.3
+
+修一条实机报错：点「✨ AI 补充」会失败，界面上显示 **`AI 补充失败：finish=max-tokens`**，而且
+模型其实已经写出了一条可用的提交信息、却被整段丢弃。根因不在模型、也不在上下文（输入上限没有
+失守），而是**我们把"模型用完了输出预算"和"请求失败"当成了同一件事**：旧代码是
+`if (finish?.kind !== 'stop') throw …`，`max-tokens` 因此变成硬失败，连已经生成的文本一起丢掉，
+并把内部的 `finish=max-tokens` 原文端给了用户。
+
+## 修复
+
+- **输出预算 400 → 1024。** 一条提交信息本身只有几十个 token，但这条请求走的是**用户当前的
+  默认模型**，部分模型会先花掉一段推理 token（`reasoningTokens` 计入输出预算），400 对辅助型
+  生成过于紧张。1024 是"够用且仍然很短"的量级（标题 + 三条要点约 100~200 token），刻意没有抬到
+  几千上万——提交信息仍然应该是短输出。
+- **`max-tokens` 不再等于失败。** 判断顺序固定为 **`blocks()` → 规范化 → 再看 finish**（绝不
+  在取文本之前判 finish）：
+  - `finish = stop`：正常返回；文本为空才报 `aiEmpty`；
+  - `finish = max-tokens` 且**已有可用文本**（有标题，或至少有一条要点——截断恰好落在标题之后时
+    那份要点列表仍然能直接贴进提交框）：**照常返回**，并带上 `truncated: true` 与
+    `finishReason: 'max-tokens'`；
+  - `finish = max-tokens` 且一个字都没留下：才报 `aiOutputLimit`，界面显示本语言的
+    「AI 生成内容超过长度限制，请重试。」——`finish=max-tokens` 这种内部原因**不再**出现在用户
+    可见的文案里；
+  - 带 `failure` 的 `error` / `aborted`（认证、provider、超时、取消）仍然走 `describeLlmFailure`
+    的失败路径：**认证失败绝不允许因为"恰好吐了几个字"而被伪装成成功**。
+- **系统指令从源头限长**（与输出预算配套，避免只改一边）：恰好一行简洁标题、最多 3 条要点、
+  最多 8 行、最多 500 字符、不要解释推理、不要分析与前言，中英文都遵守。
+- **界面提示分开**：截断但成功时正常填入输入框，只给一条非阻塞提示「AI 输出达到长度上限，已保留
+  生成的提交信息。」（不是红色失败）；只有真正的失败才显示失败提示。已有用户输入时的
+  「替换 / 追加 / 取消」三选一保持不变，采用截断建议后同样给那句提示。
+- **输入侧的上限一个都没动**（30 文件 / 单文件 3000 字符 / 总共 30000 字符）：这次是**输出**
+  预算问题，不是输入上下文溢出，没有为了修它放宽任何输入约束。
+
+## 校验
+
+- `scripts/test-review-commit-message.mjs` 从 60 项扩到 **97 项**，新增第 6/7 节完整覆盖这份
+  语义：A `stop` + 文本 → 成功；B `max-tokens` + 文本 → 成功、`message` 正常、`truncated:true`、
+  `finishReason:'max-tokens'`；C `max-tokens` + 标题与要点 → 已有文本原样保留（含"只有要点"与
+  "多块文本按顺序拼接"）；D `max-tokens` + 空文本 / 只有空白 → `aiOutputLimit`（且文案里没有
+  `finish=`）；E `failure{code:'AUTH'}` 即使已有部分文本也必须失败（`aborted` 同理、无 code 兜底
+  成 `aiFailed`）；F 请求里的 `maxTokens === 1024`；另有 `stop` + 空文本 → `aiEmpty`，以及系统
+  指令里那 7 条输出约束真的进了 `system` 槽位。
+- `scripts/test-review-staging.mjs` 新增两条界面断言（共 **228 项**）：截断但成功时内容照常填入、
+  提示是「达到长度上限」而**不是** `aiCommitFailed`、且文案里没有 `finish=`；`aiOutputLimit` 走
+  本语言短句。
+- `scripts/mutation-check.mjs` 扩到 **37 项**，新增 4 项：把 `finish !== stop` 重新当成硬失败、
+  把输出预算退回 400、去掉系统指令里的长度约束、让 `failure` 也走"有文本即成功"——每一项都确认
+  "改回旧写法即变红、还原即变绿"。
+- **真实模型 smoke**（新增 `scripts/probe-commit-message.mjs`，隔离 home + 隔离仓库，凭据只从
+  进程环境注入）：同一台机器、同一条仓库、同一个模型（`deepseek-official/deepseek-flash`）实测——
+  - 当前实现（预算 1024）：`finishReason=stop`、`truncated=false`，5 行 / 178 字符，1 条标题 +
+    3 条要点，1.5~2.0 s；
+  - 把预算压到 40（新语义）：`finishReason=max-tokens`、`truncated=true`，**已生成的标题与 2 条
+    要点被保留**（131 字符，最后一条要点明显被截断）；
+  - 同样的输入 + 旧的"非 stop 即抛错"语义：**HTTP 502 / `code=aiFailed` / `detail=finish=max-tokens`**
+    ——实机那条报错被逐字复现；
+  - 顺带说明：在 `deepseek-flash` + 3 个文件的小改动上，**400 token 并没有触发截断**（同样是
+    `stop`）。因此"400 太紧"是**必要条件而非充分条件**：真正把这条 latent bug 引爆的是"某些模型
+    的推理 token 也算进输出预算"以及更大的改动集，而修复让两条路都不再致命。
+- 离线全量 **26 个脚本 / 2,120 项断言 0 失败**（唯一失败仍是既有的 `test-unpack.mjs`，检查的是
+  陈旧归档）；`tsc --noEmit`、`check-imports`、`check-plugin-i18n`、`check-readme`（中英）、
+  `test-i18n` 全部通过。
+
+---
+
 # 1.5.2
 
 这一版把**项目级 Git 的作用域**与**未跟踪文件的规模问题**一起解决掉，并顺手修掉分支弹窗二级菜单的

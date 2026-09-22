@@ -1924,6 +1924,10 @@ function createReviewHandler(ctx) {
             bullets: result.bullets,
             model: result.model,
             stats: result.promptStats,
+            // 模型达到了输出预算但仍然给出了可用文本：**这是成功**，只是要告诉界面
+            // "这份内容是截断的"，让它显示一条非阻塞提示（不是红色失败）。
+            ...(result.truncated === true ? { truncated: true } : {}),
+            ...(typeof result.finishReason === 'string' && result.finishReason !== '' ? { finishReason: result.finishReason } : {}),
           })
         } catch (error) {
           const code = typeof error?.code === 'string' ? error.code : 'aiFailed'

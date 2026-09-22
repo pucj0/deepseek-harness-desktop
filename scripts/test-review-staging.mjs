@@ -1095,6 +1095,37 @@ console.log('=== 12. AI 一键补充提交信息（item 9）===')
   check('   重试仍失败时原文依旧保留', textarea()?.props?.value, userText)
   aiError = null
 
+  // ---- 「模型达到输出预算」是**成功**，不是失败（实机反馈：finish=max-tokens）----
+  //
+  // 旧实现把 `finish !== 'stop'` 一律当硬失败，于是模型明明写完了提交信息也会被整段丢弃，
+  // 界面显示"AI 补充失败：finish=max-tokens"。现在：内容照常填进输入框，只给一句非阻塞的
+  // 截断说明——**绝不能**出现 aiCommitFailed / finish=。
+  await mount()
+  aiResponse = {
+    isRepo: true,
+    message: 'fix(review): 修复 Git 面板\n\n- 一',
+    subject: 'fix(review): 修复 Git 面板',
+    bullets: ['一'],
+    truncated: true,
+    finishReason: 'max-tokens',
+  }
+  await click(find('data-staging-ai'))
+  check('   截断但成功：内容照常填入', textarea()?.props?.value, 'fix(review): 修复 Git 面板\n\n- 一')
+  checkTrue('   给的是"达到长度上限"的说明', viewText().includes('aiCommitTruncated'))
+  checkTrue('   不是失败提示（不出现 aiCommitFailed）', !viewText().includes('aiCommitFailed'))
+  checkTrue('   也不把内部原因端给用户（没有 finish=）', !viewText().includes('finish='))
+
+  // ---- 只有输出预算、一个字都没有 → aiOutputLimit 走本语言短句（同样不露内部原因）----
+  await mount()
+  aiResponse = { isRepo: true, message: '', subject: '', bullets: [], truncated: true, finishReason: 'max-tokens' }
+  aiError = { error: 'AI generation exceeded the output limit', code: 'aiOutputLimit', detail: 'AI 生成内容超过长度限制，请重试。' }
+  await click(find('data-staging-ai'))
+  checkTrue('   输出上限走本语言短句', viewText().includes('aiCommitOutputLimit'))
+  checkTrue('   不显示通用失败文案', !viewText().includes('aiCommitFailed'))
+  aiError = null
+  // 恢复默认响应，后面的小节按原样继续。
+  aiResponse = { isRepo: true, message: 'fix(review): 修复未跟踪文件差异查看\n\n- 改走按需差异', subject: 'fix(review): 修复未跟踪文件差异查看', bullets: ['改走按需差异'] }
+
   // 未勾选任何文件：按钮禁用 + 点了给一句说明（不是打一次空请求）。
   await mount()
   find('data-staging-file-pick', 'new-staged.txt').props.onChange({ target: { checked: false } })

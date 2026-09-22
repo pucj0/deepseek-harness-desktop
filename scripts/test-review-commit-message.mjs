@@ -21,6 +21,8 @@ const {
   COMMIT_MESSAGE_TIMEOUT_CODE,
   buildCommitMessagePrompt,
   collectCommitContext,
+  commitMessageFromAssembler,
+  commitMessageSystemPrompt,
   createCommitMessageGenerator,
   describeLlmFailure,
   normalizeCommitMessage,
@@ -245,6 +247,216 @@ console.log('=== 5. 适配器：宿主缺能力时**点名缺哪个正式能力*
   check('   标题被规范化出来', result.subject, 'feat(review): 补一条提交信息')
   check('   要点被解析出来', result.bullets.join(','), '一')
   check('   回报实际使用的模型', `${result.model.provider}/${result.model.model}`, 'deepseek-official/deepseek-flash')
+}
+
+console.log('')
+console.log('=== 6. finish 语义：max-tokens 不再等于失败（实机反馈：finish=max-tokens）===')
+{
+  // 为什么单开一节：旧写法是 `if (finish?.kind !== 'stop') throw`，把"模型成功生成、只是
+  // 达到输出预算"和"请求失败"当成同一件事。实机上表现为——模型已经把一条可用的提交信息
+  // 写完了，界面却报 `AI 补充失败：finish=max-tokens`，并且文本被整段丢弃。
+  //
+  // 这六条 case 就是那份语义的完整规格（A~F 与修复需求一一对应）。
+  const assembler = (kind, texts, failure) => ({
+    blocks: () => texts.map((text) => ({ type: 'text', text })),
+    finish: failure === undefined ? { kind } : { kind, failure },
+  })
+
+  // ---- case A：正常结束 + 正常文本 → 成功 ----
+  {
+    const outcome = commitMessageFromAssembler(assembler('stop', ['fix(review): 修复 Git 面板']))
+    check('A) stop + 文本 -> message', outcome.message, 'fix(review): 修复 Git 面板')
+    check('   不算截断', outcome.truncated, undefined)
+    check('   finishReason 总是带上（stop）', outcome.finishReason, 'stop')
+  }
+
+  // ---- case B：max-tokens + 一条可用标题 → 成功且标出截断 ----
+  {
+    const outcome = commitMessageFromAssembler(assembler('max-tokens', ['fix(review): 修复 Git 面板']))
+    check('B) max-tokens + 文本 -> message 正常', outcome.message, 'fix(review): 修复 Git 面板')
+    check('   subject 正常', outcome.subject, 'fix(review): 修复 Git 面板')
+    check('   标记为截断', outcome.truncated, true)
+    check('   带 finishReason', outcome.finishReason, 'max-tokens')
+  }
+
+  // ---- case C：max-tokens + 标题与要点 → 已有文本原样保留 ----
+  {
+    const raw = 'fix(review): 修复 Git 面板\n\n- 一\n- 二'
+    const outcome = commitMessageFromAssembler(assembler('max-tokens', [raw]))
+    check('C) 标题保留', outcome.subject, 'fix(review): 修复 Git 面板')
+    check('   要点保留', outcome.bullets.join('|'), '一|二')
+    checkTrue('   整段文本保留', outcome.message.includes('- 一') && outcome.message.includes('- 二'))
+    check('   标记为截断', outcome.truncated, true)
+  }
+
+  // 多块文本要按顺序拼起来（流式分块时很常见）。
+  {
+    const outcome = commitMessageFromAssembler(assembler('max-tokens', ['fix: 标题', '\n\n- 只有一条']))
+    check('   多块文本按顺序拼接', outcome.subject, 'fix: 标题')
+    check('   拼接后的要点', outcome.bullets.join('|'), '只有一条')
+  }
+
+  // 只有要点、没有标题（截断恰好落在标题之后）也算**可用**：丢掉它比留下它更糟。
+  {
+    const outcome = commitMessageFromAssembler(assembler('max-tokens', ['- 一\n- 二']))
+    checkTrue('   只有要点时仍然可用', outcome.message.includes('- 一'))
+    check('   仍然标记截断', outcome.truncated, true)
+  }
+
+  // ---- case D：max-tokens 且没有任何文本 → aiOutputLimit ----
+  {
+    let thrown = null
+    try {
+      commitMessageFromAssembler(assembler('max-tokens', []))
+    } catch (cause) {
+      thrown = cause
+    }
+    check('D) 没有文本 -> code', thrown?.code, 'aiOutputLimit')
+    checkTrue('   面向用户的短句里没有 finish=', !String(thrown?.message).includes('finish='))
+    // 全是空白也一样（模型只吐了换行）。
+    let blank = null
+    try {
+      commitMessageFromAssembler(assembler('max-tokens', ['\n\n   \n']))
+    } catch (cause) {
+      blank = cause
+    }
+    check('   只有空白 -> 同样是 aiOutputLimit', blank?.code, 'aiOutputLimit')
+  }
+
+  // ---- case E：真正的 failure 即使已经有部分文本也必须失败 ----
+  {
+    let thrown = null
+    try {
+      commitMessageFromAssembler(assembler('error', ['fix: 半个标题'], { code: 'AUTH', message: 'invalid api key' }))
+    } catch (cause) {
+      thrown = cause
+    }
+    check('E) failure -> code 透传', thrown?.code, 'AUTH')
+    checkTrue('   detail 带原文', String(thrown?.message).includes('invalid api key'))
+    checkTrue('   不允许把认证失败伪装成成功', thrown !== null)
+    // `aborted`（用户取消 / 超时）同理。
+    let aborted = null
+    try {
+      commitMessageFromAssembler(assembler('aborted', ['fix: 半个标题'], { code: COMMIT_MESSAGE_TIMEOUT_CODE, message: 'timed out' }))
+    } catch (cause) {
+      aborted = cause
+    }
+    check('   aborted 也按失败处理', aborted?.code, COMMIT_MESSAGE_TIMEOUT_CODE)
+    // 带 failure 的 kind 即使没有 code 也不能成功。
+    let generic = null
+    try {
+      commitMessageFromAssembler(assembler('error', ['fix: 半个标题'], { message: 'boom' }))
+    } catch (cause) {
+      generic = cause
+    }
+    check('   无 code 的 failure 兜底成 aiFailed', generic?.code, 'aiFailed')
+  }
+
+  // `stop` 但没有任何文本 → aiEmpty（与 aiOutputLimit 分开：一个"没说话"，一个"说不完"）。
+  {
+    let thrown = null
+    try {
+      commitMessageFromAssembler(assembler('stop', []))
+    } catch (cause) {
+      thrown = cause
+    }
+    check('   stop + 空文本 -> aiEmpty', thrown?.code, 'aiEmpty')
+  }
+
+  // ---- case F：请求里的输出上限是 1024 ----
+  {
+    const seen = []
+    const fakeCtx = {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              stream: async function* (options) {
+                seen.push(options)
+                yield { type: 'text-delta', index: 0, text: 'fix: 标题' }
+                yield { type: 'finish', reason: { kind: 'stop' } }
+              },
+            }
+          : { currentSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }) },
+    }
+    const generator = createCommitMessageGenerator(fakeCtx, {
+      loadLlm: async () => ({
+        createUserMessage: (input) => ({ ...input, role: 'user' }),
+        BlockAssembler: class {
+          constructor() {
+            this.chunks = []
+          }
+          push(chunk) {
+            this.chunks.push(chunk)
+          }
+          get finish() {
+            return { kind: 'stop' }
+          }
+          blocks() {
+            return this.chunks.filter((c) => c.type === 'text-delta').map((c) => ({ type: 'text', text: c.text }))
+          }
+        },
+      }),
+      loadTimeout: async () => ({ deadline: (upstream, timeoutMs, code) => ({ signal: undefined, timeoutMs, code, [Symbol.dispose]() {} }) }),
+    })
+    await generator.generateCommitMessage({ files: [], branch: 'main', total: 0 })
+    check('F) maxTokens', seen[0]?.maxTokens, 1024)
+    check('   常量也是 1024', COMMIT_MESSAGE_LIMITS.maxOutputTokens, 1024)
+  }
+
+  // 端到端替身：`max-tokens` 也要能从 `generateCommitMessage` 里正常出来（带 truncated）。
+  {
+    const fakeCtx = {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              stream: async function* () {
+                yield { type: 'text-delta', index: 0, text: 'fix(review): 修复 Git 面板' }
+                yield { type: 'finish', reason: { kind: 'max-tokens' } }
+              },
+            }
+          : { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+    }
+    const generator = createCommitMessageGenerator(fakeCtx, {
+      loadLlm: async () => ({
+        createUserMessage: (input) => ({ ...input, role: 'user' }),
+        BlockAssembler: class {
+          constructor() {
+            this.chunks = []
+          }
+          push(chunk) {
+            this.chunks.push(chunk)
+          }
+          get finish() {
+            return this.chunks.some((c) => c.type === 'finish') ? { kind: 'max-tokens' } : { kind: 'stop' }
+          }
+          blocks() {
+            return this.chunks.filter((c) => c.type === 'text-delta').map((c) => ({ type: 'text', text: c.text }))
+          }
+        },
+      }),
+      loadTimeout: async () => ({ deadline: () => ({ signal: undefined, timeoutMs: 0, code: '', [Symbol.dispose]() {} }) }),
+    })
+    const result = await generator.generateCommitMessage({ files: [], branch: 'main', total: 0 })
+    check('   端到端：消息仍然生成', result.subject, 'fix(review): 修复 Git 面板')
+    check('   端到端：标记 truncated', result.truncated, true)
+    check('   端到端：finishReason', result.finishReason, 'max-tokens')
+  }
+}
+
+console.log('')
+console.log('=== 7. 系统指令从源头限制输出长度（与输出预算配套）===')
+{
+  const system = commitMessageSystemPrompt()
+  checkTrue('7) 明确要求只回一行标题', /Return exactly one concise subject line/u.test(system))
+  checkTrue('   最多 3 条要点', /at most 3 bullet points/u.test(system))
+  checkTrue('   最多 8 行', /At most 8 lines total/u.test(system))
+  checkTrue('   最多 500 字符', /At most 500 characters total/u.test(system))
+  checkTrue('   不要解释推理', /Do not explain your reasoning/u.test(system))
+  checkTrue('   不要分析与前言', /Do not include analysis or preamble/u.test(system))
+  checkTrue('   中文同样遵守', /including Chinese/u.test(system))
+  // 这些约束必须真的进了请求的 system 槽位（不是只存在于一个没人调用的函数里）。
+  const prompt = buildCommitMessagePrompt({ branch: 'main', files: [], total: 0 })
+  checkTrue('   system 槽位里带着这些约束', prompt.system.includes('Output constraints:'))
 }
 
 console.log('')

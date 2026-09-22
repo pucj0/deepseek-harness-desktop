@@ -288,6 +288,7 @@ nsis:
 - **切项目是一次明确的三段**：`A → 正在切换项目… → B`。只要**存在**当前会话就以它的 cwd 为准；会话还在换、cwd 未到时显示「正在切换项目…」，**不会**退回上一个会话（或外壳）的目录。实现上靠 `useHasCurrentSession` 把"没有当前会话"与"有会话但 cwd 未到"区分开。所有 hook 无条件调用且都在阶段守卫之前（`check-react-rules.mjs` 静态钉住），因此切项目不会触发 React #310。
 - **点抽屉外任何普通区域都会关闭**：聊天正文、左侧列表、空白处都关；Escape 与 X 也关。不能误关的几处逐条豁免——抽屉内部（含它自己的浮层与确认框，靠 `contains`）、分支右键菜单与分支面板（gitbar 渲染在 body 级，按它们已有的稳定标记豁免）、以及右上角入口按钮（**必须**豁免：捕获阶段的 `mousedown` 会先把它关掉、紧接着按钮自己的 `onClick` 又打开，用户看到的是"闪一下打不开"——入口由它自己 toggle）。
 - **「✨ AI 补充」按已勾选的文件草拟提交信息**：输入只来自 `commitPaths`（勾选的那批，不是整个工作区），host 侧对文件数（30）/ 单文件字符数（3000）/ 总字符数（30000）三层设限，超限的文件降级为"状态 + 增删行数"而不是把整仓库塞进上下文。生成走宿主正式能力——`ctx.llm.stream()`（`@deepseek-ai/dsh-llm`，与 agent loop / 会话标题同一条路径）+ `ctx.agentDefaultModel.currentSelection()`（**复用当前登录与模型配置**），**插件内没有 API Key、没有硬编码 endpoint、没有新 provider**；宿主没有装载模型能力时返回 `aiUnavailable` 并点名缺哪个服务。交互上：生成期间按钮禁用 + loading；输入框为空直接填入；**已有用户输入绝不静默覆盖**，而是给「替换 / 追加 / 取消」三选一；生成期间切项目或改勾选会让旧响应作废（请求令牌 + 工作区 + 选择指纹）；失败保留原文本，只给一条非阻塞提示。
+  - **输出预算是 1024 token，且"达到预算"不等于失败**（实机反馈过 `AI 补充失败：finish=max-tokens`）。旧实现把"模型不是正常结束"一律当硬失败，于是模型**已经把一条可用的提交信息写完了**也会被整段丢弃。现在固定按 `blocks() → 规范化 → 再看 finish` 的顺序判断：`stop` 正常返回；`max-tokens` 且已有可用文本（标题或要点）→ **照常填入输入框**，只附一条「AI 输出达到长度上限，已保留生成的提交信息」的非阻塞提示（响应带 `truncated: true` 与 `finishReason`）；`max-tokens` 且一个字都没留下 → 给一句本语言的「AI 生成内容超过长度限制，请重试。」（code `aiOutputLimit`，**不把 `finish=max-tokens` 端给用户**）；带 `failure` 的 `error` / `aborted`（认证、provider、超时、取消）仍然走失败路径——**绝不允许把认证失败伪装成成功**。系统指令同时从源头限长（恰好一行标题、最多 3 条要点、最多 8 行 / 500 字符、不解释推理）。`scripts/probe-commit-message.mjs` 可以在真实模型上复现并验证这条路径（`--max-tokens=40 --old-semantics` 能打出旧行为的那条 `finish=max-tokens`）。
 - **字号跟随「设置 → UI 字号」**：抽屉里的字号全部从 `--dsh-ui-px-14` 派生（`calc(var(--dsh-ui-px-14, 14px) * N / 14)`），基准 14 下与原值逐像素相同，字号 12 / 18 时提交详情、改动列表、差异正文与增删行数一起缩放。选 14 这个基准是因为它由字号插件自己的样式表保证存在，不依赖"它恰好扫到了本插件的样式"。
 - **逐行差异按需取**：`/workspace` 是**元数据级**快照（`status --porcelain=v2` 一次拿文件与索引态 + `diff --numstat HEAD` 拿行数），**不含**全仓库统一差异；点开某个文件时走 `/workspace-file` 只算那一个文件（未跟踪文件用 `--no-index` 比空文件）。缓存键是 `workspace + HEAD + 路径`，因此切项目、提交后旧差异都会失效；迟到的响应有令牌与键双重把关。实测（6,639 个改动/未跟踪路径的仓库）：轮询 10 个 git 进程 / 6.3s → **2 个进程 / 0.32s**，全仓库差异正文（38.7 MB）不再产生。**未跟踪文件走的是同一条按需路径**（`LazyFileDiff` + `untracked: true`），不再引用任何"整页拆分"的产物（那正是"点未跟踪文件报 `byFile is not defined`"的根因）。
 - **gitbar（右下角分支徽章）与 review 共用同一套仓库解析**：同一个工作区的分支、`Changes`、`Log`、`stage`、`commit`、`checkout` 操作的是**同一个仓库根**（`lib/repo-context.js` 在两个插件里各有一份逐字节相同的副本，并由真实临时仓库的解析对比钉住）。副作用之一是"正在进行合并/变基"终于能显示了——那些标记以前按 `<工作区>/.git/…` 找，工作区是子目录时那个路径根本不存在。
@@ -569,13 +570,14 @@ node scripts/test-review-graph-branch-filter.mjs # 左栏分支树与中栏过�
 node scripts/test-review-project-git.mjs     # 切项目的状态机：hook 数量不许变、入口永不消失、正在切换项目、面板级降级
 node scripts/test-review-lazy-diff.mjs       # 逐行差异按需取：不点不取、点一次只取一次、缓存键含 workspace/HEAD
 node scripts/test-review-repo-scope.mjs      # 作用域拆分与未跟踪规模：子目录工作区列全仓库、快路径不搬路径、惰性树、批量 add
-node scripts/test-review-commit-message.mjs  # 「AI 补充提交信息」：上下文三层上限、提示词是数据、输出规范化、缺能力时点名
+node scripts/test-review-commit-message.mjs  # 「AI 补充提交信息」：上下文三层上限、提示词是数据、输出规范化、finish 语义（max-tokens）、缺能力时点名
 node scripts/test-review-staging.mjs         # 暂存/提交区：三组分组、行内动作、提交框、未跟踪双模式与浏览弹窗、AI 补充交互
 node scripts/test-review-graph-view.mjs      # 提交图三栏：计数、时间到秒、滚动自动分页、不显示哈希
 node scripts/test-review-drawer-style.mjs    # 抽屉外观层：数据标记与样式契约不被改写
 node scripts/check-react-rules.mjs           # 静态挡住 React #310（hook 顺序）与 #290（把 ref 当业务字段传）
 node scripts/mutation-check.mjs              # 变异验证：把本轮的每个修复逐个改回旧写法，断言必须变红
 node scripts/measure-workspace-snapshot.mjs  # 实测项目级快照的进程数与耗时（重构前 vs 重构后）
+node scripts/probe-commit-message.mjs        # **真实模型** smoke：「AI 补充」的 finish 到底是什么（会消耗一次真实调用）
 node scripts/test-project-git-smoke.mjs      # **真实 Electron/CDP 冒烟**（需要带远程调试端口的实例，见下）
 node scripts/test-gitbar-branch-interaction.mjs # 分支行交互：单击开菜单 / 双击切换 / 右键同菜单
 node scripts/test-gitbar-branch-sync.mjs      # 补算契约（syncExact）与"只补算可见行"的有界性

@@ -859,6 +859,8 @@ window.__ModuleLoader__.load({
       aiCommitHint: '根据已勾选的文件生成提交信息',
       aiCommitNoFiles: '先勾选要提交的文件。',
       aiCommitFilled: '已按勾选的文件填入提交信息（可以直接改）。',
+      aiCommitTruncated: 'AI 输出达到长度上限，已保留生成的提交信息。',
+      aiCommitOutputLimit: 'AI 生成内容超过长度限制，请重试。',
       aiCommitEmpty: '模型没有返回可用文本，请重试。',
       aiCommitFailed: 'AI 补充失败：{detail}',
       aiCommitAskReplace: '输入框里已有内容，要用 AI 的建议吗？',
@@ -1055,6 +1057,8 @@ window.__ModuleLoader__.load({
       aiCommitHint: 'Draft the message from the files you picked',
       aiCommitNoFiles: 'Pick the files to commit first.',
       aiCommitFilled: 'Filled in a message from the files you picked (edit it freely).',
+      aiCommitTruncated: 'The AI output hit its length limit; the generated message was kept.',
+      aiCommitOutputLimit: 'The AI response exceeded the length limit. Please try again.',
       aiCommitEmpty: 'The model returned no usable text. Please try again.',
       aiCommitFailed: 'AI draft failed: {detail}',
       aiCommitAskReplace: 'The box already has text — use the AI suggestion?',
@@ -4772,21 +4776,28 @@ window.__ModuleLoader__.load({
             setAiNotice(t('aiCommitEmpty'))
             return
           }
+          // 模型达到输出预算但给出了可用文本：**这是成功**，只是要说明"内容是截断的"。
+          // 因此仍然照常填入输入框（或走三选一），只把提示换一句（不是红色失败）。
+          const truncated = result?.truncated === true
           // 输入框是空的 → 直接填入（这正是"一键补充"要的）。
           if (message.trim() === '') {
             setMessage(text)
-            setAiNotice(t('aiCommitFilled'))
+            setAiNotice(truncated ? t('aiCommitTruncated') : t('aiCommitFilled'))
             return
           }
           // 已经有用户输入 → **绝不静默覆盖**。
-          setAiSuggestion({ text, subject: typeof result?.subject === 'string' ? result.subject : '' })
+          setAiSuggestion({ text, subject: typeof result?.subject === 'string' ? result.subject : '', truncated })
         } catch (cause) {
           if (aiToken.current !== mineToken) return
           if (workspaceRef.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
+          const code = typeof error.code === 'string' ? error.code : ''
           const detail = String(error.detail ?? error.message ?? error).slice(0, 200)
           // 失败**保留原文本**，只给一句非阻塞提示（AI 不可用不该看起来像面板坏了）。
-          setAiNotice(t('aiCommitFailed', { detail }))
+          //
+          // `aiOutputLimit`（模型把输出预算全花在推理上、一个字都没留下）单独给一句本语言的
+          // 短句：host 不知道界面语言，而 `finish=max-tokens` 这种内部原因绝不该端给用户。
+          setAiNotice(code === 'aiOutputLimit' ? t('aiCommitOutputLimit') : t('aiCommitFailed', { detail }))
         } finally {
           if (aiToken.current === mineToken) {
             aiInFlight.current = false
@@ -4804,14 +4815,17 @@ window.__ModuleLoader__.load({
             if (mode === 'cancel') aiToken.current += 1
             return
           }
+          // 建议本身是"被输出预算截断"的：采用之后同样要给那句非阻塞提示（见上面直接填入的
+          // 那一支），否则用户会以为这是一份完整的生成结果。
+          const filled = suggestion.truncated === true ? t('aiCommitTruncated') : t('aiCommitFilled')
           if (mode === 'append') {
             const base = message.trimEnd()
             setMessage(`${base}\n\n${suggestion.text}`)
-            setAiNotice(t('aiCommitFilled'))
+            setAiNotice(filled)
             return
           }
           setMessage(suggestion.text)
-          setAiNotice(t('aiCommitFilled'))
+          setAiNotice(filled)
         },
         [aiSuggestion, message, t],
       )

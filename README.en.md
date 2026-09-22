@@ -450,6 +450,20 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   overwritten** — you get Replace / Append / Cancel instead; switching projects or changing the
   selection mid-flight discards the late response (request token + workspace + selection
   fingerprint); a failure keeps your text and only adds a non-blocking note.
+  - **The output budget is 1024 tokens, and "hit the budget" is not a failure** (the field saw
+    `AI draft failed: finish=max-tokens`). The old code treated *any* non-`stop` finish as fatal,
+    so a model that had **already written a perfectly usable message** had it thrown away. The
+    order is now fixed at `blocks() → normalise → then read finish`: `stop` returns normally;
+    `max-tokens` with usable text (a subject or bullets) **still fills the box** and only adds the
+    non-blocking note "The AI output hit its length limit; the generated message was kept"
+    (the response carries `truncated: true` and `finishReason`); `max-tokens` with nothing usable
+    reports a localised "The AI response exceeded the length limit. Please try again."
+    (code `aiOutputLimit`, and `finish=max-tokens` is **never** shown to users); an `error` /
+    `aborted` finish that carries a `failure` (auth, provider, timeout, cancellation) still fails —
+    **an auth failure is never disguised as success**. The system prompt also bounds the output at
+    the source (exactly one subject line, at most 3 bullets, at most 8 lines / 500 characters, no
+    reasoning). `scripts/probe-commit-message.mjs` reproduces and verifies this path against a real
+    model (`--max-tokens=40 --old-semantics` prints the old `finish=max-tokens` error).
 - **Font sizes follow Settings → UI font size**: every size inside the drawer derives from
   `--dsh-ui-px-14` (`calc(var(--dsh-ui-px-14, 14px) * N / 14)`), which is pixel-identical at the
   14px default and scales the commit details, changed-file list, diff body and line counts together
@@ -761,13 +775,14 @@ was verified rather than assumed:
 | `scripts/test-review-project-git.mjs` | the project-switch state machine: the hook count must never change, the entry never disappears, "switching project…", panel-level crash isolation |
 | `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
 | `scripts/test-review-repo-scope.mjs` | scope split and untracked scale: a subdirectory workspace lists the whole repo, the fast path carries no paths, the lazy tree and bulk `git add` stay bounded (6,846 untracked files in the fixture) |
-| `scripts/test-review-commit-message.mjs` | the AI commit-message draft: the three context caps, the prompt is data, output normalisation, and naming the missing host service |
+| `scripts/test-review-commit-message.mjs` | the AI commit-message draft: the three context caps, the prompt is data, output normalisation, the `finish` semantics (`max-tokens`), and naming the missing host service |
 | `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, the two untracked modes and the Browse dialog, and the AI-draft interaction |
 | `scripts/test-review-graph-view.mjs` | the three-pane commit graph: the counter, second-accurate times, scroll-triggered paging, and no hash column |
 | `scripts/test-review-drawer-style.mjs` | the drawer's appearance layer: its data markers and style contract stay intact |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |
 | `scripts/mutation-check.mjs` | mutation check: every fix in this round is reverted to its old form and the matching assertion has to go red |
 | `scripts/measure-workspace-snapshot.mjs` | real measurements of the project snapshot: git processes and wall time, before vs after |
+| `scripts/probe-commit-message.mjs` | **real-model** smoke test for "✨ AI draft": what `finish` the provider actually returns (costs one real call) |
 | `scripts/test-project-git-smoke.mjs` | **real Electron/CDP smoke test** (needs an instance started with `--remote-debugging-port=9333`) |
 | `scripts/test-gitbar-branch-interaction.mjs` | branch rows: single click opens the menu, double click switches, right click opens the same menu |
 | `scripts/test-gitbar-branch-perf.mjs` | the process ceiling for branch listing (300 branches must not mean 300 `git` processes) |
