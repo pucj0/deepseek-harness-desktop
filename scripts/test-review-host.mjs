@@ -12,7 +12,7 @@
 //   4. 未登记的工作区 -> 400
 //   5. 整个过程不污染用户状态：status 与 stash 列表不变
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -50,6 +50,14 @@ try {
   console.log('')
 
   // ---- 起服务端 ------------------------------------------------------------
+  //
+  // **先把插件同步进 runtime**：测试起的是 `runtime/server.mjs`，它加载的是
+  // `runtime/node_modules` 里那份**副本**。不同步就会出现"改了源码、测试却跑在旧副本上
+  // 并且全绿"——实测踩到过（改了 host 路由、HTTP 测试仍然全过）。同步是幂等的。
+  {
+    const { syncBundledPlugins } = await import('./sync-plugins.mjs')
+    syncBundledPlugins()
+  }
   child = spawn(
     join(runtime, 'node', 'node.exe'),
     [
@@ -184,7 +192,9 @@ try {
   // 6e. 还原后该文件不再出现在"工作区改动"里
   res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
   json = await res.json()
-  const afterRevert = new Map((json.files ?? []).map((f) => [f.path, f]))
+  // 这一版把**未跟踪**条目从 `files` 里挪到了 `untracked.inlineFiles`（大量未跟踪时
+  // `files` 里一条都不放，见 host 的 /workspace 说明）。因此断言要同时看两处。
+  const afterRevert = new Map([...(json.files ?? []), ...(json.untracked?.inlineFiles ?? [])].map((f) => [f.path, f]))
   check('6e) 还原后的文件从列表消失', afterRevert.has('modify.txt'), 'false')
   check('   其它改动仍在列表里', afterRevert.has('added.txt'), 'true')
 
@@ -221,13 +231,16 @@ try {
   writeFileSync(join(repo, 'created-by-agent.txt'), 'agent made this\n')
   res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
   json = await res.json()
-  const untracked = new Map((json.files ?? []).map((f) => [f.path, f]))
+  const untracked = new Map((json.untracked?.inlineFiles ?? []).map((f) => [f.path, f]))
   check('8) 未跟踪的新文件出现在列表里', untracked.has('created-by-agent.txt'), 'true')
   check('   状态为新增（A）', (untracked.get('created-by-agent.txt')?.status ?? '').startsWith('A'), 'true')
   check('   标记为未跟踪', untracked.get('created-by-agent.txt')?.untracked, 'true')
+  check('   少量模式（inline）', json.untracked?.mode, 'inline')
   check('   快照里没有全仓库差异正文', json.diff, 'undefined')
-  check('   快照带 changedFiles', json.changedFiles, (json.files ?? []).length)
+  // `changedFiles` = 已跟踪改动 + 未跟踪条数（`files` 只是**已跟踪**那一半）。
+  check('   快照带 changedFiles', json.changedFiles, (json.files ?? []).length + (json.untracked?.count ?? 0))
   check('   快照带 branch 与 head', `${typeof json.branch}/${/^[0-9a-f]{40}$/u.test(json.head ?? '')}`, 'string/true')
+  check('   带回仓库根（由 host 推导）', json.repositoryRoot, realpathSync.native(repo))
   // 未跟踪文件的差异要单独按需取。
   res = await call('/dsh-desktop/review/workspace-file', { workspace, path: 'created-by-agent.txt', untracked: true })
   json = await res.json()
@@ -244,7 +257,13 @@ try {
     paths: ['created-by-agent.txt'],
   })
   check('   可还原未跟踪的新文件 -> 200', res.status, 200)
-  check('   还原后该文件从列表消失', (await (await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })).json()).files.some((f) => f.path === 'created-by-agent.txt'), 'false')
+  check(
+    '   还原后该文件从列表消失',
+    (await (await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })).json()).untracked?.inlineFiles?.some(
+      (f) => f.path === 'created-by-agent.txt',
+    ),
+    false,
+  )
 
   // ---- 8b. 已跟踪文件：差异只在点了它之后才算 -----------------------------
   writeFileSync(join(repo, 'keep.txt'), 'keep\nplus one line\n')
@@ -276,7 +295,7 @@ try {
   writeFileSync(join(repo, 'with space.txt'), 'sp\n')
   res = await call('/dsh-desktop/review/workspace', { workspace, sessionId: session })
   json = await res.json()
-  const names = (json.files ?? []).map((f) => f.path)
+  const names = (json.untracked?.inlineFiles ?? []).map((f) => f.path)
   check('8c) 中文名文件在列表里且未被转义', names.includes('中文 文件名.txt'), 'true')
   check('   带空格的文件在列表里', names.includes('with space.txt'), 'true')
   res = await call('/dsh-desktop/review/workspace-file', { workspace, path: '中文 文件名.txt', untracked: true })

@@ -1,3 +1,107 @@
+# 1.5.2
+
+这一版把**项目级 Git 的作用域**与**未跟踪文件的规模问题**一起解决掉，并顺手修掉分支弹窗二级菜单的
+两个交互缺陷。起因是两个真实形状：一是**工作区常常只是仓库的一个子目录**（例如
+`D:/project/mmsm-amis/pages/mse`），而项目面板此前把"用户打开的目录"同时当成 Git 的 cwd、路径基准、
+快照缓存键与仓库身份——于是同一个仓库的不同子目录各跑一套 10 秒轮询、`ls-files --others` 因为带
+cwd 前缀而少报文件、路径时而 `../src/a.js` 时而 `src/a.js`；二是**一个仓库里有 6,846 个未跟踪文件**
+（一个没有被 `.gitignore` 覆盖的 `tmp/`），常驻轮询每次都在搬几千条路径，而界面只列前 50 条再加一句
+"还有 6,796 个未显示"——既不是完整列表也不是概要。这一版把这两件事都按"有界"重做：**Git 工作量与
+未跟踪文件数量脱钩**，路径基准唯一，且同一仓库只跑一套轮询。
+
+## 变更
+
+- **正式拆分 `workspaceRoot` 与 `repositoryRoot`（host 推导，客户端不可信）。** 新增
+  `lib/repo-context.js`（review 与 gitbar 各持一份**逐字节相同**的副本）：以
+  `git rev-parse --show-toplevel --absolute-git-dir` **一次调用**推导仓库根，配上有界缓存
+  （最多 64 条、正向 TTL 5 分钟、负向 10 秒）与 single-flight。`repositoryRoot` 永远由 host 推导，
+  客户端只能送 `workspaceRoot`——否则 `repositoryRoot=C:/` 就能越过工作区安全边界。
+  - **所有 Git 路由都以仓库根为 cwd**：`status` / `diff` / `workspace-file` / `stage` / `unstage` /
+    `revert` / `commit` / `commit-and-push` / `file-history` / `graph` / `commit-detail` /
+    `commit-file` / `history` / `untracked`。这同时修掉一个真实缺陷：合并/变基的标记
+    （`.git/MERGE_HEAD`）以前按"工作区/.git/…"找，工作区是子目录时那个路径根本不存在，
+    于是"正在进行合并"永远显示不出来。
+  - **路径统一为仓库相对**：`repo/src` 作为工作区时，`Changes` 照样显示 `root.txt` /
+    `src/a.js` / `src/deep/b.js` / `pages/x.json`——git 自己就是这样（`status` 与 `diff` 的输出本就是
+    仓库相对），因此这一版**没有**再加 `path.startsWith(workspaceRoot)` 之类的过滤。
+  - 预留 `gitScope: { workspaceRoot, repositoryRoot, repositories: [...] }`：本轮长度恒为 1，将来
+    `project/{frontend,backend}` 各带一个 `.git` 时不用改数据形状（也**不**递归扫硬盘找 `.git`）。
+- **同一个 `repositoryRoot` 只共享一份快照、一套轮询。** 客户端快照 store 的键从
+  `workspaceRoot` 改成**仓库根**（`repo/src` 与 `repo/pages` 因此落在同一条记录上），组件仍按工作区
+  订阅。于是"切一个子目录"不再清空分支/Changes/徽标、不再重新全量扫描、不再多一套轮询；两个工作区
+  的订阅者挂在同一条记录、同一个在途请求上。临时索引与基线也改成按仓库记（同仓库只付一次全量代价）。
+- **常驻快照走快路径。** `/workspace` 与 `/status` 改用
+  `status --porcelain=v2 --branch -z --untracked-files=normal`：git 会把整块未跟踪目录折叠成一条
+  `tmp/`，因此 6,846 个未跟踪文件在轮询里只是 1~2 条记录。实测同一个夹具：
+  `-uall` **174.4 KB / 6,855 条记录** → `-unormal` **0.6 KB / 10 条记录**；
+  `/workspace`（6,848 个未跟踪）**96 ms / 1.6 KB**，且**不向渲染进程传任何一条未跟踪路径**。
+  `changedFiles` 是精确值时带 `changedFilesExact: true`，折叠状态下明确标成估计值。
+- **未跟踪文件改成 IDEA 式双模式**（阈值 `UNTRACKED_INLINE_LIMIT = 50`）：
+  - **≤ 50（inline）**：主面板逐行列出**全部**未跟踪文件（勾选、加入 Git、查看差异、变更记录都在），
+    并在有界预算内补上精确 `+N`（单文件 ≤ 1 MB、一轮总量 ≤ 8 MB、二进制只标记不读全文，
+    **绝不为一个数字 fork 一个 git 进程**）；
+  - **> 50（browse）**：主面板**一行都不列**，只显示"未进行版本管理的文件 6,846 个文件 [浏览]"。
+    DOM 里既没有 6,846 行，也没有"前 50 行 + 还有 N 个"那种半成品；
+  - **还没统计出来（pending）**：显示"正在统计未跟踪文件…"，并**按需**触发一次精确枚举。
+- **精确枚举改成 lazy + 按仓库缓存。** 只有三种情况才做完整枚举：Changes 页签要判定 inline/browse、
+  用户点「浏览」、写操作之后（缓存被 invalidate）。路由 `POST /review/untracked` 一次返回精确条数 +
+  模式 + 该层的直接子节点，缓存 TTL 20 秒、按 `repositoryRoot` 共享（`repo/src → repo/pages` 直接
+  复用）。实测 6,848 条的精确枚举 **115 ms / 1.2 KB**。
+- **「浏览未进行版本管理的文件」弹窗（惰性树）。** 目录默认折叠，只请求当前前缀的**直接子节点**；
+  同级节点分页（一页 200 条 + 「继续加载」），因此展开一个躺着 6,835 个文件的目录不会一次 mount
+  几千行；文件与目录都能勾（目录勾上 = 整棵子树，把**目录路径**交给 `git add`），部分勾选是
+  indeterminate，默认全不选，顶部有「全选 / 清空」。加入 Git 之后**就地刷新**已展开的层并清空选择，
+  主面板同时从 browse 变回 inline（`51 → 加 3 → 48` 这条路径有专门的断言）。
+- **大批量 `git add` 有界。** 一次加入几千个未跟踪文件时不再拼超长命令行，而是写一个 NUL 分隔的
+  临时 pathspec 文件、用 `git add --pathspec-from-file=… --pathspec-file-nul`（临时文件在 `finally`
+  里删掉）；老 git 不认这个选项时退回**双上限**批处理（路径数与总 argv 字符数一起限，Windows 命令行
+  上限 32K）。「全选 → 加入 Git」走 `{ all: 'untracked' }`：由 host 用**它手上那份**完整清单去 add，
+  渲染进程永远不持有那几千条路径。实测一次 add 6,835 个路径 **4.4 s**，索引里确实多了 6,835 条。
+- **分支弹窗的二级菜单改成 IDEA 式外侧级联，并消灭孤儿菜单。**
+  - 二级菜单不再从分支行左边缘开始（那会盖住一级面板），而是优先出现在**一级面板右侧**
+    （`left = panelRect.right + gap`），右侧空间不足时出现在左侧；两边都放不下才在视口内做兜底。
+    位置由 `{ branch, rowAnchor, panelAnchor }` 两个矩形算出来，纵向按行对齐并在必要时上翻，
+    首帧用估算高度、挂载后用真实高度微调（不闪）。
+  - **孤儿菜单的根因**：二级菜单的渲染条件只看 `menu !== null`，而"点面板外"只执行
+    `setOpen(false)`——既不收二级菜单也不清 200 ms 的单击定时器。于是"面板已消失、菜单还挂着"，
+    或者"点一下别处之后 200 ms 菜单自己冒出来"。现在统一成
+    `closePanel()`（面板 + 二级 + 对话框 + 定时器一起收）与 `closeBranchMenu()`（只收二级 + 定时器），
+    所有关面板路径都走它们，并在渲染层再加一道 `open === true` 的闸门。
+- **`gitbar` 与 `review` 共用同一套仓库解析**：同一个工作区的分支徽章、`Changes`、`Log`、
+  `stage`、`commit`、`checkout` 因此操作**同一个仓库根**（两份副本由逐字节比较 + 真实临时仓库的
+  解析对比钉住）。gitbar 的响应也带上 `workspaceRoot` / `repositoryRoot` / `gitScope`。
+
+## 校验
+
+- 新增 `scripts/test-review-repo-scope.mjs`（**110 项断言**，真实仓库 + 真实 HTTP + **6,846 个未跟踪
+  文件**的夹具）：作用域推导与"客户端传来的 repositoryRoot 被忽略"、子目录工作区列出全仓库四条改动、
+  快路径不搬路径（响应 < 8 KB、`-unormal` 与 `-uall` 的体量对照）、精确枚举与按仓库复用、50/51 阈值、
+  惰性树 + 分页 + 404、同仓库两个工作区共用缓存、6835 个路径一次 add（pathspec-from-file + 临时文件
+  清理 + 之后自动变 inline）、未跟踪文件按需差异。
+- `scripts/test-review-staging.mjs` 新增第 13/14 节（**222 项断言**）：inline 逐行 / browse 只给摘要 +
+  浏览入口（主面板 0 行）/ pending 显示"正在统计…"并只发一次精确枚举（在途期间不重复发）、浏览弹窗的
+  惰性树与分页与勾选与"全选走 all: untracked"、**同一仓库两个工作区只有一格记录、一套轮询**（并断言
+  退订后停止轮询、换工作区不清空、僵尸记录不会残留）。
+- `scripts/test-gitbar-branch-interaction.mjs` 扩到 **100 项断言**（新增级联几何 `S.left ≥ P.right + gap`
+  / 左侧回退 / 点外两级全关 / 点一级内只关二级 / `open === false` 时二级计数为 0，以及孤儿菜单的六条
+  回归与 Esc 三层顺序）；`test-gitbar-branch-perf.mjs` 新增"仓库探针只跑一次"的断言（第二次
+  `/branches` 只起 1 个 git 进程）。
+- `scripts/test-review-graph.mjs` / `test-review-host.mjs` 更新为新的快照契约（未跟踪不再混进
+  `files`、`untracked` 是摘要对象、`/untracked` 是惰性树）；四个 spawn 运行时的 HTTP 测试现在**自己
+  先同步插件**——此前它们会在 `runtime/node_modules` 里那份旧副本上跑并"全绿"，实测踩到过。
+- `scripts/mutation-check.mjs` 扩到 **33 项**，新增 11 项针对这一版：未跟踪大量时仍逐行列出、把摘要当
+  裸数字、精确枚举读错字段、store 退回按工作区建格、合并时留下僵尸记录、枚举退回 `-uall`、把未跟踪
+  塞回 `files`、大批量 add 退回单参数、所有命令退回工作区、惰性树不返回 404、二级菜单不优先右侧
+  ——每一项都确认"改回旧写法即变红、还原即变绿"。
+- 离线全量：**26 个脚本 / 2,077 项断言 0 失败**（唯一失败的是既有的 `test-unpack.mjs`，它检查的是
+  陈旧的 `build/runtime.br` 归档，与本次改动无关）；`tsc --noEmit`、`check-imports`、
+  `check-react-rules`、`check-plugin-i18n`（两个插件）、`check-readme`（中英）、`test-i18n`、
+  `test-ui-typography` 全部通过。
+- CDP/Electron 冒烟（需要活体实例，请在桌面会话里跑）：`test-gitbar-ui.mjs` / `test-menu-anchor.mjs`
+  可验证二级菜单的真实像素几何；`test-review-sidebar.mjs` / `test-project-git-smoke.mjs` 覆盖面板本身。
+
+---
+
 # 1.5.1
 
 这一版来自两条实机反馈：**`Log` 底部 Diff Preview 的长代码不会自动换行**（Go / Java / SQL 一行几百

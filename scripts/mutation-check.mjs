@@ -12,6 +12,10 @@ import { fileURLToPath } from 'node:url'
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'client.js')
 const INDEX = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'index.js')
+/** review 的 host 半边（路由、快照、未跟踪枚举都在这里）。 */
+const HOST = INDEX
+/** gitbar 的客户端 bundle（级联菜单的几何在这里）。 */
+const GITBAR_CLIENT = join(ROOT, 'plugins', 'dsh-client-ui-gitbar', 'lib', 'client.js')
 
 const run = (script) => {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', script)], { encoding: 'utf8', cwd: ROOT })
@@ -250,6 +254,102 @@ mutate({
   from: '        const isHeader = /^(diff --git|index |--- |\\+\\+\\+ |new file mode|deleted file mode|old mode|new mode|similarity index|rename from|rename to|copy from|copy to)/u.test(raw)\n        if (isHeader) {',
   to: '        const isHeader = false\n        if (isHeader) {',
   script: 'test-review-graph-view.mjs',
+})
+
+// ===========================================================================
+// 1.6.0：作用域（workspaceRoot / repositoryRoot）、未跟踪双模式、浏览弹窗
+// ===========================================================================
+
+mutate({
+  file: CLIENT,
+  label: '13) 未跟踪大量时仍逐行列出（回到"列前 50 个"）→ "主面板 0 行"断言变红',
+  from: "      const untrackedMode = untrackedInfo.exact === false && untrackedInfo.mode === 'pending' ? 'pending' : untrackedInfo.mode",
+  to: "      const untrackedMode = 'inline'",
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '13b) 把未跟踪摘要当裸数字（旧形状）→ 双模式断言变红',
+  // 旧实现里 `snapshot.untracked` 是一个数字；改回去之后 `untrackedInfo.mode` 等字段全是
+  // undefined，于是 browse 摘要 / 浏览入口 / 精确枚举都不会出现。
+  from: '          untracked,\n          empty: payload?.empty === true,',
+  to: '          untracked: untracked.count,\n          empty: payload?.empty === true,',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '13c) 精确枚举的结果用错字段（读 payload.untracked）→ "合并后变成 browse"变红',
+  from: '            const untracked = untrackedFromExact(payload)',
+  to: '            const untracked = untrackedSummary(payload?.untracked, tracked)',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '14) 快照 store 退回按工作区建格 → "同仓库只有一格"断言变红',
+  from: '          const key = repositoryRoot\n          const target = records.get(key)',
+  to: '          const key = provisionalKey(workspace)\n          const target = records.get(key)',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '14b) 合并同仓库的两格时留下僵尸记录 → "记录数只有 1"断言变红',
+  from: '          records.delete(record.key)\n          stopPolling(record)\n          for (const listener of record.listeners) target.listeners.add(listener)',
+  to: '          stopPolling(record)\n          for (const listener of record.listeners) target.listeners.add(listener)',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '15) 未跟踪枚举退回 -uall（常驻轮询搬全量）→ "folded/pending"断言变红',
+  from: "          git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal'], cwd, undefined, GIT_MAX_BUFFER_LARGE),",
+  to: "          git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], cwd, undefined, GIT_MAX_BUFFER_LARGE),",
+  // 必须用**带大量未跟踪文件**的那个夹具：小仓库里 -uall 与 -unormal 的输出相同，
+  // 断言根本区分不出来（这条本身也是"测试要选对夹具"的一个例子）。
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '15b) 快照把未跟踪塞回 files（几千条路径）→ 有界性断言变红',
+  from: '        const untracked = describeUntrackedFast(cwd, untrackedEntries)',
+  to: '        const untracked = describeUntrackedFast(cwd, untrackedEntries)\n        files.push(...untrackedEntries.map((entry) => ({ ...entry, added: null, removed: null })))',
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '16) 大批量 add 退回单个命令行参数 → 6818 路径的请求变红',
+  from: "      await git(['add', `--pathspec-from-file=${file}`, '--pathspec-file-nul'], cwd)\n      return { mode: 'pathspec-file', batches: 1 }",
+  to: "      await git(['add', '--', ...normalized], cwd)\n      return { mode: 'pathspec-file', batches: 1 }",
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '17) 所有 Git 命令退回工作区（不用 repositoryRoot）→ 子目录漏文件/路径不一致变红',
+  from: '      const cwd = context.repositoryRoot',
+  to: '      const cwd = workspace',
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '18) /untracked 的惰性树退回"前缀不存在也返回根层"→ 404 断言变红',
+  from: '        if (page === undefined) {\n          sendJson(response, 404, { error: \'no such directory\', code: \'noSuchPrefix\' })\n          return\n        }',
+  to: '        if (page === undefined) {\n          sendJson(response, 200, { isRepo: true, total, mode, exact: true, inlineFiles: [], tree: { prefix, directories: [], files: [], total: 0, truncated: false, offset, limit } })\n          return\n        }',
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: GITBAR_CLIENT,
+  label: '19) 二级菜单不再优先右侧展开 → 级联几何断言变红',
+  from: '      if (rightRoom >= width + margin) {\n        left = panel.right + gap\n        side = \'right\'',
+  to: '      if (false) {\n        left = panel.right + gap\n        side = \'right\'',
+  script: 'test-gitbar-branch-interaction.mjs',
 })
 
 console.log('')

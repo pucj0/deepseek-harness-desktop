@@ -177,6 +177,81 @@ let writeError = null
 /** 记录每一次请求的 `{ route, body, url }`，供"发到哪条路由、带了什么"的断言使用。 */
 const requests = []
 
+/**
+ * `/repo-context` 的响应。
+ *
+ * 固定回答"这些工作区都属于同一个仓库根"：`WORKSPACE` 与 `WORKSPACE\\pages` 因此必须落在
+ * 同一格里（第 14 节钉的就是这件事）。真实 host 那边是 `git rev-parse --show-toplevel` 的
+ * 结果，这里只需要形状一致。
+ */
+const REPO_ROOT = 'F:\\code\\projA'
+
+/**
+ * `/untracked` 的响应。
+ *
+ * 默认给一份"大量未跟踪 + 一层目录 + 一页 200 条"的形状，用来验证惰性树与分页；测试可以
+ * 在需要时替换它（例如让精确枚举失败）。
+ */
+/**
+ * 非 null 时 `/untracked` 会**挂起**，直到测试调用它放行（用来观察"正在统计…"那一帧）。
+ * 与 `aiHold` 同一套做法。
+ */
+let untrackedHold = null
+
+let untrackedResponse = (body) => {
+  const prefix = String(body?.prefix ?? '')
+  const offset = Number(body?.offset ?? 0)
+  const limit = Number(body?.limit ?? 200)
+  const tree = (directories, files) => ({
+    prefix,
+    directories,
+    files,
+    total: directories.length + files.length,
+    directoryCount: directories.length,
+    fileCount: files.length,
+    offset,
+    limit,
+    truncated: false,
+  })
+  if (prefix === '') {
+    return {
+      isRepo: true,
+      total: 6846,
+      mode: 'browse',
+      exact: true,
+      cached: false,
+      inlineFiles: [],
+      paths: [],
+      tree: tree([{ name: 'tmp', path: 'tmp', descendantCount: 6846 }], []),
+    }
+  }
+  if (prefix === 'tmp') {
+    return {
+      isRepo: true,
+      total: 6846,
+      mode: 'browse',
+      exact: true,
+      inlineFiles: [],
+      paths: [],
+      tree: tree([{ name: 'magic-api', path: 'tmp/magic-api', descendantCount: 6835 }], []),
+    }
+  }
+  // 叶子层：一次一页 200 条（用 total 表示还有更多，客户端据此显示「继续加载」）。
+  const files = []
+  for (let i = offset; i < Math.min(offset + limit, 6835); i += 1) {
+    files.push({ name: `f${String(i).padStart(5, '0')}.js`, path: `tmp/magic-api/f${String(i).padStart(5, '0')}.js` })
+  }
+  return {
+    isRepo: true,
+    total: 6846,
+    mode: 'browse',
+    exact: true,
+    inlineFiles: [],
+    paths: [],
+    tree: { prefix, directories: [], files, total: 6835, directoryCount: 0, fileCount: 6835, offset, limit, truncated: offset + files.length < 6835 },
+  }
+}
+
 /** 假的"新增文件"统一差异：内容里带路径，因此"谁的差异画在谁下面"可以直接从文本上看出来。 */
 const UNTRACKED_DIFF = (path) =>
   [
@@ -238,7 +313,18 @@ const fetchBase = async (url, init) => {
         }),
     }
   }
-  if (route === 'untracked') return { ok: true, text: async () => JSON.stringify({ isRepo: true, paths: [], total: 0, truncated: false }) }
+  if (route === 'repo-context') {
+    return { ok: true, text: async () => JSON.stringify({ isRepo: true, workspaceRoot: body?.workspace, repositoryRoot: REPO_ROOT }) }
+  }
+  if (route === 'untracked') {
+    // 可以挂起（用来观察"还没统计出来"那一帧，并在其间断言"不重复发请求"）。
+    if (untrackedHold !== null) {
+      return await new Promise((resolve) => {
+        untrackedHold = () => resolve({ ok: true, text: async () => JSON.stringify(untrackedResponse(body)) })
+      })
+    }
+    return { ok: true, text: async () => JSON.stringify(untrackedResponse(body)) }
+  }
   // 「AI 补充提交信息」。夹具可以控制它：成功给一段文本、失败给一个稳定 code、
   // 或者**挂起**（用来验证"生成期间切工作区/重新生成时，迟到结果不许写入"）。
   if (route === 'commit-message') {
@@ -1038,6 +1124,150 @@ console.log('=== 12. AI 一键补充提交信息（item 9）===')
   mountProps.workspace = savedWorkspace
   aiHold = null
   check('   期间只发过一次请求', requests.filter((r) => r.route === 'commit-message').length - aiBefore, 1)
+}
+
+console.log('')
+console.log('=== 13. 未跟踪双模式：少量逐行 / 大量只给摘要 +「浏览」===')
+{
+  // ---- 13a. 少量（≤ 50）：逐行列出**全部**，没有"浏览"摘要 ----
+  await mount()
+  check('13a) 少量模式下列出全部 3 条', findAll('data-staging-row').filter((n) => n.props['data-staging-side'] === 'untracked').length, 3)
+  check('   没有 browse 摘要', find('data-staging-untracked-browse'), null)
+  check('   有「加入 git」栏', find('data-staging-add-chosen') !== null, 'true')
+
+  // ---- 13b. 大量（> 50）：主面板**一行都不列**，只给摘要 +「浏览」 ----
+  const trackedOnly = FILES.filter((entry) => entry.untracked !== true)
+  const bigSnapshot = {
+    ...SNAPSHOT,
+    files: trackedOnly,
+    changedFiles: trackedOnly.length + 6846,
+    changedFilesExact: true,
+    untracked: { count: 6846, exact: true, mode: 'browse', collapsed: false, inlineFiles: [] },
+  }
+  const beforeBig = requests.filter((r) => r.route === 'untracked').length
+  setSnapshot(bigSnapshot)
+  await settle()
+  check('13b) 主面板里 0 条未跟踪行（需求 21.E）', findAll('data-staging-row').filter((n) => n.props['data-staging-side'] === 'untracked').length, 0)
+  check('   也没有内联列表容器', find('data-staging-untracked-list'), null)
+  check('   有 browse 摘要，模式为 browse', find('data-staging-untracked-browse')?.props?.['data-staging-untracked-browse'], 'browse')
+  checkTrue('   摘要里带总数 6846', viewText().includes('6846'))
+  check('   有「浏览」按钮', find('data-staging-browse') !== null, 'true')
+  check('   没有「加入 git」栏（没行可勾）', find('data-staging-add-chosen'), null)
+  // 已经精确了 → 不该再发精确枚举请求（"常驻轮询不枚举"这条在界面上也成立）。
+  check('   精确快照不再触发枚举请求', requests.filter((r) => r.route === 'untracked').length - beforeBig, 0)
+
+  // ---- 13c. `pending`（快路径只看到折叠目录）→ 显示"正在统计…"并自动补一次枚举 ----
+  const pendingSnapshot = {
+    ...SNAPSHOT,
+    files: trackedOnly,
+    changedFiles: trackedOnly.length + 3,
+    changedFilesExact: false,
+    untracked: { count: 3, exact: false, mode: 'pending', collapsed: true, inlineFiles: [] },
+  }
+  setSnapshot(pendingSnapshot)
+  // 让精确枚举**挂起**，于是"正在统计…"那一帧可以被稳定观察（真实界面里这一段只有
+  // 几十到一百毫秒，测试不能靠抢时序）。
+  untrackedHold = () => undefined
+  await settle()
+  check('13c) 还没统计出来时给"正在统计…"', find('data-staging-untracked-browse')?.props?.['data-staging-untracked-browse'], 'pending')
+  checkTrue('   文案是统计中', viewText().includes('untrackedCounting'))
+  check('   「浏览」按钮此时禁用', find('data-staging-browse')?.props?.disabled, true)
+  const exactCalls = requests.filter((r) => r.route === 'untracked')
+  check('   自动发了**一次**精确枚举', exactCalls.length - beforeBig, 1)
+  check('   请求带 exact: true', exactCalls[exactCalls.length - 1]?.body?.exact, true)
+  check('   请求带工作区', exactCalls[exactCalls.length - 1]?.body?.workspace, WORKSPACE)
+  check('   请求带 force（写操作之后要重数）', String(exactCalls[exactCalls.length - 1]?.body?.force ?? 'false'), 'false')
+  // 统计期间再渲染几轮（模拟轮询）：在途请求只有一个，不许再发。
+  await settle()
+  await settle()
+  check('   统计期间不重复发请求', requests.filter((r) => r.route === 'untracked').length - beforeBig, 1)
+  // 放行：结果合并进快照 → 界面变成 browse 摘要（stub 返回 total=6846 / mode=browse）。
+  const release = untrackedHold
+  untrackedHold = null
+  release()
+  await settle()
+  check('   合并后变成 browse 摘要', find('data-staging-untracked-browse')?.props?.['data-staging-untracked-browse'], 'browse')
+  check('   合并后「浏览」可用', find('data-staging-browse')?.props?.disabled, false)
+  // 已经是精确快照了：再多渲染几轮也不该再有枚举请求。
+  await settle()
+  await settle()
+  check('   精确之后不再枚举', requests.filter((r) => r.route === 'untracked').length - beforeBig, 1)
+
+  // ---- 13d. 「浏览」弹窗：惰性树 + 分页 + 勾选 + 加入 ----
+  await click(find('data-staging-browse'))
+  check('13d) 弹窗打开了', find('data-untracked-browse') !== null, 'true')
+  const rootDirs = findAll('data-untracked-browse-dir').map((n) => n.props['data-untracked-browse-dir'])
+  check('   根层只有 tmp 一个目录（惰性：只拿一层）', rootDirs.join(','), 'tmp')
+  check('   根层文件行也没有（tmp 下没有直接文件）', findAll('data-untracked-browse-file').length, 0)
+  check('   目录带后代文件数', textOf(find('data-untracked-browse-dir', 'tmp')).includes('untrackedBrowseDirCount'), 'true')
+  // 展开 tmp：发一次带 prefix 的请求，只多出这一层。
+  const prefixCalls = () => requests.filter((r) => r.route === 'untracked' && r.body?.prefix !== undefined)
+  const beforeExpand = prefixCalls().length
+  await click(find('data-untracked-browse-toggle', 'tmp'))
+  check('   展开发出了 prefix 请求', prefixCalls().length - beforeExpand, 1)
+  check('   带的是 tmp', prefixCalls()[prefixCalls().length - 1]?.body?.prefix, 'tmp')
+  const secondLevel = findAll('data-untracked-browse-dir').map((n) => n.props['data-untracked-browse-dir'])
+  check('   多出第二层目录', secondLevel.sort().join(','), 'tmp,tmp/magic-api')
+  // 展开 magic-api：拿到 200 条 + 「继续加载」（分页，而不是一次几千行）。
+  await click(find('data-untracked-browse-toggle', 'tmp/magic-api'))
+  const filesInLeaf = findAll('data-untracked-browse-file').length
+  check('   叶子层只渲染一页（200 行）', filesInLeaf, 200)
+  check('   有「继续加载」', find('data-untracked-more', 'tmp/magic-api') !== null, 'true')
+  const beforeMore = findAll('data-untracked-browse-file').length
+  await click(find('data-untracked-more', 'tmp/magic-api'))
+  check('   继续加载后多了一页', findAll('data-untracked-browse-file').length - beforeMore, 200)
+  check('   请求带了 offset', requests.filter((r) => r.route === 'untracked' && r.body?.offset === 200).length >= 1, 'true')
+  // 勾一个文件 → 计数 1 → 加入 git 只发这个路径。
+  const firstFile = findAll('data-untracked-browse-file')[0].props['data-untracked-browse-file']
+  await toggleCheck(find('data-untracked-pick', firstFile))
+  check('   勾选计数为 1', find('data-untracked-count')?.props?.['data-untracked-count'], 1)
+  const beforeAdd = posts.length
+  await click(find('data-untracked-add'))
+  check('   发出 stage', posts[posts.length - 1]?.route, 'stage')
+  check('   只带勾选的那一个路径', JSON.stringify(posts[posts.length - 1]?.body?.paths), JSON.stringify([firstFile]))
+  check('   加入成功后清空勾选', find('data-untracked-count')?.props?.['data-untracked-count'], 0)
+  check('   加入后弹窗仍在（就地刷新）', find('data-untracked-browse') !== null, 'true')
+  check('   且重取了根层', requests.filter((r) => r.route === 'untracked').length > beforeAdd, 'true')
+  // 全选 → 加入 git 时**不把几千条路径发回去**，而是让 host 用完整清单。
+  await click(find('data-untracked-all'))
+  check('   全选后显示总数', textOf(find('data-untracked-count')).includes('untrackedBrowseAll'), 'true')
+  await click(find('data-untracked-add'))
+  check('   全选加入走 all: untracked', JSON.stringify(posts[posts.length - 1]?.body), JSON.stringify({ workspace: WORKSPACE, all: 'untracked' }))
+  await click(find('data-untracked-none'))
+  check('   清空后计数为 0', find('data-untracked-count')?.props?.['data-untracked-count'], 0)
+  await click(find('data-untracked-close'))
+  check('   关闭后弹窗消失', find('data-untracked-browse'), null)
+}
+
+console.log('')
+console.log('=== 14. 同一个仓库的两个工作区：只有一格、一套轮询 ===')
+{
+  // 这一节直接测 store（不挂界面）：它是"同 repo 共享一份快照"的判据所在。
+  //
+  // 夹具让 `/repo-context` 对两个工作区都回答同一个仓库根，于是 `projA` 与
+  // `projA\\pages` 必须落在**同一条记录**上——这正是"切目录不清空、不重扫"的前提。
+  snapshotStore.reset()
+  const otherWorkspace = `${WORKSPACE}\\pages`
+  let ticks = 0
+  const unsubA = snapshotStore.subscribe(WORKSPACE, () => { ticks += 1 })
+  const unsubB = snapshotStore.subscribe(otherWorkspace, () => { ticks += 1 })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  check('14) 两个工作区解析到同一个仓库根', snapshotStore.cellKeyFor(otherWorkspace), WORKSPACE)
+  check('   两个工作区挂在同一条记录上', snapshotStore.cellKeyFor(WORKSPACE), snapshotStore.cellKeyFor(otherWorkspace))
+  check('   记录数只有 1（不是每个工作区一格）', snapshotStore.cells().length, 1)
+  check('   只有一套轮询', snapshotStore.cells()[0]?.polling, true)
+  check('   两个订阅者都记在同一格上', snapshotStore.cells()[0]?.listeners, 2)
+  checkTrue('   已经取到数据（订阅即拉一次）', snapshotStore.get(WORKSPACE)?.phase === 'ready')
+  // 切工作区（同仓库）：快照**不清空**，也不换代。
+  await snapshotStore.refresh(otherWorkspace)
+  check('   同仓库换工作区后快照仍在', snapshotStore.get(WORKSPACE) !== undefined, true)
+  check('   而且文件列表没有被清空', snapshotStore.get(WORKSPACE)?.files?.length >= 1, true)
+  check('   还是同一条记录', snapshotStore.cellKeyFor(otherWorkspace), snapshotStore.cellKeyFor(WORKSPACE))
+  checkTrue('   订阅回调确实被触发过（数据真的更新过）', ticks > 0)
+  unsubA()
+  unsubB()
+  check('   全部退订后停止轮询', snapshotStore.cells()[0]?.polling, false)
 }
 
 console.log('')

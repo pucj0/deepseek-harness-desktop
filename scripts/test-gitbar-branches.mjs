@@ -89,6 +89,14 @@ try {
   console.log('')
 
   // ---- 起服务端 -------------------------------------------------------------
+  //
+  // **先把插件同步进 runtime**：测试起的是 `runtime/server.mjs`，它加载的是
+  // `runtime/node_modules` 里那份**副本**。不同步就会出现"改了源码、测试却跑在旧副本上
+  // 并且全绿"——实测踩到过（改了 host 路由、HTTP 测试仍然全过）。同步是幂等的。
+  {
+    const { syncBundledPlugins } = await import('./sync-plugins.mjs')
+    syncBundledPlugins()
+  }
   const runtime = join(process.cwd(), 'runtime')
   const home = join(root, 'home')
   mkdirSync(home, { recursive: true })

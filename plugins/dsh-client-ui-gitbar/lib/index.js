@@ -22,6 +22,7 @@
 import { execFile } from 'node:child_process'
 import { readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
+import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 
 /** 插件名，用于诊断与 effect 标签。 */
 export const name = 'gitbar'
@@ -69,6 +70,14 @@ const REVISION_PATTERN = /^[0-9a-f]{4,40}$/u
 
 /** git 命令的默认超时。仓库很大时 `status` 可能略慢，但不该拖住 UI。 */
 const GIT_TIMEOUT_MS = 8000
+
+/**
+ * 仓库探测（两次 `rev-parse`）的超时。
+ *
+ * 它只回答"这个目录属于哪个仓库"，正常在毫秒级返回；给 5 秒是为了让异常快速失败，
+ * 而不是让一条每 10 秒一次的轮询请求挂满 8 秒。
+ */
+const REPO_PROBE_TIMEOUT_MS = 5000
 
 /**
  * 联网操作的超时。
@@ -656,6 +665,39 @@ async function stashChanges(cwd, branch) {
 }
 
 /**
+ * `workspaceRoot → RepoContext` 的解析器。
+ *
+ * 与 review 插件**共用同一份实现**（`lib/repo-context.js` 逐字节相同的副本 + 一个 parity
+ * 测试钉住）。这一点是硬要求：同一个工作区里，gitbar 的分支徽章与 review 的 Changes /
+ * Log / stage / commit **必须操作同一个仓库根**，否则在"工作区是仓库子目录"时会出现
+ * "徽章显示 A 仓库、Changes 显示 B 仓库"这类对不上的现象。
+ *
+ * 两个插件是各自独立的包（启动时整目录同步进 runtime 的 node_modules），跨包 import 会
+ * 让"另一个插件不存在"变成加载期错误，因此只能各持一份副本。
+ */
+const repoContext = createRepoContextResolver({
+  runGit: (args, cwd) => git(args, cwd, { timeoutMs: REPO_PROBE_TIMEOUT_MS }),
+  realpath: (value) => realpathSync.native(value),
+})
+
+/**
+ * 给响应附上作用域字段（工作区 / 仓库 / 多仓库模型预留的 scope）。
+ *
+ * @param workspace - 已校验的工作区路径。
+ * @param context - 解析结果（可能 undefined："这里不是仓库"）。
+ * @returns 可直接铺进响应的字段。
+ */
+function scopeFields(workspace, context) {
+  if (context === undefined) return { workspaceRoot: workspace }
+  return {
+    workspaceRoot: context.workspaceRoot,
+    repositoryRoot: context.repositoryRoot,
+    ...(context.gitDir === '' ? {} : { gitDir: context.gitDir }),
+    gitScope: createProjectGitScope(context),
+  }
+}
+
+/**
  * 解析本次请求要操作的工作区。
  *
  * **必须是每次请求传入的**，不能用外壳启动时的那个。原因：应用内可以给会话选择
@@ -714,21 +756,23 @@ function resolveRequestWorkspace(requestUrl, allowedRoots) {
  * `code` 必须与 git 的英文原文分开：host 不知道界面语言，客户端按 code 渲染当前语言的
  * 短句，git 原文只放在 `detail` 里作为权威信息原样展示（翻译它反而失真）。
  *
- * @param workspace - 已校验的工作区路径。
+ * @param cwd - 仓库根（所有 git 命令的 cwd，见 lib/repo-context.js）。
+ * @param scope - 作用域字段（工作区 / 仓库），铺进成功响应。
  * @param response - HTTP 响应。
  * @param run - 实际执行 git 的函数，返回 `{ stash?, notice? }` 之类的附加信息。
  * @param onError - 把异常映射成 `{ status, code, detail }`；不返回则用通用映射。
  * @returns 无。
  */
-async function runWrite(workspace, response, run, onError) {
+async function runWrite(cwd, scope, response, run, onError) {
   try {
     const extra = (await run()) ?? {}
     // 状态与远端列表互不依赖，并发取。
-    const [status, remotes] = await Promise.all([readStatus(workspace), listRemotes(workspace)])
+    const [status, remotes] = await Promise.all([readStatus(cwd), listRemotes(cwd)])
     sendJson(response, 200, {
       ...status,
       remotes,
       branchesStale: true,
+      ...scope,
       ...extra,
     })
   } catch (error) {
@@ -815,25 +859,50 @@ function createGitHandler() {
         return
       }
 
+      // ---- 工作区 → 仓库：**唯一的**作用域解析点 ---------------------------
+      //
+      // 从这里往下，所有 git 命令的 cwd 都是 `cwd`（= repositoryRoot，拿不到时退回工作区
+      // 本身，让 git 自己报"不是仓库"）。这一条同时修掉一个真实缺陷：合并/变基的标记
+      // （`.git/MERGE_HEAD`）以前是按 `<工作区>/.git/...` 找的，工作区是仓库子目录时
+      // 那个路径根本不存在，于是"正在进行合并"永远显示不出来。
+      //
+      // repositoryRoot 只能由 host 推导（见 lib/repo-context.js 的说明）：客户端送来
+      // 的永远只是 workspaceRoot。
+      const context = await repoContext.resolve(workspace)
+      const cwd = context === undefined ? workspace : context.repositoryRoot
+      const scope = scopeFields(workspace, context)
+
       const path = url.pathname
+
+      // 作用域查询：客户端据此确认"两个目录其实是同一个仓库"。
+      if (path === `${ROUTE_PREFIX}/repo-context`) {
+        sendJson(response, 200, { isRepo: context !== undefined, ...scope })
+        return
+      }
 
       // ---- 只读 ------------------------------------------------------------
       if (request.method === 'GET') {
         if (path === `${ROUTE_PREFIX}/status`) {
-          sendJson(response, 200, await readStatus(workspace))
+          // 不是仓库时明确回 isRepo:false，而不是让 git 的英文报错冒成 500——徽章据此
+          // 安静地不显示（用户在一个非仓库目录里工作时不该看到一个红色错误）。
+          if (context === undefined) {
+            sendJson(response, 200, { isRepo: false, ...scope })
+            return
+          }
+          sendJson(response, 200, { ...(await readStatus(cwd)), ...scope })
           return
         }
         if (path === `${ROUTE_PREFIX}/branches`) {
           // 首屏分支列表**只起一个 git 进程**（for-each-ref），精确的领先/落后由
           // `/branch/sync` 对可见分支按需补算（见 listBranches 的说明）。
-          const { branches, counts, truncated } = await listBranches(workspace)
-          sendJson(response, 200, { branches, counts, ...(truncated ? { truncated: true } : {}) })
+          const { branches, counts, truncated } = await listBranches(cwd)
+          sendJson(response, 200, { branches, counts, ...scope, ...(truncated ? { truncated: true } : {}) })
           return
         }
         if (path === `${ROUTE_PREFIX}/remotes`) {
           // 远端列表单独一条路由：它只在需要时（面板打开、推送对话框）取一次，
           // 不拖慢分支列表（见 listRemotes 的说明）。
-          sendJson(response, 200, { remotes: await listRemotes(workspace) })
+          sendJson(response, 200, { remotes: await listRemotes(cwd), ...scope })
           return
         }
         if (path === `${ROUTE_PREFIX}/branch/sync`) {
@@ -845,7 +914,7 @@ function createGitHandler() {
           // **没有逗号**，因此切分无歧义，而 URL 也不会因为几十个分支名变得很长。
           const raw = url.searchParams.get('names') ?? ''
           const names = raw === '' ? [] : raw.split(',')
-          sendJson(response, 200, await readBranchSync(workspace, names))
+          sendJson(response, 200, { ...(await readBranchSync(cwd, names)), ...scope })
           return
         }
         sendJson(response, 404, { error: 'not found' })
@@ -881,18 +950,19 @@ function createGitHandler() {
         let stash = { stashed: false }
         if (payload?.stash === true) {
           try {
-            if (!(await isDirty(workspace))) {
+            if (!(await isDirty(cwd))) {
               sendJson(response, 400, { error: 'nothing to stash', code: 'nothingToStash' })
               return
             }
-            stash = await stashChanges(workspace, target)
+            stash = await stashChanges(cwd, target)
           } catch (error) {
             sendJson(response, 409, { error: 'stash failed', code: 'stashFailed', detail: String(error.message) })
             return
           }
         }
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             // 目标可能是**本地分支、远端分支、或标签/提交**，而 `git switch` 对三者的
@@ -905,7 +975,7 @@ function createGitHandler() {
             //               （不带 `--detach` 时 git 会拒绝，并提示加它）
             const exists = async (ref) => {
               try {
-                await git(['show-ref', '--verify', '--quiet', ref], workspace)
+                await git(['show-ref', '--verify', '--quiet', ref], cwd)
                 return true
               } catch {
                 return false
@@ -920,7 +990,7 @@ function createGitHandler() {
               : onRemoteBranch
                 ? ['switch', '--track', '--', `refs/remotes/${target}`]
                 : ['switch', '--detach', '--', target]
-            await git(args, workspace)
+            await git(args, cwd)
             // 标签或提交会进入游离 HEAD：界面必须告诉用户，否则他下一次提交就成了
             // "没有分支的提交"，很难自己看出来。
             return { stash, detached: !onLocalBranch && !onRemoteBranch }
@@ -952,13 +1022,14 @@ function createGitHandler() {
         }
         const checkout = payload?.checkout === true
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             // 先判重名：`switch -c` 的报错与"名字非法"的报错混在一起，客户端无法区分，
             // 而这两种情况给用户的提示完全不同（一个是"换个名字"，一个是"名字写错了"）。
             try {
-              await git(['show-ref', '--verify', '--quiet', `refs/heads/${target}`], workspace)
+              await git(['show-ref', '--verify', '--quiet', `refs/heads/${target}`], cwd)
               const conflict = new Error(`branch '${target}' already exists`)
               conflict.known = { status: 409, code: 'branchExists' }
               throw conflict
@@ -969,7 +1040,7 @@ function createGitHandler() {
             const args = checkout
               ? ['switch', '-c', target, ...(start === undefined ? [] : [start])]
               : ['branch', target, ...(start === undefined ? [] : [start])]
-            await git(args, workspace)
+            await git(args, cwd)
             return { created: target }
           },
           (error) => error?.known,
@@ -986,12 +1057,13 @@ function createGitHandler() {
           return
         }
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             // `-m` 是重命名，`-M` 是强制重命名（会覆盖同名分支）。这里用 `-m`：
             // 覆盖一个已有分支是破坏性的，不该由一次误点完成。
-            await git(['branch', '-m', from, to], workspace)
+            await git(['branch', '-m', from, to], cwd)
             return { renamed: { from, to } }
           },
           (error) => {
@@ -1013,7 +1085,8 @@ function createGitHandler() {
         }
         const remote = payload?.remote === true
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             if (remote) {
@@ -1035,21 +1108,21 @@ function createGitHandler() {
                 bad.known = { status: 400, code: 'invalidBranch' }
                 throw bad
               }
-              await git(['push', remoteName, '--delete', branch], workspace, {
+              await git(['push', remoteName, '--delete', branch], cwd, {
                 timeoutMs: GIT_NETWORK_TIMEOUT_MS,
               })
               return { deleted: { name: target, remote: true } }
             }
 
             // 本地分支：先挡掉"删除当前分支"与"未合并"两种需要用户明确决定的情况。
-            const status = await readStatus(workspace)
+            const status = await readStatus(cwd)
             if (status.branch === target) {
               const bad = new Error('cannot delete the branch you are on')
               bad.known = { status: 409, code: 'branchCheckedOut' }
               throw bad
             }
             try {
-              await git(['show-ref', '--verify', '--quiet', `refs/heads/${target}`], workspace)
+              await git(['show-ref', '--verify', '--quiet', `refs/heads/${target}`], cwd)
             } catch {
               const bad = new Error(`no branch named '${target}'`)
               bad.known = { status: 404, code: 'noSuchBranch' }
@@ -1060,7 +1133,7 @@ function createGitHandler() {
             // 那是不可从 UI 恢复的操作，必须有人明确点过。
             let merged = true
             try {
-              await git(['merge-base', '--is-ancestor', target, 'HEAD'], workspace)
+              await git(['merge-base', '--is-ancestor', target, 'HEAD'], cwd)
             } catch {
               merged = false
             }
@@ -1069,7 +1142,7 @@ function createGitHandler() {
               bad.known = { status: 409, code: 'notMerged' }
               throw bad
             }
-            await git(['branch', merged ? '-d' : '-D', '--', target], workspace)
+            await git(['branch', merged ? '-d' : '-D', '--', target], cwd)
             return { deleted: { name: target, remote: false, forced: !merged } }
           },
           (error) => error?.known,
@@ -1085,13 +1158,14 @@ function createGitHandler() {
           return
         }
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             // 默认允许快进（与命令行一致）。`noFf` 时强制产生一个合并提交，
             // 这是团队里常见的"保留合并点"偏好。
             const args = ['merge', '--no-edit', ...(payload?.noFf === true ? ['--no-ff'] : []), '--', source]
-            await git(args, workspace)
+            await git(args, cwd)
             return {}
           },
           (error) => {
@@ -1119,10 +1193,11 @@ function createGitHandler() {
           return
         }
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
-            await git(['rebase', onto], workspace)
+            await git(['rebase', onto], cwd)
             return {}
           },
           (error) => {
@@ -1145,7 +1220,8 @@ function createGitHandler() {
           return
         }
         await runWrite(
-          workspace,
+          cwd,
+          scope,
           response,
           async () => {
             // 先判"这次摘取会不会是空的"：目标提交的改动已经以同样内容存在于当前分支时，
@@ -1160,21 +1236,21 @@ function createGitHandler() {
             // 用 `git cherry` 而不是自己去比树：它正是为这个问题存在的（比较 patch-id），
             // 能识别"改动相同但提交对象不同"的情形（例如已被变基或改写过的提交）。
             try {
-              const cherry = await git(['cherry', 'HEAD', revision, `${revision}^`], workspace)
+              const cherry = await git(['cherry', 'HEAD', revision, `${revision}^`], cwd)
               if (/^-\s/u.test(cherry)) return { cherryPicked: revision, empty: true }
             } catch {
               // `cherry` 在首提交（无父）等边界上会失败——那不影响摘取本身，继续走正常路径。
             }
 
             try {
-              await git(['cherry-pick', revision], workspace)
+              await git(['cherry-pick', revision], cwd)
             } catch (error) {
               const message = String(error?.message ?? error)
               // 空摘取同样是"结果已存在"，不是失败。此时 git 可能已经把 HEAD 留在
               // 一个空提交的中间状态，必须 `--abort` 回到干净状态再回话——否则用户
               // 会卡在一个自己不认识的状态里。
               if (/cherry-pick is now empty|nothing to commit|The previous cherry-pick/iu.test(message)) {
-                await git(['cherry-pick', '--abort'], workspace).catch(() => undefined)
+                await git(['cherry-pick', '--abort'], cwd).catch(() => undefined)
                 return { cherryPicked: revision, empty: true }
               }
               throw error
@@ -1214,12 +1290,13 @@ function createGitHandler() {
         const network = { timeoutMs: GIT_NETWORK_TIMEOUT_MS }
         if (action === 'fetch') {
           await runWrite(
-            workspace,
+            cwd,
+            scope,
             response,
             async () => {
               // `--prune`：远端已删的分支在本地也清掉，否则"最近"分组里会一直挂着
               // 早已不存在的分支。不加 `--tags`（那会拉全部标签，慢且吵）。
-              await git(['fetch', '--prune', ...(remote === undefined ? [] : [remote])], workspace, network)
+              await git(['fetch', '--prune', ...(remote === undefined ? [] : [remote])], cwd, network)
               return { fetched: remote ?? 'all' }
             },
             (error) => (/could not read|Could not resolve|unable to access|Authentication failed/iu.test(String(error?.message ?? error))
@@ -1230,12 +1307,13 @@ function createGitHandler() {
         }
         if (action === 'pull') {
           await runWrite(
-            workspace,
+            cwd,
+            scope,
             response,
             async () => {
               // 不加 --rebase/--no-rebase：用户的 pull.rebase 配置由 git 自己决定，
               // 我们不该在插件里替他选一种历史形状。
-              await git(['pull', '--no-edit', ...(remote === undefined ? [] : [remote]), ...(branch === undefined ? [] : [branch])], workspace, network)
+              await git(['pull', '--no-edit', ...(remote === undefined ? [] : [remote]), ...(branch === undefined ? [] : [branch])], cwd, network)
               return {}
             },
             (error) => {
@@ -1253,7 +1331,8 @@ function createGitHandler() {
         if (action === 'push') {
           const setUpstream = payload?.setUpstream === true
           await runWrite(
-            workspace,
+            cwd,
+            scope,
             response,
             async () => {
               const args = ['push']
@@ -1263,7 +1342,7 @@ function createGitHandler() {
               if (branch !== undefined) args.push(`${branch}:${branch}`)
               // **不提供 --force 的任何形式**：强推会重写远端历史，从 UI 一键可达太危险。
               // 需要它的人在终端里做。
-              await git(args, workspace, network)
+              await git(args, cwd, network)
               return {}
             },
             (error) => {
@@ -1298,8 +1377,8 @@ function createGitHandler() {
           sendJson(response, 400, { error: 'unknown operation', code: 'unknown' })
           return
         }
-        await runWrite(workspace, response, async () => {
-          await git(args, workspace)
+        await runWrite(cwd, scope, response, async () => {
+          await git(args, cwd)
           return { aborted: kind }
         })
         return

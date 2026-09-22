@@ -10,7 +10,7 @@
 // 临时仓库刻意造出画图需要的形状：一条主线、一个分叉后合并回来的分支（产生**合并提交**）、
 // 一个标签、以及一个未跟踪文件。
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -31,6 +31,24 @@ const check = (label, actual, expected) => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}: ${actual}${ok ? '' : `（期望 ${expected}）`}`)
 }
 const checkTrue = (label, actual) => check(label, actual === true, true)
+
+/**
+ * 先把插件同步进 runtime 再起服务。
+ *
+ * 这一步**不能省**：测试起的是 `runtime/server.mjs`，它加载的是
+ * `runtime/node_modules/dsh-client-ui-review` 里那份**副本**。如果只改 `plugins/` 而
+ * 不同步，测试就会跑在旧副本上——所有断言照常全绿，却什么都没验证（实测踩到过：改了
+ * host 路由、HTTP 测试仍然全过）。同步是幂等的，代价是几十毫秒。
+ */
+{
+  const { existsSync } = await import('node:fs')
+  if (!existsSync(join(process.cwd(), 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))) {
+    console.log('  缺少 staged 运行时（runtime/），跳过：请先 npm run stage:runtime')
+    process.exit(0)
+  }
+  const { syncBundledPlugins } = await import('./sync-plugins.mjs')
+  syncBundledPlugins()
+}
 
 let child
 try {
@@ -70,6 +88,8 @@ try {
   const mergeCount = (await git(['rev-list', '--merges', '--count', 'HEAD'], repo)).trim()
   /** 根提交，后面多节都要用它（首提交的差异、多分支可达）。 */
   const rootHash = (await git(['rev-list', '--max-parents=0', 'HEAD'], repo)).trim()
+  /** 宿主推导出的仓库根：`repositoryRoot` 的期望值（realpath，反斜杠风格）。 */
+  const repoReal = realpathSync.native(repo)
 
   console.log('临时仓库:', repo)
   console.log(`  HEAD=${headShort} 合并提交数=${mergeCount}`)
@@ -306,7 +326,7 @@ try {
   check('   绝对路径 -> 400', res.status, 400)
 
   console.log('')
-  console.log('=== 7. GET /status：已跟踪与未跟踪分开 ===')
+  console.log('=== 7. GET /status：已跟踪与未跟踪分开，且**不**搬整份未跟踪清单 ===')
   res = await get('status')
   check('7) 200', res.status, 200)
   const trackedPaths = res.body.tracked.map((entry) => entry.path)
@@ -318,22 +338,41 @@ try {
   // 新增文件"的真实结果就是它变成未跟踪。这正是界面要把"已跟踪更改"与"未跟踪文件"
   // 分成两个区块的原因：同一个文件可能同时出现在两边，而两边的可执行操作不同。
   check('   未跟踪计数', res.body.untrackedCount, 2)
-  // 状态响应里给的是**完整路径清单**（`untrackedPaths`），不只是样本：这一版把"把未跟踪
-  // 文件加入 git"做成可勾选后批量 `git add`，因此界面需要知道有哪些文件，而不只是数量。
-  checkTrue('   未跟踪清单含 untracked.txt', res.body.untrackedPaths.includes('untracked.txt'))
-  checkTrue('   未跟踪清单含 d.txt', res.body.untrackedPaths.includes('d.txt'))
-  check('   清单长度等于计数', res.body.untrackedPaths.length, res.body.untrackedCount)
-  check('   没有被截断', res.body.untrackedTruncated, false)
+  // 这一版把未跟踪从"响应里塞一份完整路径清单"改成**有界的摘要对象**：清单只在
+  // /untracked 里按需取（见那一节的说明）。因此这里既钉摘要的形状，也钉"旧字段没了"。
+  check('   摘要里带精确标记', res.body.untracked?.exact, true)
+  check('   少量模式是 inline', res.body.untracked?.mode, 'inline')
+  checkTrue('   没有折叠目录', res.body.untracked?.collapsed === false)
+  check('   inline 清单含 untracked.txt', res.body.untracked?.inlineFiles?.some((f) => f.path === 'untracked.txt'), true)
+  check('   inline 清单含 d.txt', res.body.untracked?.inlineFiles?.some((f) => f.path === 'd.txt'), true)
+  check('   摘要里的条数等于计数', res.body.untracked?.inlineFiles?.length, res.body.untrackedCount)
+  // 旧的"整份未跟踪清单"字段必须消失：它是"每次轮询搬 6,846 条路径"的入口。
+  check('   不再返回 untrackedPaths', res.body.untrackedPaths, undefined)
+  check('   也不再有 untrackedTruncated', res.body.untrackedTruncated, undefined)
   checkTrue('   不在"已跟踪"里重复未跟踪文件', !trackedPaths.includes('untracked.txt'))
   checkTrue('   每条已跟踪项带索引/工作区两列状态', res.body.tracked.every((e) => e.index.length === 1 && e.worktree.length === 1))
+  // 作用域：仓库根由 host 推导，且**路径都是仓库相对**的。
+  check('   回传 repositoryRoot', res.body.repositoryRoot, repoReal)
+  check('   回传 workspaceRoot', res.body.workspaceRoot, repoReal)
+  check('   徽标计数 = 已跟踪 + 未跟踪', res.body.changedFiles, trackedPaths.length + res.body.untrackedCount)
 
   console.log('')
-  console.log('=== 8. GET /untracked：未跟踪清单 ===')
+  console.log('=== 8. GET /untracked：精确枚举 + 惰性目录树 ===')
   res = await get('untracked')
   check('8) 200', res.status, 200)
-  check('   路径列表（字典序）', res.body.paths.slice().sort().join(','), 'd.txt,untracked.txt')
-  check('   总数', res.body.total, 2)
-  check('   未截断', res.body.truncated, false)
+  check('   精确总数', res.body.total, 2)
+  check('   模式是 inline', res.body.mode, 'inline')
+  check('   兼容的路径列表（字典序）', res.body.paths.slice().sort().join(','), 'd.txt,untracked.txt')
+  // 少量模式补精确新增行数：d.txt 只有 "main side" 被改成 1 行内容、untracked.txt 是 1 行。
+  const inlineByPath = new Map((res.body.inlineFiles ?? []).map((entry) => [entry.path, entry]))
+  check('   inline 条目带新增行数', inlineByPath.get('untracked.txt')?.added, 1)
+  check('   inline 条目删除数为 0', inlineByPath.get('untracked.txt')?.removed, 0)
+  check('   第二次取走缓存', (await get('untracked')).body.cached, true)
+  // 惰性树：仓库根的直接子节点就是这两个文件（没有目录）。
+  check('   树里没有子目录', res.body.tree.directories.length, 0)
+  check('   树里有这两个文件', res.body.tree.files.map((f) => f.name).sort().join(','), 'd.txt,untracked.txt')
+  check('   树的总数', res.body.tree.total, 2)
+  check('   不存在的目录 -> 404', (await get('untracked', '&prefix=nope')).status, 404)
 
   console.log('')
   console.log('=== 9. 暂存与取消暂存（本插件风险最高的写操作）===')

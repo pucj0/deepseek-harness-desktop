@@ -254,11 +254,45 @@ const find = (attr, value, nodes) =>
 const findAll = (attr, nodes) =>
   (nodes ?? collectHostNodes(render(Chip, mountProps, rootKey).tree, rootKey)).filter((node) => node.props?.[attr] !== undefined)
 const menuOpen = async () => (await current()).some((n) => n.props?.['data-desktop-sc-menu'] !== undefined)
-/** 一次真实浏览器里的 click。 */
-const clickRow = (row) => row.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+/**
+ * 一次真实浏览器里的 click。
+ *
+ * `rect` 是可选的**假行矩形**：桩渲染里没有布局，`getBoundingClientRect` 不会自己给出值，
+ * 因此二级菜单的几何断言必须由测试把矩形喂进去（真实浏览器里这个矩形来自被点的那一行）。
+ * 不传时 `currentTarget` 为 null——这正是"程序化点击"的形状，代码必须能退化处理。
+ */
+const clickRow = (row, rect) =>
+  row.props.onClick({
+    stopPropagation() {},
+    preventDefault() {},
+    currentTarget: rect === undefined ? null : { getBoundingClientRect: () => rect },
+  })
 const dblClickRow = (row) => row.props.onDoubleClick({ stopPropagation() {}, preventDefault() {} })
 const contextMenuRow = (row) =>
   row.props.onContextMenu({ stopPropagation() {}, preventDefault() {}, clientX: 300, clientY: 300 })
+
+/**
+ * 往 document 上派发一个 mousedown（面板的"点外部关闭"判定挂在它上面）。
+ *
+ * 判定用 `containerRef.current.contains(event.target)`，而桩渲染不会给宿主节点挂 ref——
+ * 因此测试得自己把容器 ref 填成一个只有 `contains` 的对象（见 setContainerContains）。
+ */
+const emitPointerDown = (target) => emitDocument('mousedown', { target })
+/** 让"这次点击在不在面板里"由测试决定。 */
+const setContainerContains = (list, predicate) => {
+  const node = find('data-desktop-branch', undefined, list)
+  // 假节点必须同时给出 `getBoundingClientRect`：容器 ref 也被"下拉菜单位置"那个 effect
+  // 用来量徽章（`measure()`），只给一个 `contains` 会让它当场抛错。
+  node.props.ref.current = {
+    contains: predicate,
+    getBoundingClientRect: () => ({ left: 200, right: 400, top: 300, bottom: 328, width: 200, height: 28 }),
+  }
+}
+/** 给一级面板喂一个假矩形（真实浏览器里这是 `panelRef.current.getBoundingClientRect()`）。 */
+const setPanelRect = (list, rect) => {
+  const node = find('data-desktop-branch-menu', undefined, list)
+  node.props.ref.current = { getBoundingClientRect: () => rect }
+}
 
 /** 收起当前菜单（按 Esc，走逐层退出里的第一层）。 */
 const closeMenu = async () => {
@@ -457,6 +491,220 @@ console.log('=== 5. 关闭状态机：再点同一行立即关闭、且不许自
   check('5e) 点「签出」的同一帧菜单就没了', find('data-desktop-sc-menu', 'develop', sameFrame), null)
   await sleep(40)
   check('   而且真的发出了 checkout', posts.length >= 1, 'true')
+}
+
+console.log('')
+console.log('=== 6. 二级菜单：外侧级联几何 + 孤儿菜单不可能 ===')
+{
+  // ---- 6a. 纯函数：三条横向规则 + 纵向翻转 -------------------------------------
+  //
+  // 几何断言分两层做：先直接喂坐标给纯函数（规则本身），再让组件真的渲染一遍、读它落在
+  // 宿主节点上的 left/top（规则有没有被接到界面上）。两层缺一不可——只测纯函数会漏掉
+  // "组件没用它"，只测组件则三条分支要靠四五个造价不低的场景才能凑齐。
+  const cascade = loaded.__cascadeMenuPositionForTest
+  checkTrue('6a) 导出了级联几何纯函数', typeof cascade === 'function')
+  const GAP = 6
+  const WIDTH = 268
+  const MARGIN = 8
+  const HEIGHT = 360
+  const viewport = { width: 1400, height: 900 }
+  const panel = { left: 100, right: 520, top: 400, bottom: 700 }
+  const row = { top: 430, bottom: 460, left: 110, right: 510 }
+  /** 两个矩形有没有相交（级联菜单的核心要求：不许压住一级面板）。 */
+  const intersects = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+  const boxOf = (position) => ({
+    left: position.left,
+    right: position.left + WIDTH,
+    top: position.top,
+    bottom: position.top + HEIGHT,
+  })
+
+  const right = cascade({ rowRect: row, panelRect: panel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   右侧放得下：贴着面板右缘 + 间隙', right.left, panel.right + GAP)
+  check('   方向是 right', right.side, 'right')
+  check('   纵向对齐被点的那一行', right.top, row.top)
+  check('   与一级面板零重叠', intersects(boxOf(right), panel), false)
+  checkTrue('   两矩形不相交的判据本身可靠（同一矩形必然相交）', intersects(boxOf(right), boxOf(right)))
+
+  // 右侧不够（面板贴着视口右边），但左侧够 → 必须翻到左侧。
+  const leftPanel = { left: 900, right: 1320, top: 100, bottom: 400 }
+  const leftRow = { top: 150, bottom: 180, left: 910, right: 1310 }
+  const left = cascade({ rowRect: leftRow, panelRect: leftPanel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   右侧放不下：翻到面板左侧', left.left + WIDTH, leftPanel.left - GAP)
+  check('   方向是 left', left.side, 'left')
+  check('   仍然与面板零重叠', intersects(boxOf(left), leftPanel), false)
+
+  // 两侧都不够（面板几乎占满视口）才允许夹进视口——这是唯一的退化分支。
+  const widePanel = { left: 200, right: 1200, top: 100, bottom: 400 }
+  const clamped = cascade({ rowRect: row, panelRect: widePanel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   两侧都放不下时才是 clamp', clamped.side, 'clamp')
+  checkTrue('   夹进视口：左边不越界', clamped.left >= MARGIN)
+  checkTrue('   夹进视口：右边不越界', clamped.left + WIDTH <= viewport.width - MARGIN)
+
+  // 纵向：行靠近视口底部时必须整体上移，而不是被裁掉。
+  const low = cascade({ rowRect: { top: 800, bottom: 830, left: 110, right: 510 }, panelRect: panel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   触底时上移到"底边刚好贴住下边距"', low.top, viewport.height - MARGIN - HEIGHT)
+  checkTrue('   上移后整块在视口内', low.top >= MARGIN && low.top + HEIGHT <= viewport.height - MARGIN)
+  const above = cascade({ rowRect: { top: 4, bottom: 24, left: 110, right: 510 }, panelRect: panel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   行太靠上时不越出上边距', above.top, MARGIN)
+
+  // ---- 6b. 组件真的按这两个矩形落位 -------------------------------------------
+  //
+  // 桩渲染量不到布局，所以假矩形由测试喂进去（真实浏览器里它们来自行按钮与 panelRef）。
+  // 一次右开、一次左开用的是**同一份行矩形、不同的面板矩形**：几何随面板变化，正说明
+  // "打开那一刻记录的两个矩形"真的被用上了，而不是某个写死的偏移。
+  nodes = await ensurePanel()
+  setPanelRect(nodes, panel)
+  clickRow(rowOf('develop', nodes), row)
+  await sleep(260)
+  nodes = await current()
+  let menu = find('data-desktop-sc-menu', 'develop', nodes)
+  checkTrue('6b) 单击后二级菜单打开', menu !== null)
+  check('   组件落位与纯函数一致（left）', menu?.props?.style?.left, `${panel.right + GAP}px`)
+  check('   组件落位与纯函数一致（top）', menu?.props?.style?.top, `${row.top}px`)
+  check('   方向标记是 right', menu?.props?.['data-desktop-sc-cascade'], 'right')
+  check('   没有覆盖一级面板', Number(menu?.props?.style?.left?.replace('px', '')) >= panel.right, 'true')
+
+  nodes = await closeMenu()
+  nodes = await ensurePanel()
+  setPanelRect(nodes, leftPanel)
+  clickRow(rowOf('develop', nodes), leftRow)
+  await sleep(260)
+  nodes = await current()
+  menu = find('data-desktop-sc-menu', 'develop', nodes)
+  check('   换成"右侧放不下"的面板后翻到左侧', menu?.props?.style?.left, `${leftPanel.left - GAP - WIDTH}px`)
+  check('   方向标记是 left', menu?.props?.['data-desktop-sc-cascade'], 'left')
+  nodes = await closeMenu()
+
+  // ---- 6c. 点面板外：两级一起关 ------------------------------------------------
+  nodes = await ensurePanel()
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('6c) 二级菜单已打开', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  setContainerContains(nodes, () => false)
+  emitPointerDown({})
+  nodes = await current()
+  check('   一级面板关闭', panelOpen(nodes), 'false')
+  check('   二级菜单也没了', findAll('data-desktop-sc-menu', nodes).length, 0)
+
+  // ---- 6d. 点面板内、二级菜单外：只收二级 --------------------------------------
+  nodes = await ensurePanel()
+  const insidePanelTarget = {}
+  setContainerContains(nodes, (target) => target === insidePanelTarget)
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('6d) 二级菜单已打开', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  emitPointerDown(insidePanelTarget)
+  nodes = await current()
+  check('   一级面板留着', panelOpen(nodes), 'true')
+  check('   二级菜单收起', findAll('data-desktop-sc-menu', nodes).length, 0)
+
+  // ---- 6e. 点二级菜单内部：两层都留着 ------------------------------------------
+  nodes = await ensurePanel()
+  const insideMenuTarget = {}
+  setContainerContains(nodes, (target) => target === insideMenuTarget)
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  const menuNode = find('data-desktop-sc-menu', 'develop', nodes)
+  checkTrue('6e) 二级菜单已打开', menuNode !== null)
+  menuNode.props.ref.current = { contains: (target) => target === insideMenuTarget }
+  emitPointerDown(insideMenuTarget)
+  nodes = await current()
+  check('   一级面板留着', panelOpen(nodes), 'true')
+  check('   二级菜单也留着', find('data-desktop-sc-menu', 'develop', nodes) !== null, 'true')
+
+  // ---- 6f. open === false ⇒ 一个二级菜单节点都不许有（孤儿菜单回归）------------
+  //
+  // 这是本次修复的**根因场景**：单击只排了一个 200ms 后弹菜单的定时器，此时点面板外，
+  // 旧代码只 `setOpen(false)`——定时器还挂着，200ms 后 setMenu 让二级菜单在**面板已经
+  // 不渲染**的情况下浮出来（再加渲染层只看 `menu === null`，它就真的画在屏幕上了）。
+  nodes = await ensurePanel()
+  setContainerContains(nodes, () => false)
+  clickRow(rowOf('develop', nodes))
+  emitPointerDown({})
+  nodes = await current()
+  check('6f) 点面板外后：面板关闭', panelOpen(nodes), 'false')
+  check('   同一帧里就没有二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  await sleep(320)
+  nodes = await current()
+  check('   等过单击延迟后也没有孤儿菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  check('   面板没有被定时器带着"诈尸"', panelOpen(nodes), 'false')
+
+  // 二级菜单开着时点面板外：同一帧里 open=false 而旧代码的 menu 还非 null。
+  nodes = await ensurePanel()
+  setContainerContains(nodes, () => false)
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('   前置：二级菜单开着', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  emitPointerDown({})
+  nodes = await current()
+  check('   点外后同帧没有二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  check('   面板也已关闭', panelOpen(nodes), 'false')
+
+  // 触发器再点一次（程序化 click 没有 mousedown 兜底）：旧代码在这里同样会留下孤儿菜单。
+  nodes = await ensurePanel()
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('   前置：二级菜单开着', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  find('data-desktop-branch-trigger', undefined, nodes).props.onClick()
+  nodes = await current()
+  check('   触发器再点一次：面板关闭', panelOpen(nodes), 'false')
+  check('   二级菜单同帧消失', findAll('data-desktop-sc-menu', nodes).length, 0)
+
+  // Esc 逐层退出的最后一层（没有菜单/对话框时）也必须把状态收干净。
+  nodes = await ensurePanel()
+  document.emitKeydown()
+  nodes = await current()
+  check('   Esc 关面板后没有残留菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  check('   面板确实关了', panelOpen(nodes), 'false')
+
+  // 成功的 checkout（双击）同样走 closePanel：面板与二级菜单一起消失。
+  nodes = await ensurePanel()
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('   前置：二级菜单开着', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  posts.length = 0
+  const checkoutRow = rowOf('develop', nodes)
+  clickRow(checkoutRow)
+  clickRow(checkoutRow)
+  dblClickRow(checkoutRow)
+  await sleep(60)
+  nodes = await current()
+  check('   成功 checkout 后面板关闭', panelOpen(nodes), 'false')
+  check('   而且没有孤儿二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  check('   确实发出了 checkout', posts.length >= 1, 'true')
+
+  // ---- 6g. Escape 的逐层顺序：二级菜单 → 对话框 → 面板 ------------------------
+  //
+  // "菜单与对话框同时存在"要靠**再右键一次**造出来：从菜单里打开对话框本身就会收掉菜单
+  // （那是 1.5.1 的既有行为），而三层的 Esc 顺序只有在两层同时开着时才判得出来。
+  nodes = await ensurePanel()
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  const newFrom = find('data-desktop-sc-menu', 'develop', nodes).props.children.find(
+    (child) => child?.props?.['data-desktop-sc-menuitem'] === 'new-from',
+  )
+  newFrom.props.onClick()
+  nodes = await settle()
+  checkTrue('6g) 前置：对话框已打开', find('data-desktop-sc-dialog', 'create', nodes) !== null)
+  check('   点菜单项后二级菜单已收起', find('data-desktop-sc-menu', 'develop', nodes), null)
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  checkTrue('   前置：二级菜单也开着（两层同时存在）', find('data-desktop-sc-menu', 'develop', nodes) !== null)
+  document.emitKeydown()
+  nodes = await current()
+  check('   第一次 Esc 只收二级菜单', find('data-desktop-sc-menu', 'develop', nodes), null)
+  check('   对话框还在', find('data-desktop-sc-dialog', 'create', nodes) !== null, 'true')
+  check('   面板还在', panelOpen(nodes), 'true')
+  document.emitKeydown()
+  nodes = await current()
+  check('   第二次 Esc 收对话框', find('data-desktop-sc-dialog', undefined, nodes), null)
+  check('   面板仍在', panelOpen(nodes), 'true')
+  check('   这时依然没有二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+  document.emitKeydown()
+  nodes = await current()
+  check('   第三次 Esc 收面板', panelOpen(nodes), 'false')
+  check('   收完后没有孤儿二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
 }
 
 console.log('')

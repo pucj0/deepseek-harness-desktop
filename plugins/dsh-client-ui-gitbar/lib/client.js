@@ -306,6 +306,27 @@ window.__ModuleLoader__.load({
     const VISIBLE_FALLBACK_ROWS = 12
 
     /**
+     * 二级（级联）菜单的宽度、与一级面板的水平间隙、以及离视口边缘的最小距离。
+     *
+     * 这三个常数与 `BranchContextMenu` 的样式是**同一份契约**：宽度写在样式里、间隙决定
+     * 菜单不压住面板、边距决定翻不到屏幕外。放在这里而不是组件内部，是因为纯函数
+     * `cascadeMenuPosition` 也要用它们，而它必须能在没有 DOM 的地方被单测。
+     */
+    const CASCADE_MENU_WIDTH = 268
+    const CASCADE_MENU_GAP = 6
+    const CASCADE_MENU_MARGIN = 8
+
+    /**
+     * 二级菜单的高度上界：样式里的 `maxHeight` 与**首帧的估算高度**是同一个值。
+     *
+     * 首帧还没有真实节点可量（同步渲染里读不到布局），而"先画在屏幕外再挪回来"会肉眼可见
+     * 地闪一下。因此首帧一律用这个**上界**去算纵向位置：估算 ≥ 真实高度，于是首帧就已经
+     * 落在视口内；挂载后用真实高度再细化一次，只会让位置往里收一点（见 BranchContextMenu
+     * 的 measured）。
+     */
+    const CASCADE_MENU_ESTIMATED_HEIGHT = 360
+
+    /**
      * 从渲染出来的分支行里挑出**真正与滚动容器相交**的那些名字。
      *
      * 为什么要用 DOM 相交而不是"搜索过滤之后的行"：过滤后的集合在 300/2000 分支的仓库里
@@ -346,6 +367,67 @@ window.__ModuleLoader__.load({
         names.push(name)
       }
       return names
+    }
+
+    /**
+     * 二级（级联）菜单的位置：IDEA 分支弹窗那样**贴着一级面板的外侧**展开。
+     *
+     * 为什么必须是纯函数：位置规则有三条分支（右开、左开、两侧都放不下时夹进视口）和一次
+     * 纵向翻转，全都要能逐条断言。假 DOM 量不到真实布局，但"给定两个矩形，菜单该落在哪"
+     * 这件事本身与 DOM 无关，因此把规则抽到这里，测试直接喂坐标。
+     *
+     * 横向（严格按顺序，前两条优先）：
+     *   1. 右侧放得下（`viewport.width - panelRect.right >= submenuWidth + margin`）
+     *      → `left = panelRect.right + gap`，`side = 'right'`；
+     *   2. 否则左侧放得下（`panelRect.left - gap >= submenuWidth + margin`）
+     *      → `left = panelRect.left - gap - submenuWidth`，`side = 'left'`；
+     *   3. 两侧都放不下（面板几乎占满视口宽度）才允许夹进视口：挑空间更大的一侧，再
+     *      `clamp(left, margin, viewport.width - submenuWidth - margin)`，`side = 'clamp'`。
+     *
+     * **第 3 条只在第 1、2 条都不成立时才会走到**：只要有一侧放得下，菜单就绝不落在面板
+     * 自己的横向区间里——那条退化路径正是这次要修的现象（菜单压着一级面板，看起来像"同一层"）。
+     *
+     * 纵向：
+     *   * 默认 `top = rowRect.top`（对齐被点的那一行，而不是菜单中点或面板中点）；
+     *   * 若 `top + height > viewport.height - margin`，整体上移到
+     *     `viewport.height - margin - height`，再把 `top` 夹到不小于 `margin`。
+     *
+     * @param options - `{ rowRect, panelRect, submenuWidth, submenuHeight, viewport, gap?, margin? }`；
+     *   矩形都是 `{ top, bottom, left, right }`。`panelRect` 缺失（还没量到面板）时退化成
+     *   把被点的那一行当成面板：至少保证菜单在行的右侧，而不是跑到屏幕角落。
+     * @returns `{ left, top, side }`，`side` 为 `'right' | 'left' | 'clamp'`。
+     */
+    function cascadeMenuPosition(options) {
+      const width = Number.isFinite(options.submenuWidth) ? options.submenuWidth : CASCADE_MENU_WIDTH
+      const height = Number.isFinite(options.submenuHeight) ? options.submenuHeight : CASCADE_MENU_ESTIMATED_HEIGHT
+      const gap = Number.isFinite(options.gap) ? options.gap : CASCADE_MENU_GAP
+      const margin = Number.isFinite(options.margin) ? options.margin : CASCADE_MENU_MARGIN
+      const viewportWidth = options.viewport.width
+      const viewportHeight = options.viewport.height
+      const row = options.rowRect
+      const panel = options.panelRect ?? row
+
+      const rightRoom = viewportWidth - panel.right
+      const leftRoom = panel.left - gap
+      let left
+      let side
+      if (rightRoom >= width + margin) {
+        left = panel.right + gap
+        side = 'right'
+      } else if (leftRoom >= width + margin) {
+        left = panel.left - gap - width
+        side = 'left'
+      } else {
+        left = rightRoom >= leftRoom ? panel.right + gap : panel.left - gap - width
+        left = Math.max(margin, Math.min(left, viewportWidth - width - margin))
+        side = 'clamp'
+      }
+
+      let top = Number.isFinite(row.top) ? row.top : margin
+      if (top + height > viewportHeight - margin) top = viewportHeight - margin - height
+      if (top < margin) top = margin
+
+      return { left, top, side }
     }
 
     /**
@@ -841,7 +923,13 @@ window.__ModuleLoader__.load({
        * ——错误文本里只有文件名，没有分支名。
        */
       const [pendingBranch, setPendingBranch] = react.useState('')
-      /** 右键/操作菜单：`{ x, y, branch }`；null 表示未打开。 */
+      /**
+       * 二级（级联）操作菜单：`{ branch, rowAnchor, panelAnchor }`；null 表示未打开。
+       *
+       * 存**两个矩形**而不是一个点（早先只有 `{ x, y }`）：级联菜单要开在整个一级面板的
+       * 外侧，纵向对齐被点的那一行，因此既需要行矩形也需要面板矩形，且都必须是**打开那一刻**
+       * 量的快照（菜单在后面的帧里渲染，那时再读 DOM 可能已经换了位置）。
+       */
       const [menu, setMenu] = react.useState(null)
       /** 对话框：`{ kind, branch? }`；null 表示未打开。 */
       const [dialog, setDialog] = react.useState(null)
@@ -858,12 +946,73 @@ window.__ModuleLoader__.load({
        * 重渲染时要保持不变——否则每次重渲染都会重建对话框、把用户正在输入的内容清掉。
        */
       const [serial, setSerial] = react.useState(0)
+
+      /**
+       * 单击/双击的定时器、菜单归属与"一次双击一次 checkout"的守卫。
+       *
+       * 这几个 ref 与下面两个关闭回调**必须声明在这里**（所有会用到它们的回调之前），
+       * 因为 `const` 在声明前求值会抛 "Cannot access before initialization"。
+       */
+      const menuTimer = react.useRef(0)
+      const clearMenuTimer = react.useCallback(() => {
+        if (menuTimer.current !== 0) {
+          clearTimeout(menuTimer.current)
+          menuTimer.current = 0
+        }
+      }, [])
+      // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
+      react.useEffect(() => clearMenuTimer, [clearMenuTimer])
+      /**
+       * 刚才那次"面板内 mousedown"关掉的是哪个分支的菜单。
+       *
+       * 存在的理由：document 的 mousedown 是**捕获阶段**、并且发生在 click 之前，所以
+       * "菜单 A 正开着，用户再点 A 那一行"这个动作到 click 里时 `menu` 已经是 null 了
+       * ——光看 state 分不清"再点一次要关掉"与"第一次点要打开"。这个 ref 把那次关闭的信息
+       * 带过 mousedown→click 的边界（同一 tick 内不会被清掉）。
+       */
+      const justClosedForRef = react.useRef('')
+      /** 一次双击只允许发起一次 checkout（双击事件可能被重复派发）。 */
+      const checkoutPendingRef = react.useRef(false)
+
+      /**
+       * 只收二级菜单，**不动一级面板**（面板内的其它点击、列表滚动、Esc 的第一层都用它）。
+       *
+       * 定时器也必须一起清：单击是"延迟 200ms 再弹菜单"，只 `setMenu(null)` 不管定时器的话，
+       * 200ms 后菜单会自己冒出来——看起来就是"菜单怎么都关不掉"。
+       */
+      const closeBranchMenu = react.useCallback(() => {
+        clearMenuTimer()
+        justClosedForRef.current = ''
+        setMenu(null)
+      }, [clearMenuTimer])
+
+      /**
+       * 关闭一级面板：三层状态一起收。
+       *
+       * 这是"孤儿二级菜单"的结构性修复。不变式：
+       *
+       *     panel 关 ⇒ submenu 关 ⇒ dialog 关 ⇒ 待弹的单击定时器也清掉
+       *
+       * 早先每条关闭路径各写各的：点面板外只 `setOpen(false)`（菜单仍非 null、定时器还挂着），
+       * 于是面板已经不渲染了、二级菜单却照旧渲染在屏幕上（200ms 后还会自己弹出来）。现在
+       * 所有"关面板"的入口都只走这一个函数，漏掉某一项在结构上就不可能。
+       *
+       * 渲染层还有第二道闸门：`open !== true` 时二级菜单与对话框都不渲染（见下面两个占位
+       * slot），因此即使将来有人新增了一条忘记调它的路径，也不会再出现孤儿菜单。
+       */
+      const closePanel = react.useCallback(() => {
+        clearMenuTimer()
+        setMenu(null)
+        setDialog(null)
+        setOpen(false)
+      }, [clearMenuTimer])
+
       /** 打开对话框：收起操作菜单，并换一个实例序号（见 serial 的说明）。 */
       const openDialog = react.useCallback((next) => {
-        setMenu(null)
+        closeBranchMenu()
         setSerial((value) => value + 1)
         setDialog(next)
-      }, [])
+      }, [closeBranchMenu])
 
       /**
        * 把结果写进"某一次请求所属的那一代"状态。
@@ -952,12 +1101,14 @@ window.__ModuleLoader__.load({
       react.useEffect(() => {
         if (!open) return undefined
         setQuery('')
-        setMenu(null)
+        // 换工作区/重开面板都要把二级菜单收干净（连同待弹的定时器）。面板本身**不关**：
+        // 用户是在同一个面板里换了项目，继续看新项目的分支才是他要的。
+        closeBranchMenu()
         void loadBranches()
         void loadRemotes()
         return undefined
         // 依赖 generation：会话换项目后，菜单里列出的必须是新仓库的分支。
-      }, [open, generation, loadBranches, loadRemotes])
+      }, [open, generation, loadBranches, loadRemotes, closeBranchMenu])
 
       /**
        * 执行一次写操作并整体替换状态。
@@ -1026,25 +1177,25 @@ window.__ModuleLoader__.load({
           const result = await run('checkout', options?.stash === true ? { branch, stash: true } : { branch })
           // 只有成功才关闭面板。失败时保持打开，否则用户看不到原因、也不知道
           // 该重试哪个分支——实测中最常见的失败是有未提交改动（git 会拒绝覆盖）。
-          if (result !== undefined) {
-            setOpen(false)
-            setMenu(null)
-          }
+          // 关闭走 closePanel：面板、二级菜单、对话框与待弹定时器必须一起收（见它的说明）。
+          if (result !== undefined) closePanel()
         },
-        [run],
+        [run, closePanel],
       )
 
       // 重新打开面板时清掉上一次的错误与提示：旧信息留到新一次尝试里只会造成混淆。
       const toggleOpen = react.useCallback(() => {
-        setOpen((value) => {
-          if (!value) {
-            setQuery('')
-            setSelectedBranch('')
-            setMenu(null)
-          }
-          return !value
-        })
-      }, [])
+        if (open) {
+          // 关闭分支：**必须**走 closePanel，否则面板一关、二级菜单还挂在屏幕上
+          // （程序化 click / 键盘激活没有 mousedown，那个"顺手收菜单"的兜底不会跑）。
+          closePanel()
+          return
+        }
+        setQuery('')
+        setSelectedBranch('')
+        closeBranchMenu()
+        setOpen(true)
+      }, [open, closeBranchMenu, closePanel])
 
       // 点击组件之外关闭菜单——这是标准交互，缺了它用户会觉得"弹框关不掉"。
       //
@@ -1057,6 +1208,16 @@ window.__ModuleLoader__.load({
       const containerRef = react.useRef(null)
       const triggerRef = react.useRef(null)
       const menuRef = react.useRef(null)
+      /**
+       * 一级面板自己的 ref。
+       *
+       * 二级菜单要开在面板**外侧**（见 cascadeMenuPosition），因此必须能读到面板矩形。
+       * 这个 ref 由 BranchChip 持有、以**普通 prop**（`panelRef`）传给 SourcePanel、
+       * 由它挂到自己的根节点上——不能写成 `ref`：函数组件收不到 `ref`（React #290，
+       * `scripts/check-react-rules.mjs` 会拦），而面板又必须由自己把 ref 挂到真正的 DOM
+       * 节点上。
+       */
+      const sourcePanelRef = react.useRef(null)
 
       /**
        * 下拉菜单的位置：由容器（徽章）的实时位置算出来。
@@ -1099,31 +1260,10 @@ window.__ModuleLoader__.load({
       }, [open])
 
       /**
-       * 单击/双击的定时器、菜单归属与"一次双击一次 checkout"的守卫。
-       *
-       * 这几个 ref **必须声明在文档级 mousedown 监听之前**：那个 effect 的依赖数组里要用
-       * `clearMenuTimer`，而 `const` 在声明前求值会抛 "Cannot access before initialization"。
+       * 单击/双击的定时器、菜单定时器与几个守卫 ref 都声明在上面（`serial` 之后）：
+       * 本文档级监听与好几个回调都要用到 `clearMenuTimer`，而 `const` 在声明前求值会抛
+       * "Cannot access before initialization"。
        */
-      const menuTimer = react.useRef(0)
-      const clearMenuTimer = react.useCallback(() => {
-        if (menuTimer.current !== 0) {
-          clearTimeout(menuTimer.current)
-          menuTimer.current = 0
-        }
-      }, [])
-      // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
-      react.useEffect(() => clearMenuTimer, [clearMenuTimer])
-      /**
-       * 刚才那次"面板内 mousedown"关掉的是哪个分支的菜单。
-       *
-       * 存在的理由：document 的 mousedown 是**捕获阶段**、并且发生在 click 之前，所以
-       * "菜单 A 正开着，用户再点 A 那一行"这个动作到 click 里时 `menu` 已经是 null 了
-       * ——光看 state 分不清"再点一次要关掉"与"第一次点要打开"。这个 ref 把那次关闭的信息
-       * 带过 mousedown→click 的边界（同一 tick 内不会被清掉）。
-       */
-      const justClosedForRef = react.useRef('')
-      /** 一次双击只允许发起一次 checkout（双击事件可能被重复派发）。 */
-      const checkoutPendingRef = react.useRef(false)
 
       react.useEffect(() => {
         if (!open) return undefined
@@ -1134,7 +1274,10 @@ window.__ModuleLoader__.load({
           const insideContext = menuRef.current !== null && menuRef.current.contains(event.target)
           if (insideContext) return
           if (!insidePanel) {
-            setOpen(false)
+            // 点面板外：三层一起收。早先这里只 `setOpen(false)`，于是菜单 state 还是
+            // 非 null、待弹的单击定时器也还挂着——面板已经不渲染了，二级菜单却照旧浮在
+            // 屏幕上（200ms 后还会自己再弹一次）。这就是"孤儿二级菜单"的来源。
+            closePanel()
             return
           }
           // 点了面板内部的**其它地方**（列表空白、分组标题、搜索框…）：收起右键菜单，
@@ -1153,15 +1296,15 @@ window.__ModuleLoader__.load({
         }
         const onKeyDown = (event) => {
           if (event.key !== 'Escape') return
-          // Esc 逐层退出：先收右键菜单，再收对话框，最后关面板。一次全关会让用户
+          // Esc 逐层退出：先收二级菜单，再收对话框，最后关面板。一次全关会让用户
           // 在只想去掉那层小菜单时丢掉整个面板的状态。
           if (menu !== null || menuTimer.current !== 0) {
-            clearMenuTimer()
-            justClosedForRef.current = ''
-            setMenu(null)
+            closeBranchMenu()
           } else if (dialog !== null) setDialog(null)
           else {
-            setOpen(false)
+            // 最后一层：走 closePanel（它顺带把已经为空的菜单/对话框再确认一次，
+            // 不变式在任何一条路径上都不依赖"上一层已经收过了"这个前提）。
+            closePanel()
             triggerRef.current?.focus()
           }
         }
@@ -1172,7 +1315,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open, menu, dialog, clearMenuTimer])
+      }, [open, menu, dialog, clearMenuTimer, closeBranchMenu, closePanel])
 
       const search = query.trim().toLowerCase()
       const visible = branches.filter((branch) => branch.name.toLowerCase().includes(search))
@@ -1182,9 +1325,44 @@ window.__ModuleLoader__.load({
        * 定时器与几个守卫 ref 声明在文档级监听之前（那里就要用到 clearMenuTimer）。
        */
 
-      /** 在某个位置为某个分支打开操作菜单。 */
-      const openMenuFor = react.useCallback((branch, x, y) => {
-        setMenu({ x, y, branch })
+      /**
+       * 被点那一行的矩形。
+       *
+       * 优先 `event.currentTarget`（真实浏览器里就是那一行按钮）；拿不到时退回事件坐标，
+       * 再拿不到就退到 (12,12)——纯函数 cascadeMenuPosition 会把位置收进视口，因此这里
+       * 只需要给出一个"合法但可能不准"的形状，不必自己兜底布局。
+       *
+       * @param event - click / contextmenu 事件。
+       * @returns `{ top, bottom, left, right }`。
+       */
+      const rowAnchorOf = react.useCallback((event) => {
+        const rect = typeof event?.currentTarget?.getBoundingClientRect === 'function' ? event.currentTarget.getBoundingClientRect() : null
+        if (rect !== null && rect !== undefined && Number.isFinite(rect.top)) {
+          return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
+        }
+        const x = typeof event?.clientX === 'number' ? event.clientX : 12
+        const y = typeof event?.clientY === 'number' ? event.clientY : 12
+        return { top: y, bottom: y, left: x, right: x }
+      }, [])
+
+      /**
+       * 一级面板的矩形（`null` = 还没量到，例如桩渲染或面板刚挂载）。
+       *
+       * 这里**当场量**而不是渲染菜单时再量：菜单在之后的帧里才渲染，那时面板可能已经
+       * 因为窗口尺寸变化挪了位置，用旧坐标算出"级联在外侧"会立刻被推翻（菜单跳到面板上）。
+       */
+      const panelAnchorOf = react.useCallback(() => {
+        const node = sourcePanelRef.current
+        const rect = node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+        if (rect !== null && rect !== undefined && Number.isFinite(rect.left)) {
+          return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
+        }
+        return null
+      }, [])
+
+      /** 为某个分支打开二级菜单，记下"贴着哪一行、在哪块面板外侧"。 */
+      const openMenuFor = react.useCallback((branch, rowAnchor, panelAnchor) => {
+        setMenu({ branch, rowAnchor, panelAnchor })
       }, [])
 
       /**
@@ -1218,9 +1396,7 @@ window.__ModuleLoader__.load({
            */
           const alreadyOpen = menu !== null && menu.branch.name === entry.name
           if (justClosedForRef.current === entry.name || alreadyOpen) {
-            justClosedForRef.current = ''
-            clearMenuTimer()
-            setMenu(null)
+            closeBranchMenu()
             return
           }
           justClosedForRef.current = ''
@@ -1232,15 +1408,15 @@ window.__ModuleLoader__.load({
             clearMenuTimer()
             return
           }
-          const rect = typeof event?.currentTarget?.getBoundingClientRect === 'function' ? event.currentTarget.getBoundingClientRect() : null
-          const x = rect === null ? (typeof event?.clientX === 'number' ? event.clientX : 12) : rect.left
-          const y = rect === null ? (typeof event?.clientY === 'number' ? event.clientY : 12) : rect.bottom + 2
+          // 两个矩形都**当场**量：见 rowAnchorOf / panelAnchorOf 的说明。
+          const rowAnchor = rowAnchorOf(event)
+          const panelAnchor = panelAnchorOf()
           menuTimer.current = setTimeout(() => {
             menuTimer.current = 0
-            openMenuFor(entry, x, y)
+            openMenuFor(entry, rowAnchor, panelAnchor)
           }, SINGLE_CLICK_MS)
         },
-        [clearMenuTimer, menu, openMenuFor],
+        [clearMenuTimer, closeBranchMenu, menu, openMenuFor, rowAnchorOf, panelAnchorOf],
       )
 
       /**
@@ -1255,9 +1431,7 @@ window.__ModuleLoader__.load({
        */
       const onBranchDoubleClick = react.useCallback(
         (entry) => {
-          clearMenuTimer()
-          justClosedForRef.current = ''
-          setMenu(null)
+          closeBranchMenu()
           if (entry.current === true || busy) return
           if (checkoutPendingRef.current) return
           checkoutPendingRef.current = true
@@ -1265,7 +1439,7 @@ window.__ModuleLoader__.load({
             checkoutPendingRef.current = false
           })
         },
-        [busy, clearMenuTimer, switchTo],
+        [busy, closeBranchMenu, switchTo],
       )
 
       const onBranchContextMenu = react.useCallback(
@@ -1274,9 +1448,9 @@ window.__ModuleLoader__.load({
           event.stopPropagation()
           clearMenuTimer()
           setSelectedBranch(entry.name)
-          openMenuFor(entry, event.clientX, event.clientY)
+          openMenuFor(entry, rowAnchorOf(event), panelAnchorOf())
         },
-        [clearMenuTimer, openMenuFor],
+        [clearMenuTimer, openMenuFor, rowAnchorOf, panelAnchorOf],
       )
 
       /**
@@ -1446,6 +1620,11 @@ window.__ModuleLoader__.load({
               setQuery,
               anchor,
               remotes,
+              /**
+               * 一级面板自己的 DOM 节点（普通 prop，不是 React 的 `ref`——函数组件收不到
+               * `ref`，见 check-react-rules 的规则 C）。二级菜单要靠它算级联位置。
+               */
+              panelRef: sourcePanelRef,
               /** 视口内可见的行（补算精确领先/落后的候选，见 collectVisibleBranchNames）。 */
               onVisible,
               /** 单击选中的分支（与"当前分支"不同，见 selectedBranch 的说明）。 */
@@ -1460,15 +1639,11 @@ window.__ModuleLoader__.load({
               onContextMenu: onBranchContextMenu,
               onAbort: (kind) => void run('op/abort', { kind }),
               /**
-               * 分支列表被滚动：收起操作菜单并取消待弹的单击定时器。
+               * 分支列表被滚动：收起二级菜单并取消待弹的单击定时器（面板本身留着）。
                *
                * 菜单由本组件持有（SourcePanel 是受控的展示组件），所以这件事必须由这里做。
                */
-              onListScroll: () => {
-                clearMenuTimer()
-                justClosedForRef.current = ''
-                setMenu(null)
-              },
+              onListScroll: closeBranchMenu,
             })
           : null,
 
@@ -1480,29 +1655,31 @@ window.__ModuleLoader__.load({
         // 每次"右键菜单关掉"都会被当成一个新组件重建、内部状态（比如"已确认强删"那个
         // 开关、输入框里已填的名字）全部丢失。实测现象：点一次「仍然删除」之后按钮文案
         // 又变回「删除」，第二次删除因此永远带不上 force。
+        //
+        // **两道闸门**：除了 menu/dialog 本身，还必须 `open === true`。这是"孤儿二级菜单"
+        // 的最后一道结构性防线——面板已经不渲染了，任何残留的 menu state 都不该再画出来。
         react.createElement(
           'div',
           { key: 'context-menu-slot', style: { display: 'contents' } },
-          menu === null
-            ? null
-            : react.createElement(BranchContextMenu, {
+          open === true && menu !== null
+            ? react.createElement(BranchContextMenu, {
                 t,
                 menu,
                 menuRef,
                 status,
                 busy,
-                onClose: () => setMenu(null),
+                onClose: closeBranchMenu,
                 onSwitch: (branch) => void switchTo(branch),
                 onDialog: openDialog,
-              }),
+              })
+            : null,
         ),
 
         react.createElement(
           'div',
           { key: 'dialog-slot', style: { display: 'contents' } },
-          dialog === null
-            ? null
-            : react.createElement(ActionDialog, {
+          open === true && dialog !== null
+            ? react.createElement(ActionDialog, {
                 // **按对话框类型给 key**，强制换一个实例。
                 //
                 // 这一个 key 是必需的：同一个位置上的组件在 React 里是**同一个实例**，
@@ -1521,10 +1698,12 @@ window.__ModuleLoader__.load({
                 onClose: () => setDialog(null),
                 run,
                 onDone: () => {
-                  setDialog(null)
-                  setOpen(false)
+                  // 对话框成功收尾 = 这次面板会话结束：走 closePanel，
+                  // 顺带把二级菜单与待弹定时器一起收掉（不变式，见它的说明）。
+                  closePanel()
                 },
-              }),
+              })
+            : null,
         ),
       )
     }
@@ -1544,7 +1723,7 @@ window.__ModuleLoader__.load({
     function SourcePanel(props) {
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
-        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll,
+        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
       } = props
 
       /**
@@ -1836,6 +2015,9 @@ window.__ModuleLoader__.load({
       return react.createElement(
         'div',
         {
+          // 一级面板自己的节点：BranchChip 用它算二级菜单的级联位置（普通 prop 传进来的
+          // ref 对象，见 BranchChip 里 sourcePanelRef 的说明）。
+          ref: panelRef,
           'data-desktop-branch-menu': '',
           role: 'dialog',
           'aria-label': t('sourceControl'),
@@ -2147,7 +2329,8 @@ window.__ModuleLoader__.load({
      * 给出禁用项而不是隐藏，是为了让菜单的形状稳定——用户靠位置记忆点操作，
      * 条目时有时无会让第二次点击点错。
      *
-     * @param props - `{ t, menu, menuRef, status, busy, onClose, onSwitch, onDialog }`。
+     * @param props - `{ t, menu, menuRef, status, busy, onClose, onSwitch, onDialog }`；
+     *   `menu` 的形状是 `{ branch, rowAnchor, panelAnchor }`（见 cascadeMenuPosition）。
      * @returns React 元素。
      */
     function BranchContextMenu(props) {
@@ -2155,19 +2338,45 @@ window.__ModuleLoader__.load({
       const entry = menu.branch
       const current = status?.branch ?? ''
 
-      // 位置：先按点击点放，再按视口收进边界。菜单高度按条目数估一个上界用于翻转，
-      // 拿不到真实高度时宁可往上翻——下方被裁掉比上方被裁掉更常见（菜单开在屏幕下半部）。
-      const width = 268
-      const estimatedHeight = 300
-      const flipUp = menu.y + estimatedHeight > window.innerHeight
+      /**
+       * 挂载后量到的真实高度：`{ menu, height }`（null = 还没量到）。
+       *
+       * `menu` 一起存是有意的：这个组件实例会被**下一个**菜单复用（同一个位置、同一个
+       * 组件类型），如果不认菜单身份，换一个分支时首帧会拿上一个菜单的高度去算位置；
+       * 而长分支名的条目会换行、菜单更高，那一帧就可能被裁掉。因此"量到的高度只对量它的
+       * 那个菜单有效"，其余情况一律回到估算上界 `CASCADE_MENU_ESTIMATED_HEIGHT`。
+       */
+      const [measured, setMeasured] = react.useState(null)
+      react.useEffect(() => {
+        const node = menuRef?.current
+        if (node === null || node === undefined || typeof node.getBoundingClientRect !== 'function') return undefined
+        const rect = node.getBoundingClientRect()
+        const height = typeof rect?.height === 'number' ? rect.height : rect?.bottom - rect?.top
+        if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return undefined
+        // 只在真的变了的时候更新：否则"量到同一个高度"也会触发一轮重渲染。
+        setMeasured((previous) => (previous !== null && previous.menu === menu && Math.abs(previous.height - height) < 1 ? previous : { menu, height }))
+        return undefined
+      }, [menuRef, menu])
+
+      /**
+       * 级联位置：**整个一级面板的外侧**（右优先，放不下翻到左侧，两侧都放不下才夹进视口），
+       * 纵向对齐被点的那一行并在触底时整体上移。规则本身在纯函数里，这里只负责喂坐标。
+       */
+      const submenuHeight = measured !== null && measured.menu === menu && measured.height > 0 ? measured.height : CASCADE_MENU_ESTIMATED_HEIGHT
+      const position = cascadeMenuPosition({
+        rowRect: menu.rowAnchor,
+        panelRect: menu.panelAnchor,
+        submenuWidth: CASCADE_MENU_WIDTH,
+        submenuHeight,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      })
       const style = {
         position: 'fixed',
         zIndex: 10000,
-        left: `${Math.max(8, Math.min(menu.x, window.innerWidth - width - 8))}px`,
-        top: flipUp ? undefined : `${menu.y}px`,
-        bottom: flipUp ? `${Math.max(8, window.innerHeight - menu.y)}px` : undefined,
-        width: `${width}px`,
-        maxHeight: 'min(360px, calc(100vh - 16px))',
+        left: `${position.left}px`,
+        top: `${position.top}px`,
+        width: `${CASCADE_MENU_WIDTH}px`,
+        maxHeight: `min(${CASCADE_MENU_ESTIMATED_HEIGHT}px, calc(100vh - 16px))`,
         overflowY: 'auto',
         padding: '5px',
         borderRadius: '10px',
@@ -2276,7 +2485,19 @@ window.__ModuleLoader__.load({
         }),
       )
 
-      return react.createElement('div', { ref: menuRef, role: 'menu', 'data-desktop-sc-menu': entry.name, style }, ...items)
+      return react.createElement(
+        'div',
+        {
+          ref: menuRef,
+          role: 'menu',
+          'data-desktop-sc-menu': entry.name,
+          // 级联方向（right/left/clamp）：几何断言直接读它，比反解 style.left 稳
+          // （真实 DOM 的几何回归由 CDP 脚本量矩形，桩渲染里则由测试喂坐标）。
+          'data-desktop-sc-cascade': position.side,
+          style,
+        },
+        ...items,
+      )
     }
 
     /**
@@ -2703,6 +2924,9 @@ window.__ModuleLoader__.load({
     // 后台扫全仓库），而它需要真实 DOM 才能整体跑到。把这个纯函数导出来，测试就能用一棵
     // 带矩形坐标的**假 DOM 树**直接断言"只挑相交的行、到视口下方就停"。
     exports.__visibleBranchNamesForTest = collectVisibleBranchNames
+    // 二级菜单的级联几何同样只有真实布局才能整体跑到，但规则本身是纯函数。导出它，
+    // 测试就能直接喂两个矩形，逐条断言"右开/左开/夹进视口"与纵向翻转。
+    exports.__cascadeMenuPositionForTest = cascadeMenuPosition
     // 必须声明 inject：cordis 的服务是懒解析的，不声明就直接读 `ctx.slots` 会抛
     // "cannot get property \"slots\" without inject"，而且这个错误会让**整个界面**
     // 渲染失败（不只是本插件）——排查时页面是全白的，误导性很强。

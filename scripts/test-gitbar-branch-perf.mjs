@@ -255,6 +255,14 @@ try {
   check('   计数与列表一致', res.body.counts.local, BRANCH_COUNT + 1)
   checkLe('   git 进程数 ≤ 2（for-each-ref 一次）', listed.count, 2)
   console.log(`  [measure] 旧实现会是 ${BRANCH_COUNT + 1} 次 for-each-ref/rev-list 起步`)
+  // 上面那 2 个进程里有一个是"工作区 → 仓库根"的探针（`rev-parse`）。它必须**只发生一次**：
+  // 解析器带 TTL 缓存 + single-flight（见 lib/repo-context.js），否则每条轮询路径都会多起
+  // 一个进程，而这是"每次刷新都更重"的典型回退。第二次请求因此应该只剩 for-each-ref。
+  resetTrace()
+  await get('branches')
+  const cached = readTrace()
+  console.log(`  [measure] 第二次 /branches（探针应命中缓存）：${cached.count} 个进程`)
+  checkLe('   第二次请求不再探测仓库（缓存命中）', cached.count, 1)
 
   console.log('')
   console.log('=== 2. 对照：旧算法（每分支一次 rev-list）在同一仓库上的进程数 ===')

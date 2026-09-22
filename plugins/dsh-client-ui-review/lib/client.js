@@ -825,8 +825,22 @@ window.__ModuleLoader__.load({
       commitHintCtrlEnter: 'Ctrl+Enter 提交',
       stagedCount: '已暂存 {count}',
       untrackedCount: '{count} 个文件',
-      untrackedTruncated: '只列出前 {count} 个，另有 {rest} 个未显示。',
       browseUntracked: '浏览',
+      // ---- 未跟踪文件的两种模式（少量 inline / 大量 browse）----
+      untrackedCounting: '正在统计未跟踪文件…',
+      untrackedBrowseHint: '{count} 个文件未纳入版本管理',
+      untrackedBrowseTitle: '未进行版本管理的文件',
+      untrackedBrowseEmpty: '没有未跟踪的文件',
+      untrackedBrowseLoading: '正在读取…',
+      untrackedBrowseLoadMore: '继续加载（还有 {rest} 个）',
+      untrackedBrowseSelected: '已选 {count} 个',
+      untrackedBrowseAll: '全部 {count} 个文件',
+      untrackedBrowseSelectAll: '全选',
+      untrackedBrowseClear: '清空',
+      untrackedBrowseClose: '关闭',
+      untrackedBrowseAdded: '已把 {count} 个文件加入 git',
+      untrackedBrowseFailed: '读取目录失败：{detail}',
+      untrackedBrowseDirCount: '{count} 个文件',
       noStagedOrChanged: '工作区干净，没有待提交的改动。',
       // ---- 选择与提交（参考 IDEA：勾选要提交的文件，再提交/提交并推送）----
       selectAll: '全选',
@@ -1004,8 +1018,22 @@ window.__ModuleLoader__.load({
       commitHintCtrlEnter: 'Ctrl+Enter to commit',
       stagedCount: '{count} staged',
       untrackedCount: '{count} files',
-      untrackedTruncated: 'Showing the first {count}; {rest} more not shown.',
       browseUntracked: 'Browse',
+      // ---- Two untracked modes (inline for a few, browse for many) ----
+      untrackedCounting: 'Counting untracked files…',
+      untrackedBrowseHint: '{count} files are not under version control',
+      untrackedBrowseTitle: 'Unversioned files',
+      untrackedBrowseEmpty: 'No untracked files',
+      untrackedBrowseLoading: 'Loading…',
+      untrackedBrowseLoadMore: 'Load more ({rest} remaining)',
+      untrackedBrowseSelected: '{count} selected',
+      untrackedBrowseAll: 'All {count} files',
+      untrackedBrowseSelectAll: 'Select all',
+      untrackedBrowseClear: 'Clear',
+      untrackedBrowseClose: 'Close',
+      untrackedBrowseAdded: 'Added {count} file(s) to Git',
+      untrackedBrowseFailed: 'Failed to read the directory: {detail}',
+      untrackedBrowseDirCount: '{count} files',
       noStagedOrChanged: 'The working tree is clean; nothing to commit.',
       stagedNotice: 'Staged {count} file(s)',
       unstagedNotice: 'Unstaged {count} file(s)',
@@ -1392,14 +1420,98 @@ window.__ModuleLoader__.load({
     const SNAPSHOT_POLL_MS = POLL_MS
 
     /**
-     * 未跟踪文件最多渲染多少行。
+     * 未跟踪文件的双模式阈值。
      *
-     * 实测一个真实仓库有 6,636 个未跟踪文件：全量渲染会让这块面板变成一堵墙（每行还有
-     * 勾选框、差异按钮、历史按钮）。**分组标题上的数量仍然显示完整总数**，因此
-     * "分组数量与文件列表一致"这条要求不受影响——这是"只显示前 N 个"的视图截断，
-     * 不是另一份数据。
+     * ≤ 它 → **inline**：主面板逐行列出**全部**未跟踪文件（IDEA 的少量模式）。
+     * > 它 → **browse**：主面板**一行都不列**，只给"6,846 个文件 + 浏览"，点开一个惰性
+     *        目录树去挑。
+     *
+     * 旧实现是"最多列前 50 个 + 说一句还有 N 个没显示"——那既不是完整列表也不是概要：
+     * 用户既看不到全部，也不知道剩下的该去哪儿看。这一版把两种模式分开。
      */
-    const UNTRACKED_RENDER_LIMIT = 50
+    const UNTRACKED_INLINE_LIMIT = 50
+
+    /**
+     * 精确枚举失败后的重试退避。
+     *
+     * 轮询每 10 秒会让 Changes 再问一次"未跟踪到底有多少个"；如果那条路由一直失败，没有
+     * 退避就会变成"每 10 秒重数一次 6,846 个文件"。30 秒是"用户重试一次能成功"与"不把
+     * 失败放大成后台扫描"之间的折中。
+     */
+    const EXACT_UNTRACKED_BACKOFF_MS = 30000
+
+    /**
+     * 「浏览」一页取多少个同级节点。
+     *
+     * 某个目录下直接躺着几千个文件时（`tmp/` 里 6,818 个日志是实机形状），一次请求
+     * 全给回来就会一次 mount 几千行。分页是这里选用的"虚拟化"：一页 200 条 + 「继续
+     * 加载」，DOM 里永远只有用户真的翻到的那几百行。
+     */
+    const UNTRACKED_PAGE_SIZE = 200
+
+    /**
+     * `workspaceRoot → repositoryRoot` 的解析缓存。
+     *
+     * 为什么客户端也需要它：Git 快照的 store 必须按**仓库**共享（同仓库的两个子目录只能有
+     * 一套轮询），而 store 的键要在订阅的那一刻就确定。先问一次 host（`/repo-context`，
+     * 内部是两次 `rev-parse` 的有界缓存），拿到 repositoryRoot 再把订阅挂到"仓库那一格"。
+     *
+     * 这里也做缓存与 single-flight：一个工作区只问一次，多个组件（入口徽标 + 抽屉）同时
+     * 订阅不会各问一遍。
+     */
+    const repoContexts = (() => {
+      /** workspaceRoot → repositoryRoot（空串 = 不是仓库）。 */
+      const cache = new Map()
+      /** workspaceRoot → 在途请求。 */
+      const inflight = new Map()
+
+      const resolve = (workspaceRoot) => {
+        if (typeof workspaceRoot !== 'string' || workspaceRoot === '') return Promise.resolve('')
+        if (cache.has(workspaceRoot)) return Promise.resolve(cache.get(workspaceRoot))
+        const running = inflight.get(workspaceRoot)
+        if (running !== undefined) return running
+        const task = (async () => {
+          try {
+            const payload = await call('repo-context', { workspace: workspaceRoot })
+            const root =
+              payload?.isRepo === true && typeof payload.repositoryRoot === 'string' && payload.repositoryRoot !== ''
+                ? payload.repositoryRoot
+                : ''
+            cache.set(workspaceRoot, root)
+            return root
+          } catch {
+            // 取不到就按"不是仓库"处理，并把结果记成空串缓存起来避免反复打这条路由
+            // （缓存是短生命周期的：写操作与切换项目都会 invalidate）。
+            cache.set(workspaceRoot, '')
+            return ''
+          } finally {
+            if (inflight.get(workspaceRoot) === task) inflight.delete(workspaceRoot)
+          }
+        })()
+        inflight.set(workspaceRoot, task)
+        return task
+      }
+
+      return {
+        resolve,
+        /** 直接写入（测试与写操作之后用）。 */
+        set(workspaceRoot, repositoryRoot) {
+          cache.set(workspaceRoot, repositoryRoot)
+        },
+        /** 丢掉一个工作区的解析结果（`git init`、切项目、写操作之后）。 */
+        invalidate(workspaceRoot) {
+          if (typeof workspaceRoot === 'string' && workspaceRoot !== '') cache.delete(workspaceRoot)
+          else cache.clear()
+        },
+        peek(workspaceRoot) {
+          return cache.get(workspaceRoot)
+        },
+        reset() {
+          cache.clear()
+          inflight.clear()
+        },
+      }
+    })()
 
     /**
      * 把一个文件的暂存/未暂存状态翻译成 porcelain 的 XY 两列。
@@ -1450,8 +1562,20 @@ window.__ModuleLoader__.load({
      * "B 的数据落到 A 上"。
      */
     const gitSnapshots = (() => {
-      /** workspace → 记录。 */
+      /**
+       * 记录表：**键是仓库根**（`repositoryRoot`），不是工作区。
+       *
+       * 这是这一版的核心改动。以前键是 workspaceRoot，于是同一个仓库的两个子目录
+       * （`repo/src` 与 `repo/pages`）会各拿一份快照、各跑一套 10 秒轮询——切一次目录就
+       * 多一倍 Git 工作量，而且两边看到的数可能不一致。现在：
+       *   * **一个仓库一份快照、一套轮询、一个在途请求**；
+       *   * UI 仍然按 workspaceRoot 订阅（见 `byWorkspace`），因此组件那一侧完全不用改；
+       *   * 工作区换了但仓库没换（`repo/src → repo/pages`）时**什么都不清**：分支、Changes、
+       *     徽标继续显示，必要时后台补一次轻量 revalidate。
+       */
       const records = new Map()
+      /** workspaceRoot → 记录（两个子目录指向**同一个**记录）。 */
+      const byWorkspace = new Map()
 
       /**
        * 一份"空"快照（还没取到数据，或者刚被重置）。
@@ -1470,6 +1594,7 @@ window.__ModuleLoader__.load({
        */
       const emptySnapshot = (record, phase = 'idle') => ({
         workspace: record.workspace,
+        repositoryRoot: record.repositoryRoot ?? '',
         generation: record.generation,
         requestId: record.requestId,
         phase,
@@ -1481,9 +1606,19 @@ window.__ModuleLoader__.load({
         head: '',
         files: [],
         changedFiles: 0,
+        /** 徽标上的数字是不是精确值（未跟踪还在折叠状态时为 false）。 */
+        changedFilesExact: true,
         staged: 0,
         unstaged: 0,
-        untracked: 0,
+        /**
+         * 未跟踪文件的**摘要**（不再是"未跟踪条目数"这一个数字）：
+         * `{ count, exact, mode, collapsed, inlineFiles }`。
+         *
+         *   `mode: 'inline'`  少量（≤ 50）→ `inlineFiles` 就是全部行
+         *   `mode: 'browse'`  大量（> 50）→ 主面板一行都不列，只给数量 +「浏览」
+         *   `mode: 'pending'` 快路径只看到折叠目录，精确条数还没取到
+         */
+        untracked: emptyUntracked(),
         empty: false,
         error: '',
         /** 有旧数据时刷新失败的原因（数据仍然显示，只是标出"这次没刷新上"）。 */
@@ -1493,11 +1628,117 @@ window.__ModuleLoader__.load({
         invalidate: () => invalidateRecord(record),
       })
 
+      /**
+       * 一份空的未跟踪摘要。
+       * @returns `{ count, exact, mode, collapsed, inlineFiles }`。
+       */
+      function emptyUntracked() {
+        return { count: 0, exact: true, mode: 'inline', collapsed: false, inlineFiles: [] }
+      }
+
+      /**
+       * 把宿主给的未跟踪摘要归一成界面用的形状。
+       *
+       * 兼容旧形状很重要：大量既有测试用 `__setForTest` 直接喂一份"files 里带
+       * `untracked: true` 条目"的快照。那种输入下按条目现场推导出一份等价的摘要，因此
+       * 组件与断言都不必知道"宿主现在把未跟踪单独放了"。
+       *
+       * @param payload - `/workspace` 的响应。
+       * @param files - 已归一化的文件列表（可能含未跟踪条目）。
+       * @returns 未跟踪摘要 `{ count, exact, mode, collapsed, inlineFiles }`。
+       */
+      function normalizeUntracked(payload, files) {
+        return untrackedSummary(payload?.untracked, files)
+      }
+
+      /**
+       * 摘要归一化的实现（`/workspace` 的 `untracked` 字段与 `/untracked` 的响应共用）。
+       *
+       * @param raw - 摘要对象（可能是旧形状下的 undefined）。
+       * @param files - 旧形状下用来推导的文件列表。
+       * @returns 未跟踪摘要。
+       */
+      function untrackedSummary(raw, files) {
+        if (raw !== null && typeof raw === 'object' && Number.isFinite(raw.count)) {
+          const count = Math.max(0, Math.trunc(raw.count))
+          const mode = raw.mode === 'browse' || raw.mode === 'pending' ? raw.mode : count <= UNTRACKED_INLINE_LIMIT ? 'inline' : 'browse'
+          return {
+            count,
+            exact: raw.exact === true,
+            mode,
+            collapsed: raw.collapsed === true,
+            inlineFiles: Array.isArray(raw.inlineFiles) ? raw.inlineFiles.map((file) => ({ ...entryOfFile(file), ...file })) : [],
+          }
+        }
+        // 旧形状：未跟踪条目混在 files 里。
+        const entries = files.filter((file) => file.untracked === true)
+        const count = entries.length
+        const mode = count <= UNTRACKED_INLINE_LIMIT ? 'inline' : 'browse'
+        return {
+          count,
+          exact: true,
+          mode,
+          collapsed: false,
+          inlineFiles: mode === 'inline' ? entries : [],
+        }
+      }
+
+      /**
+       * 把 `/untracked` 路由的响应当成一份摘要。
+       *
+       * **字段名不一样，这是踩过的坑**：`/workspace` 把摘要放在 `untracked: { count, … }`
+       * 里，而 `/untracked` 直接回 `{ total, mode, exact, inlineFiles }`。曾经在这里直接
+       * 调了 `normalizeUntracked(payload)`，于是它读 `payload.untracked`（undefined）→ 退回
+       * "按 files 推导" → 精确枚举的结果被当成 0 条，界面永远是"正在统计…"
+       * （`test-review-staging.mjs` 第 13c 节就是钉这个的）。
+       *
+       * @param payload - `/untracked` 的响应。
+       * @returns 未跟踪摘要。
+       */
+      function untrackedFromExact(payload) {
+        const count = Number.isFinite(payload?.total) ? Math.max(0, Math.trunc(payload.total)) : 0
+        return untrackedSummary(
+          {
+            count,
+            exact: payload?.exact === true,
+            mode: payload?.mode,
+            collapsed: false,
+            inlineFiles: payload?.inlineFiles,
+          },
+          [],
+        )
+      }
+
+      /**
+       * 还没解析出仓库根时用的临时键。
+       * @param workspace - 工作区路径。
+       * @returns 记录键。
+       */
+      const provisionalKey = (workspace) => `ws:${workspace}`
+
+      /**
+       * 取（必要时创建）一个工作区的记录。
+       *
+       * 记录先以 `ws:<workspaceRoot>` 这个**临时键**建出来，等仓库解析回来再迁到仓库根
+       * （见 resolveRecord）。这样做的好处是：`get()` / `subscribe()` 都是同步的、任何
+       * 时刻都有一份稳定的快照对象可返回，而 React 的 `useSyncExternalStore` 需要这个。
+       *
+       * @param workspace - 工作区路径。
+       * @returns 记录。
+       */
       const ensure = (workspace) => {
-        let record = records.get(workspace)
+        const existing = byWorkspace.get(workspace)
+        if (existing !== undefined) return existing
+        const key = provisionalKey(workspace)
+        let record = records.get(key)
         if (record === undefined) {
           record = {
+            key,
             workspace,
+            /** 仓库根；解析出来之前是空串（"还不知道"）。 */
+            repositoryRoot: '',
+            /** 是否已经问过 host（避免对"不是仓库"的目录反复解析）。 */
+            resolved: false,
             generation: 0,
             /** 这一代里的第几次请求；用于"只看最新那次请求的响应"。 */
             requestId: 0,
@@ -1505,11 +1746,78 @@ window.__ModuleLoader__.load({
             listeners: new Set(),
             inflight: null,
             timer: 0,
+            /** 是否正在轮询（用显式布尔，见 startPolling 的说明）。 */
+            polling: false,
+            /** 精确未跟踪枚举的在途请求（按仓库去重）。 */
+            exactInflight: null,
+            /** 上一次精确枚举的时间戳（轮询不重复问同一条路由）。 */
+            exactAt: 0,
+            /** 上一次精确枚举**失败**的时间戳：失败后的退避，避免每 10 秒重试一次。 */
+            exactErrorAt: 0,
+            /** 正在解析仓库根。 */
+            resolving: null,
           }
-          records.set(workspace, record)
+          records.set(key, record)
           record.snapshot = emptySnapshot(record)
         }
+        byWorkspace.set(workspace, record)
         return record
+      }
+
+      /**
+       * 解析（并迁移到）仓库根那一格。
+       *
+       * 三种情况：
+       *   1. 解析出仓库根，且那一格还不存在 → 把当前记录**迁过去**（订阅者、计时器、
+       *      在途请求全部保留，因此不会闪一下）；
+       *   2. 解析出仓库根，但那一格已经存在（同仓库的另一个工作区先建好了）→ 把当前记录
+       *      **并过去**（订阅者转挂到目标记录，丢弃这一个的计时器）；
+       *   3. 不是仓库 → 停在临时键上（每个非仓库目录一份 `notrepo` 快照就够）。
+       *
+       * @param record - 记录。
+       * @returns 解析（可能被替换）后的记录。
+       */
+      const resolveRecord = (record) => {
+        if (record.resolved === true) return Promise.resolve(record)
+        if (record.resolving !== null) return record.resolving
+        const workspace = record.workspace
+        record.resolving = (async () => {
+          const repositoryRoot = await repoContexts.resolve(workspace)
+          record.resolved = true
+          if (repositoryRoot === '') return record
+          const key = repositoryRoot
+          const target = records.get(key)
+          if (target === undefined) {
+            records.delete(record.key)
+            record.key = key
+            record.repositoryRoot = repositoryRoot
+            records.set(key, record)
+            // 快照引用必须换：`repositoryRoot` 变了，界面据此知道"这是哪个仓库的数据"。
+            record.snapshot = { ...record.snapshot, repositoryRoot }
+            emit(record)
+            return record
+          }
+          if (target === record) return record
+          // 同一个仓库已经有另一格了：订阅者转挂过去。
+          //
+          // **源记录必须从表里删掉**：只搬走订阅者而把它留在 `records` 里，会留下一条永远
+          // 没有订阅者、也永远不会被清理的"僵尸记录"（`cells()` 会看到两条，于是"同仓库只有
+          // 一格"这条不变量在断言里当场露馅）。
+          records.delete(record.key)
+          stopPolling(record)
+          for (const listener of record.listeners) target.listeners.add(listener)
+          record.listeners.clear()
+          for (const [ws, holder] of byWorkspace) {
+            if (holder === record) byWorkspace.set(ws, target)
+          }
+          // 目标格已经有数据就不动；没有就替它拉一次。
+          if (target.snapshot.phase === 'idle' || target.snapshot.phase === 'loading') void load(target)
+          emit(target)
+          return target
+        })().finally(() => {
+          record.resolving = null
+        })
+        return record.resolving
       }
 
       const emit = (record) => {
@@ -1527,14 +1835,16 @@ window.__ModuleLoader__.load({
         // 宿主现在**直接给** `index`/`worktree`（来自 `porcelain=v2`）与三个布尔值；旧形状的
         // fixture（以及测试里的 `__setForTest`）只有布尔值，因此用 `entryOfFile` 补齐，
         // 但**以宿主给的为准**——v2 的两列比"从 status 字母反推"更精确。
-        const files = rawFiles.map((file) => ({ ...entryOfFile(file), ...file }))
-        // 三组数量与文件列表**同源**：全部由这一份 files 现场算出。把它们做成独立字段
-        // 只是省去调用方各自 filter 一遍，不会引入第二个数据来源。
+        const trackedRaw = rawFiles.map((file) => ({ ...entryOfFile(file), ...file }))
+        const untracked = normalizeUntracked(payload, trackedRaw)
+        // `files` = 已跟踪改动 + **inline 模式下的未跟踪条目**。browse / pending 时这里
+        // 一条未跟踪条目都不放：主面板因此**不会**持有几千条路径（需求九、二十.2）。
+        const files = [...trackedRaw.filter((file) => file.untracked !== true), ...untracked.inlineFiles]
         const stagedFiles = files.filter((file) => classifyEntry(file).staged)
         const unstagedFiles = files.filter((file) => file.untracked !== true && classifyEntry(file).unstaged)
-        const untrackedFiles = files.filter((file) => file.untracked === true)
         record.snapshot = {
           workspace: record.workspace,
+          repositoryRoot: record.repositoryRoot === '' ? (typeof payload?.repositoryRoot === 'string' ? payload.repositoryRoot : '') : record.repositoryRoot,
           generation: record.generation,
           requestId: record.requestId,
           phase: 'ready',
@@ -1543,10 +1853,11 @@ window.__ModuleLoader__.load({
           branch: typeof payload?.branch === 'string' ? payload.branch : '',
           head: typeof payload?.head === 'string' ? payload.head : '',
           files,
-          changedFiles: files.length,
+          changedFiles: files.length - untracked.inlineFiles.length + untracked.count,
+          changedFilesExact: untracked.exact,
           staged: stagedFiles.length,
           unstaged: unstagedFiles.length,
-          untracked: untrackedFiles.length,
+          untracked,
           empty: payload?.empty === true,
           error: '',
           refreshError: '',
@@ -1619,11 +1930,15 @@ window.__ModuleLoader__.load({
       }
 
       const startPolling = (record) => {
-        if (record.timer !== 0) return
+        // 用显式布尔而不是"timer !== 0"判断：测试里的 `setInterval` 会被替成 `() => 0`
+        // （几乎所有假 DOM harness 都这么干），于是"计时器 id 是 0"会被误判成"没在轮询"。
+        if (record.polling === true) return
+        record.polling = true
         record.timer = setInterval(() => void load(record), SNAPSHOT_POLL_MS)
       }
       const stopPolling = (record) => {
-        if (record.timer === 0) return
+        if (record.polling !== true) return
+        record.polling = false
         clearInterval(record.timer)
         record.timer = 0
       }
@@ -1646,8 +1961,81 @@ window.__ModuleLoader__.load({
       const invalidateRecord = (record) => {
         record.generation += 1
         record.inflight = null
+        // 写操作也会改动未跟踪集合（add / 还原 / 提交），因此精确枚举的时间戳一起清掉：
+        // 下一次 `requestExactUntracked` 会带 `force` 重数，而不是复用 20 秒内的旧结果。
+        record.exactAt = 0
         record.snapshot = { ...record.snapshot, generation: record.generation, stale: true }
         return load(record)
+      }
+
+      /**
+       * 精确枚举未跟踪文件（`inline` / `browse` 的判定依据）。
+       *
+       * **只在需要时才调**（需求十）：Changes 页签要渲染未跟踪那一组、用户点「浏览」、
+       * 或者写操作之后。常驻轮询**绝不**走到这里——那正是"每 10 秒重数 6,846 个文件"的
+       * 来源。
+       *
+       * 结果原地合并进当前快照（**不换代**）：换代码会丢弃在途的 `/workspace` 响应，
+       * 而这两条请求回答的是同一份工作区的不同侧面，没必要互相打断。
+       *
+       * @param workspace - 工作区路径。
+       * @param options - `{ force }`：忽略"同一份快照已经枚举过"的短周期去重。
+       * @returns 合并后的快照。
+       */
+      const requestExactUntracked = (workspace, options = {}) => {
+        if (typeof workspace !== 'string' || workspace === '') return Promise.resolve(undefined)
+        const record = ensure(workspace)
+        if (record.exactInflight !== null) return record.exactInflight
+        // 同一份快照已经拿到过精确结果就不重复问：面板打开、切页签、重渲染都会调到这里，
+        // 没有这道闸门就变成"每次渲染一个请求"。
+        if (
+          options.force !== true &&
+          record.snapshot?.phase === 'ready' &&
+          record.snapshot?.untracked?.exact === true &&
+          Date.now() - record.exactAt < SNAPSHOT_STALE_MS
+        ) {
+          return Promise.resolve(record.snapshot)
+        }
+        // 刚刚失败过就先别重试：轮询每 10 秒会再调到这里，没有这条退避就会变成"每 10 秒
+        // 重数一次 6,846 个文件"。
+        if (options.force !== true && Date.now() - record.exactErrorAt < EXACT_UNTRACKED_BACKOFF_MS) {
+          return Promise.resolve(record.snapshot)
+        }
+        const generation = record.generation
+        const task = (async () => {
+          try {
+            const payload = await call('untracked', {
+              workspace: record.workspace,
+              exact: true,
+              ...(options.force === true ? { force: true } : {}),
+            })
+            if (record.generation !== generation) return record.snapshot
+            const tracked = record.snapshot.files.filter((file) => file.untracked !== true)
+            const untracked = untrackedFromExact(payload)
+            if (payload?.isRepo === false) return record.snapshot
+            record.exactAt = Date.now()
+            record.snapshot = {
+              ...record.snapshot,
+              repositoryRoot: record.repositoryRoot === '' ? record.snapshot.repositoryRoot : record.repositoryRoot,
+              files: [...tracked, ...untracked.inlineFiles],
+              changedFiles: tracked.length + untracked.count,
+              changedFilesExact: untracked.exact,
+              untracked,
+              staged: tracked.filter((file) => classifyEntry(file).staged).length,
+              unstaged: tracked.filter((file) => classifyEntry(file).unstaged).length,
+            }
+            emit(record)
+            return record.snapshot
+          } catch {
+            // 精确枚举失败不影响已经拿到的那份快照（界面继续显示计数 + 浏览入口）。
+            record.exactErrorAt = Date.now()
+            return record.snapshot
+          } finally {
+            if (record.exactInflight === task) record.exactInflight = null
+          }
+        })()
+        record.exactInflight = task
+        return task
       }
 
       return {
@@ -1657,38 +2045,72 @@ window.__ModuleLoader__.load({
           record.listeners.add(listener)
           if (record.listeners.size === 1) {
             startPolling(record)
-            void load(record)
           }
+          // 异步解析仓库根：解析完可能**换一条记录**（迁到仓库根、或并进同仓库的另一格），
+          // 因此退订函数要盯住"最终挂在哪条记录上"，而不是闭包里的那条。
+          let attached = record
+          void resolveRecord(record).then((target) => {
+            attached = target
+            // 解析期间组件可能已经退订了：`attached.listeners` 里没有它，什么都不用做。
+            if (!attached.listeners.has(listener)) return
+            if (attached.listeners.size === 1) startPolling(attached)
+            if (attached.snapshot.phase === 'idle' || attached.snapshot.phase === 'loading') void load(attached)
+          })
           return () => {
+            attached.listeners.delete(listener)
             record.listeners.delete(listener)
-            if (record.listeners.size === 0) stopPolling(record)
+            if (attached.listeners.size === 0) stopPolling(attached)
           }
         },
         /** 当前快照（引用稳定：没变化时返回同一个对象）。 */
         get(workspace) {
-          return ensure(workspace).snapshot
+          const record = byWorkspace.get(workspace)
+          return record === undefined ? undefined : record.snapshot
         },
         /** 重新拉一次（single-flight 会合并并发调用）。 */
-        refresh(workspace) {
-          return load(ensure(workspace))
+        async refresh(workspace) {
+          const record = await resolveRecord(ensure(workspace))
+          return load(record)
         },
         /** 让当前快照过期：换代（丢弃在途响应）后立刻重取一次。 */
-        invalidate(workspace) {
-          return invalidateRecord(ensure(workspace))
+        async invalidate(workspace) {
+          const record = await resolveRecord(ensure(workspace))
+          return invalidateRecord(record)
         },
         /** 面板打开时调用：过期就补一次刷新。 */
-        refreshIfStale(workspace) {
-          const record = ensure(workspace)
+        async refreshIfStale(workspace) {
+          const record = await resolveRecord(ensure(workspace))
           // `stale` 由 invalidate（写操作之后）置起，与"多久没更新"是两件事：前者是"这份
           // 数据不可信"，后者只是"有点旧"。两者都刷新，但只有"从没取到过"才显示 loading。
           if (record.snapshot.stale !== true && Date.now() - record.snapshot.updatedAt < SNAPSHOT_STALE_MS) {
-            return Promise.resolve(record.snapshot)
+            return record.snapshot
           }
           return load(record)
         },
+        /** 精确枚举未跟踪（见 requestExactUntracked）。 */
+        requestExactUntracked,
         /** 只给测试用：直接写入一份快照（免去伪造 host 响应）。 */
         __setForTest(workspace, payload) {
-          const record = ensure(workspace)
+          // 测试里给的快照可以带 `repositoryRoot`：带上就按**仓库**建格（这样"同仓库两个
+          // 工作区共享一格"也能在假 DOM 里被断言），不带就退回"一个工作区一格"的旧行为。
+          const repoRoot = typeof payload?.repositoryRoot === 'string' && payload.repositoryRoot !== '' ? payload.repositoryRoot : ''
+          if (repoRoot !== '') repoContexts.set(workspace, repoRoot)
+          let record = ensure(workspace)
+          record.resolved = true
+          if (repoRoot !== '' && record.key !== repoRoot) {
+            const target = records.get(repoRoot)
+            if (target !== undefined && target !== record) {
+              // 那一格已经在了（同仓库的另一个工作区）：直接挂过去。
+              byWorkspace.set(workspace, target)
+              stopPolling(record)
+              record = target
+            } else {
+              records.delete(record.key)
+              record.key = repoRoot
+              records.set(repoRoot, record)
+            }
+          }
+          record.repositoryRoot = repoRoot === '' ? record.repositoryRoot : repoRoot
           record.generation += 1
           if (payload === null) {
             record.snapshot = emptySnapshot(record)
@@ -1700,10 +2122,29 @@ window.__ModuleLoader__.load({
         __resetForTest() {
           for (const record of records.values()) stopPolling(record)
           records.clear()
+          byWorkspace.clear()
+          repoContexts.reset()
         },
         /** 只给测试用：有没有在途请求。 */
         __inflight(workspace) {
-          return ensure(workspace).inflight !== null
+          const record = byWorkspace.get(workspace)
+          return record !== undefined && record.inflight !== null
+        },
+        /** 只给测试用：当前有几条记录（= 几个仓库）、各自订阅者与计时器数量。 */
+        __cells() {
+          return [...records.values()].map((record) => ({
+            key: record.key,
+            workspace: record.workspace,
+            repositoryRoot: record.repositoryRoot,
+            listeners: record.listeners.size,
+            polling: record.polling === true,
+            phase: record.snapshot.phase,
+          }))
+        },
+        /** 只给测试用：某个工作区最终挂在哪条记录上。 */
+        __cellKeyFor(workspace) {
+          const record = byWorkspace.get(workspace)
+          return record === undefined ? undefined : record.key
         },
       }
     })()
@@ -3442,16 +3883,406 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 暂存与提交区块。
+     * 「浏览未进行版本管理的文件」弹窗（大量未跟踪文件时的唯一入口）。
+     *
+     * 为什么需要它：一个真实仓库里有 6,846 个未跟踪文件时，"主面板逐行列出"这件事本身
+     * 就不成立了（DOM 会变成一堵墙、用户也找不到目标）。IDEA 的做法是分组标题上给一个
+     * 入口、打开一个独立的树。
+     *
+     * 三条设计约束（都来自需求十二~十五）：
+     *   * **惰性树**：只请求当前前缀的**直接子节点**（`POST /untracked { prefix }`），
+     *     目录默认折叠。打开弹窗只拿仓库根那一层（实机是 3 项），DOM 里因此不可能出现
+     *     几千行；
+     *   * **同级分页**：某个目录下直接躺着 6,835 个文件时（实机的 `tmp/magic-api`），
+     *     一页只取 `UNTRACKED_PAGE_SIZE` 条 + 「继续加载」——这是这里选用的虚拟化；
+     *   * **勾选语义**：文件与目录都能勾，目录勾上 = 整棵子树（把**目录路径**交给
+     *     `git add`，git 自己会展开）；部分勾选时是 indeterminate；默认**全不选**。
+     *
+     * @param props - `{ t, workspace, total, busy, onAdd, onClose, reloadToken }`。
+     * @returns React 元素。
+     */
+    function UntrackedBrowseDialog(props) {
+      const { t, workspace, total, busy, onAdd, onClose, reloadToken } = props
+      /** 前缀 → 该层的一页（`files` 是**累积**的，翻页时追加）。 */
+      const [pages, setPages] = react.useState({})
+      /** 已展开目录的路径（默认全折叠）。 */
+      const [expanded, setExpanded] = react.useState([])
+      const [selectedFiles, setSelectedFiles] = react.useState([])
+      const [selectedDirs, setSelectedDirs] = react.useState([])
+      /** 「全选」：不逐个列出路径，直接让 host 把**全部**未跟踪文件加进去（见 onAdd）。 */
+      const [selectAll, setSelectAll] = react.useState(false)
+      const [error, setError] = react.useState('')
+      /**
+       * 请求令牌：弹窗关闭、或换了工作区之后，迟到的那一页不许再写进界面。
+       * 与 AI 补充用的是同一套做法（见 generateCommitMessage 的说明）。
+       */
+      const token = react.useRef(0)
+
+      /**
+       * 取某个前缀的一页。
+       *
+       * @param prefix - 目录前缀（`''` = 仓库根）。
+       * @param offset - 起始下标（0 = 第一页）。
+       * @param mine - 发起这次请求时的令牌。
+       */
+      const loadPage = react.useCallback(
+        async (prefix, offset, mine) => {
+          try {
+            const payload = await call('untracked', {
+              workspace,
+              prefix,
+              offset,
+              limit: UNTRACKED_PAGE_SIZE,
+            })
+            if (token.current !== mine) return
+            const tree = payload?.tree ?? { directories: [], files: [], total: 0, truncated: false, offset }
+            setPages((current) => {
+              const previous = current[prefix]
+              const files = offset > 0 && previous !== undefined ? [...previous.files, ...tree.files] : tree.files
+              return { ...current, [prefix]: { ...tree, files } }
+            })
+            setError('')
+          } catch (cause) {
+            if (token.current !== mine) return
+            const failure = cause instanceof Error ? cause : new Error(String(cause))
+            setError(String(failure.detail ?? failure.message ?? failure).slice(0, 200))
+          }
+        },
+        [workspace],
+      )
+
+      // 打开就把仓库根那一层拿回来（只有一层，实机是 3 项）。
+      react.useEffect(() => {
+        const mine = (token.current += 1)
+        void loadPage('', 0, mine)
+        return () => {
+          // 卸载（关闭弹窗）时让在途的那一页作废。
+          token.current += 1
+        }
+      }, [loadPage])
+
+      /**
+       * 展开目录时**按需**取它那一层。
+       *
+       * 这是"惰性树"的落点：`renderLevel` 只画已经拿到的那一层，没拿到的前缀在这里补一次
+       * 请求。默认展开集合是空的，因此打开弹窗只会有根层那一次请求（实机 3 项）。
+       *
+       * 用到 `pagesRef` 而不是 `pages` 当依赖：`pages` 每次加载都是新对象，用它会让这个
+       * effect 每加载一层就重跑一次（虽然不会重复请求，但没必要）。
+       */
+      const pagesRef = react.useRef(pages)
+      pagesRef.current = pages
+      react.useEffect(() => {
+        const missing = expanded.filter((prefix) => pagesRef.current[prefix] === undefined)
+        if (missing.length === 0) return
+        // **不要**在这里 +1：令牌代表"这一代弹窗"，展开两层并发时后一个请求不该把前一个
+        // 的响应作废（那样目录会永远停在"正在读取…"）。
+        const mine = token.current
+        for (const prefix of missing) void loadPage(prefix, 0, mine)
+      }, [expanded, loadPage])
+
+      /**
+       * 加入 git 之后**就地刷新**已经加载过的那些层（需求十七：刷新 Browse 当前节点）。
+       *
+       * 父组件每成功加入一次就把 `reloadToken` +1。这里重取所有已加载前缀的第一页并清空
+       * 选择：刚加入的文件在树里消失，已选集合也必须清掉（否则下一次加入会重复带上它们）。
+       */
+      react.useEffect(() => {
+        if (reloadToken === undefined || reloadToken === 0) return
+        const loaded = Object.keys(pagesRef.current)
+        const mine = (token.current += 1)
+        setSelectedFiles([])
+        setSelectedDirs([])
+        setSelectAll(false)
+        setPages({})
+        for (const prefix of loaded.length === 0 ? [''] : loaded) void loadPage(prefix, 0, mine)
+      }, [reloadToken, loadPage])
+
+      /** 某个文件是否算已选（「全选」或某个祖先目录被整选）。 */
+      const isFileSelected = (path) =>
+        selectAll ||
+        selectedFiles.includes(path) ||
+        selectedDirs.some((dir) => path === dir || path.startsWith(`${dir}/`))
+
+      /** 一个目录的勾选状态：`all` | `some` | `none`。 */
+      const dirState = (path) => {
+        if (selectAll || selectedDirs.includes(path)) return 'all'
+        return selectedFiles.some((file) => file.startsWith(`${path}/`)) ? 'some' : 'none'
+      }
+
+      const toggleDir = (path) => {
+        setSelectAll(false)
+        if (selectedDirs.includes(path)) {
+          setSelectedDirs((current) => current.filter((item) => item !== path))
+          return
+        }
+        setSelectedDirs((current) => [...current, path])
+        // 整选一个目录之后，它下面"逐个勾过"的文件就不必再单独带了（路径会重复）。
+        setSelectedFiles((current) => current.filter((file) => !file.startsWith(`${path}/`)))
+      }
+
+      const toggleFile = (path) => {
+        setSelectAll(false)
+        setSelectedFiles((current) => (current.includes(path) ? current.filter((item) => item !== path) : [...current, path]))
+      }
+
+      const selectedCount = selectAll ? total : selectedDirs.length + selectedFiles.length
+
+      /** 一行。`kind` 是 `dir` | `file`。 */
+      const row = (entry, depth, kind) => {
+        const isDir = kind === 'dir'
+        const state = isDir ? dirState(entry.path) : isFileSelected(entry.path) ? 'all' : 'none'
+        const open = isDir && expanded.includes(entry.path)
+        return react.createElement(
+          'div',
+          {
+            key: `${kind}:${entry.path}`,
+            [isDir ? 'data-untracked-browse-dir' : 'data-untracked-browse-file']: entry.path,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              minHeight: '24px',
+              paddingLeft: `${8 + depth * 14}px`,
+              paddingRight: '8px',
+              fontFamily: isDir ? UI_FONT : CODE_FONT,
+              fontSize: uiPx(11.5),
+              borderRadius: '5px',
+            },
+          },
+          // 展开箭头（只有目录有）。
+          isDir
+            ? react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  'data-untracked-browse-toggle': entry.path,
+                  'aria-expanded': open,
+                  'aria-label': entry.name,
+                  onClick: () =>
+                    setExpanded((current) =>
+                      current.includes(entry.path) ? current.filter((item) => item !== entry.path) : [...current, entry.path],
+                    ),
+                  style: { flexShrink: 0, width: '16px', height: '16px', padding: 0, border: 'none', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer' },
+                },
+                open ? '▾' : '▸',
+              )
+            : react.createElement('span', { style: { flexShrink: 0, width: '16px' } }),
+          // 勾选框。目录用 `indeterminate`（DOM 属性只能命令式设置，见下面的 ref 回调）。
+          react.createElement('input', {
+            type: 'checkbox',
+            'data-untracked-pick': entry.path,
+            'data-untracked-pick-kind': kind,
+            checked: state === 'all',
+            ref: state === 'some' ? (node) => { if (node !== null) node.indeterminate = true } : undefined,
+            disabled: busy,
+            'aria-label': entry.path,
+            onChange: () => (isDir ? toggleDir(entry.path) : toggleFile(entry.path)),
+            style: { flexShrink: 0, margin: 0, cursor: busy ? 'default' : 'pointer' },
+          }),
+          react.createElement(
+            'span',
+            { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            entry.name,
+          ),
+          // 目录右侧标出后代文件数：用户据此判断"这个目录值不值得展开"。
+          isDir
+            ? react.createElement('span', { style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(10.5) } }, t('untrackedBrowseDirCount', { count: entry.descendantCount }))
+            : null,
+        )
+      }
+
+      /**
+       * 递归渲染一个前缀下的节点。
+       *
+       * **只渲染已展开的目录**：默认展开集合是空的，因此打开弹窗时 DOM 里就是仓库根那
+       * 几行；展开一层才多一层的行（且那一层自己还分页）。
+       */
+      const renderLevel = (prefix, depth) => {
+        const page = pages[prefix]
+        if (page === undefined) {
+          return [
+            react.createElement(
+              'div',
+              { key: `loading:${prefix}`, 'data-untracked-loading': prefix, style: { padding: '6px 10px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } },
+              t('untrackedBrowseLoading'),
+            ),
+          ]
+        }
+        const nodes = []
+        for (const dir of page.directories) {
+          nodes.push(row(dir, depth, 'dir'))
+          if (expanded.includes(dir.path)) nodes.push(...renderLevel(dir.path, depth + 1))
+        }
+        for (const file of page.files) nodes.push(row(file, depth, 'file'))
+        if (page.truncated === true) {
+          nodes.push(
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                key: `more:${prefix}`,
+                'data-untracked-more': prefix,
+                disabled: busy,
+                onClick: () => {
+                  // 翻页属于"这一代弹窗"里的一次追加，不换代（见展开那一处 effect 的说明）。
+                  void loadPage(prefix, page.files.length, token.current)
+                },
+                style: { margin: '4px 0 4px 24px', height: '22px', padding: '0 10px', border: '1px solid var(--dsh-review-line, rgba(127,127,127,.35))', borderRadius: '6px', background: 'transparent', color: 'inherit', fontFamily: UI_FONT, fontSize: uiPx(11.5), cursor: 'pointer' },
+              },
+              t('untrackedBrowseLoadMore', { rest: Math.max(0, (page.total ?? 0) - page.files.length) }),
+            ),
+          )
+        }
+        return nodes
+      }
+
+      const rootPage = pages['']
+      const showEmpty = rootPage !== undefined && rootPage.total === 0 && rootPage.files.length === 0
+
+      return react.createElement(
+        'div',
+        {
+          'data-untracked-browse': '',
+          role: 'dialog',
+          'aria-label': t('untrackedBrowseTitle'),
+          onMouseDown: (event) => {
+            // 点遮罩关闭；点弹窗内部不关。
+            if (event.target === event.currentTarget) onClose()
+          },
+          onKeyDown: (event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              onClose()
+            }
+          },
+          style: {
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10020,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,.28)',
+          },
+        },
+        react.createElement(
+          'div',
+          {
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              width: 'min(720px, calc(100vw - 48px))',
+              maxHeight: 'min(560px, calc(100vh - 64px))',
+              minHeight: 0,
+              borderRadius: '12px',
+              border: `1px solid ${BORDER}`,
+              background: 'var(--dsw-alias-bg-overlay, #fff)',
+              color: 'var(--dsw-alias-label-primary, #202124)',
+              fontFamily: UI_FONT,
+              boxShadow: '0 18px 48px rgba(0,0,0,.22)',
+              overflow: 'hidden',
+            },
+          },
+          // 标题栏：标题 + 总数 + 全选/清空。
+          react.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, padding: '10px 12px', borderBottom: `1px solid ${BORDER}` } },
+            react.createElement('span', { style: { fontWeight: 600, fontSize: uiPx(12.5) } }, t('untrackedBrowseTitle')),
+            react.createElement('span', { 'data-untracked-total': '', style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } }, t('untrackedCount', { count: total })),
+            react.createElement('span', { style: { flex: '1 1 auto' } }),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-untracked-all': '',
+                disabled: busy,
+                onClick: () => {
+                  // 全选**不逐个列出路径**：勾上之后由 host 用完整清单一次性 add
+                  // （见 onAdd 的 all 分支），因此渲染进程永远不持有那几千条路径。
+                  setSelectAll(true)
+                  setSelectedDirs([])
+                  setSelectedFiles([])
+                },
+                style: { height: '22px', padding: '0 8px', border: 'none', borderRadius: '6px', background: 'transparent', color: ACCENT, fontFamily: UI_FONT, fontSize: uiPx(11.5), cursor: 'pointer' },
+              },
+              t('untrackedBrowseSelectAll'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-untracked-none': '',
+                disabled: busy,
+                onClick: () => {
+                  setSelectAll(false)
+                  setSelectedDirs([])
+                  setSelectedFiles([])
+                },
+                style: { height: '22px', padding: '0 8px', border: 'none', borderRadius: '6px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: uiPx(11.5), cursor: 'pointer' },
+              },
+              t('untrackedBrowseClear'),
+            ),
+          ),
+          // 树本体（唯一滚动区）。
+          react.createElement(
+            'div',
+            { 'data-untracked-tree': '', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '6px 4px' } },
+            error === ''
+              ? null
+              : react.createElement('div', { 'data-untracked-error': '', style: { padding: '6px 10px', color: REMOVED, fontSize: uiPx(11.5) } }, t('untrackedBrowseFailed', { detail: error })),
+            showEmpty
+              ? react.createElement('div', { style: { padding: '10px', textAlign: 'center', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(12) } }, t('untrackedBrowseEmpty'))
+              : renderLevel('', 0),
+          ),
+          // 底栏：已选数量 + 加入 Git + 关闭。
+          react.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, padding: '10px 12px', borderTop: `1px solid ${BORDER}` } },
+            react.createElement(
+              'span',
+              { 'data-untracked-count': selectedCount, style: { flex: '1 1 auto', minWidth: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } },
+              selectAll ? t('untrackedBrowseAll', { count: total }) : t('untrackedBrowseSelected', { count: selectedCount }),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-untracked-add': '',
+                'data-review-primary': '',
+                disabled: busy || selectedCount === 0,
+                onClick: () => onAdd(selectAll ? { all: true } : { paths: [...selectedDirs, ...selectedFiles] }),
+                style: { height: '26px', padding: '0 14px', border: 'none', borderRadius: '7px', background: selectedCount === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT, color: selectedCount === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff', fontFamily: UI_FONT, fontSize: uiPx(12), cursor: busy || selectedCount === 0 ? 'default' : 'pointer' },
+              },
+              busy ? t('working') : t('addToGit'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-untracked-close': '',
+                disabled: busy,
+                onClick: onClose,
+                style: { height: '26px', padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: '7px', background: 'transparent', color: 'inherit', fontFamily: UI_FONT, fontSize: uiPx(12), cursor: 'pointer' },
+              },
+              t('untrackedBrowseClose'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * 源代码管理面板里的暂存与提交区块。
      *
      * 三组文件（已暂存 / 更改 / 未进行版本管理的文件）+ 一个提交框。分组依据是
      * `git status --porcelain` 的索引态与工作区态两列（见 classifyEntry），**不是**
      * 差异内容——差异里没有索引态。
      *
-     * 未跟踪文件默认**折叠且只取前若干条**：实测一个真实仓库有 6,636 个未跟踪文件，
-     * 一次列全会让这块面板变成一堵墙，而用户日常只是想知道"有多少、有没有我要找的那个"。
+     * 未跟踪文件按**数量**走两种模式（见 UNTRACKED_INLINE_LIMIT）：少量逐行列出，
+     * 大量只给一行摘要 +「浏览」（树在 UntrackedBrowseDialog 里）。
      *
-     * @param props - `{ t, workspace, phase, onCommitted }`。
+     * @param props - `{ t, workspace, snapshot, onCommitted }`。
      * @returns React 元素。
      */
     function StagingSection(props) {
@@ -3472,6 +4303,20 @@ window.__ModuleLoader__.load({
        * 自动进暂存区），用户勾哪些就只 add 哪些，另一个按钮负责全选/全不选。
        */
       const [chosenUntracked, setChosenUntracked] = react.useState([])
+      /**
+       * 「浏览未进行版本管理的文件」弹窗是否打开。
+       *
+       * 只在未跟踪文件**超过 inline 阈值**时才有入口：那时主面板一行都不列，用户需要一个
+       * 真正能翻几千个文件的地方（IDEA 的"Unversioned Files"是一样的双模式）。
+       */
+      const [browseOpen, setBrowseOpen] = react.useState(false)
+      /**
+       * 「浏览」弹窗的内部刷新令牌。
+       *
+       * 每成功加入一次 +1，让弹窗**就地**重取已展开的层（需求十七："刷新 Browse 当前
+       * 节点"）。初始为 0：弹窗自己挂载时取一次根层，这条令牌只负责"之后的重取"。
+       */
+      const [browseReload, setBrowseReload] = react.useState(0)
       /**
        * 用户**主动取消勾选**的已跟踪文件。
        *
@@ -3577,6 +4422,29 @@ window.__ModuleLoader__.load({
         setAiNotice('')
         setAiSuggestion(null)
       }, [workspace])
+
+      /**
+       * 需要精确条数时，去问一次"未跟踪文件到底有多少个"。
+       *
+       * 触发条件只有三种（需求十）：
+       *   1. Changes 页签在渲染未跟踪那一组，而快照只知道折叠后的条目数（`pending`）；
+       *   2. 用户点了「浏览」（由弹窗自己再取目录树，这里只是保证模式已定）；
+       *   3. 写操作之后（store 的 `invalidate` 会把时间戳清掉，下一次这里带 `force`）。
+       *
+       * **常驻轮询不会走到这里**：这条 effect 只依赖未跟踪摘要与快照时间戳，摘要精确之后
+       * 条件就不成立了。而 store 内部还有两道闸门（同一份快照不重复问、失败后 30 秒退避），
+       * 因此即使这里每轮询都被调用，也不会退化成"每 10 秒重数一遍"。
+       */
+      const untrackedNeedsExact = snapshot?.phase === 'ready' && snapshot?.untracked?.exact !== true
+      /** 快照的 `updatedAt`：每次轮询都会变，用来在"还没精确"时再试一次（见上）。 */
+      const snapshotUpdatedAt = snapshot?.updatedAt ?? 0
+      react.useEffect(() => {
+        if (untrackedNeedsExact !== true) return
+        if (typeof workspace !== 'string' || workspace === '') return
+        // 每次都问 store，由 store 决定要不要真的发请求（见上面那两道闸门）：否则一次瞬时
+        // 失败会让未跟踪永远停在"正在统计…"。
+        void gitSnapshots.requestExactUntracked(workspace)
+      }, [untrackedNeedsExact, snapshotUpdatedAt, workspace])
 
       /**
        * 量出 Changes 内容的可用宽度。
@@ -3803,8 +4671,17 @@ window.__ModuleLoader__.load({
       // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
       const staged = files.filter((entry) => classifyEntry(entry).staged)
       const unstaged = files.filter((entry) => entry.untracked !== true && classifyEntry(entry).unstaged)
-      const untrackedPaths = files.filter((entry) => entry.untracked === true).map((entry) => entry.path)
-      const untrackedCount = untrackedPaths.length
+      // ---- 未跟踪：双模式 ----
+      //
+      // 数量与模式来自快照的 `untracked` 摘要（**不是**本地数 `files` 里的未跟踪条目）：
+      //   * inline（≤ 50）：`files` 里带着全部未跟踪条目，逐行列出；
+      //   * browse（> 50）：`files` 里**一条都没有**，主面板只显示数量 +「浏览」；
+      //   * pending：快路径只看到折叠目录，精确条数还没取到（界面显示"正在统计…"）。
+      const untrackedInfo = snapshot?.untracked ?? { count: 0, exact: true, mode: 'inline', collapsed: false, inlineFiles: [] }
+      const untrackedFiles = files.filter((entry) => entry.untracked === true)
+      const untrackedPaths = untrackedFiles.map((entry) => entry.path)
+      const untrackedCount = untrackedInfo.count
+      const untrackedMode = untrackedInfo.exact === false && untrackedInfo.mode === 'pending' ? 'pending' : untrackedInfo.mode
       const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
       // 已勾选（准备"加入 git"）的未跟踪文件。
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
@@ -4360,8 +5237,10 @@ window.__ModuleLoader__.load({
                 collapsed: collapsed.untracked,
                 onToggle: () => setCollapsed((value) => ({ ...value, untracked: !value.untracked })),
                 // 全选/全不选。IDEA 的分组标题上也有这个勾选框，它决定"下面那批要不要
-                // 一起加入"。
-                action: react.createElement(
+                // 一起加入"。**只在少量模式下出现**：大量模式下列表是空的，勾无从谈起
+                // （那边的全选在「浏览」弹窗里）。
+                action: untrackedMode === 'inline'
+                  ? react.createElement(
                   'button',
                   {
                     type: 'button',
@@ -4393,91 +5272,138 @@ window.__ModuleLoader__.load({
                     },
                   },
                   allChosen ? '☑' : '☐',
-                ),
+                )
+                  : null,
               }),
               collapsed.untracked
                 ? null
                 : [
-                    react.createElement(
-                      'div',
-                      { key: 'list', 'data-staging-untracked-list': '' },
-                      untrackedPaths.slice(0, UNTRACKED_RENDER_LIMIT).flatMap((path) => {
-                        const row = untrackedRow(path, chosenUntracked.includes(path))
-                        const nodes = [row]
-                        // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
-                        //
-                        // 差异**不再 inline 插在这一行下面**（见 renderRows 的说明）：点了它
-                        // 只是把这个路径交给右侧的 Diff Preview，由那个常驻的 viewer 走
-                        // `/workspace-file?untracked=true` 取差异。**这里曾经传
-                        // `byFile.get(path)`**——那是按需差异改造时删掉的整页拆分产物，于是
-                        // 点击直接 `ReferenceError: byFile is not defined`。不要重建 `byFile`。
-                        if (history === path) {
-                          nodes.push(react.createElement(FileHistory, {
-                            key: `history:untracked:${path}`,
-                            t,
-                            workspace,
-                            path,
-                          }))
-                        }
-                        return nodes
-                      }),
-                      // 只渲染前 UNTRACKED_RENDER_LIMIT 条：实测一个真实仓库有 6,636 个
-                      // 未跟踪文件，全量渲染会让这块面板变成一堵墙（而且每一行都有
-                      // 勾选框与按钮）。**数量仍然显示完整总数**（见分组标题），
-                      // 因此"数量与列表一致"这条要求不受影响——列表是被明确标注为
-                      // "只显示前 N 个"的视图，不是数据源。
-                      untrackedCount > UNTRACKED_RENDER_LIMIT
-                        ? react.createElement(
-                            'div',
-                            { 'data-staging-untracked-truncated': '', style: { padding: '4px 8px 4px 26px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 } },
-                            t('untrackedTruncated', {
-                              count: UNTRACKED_RENDER_LIMIT,
-                              rest: untrackedCount - UNTRACKED_RENDER_LIMIT,
-                            }),
-                          )
-                        : null,
-                    ),
-                    // 「加入 git」= `git add`。这就是 IDEA 里未跟踪文件那一组的核心动作：
+                    // ---- 少量模式：逐行列出**全部**未跟踪文件 ----
+                    //
+                    // `untrackedPaths` 来自快照 —— 宿主在 inline 模式下把全部（≤ 50）条目
+                    // 随 `/workspace` 一起给出，因此这里不需要第二份数据。
+                    untrackedMode !== 'inline'
+                      ? null
+                      : react.createElement(
+                          'div',
+                          { key: 'list', 'data-staging-untracked-list': '' },
+                          untrackedPaths.flatMap((path) => {
+                            const row = untrackedRow(path, chosenUntracked.includes(path))
+                            const nodes = [row]
+                            // 未跟踪文件同样能看差异（对 HEAD 而言它是新增文件）与历史。
+                            //
+                            // 差异**不再 inline 插在这一行下面**（见 renderRows 的说明）：点了它
+                            // 只是把这个路径交给右侧的 Diff Preview，由那个常驻的 viewer 走
+                            // `/workspace-file?untracked=true` 取差异。**这里曾经传
+                            // `byFile.get(path)`**——那是按需差异改造时删掉的整页拆分产物，于是
+                            // 点击直接 `ReferenceError: byFile is not defined`。不要重建它。
+                            if (history === path) {
+                              nodes.push(react.createElement(FileHistory, {
+                                key: `history:untracked:${path}`,
+                                t,
+                                workspace,
+                                path,
+                              }))
+                            }
+                            return nodes
+                          }),
+                        ),
+                    // ---- 大量模式 / 还没统计出来：**一行都不列** ----
+                    //
+                    // 实测一个真实仓库有 6,846 个未跟踪文件。旧实现是"列前 50 个 + 说一句
+                    // 还有 6,796 个"，那既不是完整列表也不是概要：DOM 里仍然有 50 行，用户
+                    // 却看不到剩下的。现在 > 50 时主面板只有**一行摘要 +「浏览」**，真正
+                    // 几千个文件的那个树在弹窗里按前缀惰性展开（见 UntrackedBrowseDialog）。
+                    //
+                    // `pending` 是快路径只看到折叠目录、精确条数还没统计出来的那一小段：
+                    // 给它一句明确的"正在统计…"，而不是拿偏小的估计值当结论（实测精确
+                    // 枚举 6,848 条约 100ms，界面几乎立刻就收敛）。
+                    untrackedMode === 'inline'
+                      ? null
+                      : react.createElement(
+                          'div',
+                          {
+                            key: 'browse',
+                            'data-staging-untracked-browse': untrackedMode,
+                            style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px 4px 26px', fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 },
+                          },
+                          react.createElement(
+                            'span',
+                            { style: { flex: '1 1 auto', minWidth: 0 } },
+                            untrackedMode === 'pending'
+                              ? t('untrackedCounting')
+                              : t('untrackedBrowseHint', { count: untrackedCount }),
+                          ),
+                          react.createElement(
+                            'button',
+                            {
+                              type: 'button',
+                              'data-staging-browse': '',
+                              disabled: busy || untrackedMode === 'pending',
+                              onClick: () => setBrowseOpen(true),
+                              style: {
+                                flexShrink: 0,
+                                height: '22px',
+                                padding: '0 10px',
+                                border: '1px solid var(--dsh-review-line, rgba(127,127,127,.35))',
+                                borderRadius: '6px',
+                                background: 'transparent',
+                                color: 'inherit',
+                                fontFamily: UI_FONT,
+                                fontSize: uiPx(11.5),
+                                cursor: busy || untrackedMode === 'pending' ? 'default' : 'pointer',
+                                opacity: untrackedMode === 'pending' ? 0.5 : 1,
+                              },
+                            },
+                            t('browseUntracked'),
+                          ),
+                        ),
+                    // 「加入 git」= `git add`。这是 IDEA 里未跟踪文件那一组的核心动作：
                     // 选中若干新文件 → Add to VCS → 它们进入"已暂存"。
+                    //
+                    // **只在少量模式下有它**：大量模式下一行都没列，勾选无从谈起——那边
+                    // 的入口是「浏览」弹窗里的勾选 + 批量加入（见 UntrackedBrowseDialog）。
                     //
                     // 做成贴底的一条汇总栏（而不是挤在列表末尾）：文件多的时候"选了
                     // 几个、点哪个按钮"必须一眼可见，否则要滚到底才知道能干什么。
-                    react.createElement(
-                      'div',
-                      { key: 'bar', 'data-review-untracked-bar': '' },
-                      react.createElement(
-                        'button',
-                        {
-                          type: 'button',
-                          'data-staging-add-chosen': '',
-                          'data-review-primary': '',
-                          disabled: busy || chosen.length === 0,
-                          onClick: () =>
-                            void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
-                              (ok) => {
-                                // `run` 现在返回响应体（成功）或 undefined（失败）。
-                                if (ok !== undefined) setChosenUntracked([])
+                    untrackedMode !== 'inline'
+                      ? null
+                      : react.createElement(
+                          'div',
+                          { key: 'bar', 'data-review-untracked-bar': '' },
+                          react.createElement(
+                            'button',
+                            {
+                              type: 'button',
+                              'data-staging-add-chosen': '',
+                              'data-review-primary': '',
+                              disabled: busy || chosen.length === 0,
+                              onClick: () =>
+                                void run('stage', { paths: chosen }, t('addedNotice', { count: chosen.length })).then(
+                                  (ok) => {
+                                    // `run` 现在返回响应体（成功）或 undefined（失败）。
+                                    if (ok !== undefined) setChosenUntracked([])
+                                  },
+                                ),
+                              style: {
+                                height: '24px',
+                                padding: '0 12px',
+                                border: 'none',
+                                background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
+                                color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
                               },
-                            ),
-                          style: {
-                            height: '24px',
-                            padding: '0 12px',
-                            border: 'none',
-                            background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
-                            color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
-                          },
-                        },
-                        t('addToGit'),
-                      ),
-                      react.createElement(
-                        'span',
-                        {
-                          'data-staging-chosen-count': '',
-                          style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                        },
-                        chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
-                      ),
-                    ),
+                            },
+                            t('addToGit'),
+                          ),
+                          react.createElement(
+                            'span',
+                            {
+                              'data-staging-chosen-count': '',
+                              style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                            },
+                            chosen.length === 0 ? t('untrackedHint') : t('chosenCount', { count: chosen.length }),
+                          ),
+                        ),
                   ],
             ),
       ]
@@ -4936,6 +5862,42 @@ window.__ModuleLoader__.load({
                 const path = confirming
                 setConfirming('')
                 void run('revert', { paths: [path], scope: 'workspace' }, t('revertedNotice', { path }))
+              },
+            }),
+
+        // 「浏览未进行版本管理的文件」弹窗。挂在最外层（fixed 遮罩），与确认框同级。
+        //
+        // 加入 git 的三件事按顺序做（需求十七）：
+        //   1. 交给 `run('stage', …)` —— 它成功后会让**共享快照**失效并重取（主 Changes
+        //      因此在浏览还开着的时候就已经从 browse 变成 inline 了）；
+        //   2. host 侧同时把未跟踪枚举缓存清了（见 /stage）；
+        //   3. 这里把 `browseReload` +1，让弹窗**就地**重取已展开的层并清空选择。
+        browseOpen !== true
+          ? null
+          : react.createElement(UntrackedBrowseDialog, {
+              t,
+              workspace,
+              total: untrackedCount,
+              busy,
+              reloadToken: browseReload,
+              onClose: () => setBrowseOpen(false),
+              onAdd: (request) => {
+                // `all`：勾的是「全选」。**不把几千条路径发回来**，只让 host 用它自己
+                // 那份完整清单去 add（渲染进程因此永远不持有那些路径）。
+                if (request?.all === true) {
+                  void run('stage', { all: 'untracked' }, t('untrackedBrowseAdded', { count: untrackedCount })).then((ok) => {
+                    if (ok === undefined) return
+                    setBrowseReload((value) => value + 1)
+                  })
+                  return
+                }
+                const paths = Array.isArray(request?.paths) ? request.paths : []
+                if (paths.length === 0) return
+                void run('stage', { paths }, t('addedNotice', { count: paths.length })).then((ok) => {
+                  if (ok === undefined) return
+                  setChosenUntracked([])
+                  setBrowseReload((value) => value + 1)
+                })
               },
             }),
       )
@@ -8636,10 +9598,22 @@ window.__ModuleLoader__.load({
       get: (workspace) => gitSnapshots.get(workspace),
       /** 让快照失效（等价于写操作成功后的那次 invalidate）。 */
       invalidate: (workspace) => gitSnapshots.invalidate(workspace),
+      /** 重取一次（single-flight 合并并发调用）。 */
+      refresh: (workspace) => gitSnapshots.refresh(workspace),
+      /** 精确枚举未跟踪（`inline` / `browse` 的判定依据）。 */
+      requestExactUntracked: (workspace, options) => gitSnapshots.requestExactUntracked(workspace, options),
       /** 有没有在途请求（single-flight 的断言点）。 */
       inflight: (workspace) => gitSnapshots.__inflight(workspace),
       /** 订阅（返回取消函数）。 */
       subscribe: (workspace, listener) => gitSnapshots.subscribe(workspace, listener),
+      /**
+       * 只给测试用：当前有几条记录（= 几个仓库）、各自的订阅者数与轮询状态。
+       *
+       * 这是"同一个 repositoryRoot 只能有一套 polling"这条要求的直接断言点。
+       */
+      cells: () => gitSnapshots.__cells(),
+      /** 只给测试用：某个工作区最终挂在哪条记录上（键 = 仓库根）。 */
+      cellKeyFor: (workspace) => gitSnapshots.__cellKeyFor(workspace),
     }
     // 工作区闸门与提交图也导出：前者是这条要求的核心机制（换代/丢弃/合并），后者是
     // Log 页签与主区域共用的那个视图，都需要能被单独驱动。

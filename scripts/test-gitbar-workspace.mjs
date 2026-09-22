@@ -50,6 +50,13 @@ function writeWorkspaceRegistry(roots) {
   )
 }
 
+// **先把插件同步进 runtime**（见 test-gitbar-branches.mjs 的说明）：宿主半边是从
+// runtime/node_modules 里那份副本加载的，不同步就会测到旧代码。
+{
+  const { syncBundledPlugins } = await import('./sync-plugins.mjs')
+  syncBundledPlugins()
+}
+
 const child = spawn(
   join(runtime, 'node', 'node.exe'),
   [

@@ -238,6 +238,13 @@ composer card visually — the background extends behind the card and reuses the
 - Branch rows behave the way IDEA's do: a **single click** selects the row and opens its
   action menu (the ~200 ms delay is what tells a single click from a double), a **double
   click** switches, and a **right click** opens exactly the same menu
+- The action menu is an **outside cascade** (like IDEA's branch popup): the second level opens
+  to the **right of the whole first-level panel** (`panel right edge + 6px`), falls back to the
+  left side when there is no room, and only clamps inside the viewport when neither side fits;
+  vertically it is anchored to the clicked row and flips up when needed. It **never covers the
+  first-level panel**, and it can no longer survive the panel being closed — every close path
+  goes through one function that drops panel + submenu + dialog + pending timer together, and
+  the render layer adds an `open === true` gate on top of that
 - Shows "Loading branches…" while the list is fetched, and distinguishes
   "No matching branches" from "no branches at all"
 - The list puts **local branches first, remotes after**, tags remote entries, marks the
@@ -275,6 +282,24 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 
 - Follows the **current conversation's** workspace: switching conversations and starting a new
   one both move it; the panel itself has no workspace picker and never shows an absolute path
+- **Two scopes: `workspaceRoot` (the directory you opened) and `repositoryRoot` (the top of the
+  Git working tree).** The repository root is derived by the host via
+  `git rev-parse --show-toplevel` (bounded cache + single-flight, and it is **never** taken from
+  the client — otherwise `repositoryRoot=C:/` would cross the workspace security boundary). Every
+  Git command runs with it as its cwd and every returned path is **repo-relative**. So when the
+  workspace is a subdirectory (say `…/pages/mse`), `Changes` still lists the **whole repository**
+  (`root.txt`, `src/a.js`, `pages/x.json`) and no `../src/a.js` ever shows up.
+- **One snapshot and one polling loop per repository.** The snapshot store is keyed by the
+  **repository root**, so `repo/src` and `repo/pages` share a single record: changing directories
+  no longer clears the branch/Changes/badge, re-scans everything, or starts a second 10-second poll.
+- **Resident polling takes a fast path, so Git work is decoupled from the number of untracked
+  files.** `/workspace` and `/status` use
+  `status --porcelain=v2 --branch -z --untracked-files=normal`, which collapses whole untracked
+  directories into a single `tmp/` entry: 6,846 untracked files become 1–2 records per poll
+  (measured on the same fixture: `-uall` **174.4 KB / 6,855 records** → `-unormal` **0.6 KB /
+  10 records**; `/workspace` **96 ms / 1.6 KB**, with **no untracked path sent to the renderer**).
+  `changedFiles` carries `changedFilesExact: true` when it is exact and is explicitly marked as an
+  estimate while directories are still collapsed.
 - **The default width is 80% of the viewport** (1920 → 1536, 2560 → 2048), with no fixed pixel
   ceiling — the 80% ratio *is* the ceiling (it keeps 20% of the shell visible). A persisted width
   wins over the default. **Resizable**: drag the left edge (double-click to reset to 80%; focus it
@@ -289,6 +314,31 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
     panes stack vertically.
     The message box (4 rows tall, vertically resizable) and **✨ AI draft / Commit / Commit and
     Push** are pinned to the bottom and never scroll away with a long file list
+    - **Untracked files come in two modes** (threshold **50**): at **≤ 50** the main pane lists
+      **every** untracked file (checkbox, add to Git, diff, file history — plus an exact `+N`
+      computed within a bounded budget: ≤ 1 MB per file, ≤ 8 MB per round, binaries marked
+      without being read, and never one `git` fork per file); above **50** the main pane lists
+      **no rows at all** and shows only "Unversioned files: 6,846 files [Browse]". The old
+      behaviour — "first 50 rows plus 6,796 more not shown" — was neither a complete list nor a
+      summary. While the exact count is still unknown it says "Counting untracked files…" and
+      requests one enumeration.
+    - **Browse is a lazy tree dialog**: directories are collapsed by default and only the
+      **direct children** of the current prefix are fetched, with pagination for large levels
+      (200 rows + "Load more"), so expanding a directory that holds 6,835 files never mounts
+      thousands of rows. Files and directories can both be ticked (ticking a directory means its
+      whole subtree — the directory path is handed to `git add`), partial selection shows as
+      indeterminate, nothing is selected by default, and the header offers Select all / Clear.
+      Adding to Git refreshes the loaded levels in place, and the main pane flips from browse
+      back to inline (`51 → add 3 → 48` is pinned by an assertion).
+    - **Exact enumeration is lazy**: it only happens when Changes has to decide inline vs browse,
+      when the user opens Browse, or after a write. The result is cached per `repositoryRoot` for
+      20 seconds (`repo/src → repo/pages` reuses it; 6,848 entries measured at **115 ms / 1.2 KB**).
+    - **Adding thousands of files cannot blow up the command line**: paths go into a NUL-separated
+      temporary pathspec file via `git add --pathspec-from-file=… --pathspec-file-nul` (removed in
+      a `finally`), with a bounded batching fallback (both path count and total argv length) for
+      older gits. "Select all → Add to Git" sends only `{ all: 'untracked' }` and lets the host use
+      the complete list it already holds, so the renderer never carries those thousands of paths
+      (measured: one add of 6,835 paths takes 4.4 s).
   - `Log`: **branch tree / commit graph / commit details**, three panes. A single click on a
     commit only changes the selection and shows its details (and changed files) on the right —
     no inline expansion. The two splitters
@@ -710,8 +760,9 @@ was verified rather than assumed:
 | `scripts/test-review-graph-branch-filter.mjs` | the Log branch tree is decoupled from the filtered commit list: clicking a ref never shrinks the tree, never blanks the panes, and out-of-order responses never overwrite |
 | `scripts/test-review-project-git.mjs` | the project-switch state machine: the hook count must never change, the entry never disappears, "switching project…", panel-level crash isolation |
 | `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
+| `scripts/test-review-repo-scope.mjs` | scope split and untracked scale: a subdirectory workspace lists the whole repo, the fast path carries no paths, the lazy tree and bulk `git add` stay bounded (6,846 untracked files in the fixture) |
 | `scripts/test-review-commit-message.mjs` | the AI commit-message draft: the three context caps, the prompt is data, output normalisation, and naming the missing host service |
-| `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, lazy diffs for untracked files, and the AI-draft interaction |
+| `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, the two untracked modes and the Browse dialog, and the AI-draft interaction |
 | `scripts/test-review-graph-view.mjs` | the three-pane commit graph: the counter, second-accurate times, scroll-triggered paging, and no hash column |
 | `scripts/test-review-drawer-style.mjs` | the drawer's appearance layer: its data markers and style contract stay intact |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |

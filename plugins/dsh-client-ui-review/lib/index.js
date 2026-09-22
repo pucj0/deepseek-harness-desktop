@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { collectCommitContext, createCommitMessageGenerator } from './commit-message.js'
+import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 
 // 「AI 补充提交信息」的其余部分（上限、提示词构造、输出规范化、失败翻译）从 host 侧
 // 原样再导出一份：它们是纯函数，`scripts/test-review-commit-message.mjs` 直接断言，
@@ -44,6 +45,14 @@ const ROUTE_PREFIX = '/dsh-desktop/review'
 /** git 命令超时。**基线快照要遍历整个工作区，实测在带大量未跟踪文件的仓库上接近 100 秒**，
  * 因此这里给足余量；而每次轮询走的"只哈希变化文件"路径是毫秒级的。 */
 const GIT_TIMEOUT_MS = 240000
+
+/**
+ * 探测类 git 命令（`rev-parse`）的超时。
+ *
+ * 它们回答的是"这个目录属于哪个仓库"，输入只有路径、输出只有一行，正常在毫秒级返回。
+ * 给 5 秒是为了让"磁盘掉了/仓库损坏"这类异常快速失败，而不是让一条轮询请求挂 4 分钟。
+ */
+const REPO_PROBE_TIMEOUT_MS = 5000
 
 /**
  * 联网操作的超时。
@@ -769,6 +778,76 @@ function scratchDir() {
 }
 
 /**
+ * 一批 `git add` 的 argv 预算（字符数）。
+ *
+ * Windows 的 `CreateProcess` 命令行上限是 32,767 个字符，而 `execFile` 还要为每个参数
+ * 加引号与转义。路径数上限（`ADD_BATCH_MAX`）单独用是不够的：500 个 200 字符的深层
+ * 路径就是 10 万字符，早就爆了。因此**两个上限一起用**，先到哪个算哪个。
+ */
+const ADD_ARGV_BUDGET = 7000
+
+/** 一批 `git add` 最多带多少个路径（另一条独立上限，见 ADD_ARGV_BUDGET）。 */
+const ADD_BATCH_MAX = 500
+
+/** 临时 pathspec 文件的序号（文件名里带它，避免同一进程内并发时撞名）。 */
+let pathspecSerial = 0
+
+/**
+ * 把一批路径加进索引，**参数长度有界**。
+ *
+ * 为什么不能直接 `git add -- <paths...>`：用户可以在「浏览」里全选几千个未跟踪文件，
+ * 那个 argv 一定会超过 Windows 的命令行上限，表现是 `spawn ENAMETOOLONG` 或 git 报
+ * "filename too long"，而**用户看到的只是"加入 git 失败了"**。
+ *
+ * 首选 `--pathspec-from-file`（git ≥ 2.25）：路径写进一个临时文件、以 NUL 分隔，
+ * 完全绕开命令行长度。临时文件在 `finally` 里删掉（失败路径也要删，否则临时目录会
+ * 随着每次失败慢慢堆积）。
+ *
+ * 老 git 不认这个选项时退回**有界批处理**（按路径数与总字符数双上限切批），代价是多
+ * 跑几个 git 进程，但正确性不变。
+ *
+ * @param cwd - 仓库根。
+ * @param paths - 仓库相对路径（已过形状校验）。
+ * @returns `{ mode, batches }`：用了哪条路径、跑了几批（诊断与测试用）。
+ */
+async function addPaths(cwd, paths) {
+  const normalized = paths.map((path) => String(path).replace(/\\/gu, '/'))
+  const file = join(scratchDir(), `pathspec-${pathspecSerial++}.txt`)
+  try {
+    // NUL 分隔 + `--pathspec-file-nul`：路径里的空格、引号、中文都不需要转义。
+    writeFileSync(file, `${normalized.join('\0')}\0`, 'utf8')
+    try {
+      await git(['add', `--pathspec-from-file=${file}`, '--pathspec-file-nul'], cwd)
+      return { mode: 'pathspec-file', batches: 1 }
+    } catch (error) {
+      // 只有"这个 git 不认这个选项"才退回批处理；真正的 add 失败（路径不存在、
+      // 索引锁）必须原样抛出去，否则错误会被吞掉、界面显示"成功了"。
+      if (!/unknown option|unrecognized option|usage: git add/iu.test(String(error?.message ?? error))) throw error
+    }
+  } finally {
+    rmSync(file, { force: true })
+  }
+
+  const batches = []
+  let current = []
+  let size = 0
+  for (const path of normalized) {
+    if (current.length >= ADD_BATCH_MAX || (current.length > 0 && size + path.length + 1 > ADD_ARGV_BUDGET)) {
+      batches.push(current)
+      current = []
+      size = 0
+    }
+    current.push(path)
+    size += path.length + 1
+  }
+  if (current.length > 0) batches.push(current)
+  for (const batch of batches) {
+    await git(['add', '--', ...batch], cwd)
+  }
+  return { mode: 'batched', batches: batches.length }
+}
+
+/**
  * 丢弃**旧版本**留下的临时索引。
  *
  * 不做这一步的话，升级到本版本后旧索引仍会被沿用，`core.fileMode` 的幽灵条目会一直
@@ -794,24 +873,25 @@ function ensureIndexVersion() {
 }
 
 /**
- * 为某个会话 + 某个工作区取得临时 index 路径。
+ * 为某个会话 + 某个**仓库**取得临时 index 路径。
  *
- * 按"会话 + 工作区"保持同一个 index 文件：git 会在里面记录 stat 缓存，因此后续快照
+ * 按"会话 + 仓库根"保持同一个 index 文件：git 会在里面记录 stat 缓存，因此后续快照
  * 只需重新哈希真正变化的文件，而不是每次遍历整棵树。
  *
- * **工作区必须参与命名**：索引是与仓库强相关的（路径、stat 缓存、对象库都不同），
- * 而项目级面板的请求对所有项目共用同一个会话标识（`default`）。此前只用会话命名，
- * 于是切到另一个项目后 git 会被喂上一份**别的仓库的索引**——轻则结果错乱，重则
- * 直接报错。工作区路径用哈希进入文件名：它可能很长且含不适合做文件名的字符。
+ * **仓库根必须参与命名**（而不是工作区）：project 级面板的请求对所有项目共用同一个会话
+ * 标识（`default`），只用会话命名会让切到另一个项目后的 git 被喂上一份**别的仓库的
+ * 索引**——轻则结果错乱，重则直接报错。用工作区命名则更糟：同一个仓库的两个子目录会
+ * 各拿一份索引，于是"两个目录看到的数据不一致"且首次快照的代价付两遍。仓库路径用哈希
+ * 进入文件名：它可能很长且含不适合做文件名的字符。
  *
  * @param sessionId - 会话标识。
- * @param workspace - 工作区绝对路径。
+ * @param repositoryRoot - 仓库顶层绝对路径。
  * @returns index 文件绝对路径。
  */
-function indexFor(sessionId, workspace) {
+function indexFor(sessionId, repositoryRoot) {
   // 会话 id 来自客户端，做个保守的字符过滤以免拼出意外路径。
   const safe = String(sessionId).replace(/[^A-Za-z0-9_-]/gu, '_').slice(0, 80)
-  const key = createHash('sha1').update(String(workspace)).digest('hex').slice(0, 10)
+  const key = createHash('sha1').update(String(repositoryRoot)).digest('hex').slice(0, 10)
   return join(scratchDir(), `${safe}-${key}.index`)
 }
 
@@ -863,26 +943,26 @@ async function withIndexLockRecovery(indexPath, task) {
 }
 
 /**
- * 从零给工作区拍一张完整快照（遍历整棵树），返回树对象 SHA。
+ * 从零给仓库拍一张完整快照（遍历整棵树），返回树对象 SHA。
  *
  * **只在记录基线时调用**：它要为所有变动文件重新计算哈希，代价与它们数量成正比。
  * 实测在带 6640 个变动路径的仓库上约 4 秒（首次索引为空时更慢），因此不能放进轮询路径。
  *
  * 全程只读：git 只写我们自己指定的临时 index，不动仓库状态。
- * @param workspace - 已校验的工作区路径。
+ * @param repositoryRoot - 仓库顶层路径（git 的 cwd）。
  * @param sessionId - 会话标识（决定临时 index 的归属）。
  * @returns 树对象 SHA。
  */
-async function snapshot(workspace, sessionId) {
-  const indexPath = indexFor(sessionId, workspace)
+async function snapshot(repositoryRoot, sessionId) {
+  const indexPath = indexFor(sessionId, repositoryRoot)
   const env = { GIT_INDEX_FILE: indexPath }
   try {
     return await withIndexLockRecovery(indexPath, async () => {
       // 空仓库没有 HEAD 可读——从空 index 开始即可。
-      await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
+      await git(['read-tree', 'HEAD'], repositoryRoot, env).catch(() => undefined)
       // -A：已跟踪的修改与删除、新增文件、以及按 .gitignore 规则纳入的未跟踪文件。
-      await git(['add', '-A'], workspace, env)
-      return (await git(['write-tree'], workspace, env)).trim()
+      await git(['add', '-A'], repositoryRoot, env)
+      return (await git(['write-tree'], repositoryRoot, env)).trim()
     })
   } catch (error) {
     // 临时 index 坏掉时删掉，下次重建。
@@ -898,17 +978,20 @@ async function snapshot(workspace, sessionId) {
  * 复用常驻索引后，索引里保留的 stat 数据让 git 直接跳过未变文件（实测 4 秒降到 0.5 秒）。
  * 代价是索引文件被多个请求共享，因此必须配上面那层去重。
  *
- * @param workspace - 工作区路径。
+ * 去重键与索引命名都用**仓库根**：同一个仓库的两个子工作区因此共用同一份索引与同一个
+ * 在途快照，不会各跑一遍全量哈希。
+ *
+ * @param repositoryRoot - 仓库顶层路径（git 的 cwd）。
  * @param sessionId - 会话标识。
  * @returns 树对象 SHA。
  */
-async function currentTree(workspace, sessionId) {
-  const key = `${sessionId}|${workspace}`
+async function currentTree(repositoryRoot, sessionId) {
+  const key = `${sessionId}|${repositoryRoot}`
   const running = inFlightSnapshots.get(key)
   if (running !== undefined) return running
 
   const task = (async () => {
-    const indexPath = indexFor(`${sessionId}-current`, workspace)
+    const indexPath = indexFor(`${sessionId}-current`, repositoryRoot)
     const env = { GIT_INDEX_FILE: indexPath }
     return withIndexLockRecovery(indexPath, async () => {
       // 索引首次使用（或损坏）时从 HEAD 起一个基准，让后续的 add -A 有比较对象。
@@ -917,10 +1000,10 @@ async function currentTree(workspace, sessionId) {
       // 每次都退化成全量重新哈希（实测 4.3 秒而不是 0.22 秒）。这个代价不明显，因为结果
       // 依然正确——只是慢，所以很容易一直留着。
       if (!existsSync(indexPath)) {
-        await git(['read-tree', 'HEAD'], workspace, env).catch(() => undefined)
+        await git(['read-tree', 'HEAD'], repositoryRoot, env).catch(() => undefined)
       }
-      await git(['add', '-A'], workspace, env)
-      return (await git(['write-tree'], workspace, env)).trim()
+      await git(['add', '-A'], repositoryRoot, env)
+      return (await git(['write-tree'], repositoryRoot, env)).trim()
     })
   })().finally(() => {
     inFlightSnapshots.delete(key)
@@ -931,15 +1014,349 @@ async function currentTree(workspace, sessionId) {
 }
 
 /**
- * 判断工作区是不是 git 仓库。
- * @param workspace - 工作区路径。
- * @returns 是则 true。
+ * `workspaceRoot → RepoContext` 的解析器（见 lib/repo-context.js 的说明）。
+ *
+ * **所有 Git 路由都以 `repositoryRoot` 为 cwd**：git 的路径输出是**仓库相对**的
+ * （`status` / `diff` 实测如此），而 `ls-files --others` 这类命令是**cwd 前缀相对**的
+ * ——从子目录跑会少报文件。统一到仓库根之后，两件事同时成立：路径基准唯一（界面不会
+ * 时而 `../src/a.js` 时而 `src/a.js`），未跟踪枚举也完整。
+ *
+ * 探测用短超时（5 秒）：它只是两次 `rev-parse`，超过这个时间说明磁盘/仓库异常，
+ * 拖住整个路由没有意义。
  */
-async function isRepo(workspace) {
-  try {
-    return (await git(['rev-parse', '--is-inside-work-tree'], workspace)).trim() === 'true'
-  } catch {
-    return false
+const repoContext = createRepoContextResolver({
+  runGit: (args, cwd) => git(args, cwd, undefined, GIT_MAX_BUFFER, REPO_PROBE_TIMEOUT_MS),
+  realpath: (value) => realpathSync.native(value),
+})
+
+/**
+ * 解析一个工作区所属的仓库。
+ *
+ * @param workspace - 已通过 `validateWorkspace` 的真实工作区路径。
+ * @returns `{ workspaceRoot, repositoryRoot, gitDir }`；不是仓库时 undefined。
+ */
+async function resolveRepo(workspace) {
+  return repoContext.resolve(workspace)
+}
+
+/**
+ * 给响应附上作用域信息（工作区 / 仓库 / 供多仓库模型使用的 scope）。
+ *
+ * 客户端要靠 `repositoryRoot` 决定"这份快照属于哪个仓库"——同仓库的两个子目录必须
+ * 共用同一份快照与同一套轮询（见客户端 gitSnapshots 的说明）。
+ *
+ * @param context - `resolveRepo` 的结果。
+ * @returns 可直接铺进响应的字段。
+ */
+function scopeFields(context) {
+  return {
+    workspaceRoot: context.workspaceRoot,
+    repositoryRoot: context.repositoryRoot,
+    ...(context.gitDir === '' ? {} : { gitDir: context.gitDir }),
+    gitScope: createProjectGitScope(context),
+  }
+}
+
+// ===========================================================================
+// 未跟踪文件：快路径 / 精确枚举 / 浏览树
+// ===========================================================================
+//
+// 这套东西存在的唯一理由是**规模**：实测过一个仓库有 6,846 个未跟踪文件（一个没有被
+// `.gitignore` 覆盖的 `tmp/`）。如果常驻轮询每次都做完整枚举、再把 6846 条路径塞给
+// 渲染进程，那么"每 10 秒搬 6846 个对象"会一直存在，而且大多数时候用户根本没打开
+// Changes 页签。
+//
+// 因此分成两条路径：
+//   * **快路径**（常驻轮询、右上角徽标）：`--untracked-files=normal`，git 会把整块
+//     未跟踪目录折叠成一条 `tmp/`，因此返回的条目数与目录深度成正比，而不是与文件数
+//     成正比。它回答"有多少条未跟踪条目"（可能是估计值，`exact: false`）。
+//   * **精确枚举**（用户打开 Changes 需要判定 inline/browse、或点了「浏览」、或写操作
+//     之后）：`ls-files --others --exclude-standard -z` 拿完整清单，按 repositoryRoot
+//     缓存 20 秒，并据此建一棵目录树供「浏览」按前缀惰性取子节点。
+
+/**
+ * inline / browse 的阈值。
+ *
+ * ≤ 它就**逐行列出全部**未跟踪文件（IDEA 的"少量模式"）；> 它则主面板**一行都不列**，
+ * 只给"6,846 个文件 + 浏览"。旧实现是"最多列前 50 个、剩下的说一句还有 N 个"——那既不
+ * 是完整列表也不是概要，用户既看不到全部、也不知道该去哪里看剩下的。
+ */
+const UNTRACKED_INLINE_LIMIT = 50
+
+/** 统计新增行数时的读取上限。 */
+const MAX_COUNT_FILE_BYTES = 1024 * 1024
+const MAX_TOTAL_COUNT_BYTES = 8 * 1024 * 1024
+
+/** 精确枚举结果的缓存 TTL（毫秒）。写操作会立刻让它失效，因此这里只是兜底。 */
+const UNTRACKED_TTL_MS = 20000
+
+/** 「浏览」一个目录默认/最多返回多少个子节点（同级几千个文件时靠它分页）。 */
+const UNTRACKED_PAGE_DEFAULT = 200
+const UNTRACKED_PAGE_MAX = 1000
+
+/** repositoryRoot → `{ at, paths, tree }`（精确枚举的缓存）。 */
+const untrackedCache = new Map()
+
+/**
+ * 把一条未跟踪路径转成界面认识的条目。
+ *
+ * `added`/`removed` 先给 `null`（界面显示 `+·`），精确行数由 `countUntrackedLines`
+ * 在有界预算内补上——两者分开是因为"有多少个未跟踪文件"必须随时可用，而"每个文件
+ * 有多少行"可以在读得起的时候再算。
+ *
+ * @param path - 仓库相对路径。
+ * @returns 文件条目。
+ */
+function untrackedEntry(path) {
+  return {
+    path,
+    status: 'A',
+    index: '?',
+    worktree: '?',
+    staged: false,
+    unstaged: false,
+    untracked: true,
+    added: null,
+    removed: null,
+  }
+}
+
+/**
+ * 判断一段字节是否是二进制内容。
+ *
+ * 只看前 8000 字节里有没有 NUL：这是 git 自己用的同一条启发式（`buffer_is_binary`）。
+ * 二进制文件的行数没有意义（`git diff --numstat` 也回 `-`），因此宁可不显示数字。
+ *
+ * @param buffer - 文件前若干字节。
+ * @returns 是二进制则 true。
+ */
+function looksBinary(buffer) {
+  return buffer.includes(0)
+}
+
+/**
+ * 给少量未跟踪文件补上"新增行数"。
+ *
+ * 三条边界都是必须的，否则一个 500 MB 的日志文件会让整条路由（以及宿主进程）卡住：
+ *   * 单文件超过 `MAX_COUNT_FILE_BYTES` 不读，只留 `·`；
+ *   * 一轮读取的总字节超过 `MAX_TOTAL_COUNT_BYTES` 就停止补算，后面的保持 `·`；
+ *   * 二进制不读全文、也不给数字。
+ *
+ * **绝不为了一个数字去 fork 一个 git 进程**：那是每文件一次进程，50 个文件就是 50 次。
+ *
+ * @param cwd - 仓库根。
+ * @param entries - 未跟踪条目（会被就地补上 added）。
+ * @returns 同一批条目。
+ */
+function countUntrackedLines(cwd, entries) {
+  let budget = MAX_TOTAL_COUNT_BYTES
+  for (const entry of entries) {
+    if (budget <= 0) break
+    const absolute = resolve(cwd, entry.path)
+    let size
+    try {
+      size = statSync(absolute).size
+    } catch {
+      // 枚举之后文件被删掉了：保持 `·`，不做任何猜测。
+      continue
+    }
+    if (size > MAX_COUNT_FILE_BYTES || size > budget) continue
+    let buffer
+    try {
+      buffer = readFileSync(absolute)
+    } catch {
+      continue
+    }
+    budget -= buffer.length
+    if (looksBinary(buffer.subarray(0, 8000))) {
+      entry.binary = true
+      continue
+    }
+    // 行数按 `\n` 数：与 `git diff --numstat` 对新增文件的算法一致（最后一行没有换行
+    // 也算一行）。
+    let lines = 0
+    for (const byte of buffer) {
+      if (byte === 10) lines += 1
+    }
+    if (buffer.length > 0 && buffer[buffer.length - 1] !== 10) lines += 1
+    entry.added = lines
+    entry.removed = 0
+  }
+  return entries
+}
+
+/**
+ * 把一份扁平的未跟踪路径清单建成目录树。
+ *
+ * 建树只做一次（跟着枚举缓存走）：6846 条路径的树在内存里是几 MB 量级，而"每次展开
+ * 一个目录都重新过滤一遍全表"是 O(N × 展开次数)。
+ *
+ * @param paths - 仓库相对路径数组（字典序）。
+ * @returns 根节点 `{ dirs: Map<name, node>, files: string[] }`。
+ */
+function buildUntrackedTree(paths) {
+  const root = { dirs: new Map(), files: [] }
+  for (const path of paths) {
+    const parts = path.split('/')
+    let node = root
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const name = parts[i]
+      let next = node.dirs.get(name)
+      if (next === undefined) {
+        next = { dirs: new Map(), files: [] }
+        node.dirs.set(name, next)
+      }
+      node = next
+    }
+    if (parts.length > 0 && parts[parts.length - 1] !== '') node.files.push(parts[parts.length - 1])
+  }
+  return root
+}
+
+/** 一个目录子树里的文件总数（含所有层级）。 */
+function countDescendants(node) {
+  let total = node.files.length
+  for (const child of node.dirs.values()) total += countDescendants(child)
+  return total
+}
+
+/**
+ * 按前缀走进树里。
+ *
+ * @param root - 树根。
+ * @param prefix - 目录前缀（`''` = 仓库根；末尾斜杠可选）。
+ * @returns 节点；前缀不存在时 undefined。
+ */
+function descendUntracked(root, prefix) {
+  const clean = String(prefix ?? '').replace(/^\/+|\/+$/gu, '')
+  if (clean === '') return root
+  let node = root
+  for (const part of clean.split('/')) {
+    const next = node.dirs.get(part)
+    if (next === undefined) return undefined
+    node = next
+  }
+  return node
+}
+
+/**
+ * 列出某个前缀下的**直接子节点**（目录 + 文件），并分页。
+ *
+ * 只给直接子节点是"lazy tree"的关键：展开 `tmp/magic-api` 时再按
+ * `prefix=tmp/magic-api` 请求一次，而不是一次把 6846 条全丢给渲染进程。
+ *
+ * @param root - 树根。
+ * @param prefix - 目录前缀。
+ * @param offset - 起始下标（对"目录 + 文件"合并排序后的列表）。
+ * @param limit - 最多返回多少项。
+ * @returns `{ prefix, directories, files, total, offset, limit, truncated }` 或 undefined。
+ */
+function listUntrackedChildren(root, prefix, offset, limit) {
+  const clean = String(prefix ?? '').replace(/^\/+|\/+$/gu, '')
+  const node = descendUntracked(root, clean)
+  if (node === undefined) return undefined
+  const directories = [...node.dirs.entries()]
+    .map(([name, child]) => ({
+      name,
+      path: clean === '' ? name : `${clean}/${name}`,
+      descendantCount: countDescendants(child),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const files = [...node.files]
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({ name, path: clean === '' ? name : `${clean}/${name}` }))
+  const size = directories.length + files.length
+  const from = Math.max(0, offset)
+  const take = Math.max(0, limit)
+  // 目录在前、文件在后（与 IDEA 一致）：分页也要按这个顺序切，否则用户会看到"目录
+  // 翻着翻着夹进来一堆文件"。
+  const all = [...directories, ...files]
+  const page = all.slice(from, from + take)
+  return {
+    prefix: clean,
+    directories: page.filter((item) => item.descendantCount !== undefined),
+    files: page.filter((item) => item.descendantCount === undefined),
+    total: size,
+    directoryCount: directories.length,
+    fileCount: files.length,
+    offset: from,
+    limit: take,
+    truncated: from + page.length < size,
+  }
+}
+
+/**
+ * 取（必要时枚举）某个仓库的完整未跟踪清单。
+ *
+ * 缓存键是 **repositoryRoot**：同一个仓库的两个子工作区因此共用一份枚举，切目录不会
+ * 让"6,846 个文件"重新数一遍。
+ *
+ * @param cwd - 仓库根。
+ * @param options - `{ force }`：写操作之后强制重枚举。
+ * @returns `{ at, paths, tree, cached }`。
+ */
+async function readUntracked(cwd, options = {}) {
+  const cached = untrackedCache.get(cwd)
+  if (options.force !== true && cached !== undefined && Date.now() - cached.at < UNTRACKED_TTL_MS) {
+    return { ...cached, cached: true }
+  }
+  const raw = await git(['ls-files', '--others', '--exclude-standard', '-z'], cwd, undefined, GIT_MAX_BUFFER_LARGE)
+  const paths = String(raw)
+    .split('\0')
+    .filter((line) => line !== '')
+    .sort((a, b) => a.localeCompare(b))
+  const entry = { at: Date.now(), paths, tree: buildUntrackedTree(paths) }
+  // 条数上限：只留最近使用的 16 个仓库（每个的清单可能是几百 KB）。
+  untrackedCache.delete(cwd)
+  untrackedCache.set(cwd, entry)
+  while (untrackedCache.size > 16) {
+    const oldest = untrackedCache.keys().next()
+    if (oldest.done === true) break
+    untrackedCache.delete(oldest.value)
+  }
+  return { ...entry, cached: false }
+}
+
+/** 让某个仓库的未跟踪枚举缓存失效（写操作之后调用）。 */
+function invalidateUntracked(cwd) {
+  untrackedCache.delete(cwd)
+}
+
+/**
+ * 快路径下的未跟踪摘要。
+ *
+ * @param cwd - 仓库根。
+ * @param entries - 快路径拿到的未跟踪条目（`-unormal`，目录已折叠）。
+ * @returns `{ count, exact, mode, inlineFiles, collapsed }`。
+ */
+function describeUntrackedFast(cwd, entries) {
+  const collapsed = entries.some((entry) => entry.path.endsWith('/'))
+  const cached = untrackedCache.get(cwd)
+  const fresh = cached !== undefined && Date.now() - cached.at < UNTRACKED_TTL_MS
+  // 有精确缓存就用它：轮询路径因此能顺带把"上一轮已经数清楚的"结果带上，索引/界面都
+  // 不必再等一次枚举。
+  if (fresh) {
+    const count = cached.paths.length
+    const mode = count <= UNTRACKED_INLINE_LIMIT ? 'inline' : 'browse'
+    return {
+      count,
+      exact: true,
+      mode,
+      collapsed: false,
+      inlineFiles: mode === 'inline' ? cached.paths.map(untrackedEntry) : [],
+    }
+  }
+  const exact = !collapsed
+  const count = entries.length
+  const mode = exact ? (count <= UNTRACKED_INLINE_LIMIT ? 'inline' : 'browse') : 'pending'
+  return {
+    count,
+    exact,
+    mode,
+    collapsed,
+    // 少量且确切时先把路径给出去（行数留 `·`），让首屏就有可点的行；精确行数由
+    // `/untracked` 的精确枚举补上。
+    inlineFiles: mode === 'inline' ? entries.map((entry) => untrackedEntry(entry.path)) : [],
   }
 }
 
@@ -958,16 +1375,28 @@ function sendJson(response, status, payload) {
 }
 
 /**
+ * 请求体的字节上限。
+ *
+ * 曾经是 8 KiB——那时所有请求体都只有路径清单和小标量。现在「浏览未跟踪文件」会把用户
+ * 勾选的一整批路径发回来（实测 6,818 个路径的 JSON 约 200 KB），8 KiB 会让"全选后加入
+ * git"变成 400 `invalid body`，而界面上只看到"加入 git 失败了"。
+ *
+ * 2 MiB 的余量：路径形状已经过 `SAFE_PATH_PATTERN` 校验（≤1024 字符、无 `..`、非绝对），
+ * 因此这里挡的是"有人往这个路由灌垃圾"，而不是正常使用。
+ */
+const MAX_BODY_BYTES = 2 * 1024 * 1024
+
+/**
  * 读取并限制请求体。
  * @param request - HTTP 请求。
- * @returns 请求体文本（上限 8 KiB）。
+ * @returns 请求体文本（上限 `MAX_BODY_BYTES`）。
  */
 async function readSmallBody(request) {
   const chunks = []
   let size = 0
   for await (const chunk of request) {
     size += chunk.length
-    if (size > 8192) throw new Error('request body too large')
+    if (size > MAX_BODY_BYTES) throw new Error('request body too large')
     chunks.push(chunk)
   }
   return Buffer.concat(chunks).toString('utf8')
@@ -1144,7 +1573,14 @@ function createReviewHandler(ctx) {
         try {
           payload = JSON.parse(await readSmallBody(request))
         } catch (error) {
-          sendJson(response, 400, { error: 'invalid body', detail: String(error.message) })
+          // 稳定的 code（`invalidBody`）：客户端据此显示本语言的短句，而不是把
+          // "request body too large" 这种内部文本端给用户。
+          const tooLarge = /too large/iu.test(String(error?.message ?? error))
+          sendJson(response, tooLarge ? 413 : 400, {
+            error: 'invalid body',
+            code: 'invalidBody',
+            detail: String(error.message),
+          })
           return
         }
       }
@@ -1200,6 +1636,39 @@ function createReviewHandler(ctx) {
 
       const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : 'default'
 
+      // ---- 工作区 → 仓库：**唯一的**作用域解析点 -----------------------------
+      //
+      // 从这里往下，所有 git 命令的 cwd 都是 `cwd`（= repositoryRoot）。这不是风格问题：
+      //   * git 的 `status` / `diff` 输出路径是**仓库相对**的，而 `ls-files --others`
+      //     是**cwd 前缀相对**的——从子目录跑会少报未跟踪文件；
+      //   * 同一个仓库的两个子目录必须共用同一份快照、同一份临时索引与同一套轮询。
+      // 因此"所有路由都从仓库根跑"同时解决了路径基准与共享这两件事。
+      //
+      // 客户端只送 workspaceRoot；repositoryRoot 一律由 host 推导，绝不接受客户端传入
+      // （否则 `repositoryRoot=C:/` 就能越过工作区安全边界）。
+      const context = await resolveRepo(workspace)
+
+      // 作用域本身也要能被查询：客户端用它决定"这份数据属于哪个仓库"。
+      if (url.pathname === `${ROUTE_PREFIX}/repo-context`) {
+        sendJson(
+          response,
+          200,
+          context === undefined
+            ? { isRepo: false, workspaceRoot: workspace }
+            : { isRepo: true, ...scopeFields(context) },
+        )
+        return
+      }
+
+      // 不是仓库：所有其它路由统一回 `isRepo: false`（界面据此显示"不是 Git 仓库"）。
+      // 以前这条判据散在十几个路由里各写一遍，漏一个就会让那条路由在非仓库目录上抛
+      // git 的英文报错。
+      if (context === undefined) {
+        sendJson(response, 200, { isRepo: false, workspaceRoot: workspace })
+        return
+      }
+      const cwd = context.repositoryRoot
+
       // ---- 记录基线：本轮开始时调用一次 ------------------------------------
       if (url.pathname === `${ROUTE_PREFIX}/baseline`) {
         if (request.method !== 'POST') {
@@ -1207,17 +1676,15 @@ function createReviewHandler(ctx) {
           sendJson(response, 405, { error: 'method not allowed' })
           return
         }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
-        const revision = await snapshot(workspace, sessionId)
+        const revision = await snapshot(cwd, sessionId)
         // 顺手把"当前侧"的常驻索引也建起来，让第一次取差异就不必再付一次全量代价。
         // 不做这一步的话，首次 add -A 要重新哈希所有变化文件（实测约 4 秒），
         // 而它发生在用户刚点开面板时——最不该等的那一刻。
-        await currentTree(workspace, sessionId).catch(() => undefined)
-        baselines.set(sessionId, { revision, workspace, takenAt: Date.now() })
-        sendJson(response, 200, { isRepo: true, revision, workspace })
+        await currentTree(cwd, sessionId).catch(() => undefined)
+        // 基线记的是**仓库**（不是工作区）：会话在同一个仓库里换了子目录时，本轮基线依然
+        // 有效，不该被清掉重拍。
+        baselines.set(sessionId, { revision, repositoryRoot: cwd, takenAt: Date.now() })
+        sendJson(response, 200, { isRepo: true, revision, ...scopeFields(context) })
         return
       }
 
@@ -1228,13 +1695,12 @@ function createReviewHandler(ctx) {
           sendJson(response, 200, { isRepo: true, noBaseline: true })
           return
         }
-        // 工作区换了（会话切了项目）：旧基线无意义，要求重新记录。
-        if (stored.workspace !== workspace) {
+        // 仓库换了（会话切了项目）：旧基线无意义，要求重新记录。
+        //
+        // 判据是**仓库根**而不是工作区：会话在同一个仓库里从 `repo/src` 换到 `repo/pages`
+        // 时基线依然有效——那正是"同仓库切工作区不许清空 Changes"的一条。
+        if (stored.repositoryRoot !== cwd) {
           sendJson(response, 200, { isRepo: true, noBaseline: true, workspaceChanged: true })
-          return
-        }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
           return
         }
 
@@ -1243,11 +1709,11 @@ function createReviewHandler(ctx) {
         // 早先试过"先算出变化路径、只哈希它们"，但收窄没有效果：那个仓库里 tmp/ 下的
         // 6636 个日志文件其实是被 git 跟踪的（只是工作区副本未提交），因此基线快照本来
         // 就把它们算了进去，收窄集合依然是 6640 条。让索引保持热才是真正的办法。
-        const current = await currentTree(workspace, sessionId)
+        const current = await currentTree(cwd, sessionId)
 
         const [stat, names] = await Promise.all([
-          git(['diff', '--numstat', stored.revision, current], workspace),
-          git(['diff', '--name-status', stored.revision, current], workspace),
+          git(['diff', '--numstat', stored.revision, current], cwd),
+          git(['diff', '--name-status', stored.revision, current], cwd),
         ])
         // `metadataOnly`：只要"改了哪些文件、各几行"，**不要差异正文**。
         //
@@ -1257,9 +1723,9 @@ function createReviewHandler(ctx) {
         const metadataOnly = payload.metadataOnly === true || url.searchParams.get('metadataOnly') === '1'
         const { diff, oversized } = metadataOnly
           ? { diff: '', oversized: false }
-          : await readUnifiedDiff(workspace, stored.revision, current, stat.split('\n').length)
+          : await readUnifiedDiff(cwd, stored.revision, current, stat.split('\n').length)
         // 索引态一并取回：会话内的"本轮修改"列表同样要能看出哪些已暂存（见 indexStates）。
-        const porcelain = await git(['status', '--porcelain'], workspace).catch(() => '')
+        const porcelain = await git(['status', '--porcelain'], cwd).catch(() => '')
 
         // --numstat 给出每条文件的新增/删除行数，与 --name-status 的顺序一致。
         // 注意别把这个局部量叫 `payload`：那会**遮蔽**请求体，而同一个块作用域里的
@@ -1275,6 +1741,7 @@ function createReviewHandler(ctx) {
           scope: 'turn',
           revision: stored.revision,
           takenAt: stored.takenAt,
+          ...scopeFields(context),
           ...described,
           files,
           ...(oversized ? { diffOversized: true } : {}),
@@ -1282,39 +1749,46 @@ function createReviewHandler(ctx) {
         return
       }
 
-      // ---- 工作区级**轻量**快照：文件清单 + 索引态 + 分支（项目级面板用）--------
+      // ---- 仓库级**轻量**快照：文件清单 + 索引态 + 分支（项目级面板用）--------
       //
       // 与 /changes 的区别在于语义：那个回答"本轮改了什么"（基线是本轮开始时的快照），
       // 这个回答"这个项目现在有什么改动"（基线是 HEAD）。项目页还没有任何一轮对话，
       // 所以那里只能用后者。
       //
-      // **这条路由是轮询路径，因此只做元数据级的工作**：
-      //   * `status --porcelain=v2 --branch -z -uall` 一次拿到分支/HEAD/每个文件的状态；
-      //   * `diff --numstat HEAD` 拿每个文件的增删**行数**（不含正文，几十 KB）。
+      // **这条路由是轮询路径（每 10 秒），因此只做有界的工作**：
+      //   * `status --porcelain=v2 --branch -z --untracked-files=normal` 一次拿到
+      //     分支/HEAD/已跟踪改动，以及**已折叠的**未跟踪条目；
+      //   * `diff --numstat HEAD` 拿每个已跟踪文件的增删**行数**（不含正文，几十 KB）。
+      //
+      // `--untracked-files=normal`（而不是 `all`）是这一版的关键：git 会把整块未跟踪
+      // 目录折叠成一条 `tmp/`，因此 6,846 个未跟踪文件在轮询里只是 1~2 条记录。完整
+      // 枚举推迟到真的需要时（见 /untracked 与客户端的 inline/browse 判定）。
       // 以前它还会 `add -A` + `write-tree` 造临时索引树、再算一份**全仓库统一差异**，
       // 而右上角那个数字只需要文件个数：6,639 个改动路径的仓库上那是 4 秒 + 45.9 MB，
       // 且每 10 秒重来一次（实测就是"切过去要等很久"的根因）。
       // 单文件的逐行差异改为点了才取（见 /workspace-file）。
       if (url.pathname === `${ROUTE_PREFIX}/workspace`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const [statusRaw, numstat] = await Promise.all([
-          git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'], workspace, undefined, GIT_MAX_BUFFER_LARGE),
+          git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal'], cwd, undefined, GIT_MAX_BUFFER_LARGE),
           // `HEAD` 不存在（尚无提交）时这条会失败；那不是错误，只是没有可比对的基线。
-          git(['diff', '--numstat', 'HEAD'], workspace).catch(() => ''),
+          git(['diff', '--numstat', 'HEAD'], cwd).catch(() => ''),
         ])
         const parsed = parseStatusV2(statusRaw)
+        // 已跟踪与未跟踪分开：未跟踪不再混在 `files` 里（那份清单要能上千条），而是走
+        // `untracked` 这个有界的摘要对象。`files` 就是"已跟踪改动"（= trackedFiles）。
+        const trackedEntries = parsed.files.filter((file) => file.untracked !== true)
+        const untrackedEntries = parsed.files.filter((file) => file.untracked === true)
         // 尚无提交的仓库：`git diff HEAD` 会失败，`numstat` 是空串。这时不能按 numstat
         // 过滤（否则已暂存的文件会被全部丢掉），直接保留 status 的结果，由 `empty` 让界面
         // 显示"尚无提交"。
         const files = parsed.initial
-          ? parsed.files.map((file) => ({ ...file, added: null, removed: null }))
-          : withLineCounts(parsed.files, numstat)
+          ? trackedEntries.map((file) => ({ ...file, added: null, removed: null }))
+          : withLineCounts(trackedEntries, numstat)
+        const untracked = describeUntrackedFast(cwd, untrackedEntries)
         sendJson(response, 200, {
           isRepo: true,
           scope: 'workspace',
+          ...scopeFields(context),
           /** 当前分支名（游离 HEAD 时为空串）。 */
           branch: parsed.branch,
           /** HEAD 的提交对象；尚无提交时为空串（`empty` 为 true）。 */
@@ -1325,8 +1799,22 @@ function createReviewHandler(ctx) {
           behind: parsed.behind,
           // 尚无提交的仓库：没有 HEAD 可比较，界面说"改动"会误导（用户会以为文件丢了）。
           empty: parsed.initial || parsed.head === '',
+          /** 已跟踪改动（等价于需求里的 `trackedFiles`）。 */
           files,
-          changedFiles: files.length,
+          /**
+           * 未跟踪摘要：`{ count, exact, mode, collapsed, inlineFiles }`。
+           *
+           *   `mode: 'inline'`  少量（≤ 50）→ 界面逐行列出 `inlineFiles`
+           *   `mode: 'browse'`  大量（> 50）→ 界面只显示数量 + 「浏览」，**不持有**路径
+           *   `mode: 'pending'` 快路径只看到折叠目录，还不知道精确条数
+           *
+           * 大量模式下 `inlineFiles` 是空数组：渲染进程因此**不会**持有 6,846 条路径。
+           */
+          untracked,
+          // 徽标用的总数：已跟踪改动 + 未跟踪条目。折叠目录存在时它是**下界**
+          // （`untracked.exact === false`），界面上不该声称精确。
+          changedFiles: files.length + untracked.count,
+          changedFilesExact: untracked.exact,
         })
         return
       }
@@ -1341,10 +1829,6 @@ function createReviewHandler(ctx) {
       // 比；`--no-index` 在"有差异"时退出码是 1，那是正常结果而不是失败（见 git() 的
       // allowExit）。
       if (url.pathname === `${ROUTE_PREFIX}/workspace-file`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const filePath = payload.path ?? url.searchParams.get('path')
         if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
           sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
@@ -1353,7 +1837,9 @@ function createReviewHandler(ctx) {
         const requested = payload.revision ?? url.searchParams.get('revision')
         const revision = typeof requested === 'string' && REVISION_PATTERN.test(requested) ? requested : 'HEAD'
         const normalized = normalizePath(filePath)
-        const absolute = resolve(workspace, normalized)
+        // 路径是**仓库相对**的，因此基准是仓库根（客户端拿到的路径也来自仓库根的
+        // `status`，两者同源）。
+        const absolute = resolve(cwd, normalized)
         try {
           // 未跟踪文件必须**真的在工作区里**：`git diff --no-index /dev/null <缺失路径>` 会
           // 以 git 自己的错误退出，而那会被当成 500。先判一次，直接给 404。
@@ -1361,7 +1847,7 @@ function createReviewHandler(ctx) {
             sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
             return
           }
-          const result = await readWorkspaceFileDiff(workspace, revision, normalized, payload.untracked === true)
+          const result = await readWorkspaceFileDiff(cwd, revision, normalized, payload.untracked === true)
           // 差异为空**且**工作区里没有这个路径 → 这个路径不存在（状态过期、或刚被删掉），
           // 那是 404 而不是"没有改动"。`git diff HEAD -- <不存在的路径>` 本身是**成功但空**
           // 的，光看 git 的退出码分不出来。
@@ -1369,7 +1855,7 @@ function createReviewHandler(ctx) {
             sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
             return
           }
-          sendJson(response, 200, { isRepo: true, path: normalized, ...result })
+          sendJson(response, 200, { isRepo: true, path: normalized, ...scopeFields(context), ...result })
         } catch (error) {
           // 路径不在仓库里（用户刚删掉、或状态已过期）：这是 404 而不是 500。
           if (/did not match|no such path|exists on disk, but not in|unknown revision|bad revision|could not access/iu.test(String(error?.message ?? error))) {
@@ -1399,10 +1885,6 @@ function createReviewHandler(ctx) {
           sendJson(response, 501, { error: 'ai unavailable', code: 'aiUnavailable', detail: '宿主没有装载 AI 补充能力' })
           return
         }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const requested = Array.isArray(payload.files) ? payload.files : []
         if (requested.length === 0) {
           sendJson(response, 400, { error: 'files is required', code: 'noFiles' })
@@ -1426,15 +1908,17 @@ function createReviewHandler(ctx) {
           })
         }
         const revision = REVISION_PATTERN.test(String(payload.revision ?? '')) ? payload.revision : 'HEAD'
-        const context = await collectCommitContext({
+        // 名字不要叫 `context`：外层那个 `context` 是仓库作用域，同名会遮蔽它。
+        const commitContext = await collectCommitContext({
           branch: payload.branch,
           files,
-          readDiff: (path, untracked) => readWorkspaceFileDiff(workspace, revision, path, untracked),
+          readDiff: (path, untracked) => readWorkspaceFileDiff(cwd, revision, path, untracked),
         })
         try {
-          const result = await onCommitMessage(context)
+          const result = await onCommitMessage(commitContext)
           sendJson(response, 200, {
             isRepo: true,
+            ...scopeFields(context),
             message: result.message,
             subject: result.subject,
             bullets: result.bullets,
@@ -1469,10 +1953,6 @@ function createReviewHandler(ctx) {
           sendJson(response, 405, { error: 'method not allowed' })
           return
         }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
 
         const requestedPaths = Array.isArray(payload.paths) ? payload.paths : []
         if (requestedPaths.length === 0) {
@@ -1489,13 +1969,14 @@ function createReviewHandler(ctx) {
         let source
         if (payload.scope === 'turn') {
           const stored = baselines.get(sessionId)
-          if (stored === undefined || stored.workspace !== workspace) {
+          // 基线记在**仓库**上：会话在同一个仓库里换了子目录时基线依然适用。
+          if (stored === undefined || stored.repositoryRoot !== cwd) {
             sendJson(response, 400, { error: 'no baseline recorded for this turn', code: 'noBaseline' })
             return
           }
           source = stored.revision
         } else {
-          source = (await git(['rev-parse', 'HEAD'], workspace)).trim()
+          source = (await git(['rev-parse', 'HEAD'], cwd)).trim()
         }
         if (!REVISION_PATTERN.test(source)) {
           sendJson(response, 400, { error: 'no valid revision to restore from', code: 'noRevision' })
@@ -1514,21 +1995,23 @@ function createReviewHandler(ctx) {
           // `cat-file -e <rev>:<path>` 在路径不存在时以非零退出。
           let existsInSource = true
           try {
-            await git(['cat-file', '-e', `${source}:${path}`], workspace)
+            await git(['cat-file', '-e', `${source}:${path}`], cwd)
           } catch {
             existsInSource = false
           }
           if (existsInSource) {
-            await git(['restore', '--source', source, '--worktree', '--', path], workspace)
+            await git(['restore', '--source', source, '--worktree', '--', path], cwd)
             restored.push(path)
           } else {
             // 工作区里若确实存在就删掉；不存在则视为已经还原。
-            const absolute = resolve(workspace, path)
+            const absolute = resolve(cwd, path)
             if (existsSync(absolute)) rmSync(absolute, { force: true })
             deleted.push(path)
           }
         }
-        sendJson(response, 200, { isRepo: true, restored, deleted, source })
+        // 还原会改工作区：未跟踪清单（新增文件被删掉）必须重数。
+        invalidateUntracked(cwd)
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context), restored, deleted, source })
         return
       }
 
@@ -1538,17 +2021,13 @@ function createReviewHandler(ctx) {
       // 最近的提交记录。之所以放在本插件（而不是新开一个），是因为它服务于同一块面板，
       // 且同样需要"只读、按工作区解析"这两条既有约束。
       if (url.pathname === `${ROUTE_PREFIX}/history`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const limitRaw = Number(payload.limit ?? 20)
         const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 100) : 20
         // %x1f（单元分隔符）与 %x1e（记录分隔符）——用它们而不是 \t/\n，因为提交标题
         // 里可能含制表符，而 author 名里可能含各种空白。
         const raw = await git(
           ['log', `-${limit}`, '--date=short', '--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1e'],
-          workspace,
+          cwd,
         )
         const commits = raw
           .split('\x1e')
@@ -1559,9 +2038,9 @@ function createReviewHandler(ctx) {
             return { hash, short, author, date, subject: rest.join('\x1f') }
           })
         const branch = (
-          await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')
+          await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).catch(() => '')
         ).trim()
-        sendJson(response, 200, { isRepo: true, branch, commits })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context), branch, commits })
         return
       }
 
@@ -1572,25 +2051,22 @@ function createReviewHandler(ctx) {
       // 标签与"当前分支"），并且必须分页。两条路由都保留：侧栏"更改"区块用 /history，
       // 主区域的提交图用 /graph。
       if (url.pathname === `${ROUTE_PREFIX}/graph`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? GRAPH_PAGE_DEFAULT)
         const skipRaw = Number(payload.skip ?? url.searchParams.get('skip') ?? 0)
         const limit = Number.isFinite(limitRaw) ? limitRaw : GRAPH_PAGE_DEFAULT
         const skip = Number.isFinite(skipRaw) ? skipRaw : 0
         const ref = payload.ref ?? url.searchParams.get('ref') ?? ''
-        const page = await readGraph(workspace, { limit, skip, ref })
+        const page = await readGraph(cwd, { limit, skip, ref })
         if (page.invalidRef === true) {
           sendJson(response, 400, { error: 'invalid ref', code: 'invalidRef' })
           return
         }
         // 当前分支单独给一次：客户端要在图里高亮"HEAD 所在的分支名"，
         // 而 `%D` 只在**恰好有 ref 指向的提交**上带这个信息，当前分支的尖端之外拿不到。
-        const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')).trim()
+        const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).catch(() => '')).trim()
         sendJson(response, 200, {
           isRepo: true,
+          ...scopeFields(context),
           branch,
           ...page,
         })
@@ -1605,17 +2081,13 @@ function createReviewHandler(ctx) {
       // 不可用，而报错信息指向一个跟提交无关的原因（实测就是这样）。
       // 同一个路径上放"读详情"与"写提交"这两种语义不同的操作，是这次踩坑的根源。
       if (url.pathname === `${ROUTE_PREFIX}/commit-detail`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const revision = payload.revision ?? url.searchParams.get('revision')
         if (typeof revision !== 'string' || !REVISION_PATTERN.test(revision)) {
           sendJson(response, 400, { error: 'invalid revision', code: 'invalidRevision' })
           return
         }
         try {
-          sendJson(response, 200, { isRepo: true, ...(await readCommit(workspace, revision)) })
+          sendJson(response, 200, { isRepo: true, ...scopeFields(context), ...(await readCommit(cwd, revision)) })
         } catch (error) {
           // 对象不在本地（浅克隆、被 GC 掉的分支）：这是 404，不是 500。
           if (/bad object|unknown revision|bad revision|not a valid object/iu.test(String(error?.message ?? error))) {
@@ -1629,10 +2101,6 @@ function createReviewHandler(ctx) {
 
       // ---- 一条提交里单个文件的差异 ------------------------------------------
       if (url.pathname === `${ROUTE_PREFIX}/commit-file`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const revision = payload.revision ?? url.searchParams.get('revision')
         const filePath = payload.path ?? url.searchParams.get('path')
         if (typeof revision !== 'string' || !REVISION_PATTERN.test(revision)) {
@@ -1643,60 +2111,87 @@ function createReviewHandler(ctx) {
           sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
           return
         }
-        const result = await readCommitFileDiff(workspace, revision, filePath)
-        sendJson(response, 200, { isRepo: true, path: filePath, ...result })
+        const result = await readCommitFileDiff(cwd, revision, filePath)
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, ...result })
         return
       }
 
-      // ---- 工作区状态：已跟踪改动与未跟踪文件分开两组 ------------------------
+      // ---- 仓库状态：已跟踪改动与未跟踪文件分开两组 --------------------------
       //
       // 与 /workspace 的区别：那个给的是"基线树 vs 工作区"的**差异内容**（用来渲染
       // 逐行 diff），这个给的是 git 视角的**状态分类**（索引态/工作区态、未跟踪、以及
       // 冲突态）。界面上"已跟踪更改"与"未跟踪文件"要分成两个区块，而分类只有
       // `status --porcelain` 能准确给出——从差异内容反推分类会在重命名、删除等情形上出错。
+      //
+      // 未跟踪清单**不再整份塞进响应**：实测过 6,846 个未跟踪文件，每次轮询都拖着这样
+      // 一份长列表正是本轮要消灭的开销。这里只给数量与模式，完整清单走 /untracked。
       if (url.pathname === `${ROUTE_PREFIX}/status`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
-        const raw = await git(['status', '--porcelain'], workspace)
-        const { tracked, untracked } = parsePorcelain(raw)
-        const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace).catch(() => '')).trim()
-        // 未跟踪文件的**路径清单**要一并给出，因为"加入 git"（`git add`）正是对它们最主要的
-        // 操作：用户要能看见有哪些、能挑几个加进去。IDEA 的 Git 工具窗也是这么做的。
-        //
-        // 仍然设一个上限：实测过 6,636 个未跟踪文件，一次全塞进状态响应会让每次轮询都拖着
-        // 一份长列表。超过上限时只给前若干条并说明总数，界面据此提示"仅显示前 N 个"。
-        const UNTRACKED_LIMIT = 500
+        const raw = await git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal'], cwd, undefined, GIT_MAX_BUFFER_LARGE)
+        const parsed = parseStatusV2(raw)
+        const tracked = parsed.files.filter((entry) => entry.untracked !== true)
+        const untrackedEntries = parsed.files.filter((entry) => entry.untracked === true)
+        const untracked = describeUntrackedFast(cwd, untrackedEntries)
         sendJson(response, 200, {
           isRepo: true,
-          branch,
+          ...scopeFields(context),
+          branch: parsed.branch,
+          head: parsed.head,
+          detached: parsed.detached,
           tracked,
           trackedCount: tracked.length,
-          untrackedCount: untracked.length,
-          untrackedPaths: untracked.slice(0, UNTRACKED_LIMIT).map((entry) => entry.path),
-          untrackedTruncated: untracked.length > UNTRACKED_LIMIT,
+          untrackedCount: untracked.count,
+          untracked,
+          changedFiles: tracked.length + untracked.count,
         })
         return
       }
 
-      // ---- 未跟踪文件清单（展开"未跟踪文件"区块时才取）---------------------
+      // ---- 未跟踪文件：精确枚举 + 惰性目录树 ---------------------------------
+      //
+      // 这是**唯一**会做完整枚举的地方，而它只在三种情况下被调用：
+      //   1. 用户打开 Changes，需要精确判定 inline（≤ 50）/ browse（> 50）；
+      //   2. 用户点了「浏览」（按 prefix 取直接子节点，一次只返回一层）；
+      //   3. 写操作之后（缓存已被 invalidate，客户端会带 force）。
+      // 常驻的 `/workspace` 轮询**绝不**走到这里。
+      //
+      // 请求形状：
+      //   `{ exact: true }`           → 精确条数 + 模式（inline 时带完整 inlineFiles）
+      //   `{ prefix, offset, limit }` → 该目录的直接子节点（lazy tree + 分页）
+      //   `{ force: true }`           → 忽略缓存重枚举
       if (url.pathname === `${ROUTE_PREFIX}/untracked`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
+        const force = payload.force === true || url.searchParams.get('force') === '1'
+        const snapshotUntracked = await readUntracked(cwd, { force })
+        const total = snapshotUntracked.paths.length
+        const mode = total <= UNTRACKED_INLINE_LIMIT ? 'inline' : 'browse'
+        const prefix = String(payload.prefix ?? url.searchParams.get('prefix') ?? '')
+        const offsetRaw = Number(payload.offset ?? url.searchParams.get('offset') ?? 0)
+        const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? UNTRACKED_PAGE_DEFAULT)
+        const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.trunc(offsetRaw)) : 0
+        const limit = Number.isFinite(limitRaw)
+          ? Math.min(Math.max(Math.trunc(limitRaw), 1), UNTRACKED_PAGE_MAX)
+          : UNTRACKED_PAGE_DEFAULT
+        const page = listUntrackedChildren(snapshotUntracked.tree, prefix, offset, limit)
+        if (page === undefined) {
+          sendJson(response, 404, { error: 'no such directory', code: 'noSuchPrefix' })
           return
         }
-        const limitRaw = Number(payload.limit ?? url.searchParams.get('limit') ?? 500)
-        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 500
-        // `ls-files --others --exclude-standard` 正是"未跟踪且未被忽略"的定义，
-        // 与被 git 忽略的文件（`--ignored`）区分开——后者不该出现在"待暂存"里。
-        const raw = await git(['ls-files', '--others', '--exclude-standard'], workspace)
-        const all = raw.split('\n').filter((line) => line.trim() !== '')
+        // inline 模式才给完整清单（含精确新增行数）；browse 模式给空数组，渲染进程因此
+        // 不会持有几千条路径。
+        const inlineFiles =
+          mode === 'inline' ? countUntrackedLines(cwd, snapshotUntracked.paths.map(untrackedEntry)) : []
         sendJson(response, 200, {
           isRepo: true,
-          paths: all.slice(0, limit),
-          total: all.length,
-          truncated: all.length > limit,
+          ...scopeFields(context),
+          total,
+          mode,
+          exact: true,
+          cached: snapshotUntracked.cached,
+          updatedAt: snapshotUntracked.at,
+          inlineFiles,
+          /** 目录树的一层（`prefix` 为空时就是仓库根的直接子节点）。 */
+          tree: page,
+          /** 兼容旧形状：少量模式下给完整清单（字典序）；大量模式下是空数组。 */
+          paths: mode === 'inline' ? snapshotUntracked.paths : [],
         })
         return
       }
@@ -1716,12 +2211,17 @@ function createReviewHandler(ctx) {
           sendJson(response, 405, { error: 'method not allowed' })
           return
         }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
+        const staging = url.pathname.endsWith('/stage')
+        /**
+         * 「加入 Git」里勾了**全选**时的一种特殊形状：`{ all: 'untracked' }`。
+         *
+         * 为什么不让客户端把那几千条路径发回来：需求十五/二十.2 明确要求渲染进程**不持有**
+         * 那些路径。这里由 host 用它自己那份（本来就有的）完整清单去 add，客户端只发一个
+         * 字符串。这也顺手避免了"2 MiB 的请求体"这条路。
+         */
+        const stageAllUntracked = staging && payload.all === 'untracked'
         const requestedPaths = Array.isArray(payload.paths) ? payload.paths : []
-        if (requestedPaths.length === 0) {
+        if (requestedPaths.length === 0 && !stageAllUntracked) {
           sendJson(response, 400, { error: 'paths is required', code: 'noPaths' })
           return
         }
@@ -1730,17 +2230,27 @@ function createReviewHandler(ctx) {
           sendJson(response, 400, { error: `unsafe path: ${String(bad).slice(0, 80)}`, code: 'unsafePath' })
           return
         }
-        const staging = url.pathname.endsWith('/stage')
-        const normalized = requestedPaths.map(normalizePath)
+        let normalized = requestedPaths.map(normalizePath)
+        let addMode = ''
         try {
           if (staging) {
-            await git(['add', '--', ...normalized], workspace)
+            if (stageAllUntracked) {
+              // 强制重数一次：用户点的是"把现在这些全加进去"，用旧缓存会把刚创建的文件漏掉。
+              const all = await readUntracked(cwd, { force: true })
+              normalized = all.paths
+              if (normalized.length === 0) {
+                sendJson(response, 200, { isRepo: true, ...scopeFields(context), staged: [], stagedCount: 0 })
+                return
+              }
+            }
+            // 大批量路径（「浏览」里全选几千个未跟踪文件）必须走有界的 add：见 addPaths。
+            addMode = (await addPaths(cwd, normalized)).mode
           } else {
             // 仓库尚无 HEAD 时 `restore --staged` 没有源可恢复，用 `rm --cached`：
             // 那正是"把这个文件从索引里去掉、但保留工作区文件"的语义。
-            const hasHead = (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], workspace).then(() => true).catch(() => false))
-            if (hasHead) await git(['restore', '--staged', '--', ...normalized], workspace)
-            else await git(['rm', '--cached', '--quiet', '--', ...normalized], workspace)
+            const hasHead = (await git(['rev-parse', '--verify', '--quiet', 'HEAD'], cwd).then(() => true).catch(() => false))
+            if (hasHead) await git(['restore', '--staged', '--', ...normalized], cwd)
+            else await git(['rm', '--cached', '--quiet', '--', ...normalized], cwd)
           }
         } catch (error) {
           sendJson(response, 409, {
@@ -1750,7 +2260,16 @@ function createReviewHandler(ctx) {
           })
           return
         }
-        sendJson(response, 200, { isRepo: true, staged: staging ? normalized : [], unstaged: staging ? [] : normalized })
+        // 索引变了 → 未跟踪清单（以及"这个文件还是未跟踪吗"）立刻过期。
+        invalidateUntracked(cwd)
+        sendJson(response, 200, {
+          isRepo: true,
+          ...scopeFields(context),
+          ...(addMode === '' ? {} : { addMode }),
+          staged: staging ? normalized : [],
+          stagedCount: staging ? normalized.length : 0,
+          unstaged: staging ? [] : normalized,
+        })
         return
       }
 
@@ -1758,10 +2277,6 @@ function createReviewHandler(ctx) {
         if (request.method !== 'POST') {
           response.setHeader('allow', 'POST')
           sendJson(response, 405, { error: 'method not allowed' })
-          return
-        }
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
           return
         }
         const message = typeof payload.message === 'string' ? payload.message.trim() : ''
@@ -1786,7 +2301,8 @@ function createReviewHandler(ctx) {
             return
           }
           try {
-            await git(['add', '--', ...commitPaths.map((p) => p.replace(/\\/gu, '/'))], workspace)
+            // 与 /stage 同一条有界路径：勾选的文件可能有几千个（「浏览」里全选）。
+            await addPaths(cwd, commitPaths)
           } catch (error) {
             sendJson(response, 409, {
               error: 'stage failed',
@@ -1799,7 +2315,7 @@ function createReviewHandler(ctx) {
 
         // 暂存区为空时 git 会以非零退出（"nothing to commit"）。提前判掉，并区分
         // "没有任何改动"与"有改动但没暂存"——这两种情况该给用户的下一步完全不同。
-        const statusRaw = await git(['status', '--porcelain'], workspace)
+        const statusRaw = await git(['status', '--porcelain'], cwd)
         const { tracked } = parsePorcelain(statusRaw)
         const staged = tracked.filter((entry) => entry.index !== ' ' && entry.index !== '?')
         if (staged.length === 0) {
@@ -1812,7 +2328,7 @@ function createReviewHandler(ctx) {
         try {
           // `-F -` 从标准输入读提交信息太绕；这里用 `-m`，它是参数数组里的一个元素，
           // 不会被 shell 解释。多行信息由 `-m` 重复传递，但界面只给单行，因此不需要。
-          await git(['commit', '-m', message], workspace)
+          await git(['commit', '-m', message], cwd)
         } catch (error) {
           sendJson(response, 409, {
             error: 'commit failed',
@@ -1821,7 +2337,7 @@ function createReviewHandler(ctx) {
           })
           return
         }
-        const head = (await git(['rev-parse', 'HEAD'], workspace).catch(() => '')).trim()
+        const head = (await git(['rev-parse', 'HEAD'], cwd).catch(() => '')).trim()
 
         // ---- 可选的"提交并推送" ----------------------------------------------
         //
@@ -1835,7 +2351,7 @@ function createReviewHandler(ctx) {
           try {
             // 不加远端与分支：用仓库自己的上游配置（`git push` 的默认行为）。
             // 指定远端会把"该推到哪"这个决定从用户的 git 配置里抢过来。
-            await git(['push'], workspace, undefined, GIT_MAX_BUFFER, GIT_NETWORK_TIMEOUT_MS)
+            await git(['push'], cwd, undefined, GIT_MAX_BUFFER, GIT_NETWORK_TIMEOUT_MS)
             pushed = true
           } catch (error) {
             pushed = false
@@ -1843,8 +2359,11 @@ function createReviewHandler(ctx) {
           }
         }
 
+        // 提交动了索引与 HEAD：未跟踪清单必须重数（刚提交的那些文件不再是未跟踪）。
+        invalidateUntracked(cwd)
         sendJson(response, 200, {
           isRepo: true,
+          ...scopeFields(context),
           committed: true,
           head,
           ...(pushed === undefined ? {} : { pushed }),
@@ -1858,10 +2377,6 @@ function createReviewHandler(ctx) {
       // 对应 IDEA 文件行右侧的"显示历史"。用 `--follow`：重命名之后仍然能追到改名前的
       // 提交，否则历史会在改名那一处断掉——而那正是用户最想看的"这个文件原来是什么"。
       if (url.pathname === `${ROUTE_PREFIX}/file-history`) {
-        if (!(await isRepo(workspace))) {
-          sendJson(response, 200, { isRepo: false })
-          return
-        }
         const filePath = payload.path ?? url.searchParams.get('path')
         if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN.test(filePath)) {
           sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
@@ -1882,12 +2397,12 @@ function createReviewHandler(ctx) {
               '--',
               filePath.replace(/\\/gu, '/'),
             ],
-            workspace,
+            cwd,
           )
         } catch (error) {
           // 未跟踪的文件没有历史，这不是错误：返回空列表，界面显示"尚无提交记录"。
           if (/does not have any commits|unknown revision|bad revision/iu.test(String(error?.message ?? error))) {
-            sendJson(response, 200, { isRepo: true, path: filePath, commits: [] })
+            sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, commits: [] })
             return
           }
           throw error
@@ -1906,7 +2421,7 @@ function createReviewHandler(ctx) {
               subject: rest.join('\x1f').trim(),
             }
           })
-        sendJson(response, 200, { isRepo: true, path: filePath, commits })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, commits })
         return
       }
 
@@ -1928,6 +2443,7 @@ export function apply(ctx) {
 
   const handler = createReviewHandler(ctx)
   for (const path of [
+    `${ROUTE_PREFIX}/repo-context`,
     `${ROUTE_PREFIX}/baseline`,
     `${ROUTE_PREFIX}/changes`,
     `${ROUTE_PREFIX}/workspace`,
