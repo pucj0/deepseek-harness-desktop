@@ -45,7 +45,8 @@ window.__ModuleLoader__.load({
      * MutationObserver 扫到我们这个插件的样式才会被注册；那是"顺带生效"，不能当作前提。
      * 从这里派生则任何加载顺序、任何字号下都成立，插件没装时 fallback 就是 14px（原样）。
      */
-    const UI_FONT_PX_BASE = 'var(--dsh-ui-px-14, 14px)'
+    const UI_FONT_VAR = '--dsh-ui-px-14'
+    const UI_FONT_PX_BASE = `var(${UI_FONT_VAR}, 14px)`
 
     /**
      * 把一个"按基准字号 14px 设计"的字号换算成跟随 UI 字号的长度。
@@ -61,6 +62,30 @@ window.__ModuleLoader__.load({
      */
     function uiPx(px) {
       return `calc(${UI_FONT_PX_BASE} * ${px} / 14)`
+    }
+
+    /**
+     * `uiPx()` 的**数值**版本：当前 UI 字号下的像素数。
+     *
+     * 什么时候需要它：有些尺寸要参与**算术**（提交区的默认/最小高度是"8 行正文 + 按钮行"，
+     * 拖动时还要比较、夹取），而这些算术必须发生在 JS 里，CSS 的 `calc()` 帮不上忙（`height`
+     * 里的 `calc` 没法像 px 一样读回来做比较）。因此这里把 `--dsh-ui-px-14` 读成一个数。
+     *
+     * 读不到时按基准 14 算——那是"字号设置没生效"时的正确外观，也保证测试环境（假 DOM、
+     * `getComputedStyle` 返回垃圾值）里的高度是确定的。
+     *
+     * @param px - 设计稿（基准 14px）下的像素值。
+     * @returns 当前 UI 字号下的像素数。
+     */
+    function uiPxNumber(px) {
+      let base = 14
+      try {
+        const value = Number.parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue(UI_FONT_VAR))
+        if (Number.isFinite(value) && value > 0) base = value
+      } catch {
+        // 拿不到（非浏览器、假 DOM）就按基准算。
+      }
+      return (base * px) / 14
     }
 
     /**
@@ -164,6 +189,29 @@ window.__ModuleLoader__.load({
 
       /* 拖动时不要选中文字、也不要让 iframe/文本抢走指针事件。 */
       body[data-review-dragging='1'] { cursor: col-resize; user-select: none; }
+      /* 纵向拖动（提交区顶部那条手柄）要的是 ns-resize；同一特异度下后写的规则胜出。 */
+      body[data-review-dragging-axis='vertical'] { cursor: ns-resize; }
+
+      /* ---- 提交区顶部的高度手柄 ----
+       *
+       * 8px 高、默认完全透明（常显一条灰杠会把"提交区"和"文件区"之间的分割线画成两条），
+       * 中间那条短横默认只是淡淡的描边；悬停或拖动时才亮起来。 */
+      [data-staging-commit-resize] {
+        flex: 0 0 auto; order: 3; height: 8px; margin-top: 6px;
+        display: flex; align-items: center; justify-content: center;
+        cursor: ns-resize; background: transparent; touch-action: none;
+      }
+      [data-staging-commit-grip] {
+        display: block; width: 42px; height: 3px; border-radius: 2px;
+        background: transparent; transition: background-color .15s ease, width .15s ease;
+      }
+      [data-staging-commit-resize]:hover [data-staging-commit-grip],
+      [data-staging-commit-resize]:focus-visible [data-staging-commit-grip],
+      [data-staging-commit-resize][data-dragging='1'] [data-staging-commit-grip] {
+        background: color-mix(in srgb, ${ACCENT} 60%, transparent);
+        width: 64px;
+      }
+      [data-staging-commit-resize]:focus-visible { outline: none; }
 
       /* 图标按钮：IDEA 的工具窗按钮是"平时无边框、悬停才出底色"。 */
       [data-review-icon-button] {
@@ -832,7 +880,9 @@ window.__ModuleLoader__.load({
       unstage: '取消暂存',
       stageAll: '全部暂存',
       unstageAll: '全部取消暂存',
-      commitMessage: '提交信息（{branch}）',
+      commitMessage: '提交信息（{branch}）\n第一行为提交摘要，空一行后填写详细说明',
+      /** 提交区顶部那条高度手柄的无障碍名（拖它上下改变提交区高度）。 */
+      commitResize: '拖动调整提交区高度（双击复位）',
       commit: '提交',
       committing: '提交中…',
       commitHintCtrlEnter: 'Ctrl+Enter 提交',
@@ -1038,7 +1088,9 @@ window.__ModuleLoader__.load({
       unstage: 'Unstage',
       stageAll: 'Stage all',
       unstageAll: 'Unstage all',
-      commitMessage: 'Commit message ({branch})',
+      commitMessage: 'Commit message ({branch})\nFirst line is the subject; leave a blank line before the details',
+      /** Accessible name of the drag handle above the commit area. */
+      commitResize: 'Drag to resize the commit area (double-click to reset)',
       commit: 'Commit',
       committing: 'Committing…',
       commitHintCtrlEnter: 'Ctrl+Enter to commit',
@@ -5082,6 +5134,27 @@ window.__ModuleLoader__.load({
        * 每个文件的逐行差异，全部来自这同一个 `snapshot`。
        */
       const files = Array.isArray(snapshot?.files) ? snapshot.files : []
+      /**
+       * 提交区的高度（px）。
+       *
+       * `undefined` = 用户**没拖过** → 每次渲染都按"8 行正文 + 按钮行"重新算（因此"设置 →
+       * UI 字号"变化后默认高度跟着变）。拖过之后是用户选的 px，落盘在
+       * `dsh.review.commitAreaHeight`。
+       */
+      const [commitHeight, setCommitHeight] = react.useState(() => commitAreaHeightStore.get())
+      /**
+       * Changes 这一块的可用高度（px）。
+       *
+       * 拖动的上限依据之一，也是"窗口变小之后重新夹取"的触发点：窗口 resize 时重算它，
+       * 于是当前高度立刻被夹进新区间，而不是等下一次拖动。
+       */
+      const [commitRoom, setCommitRoom] = react.useState(0)
+      /** StagingSection 的根节点：量可用高度用。 */
+      const stagingRootRef = react.useRef(null)
+      /** 提交区卡片本身：拖动开始时要量"现在到底多高"（默认值是算出来的，不量就没有基准）。 */
+      const commitCardRef = react.useRef(null)
+      /** 本帧实际应用的高度（提交时用它落盘）。 */
+      const commitHeightRef = react.useRef(0)
       const [collapsed, setCollapsed] = react.useState({ staged: false, unstaged: false, untracked: false })
       /**
        * 已勾选、准备"加入 git"的未跟踪文件。
@@ -5232,6 +5305,44 @@ window.__ModuleLoader__.load({
         // 失败会让未跟踪永远停在"正在统计…"。
         void gitSnapshots.requestExactUntracked(workspace)
       }, [untrackedNeedsExact, snapshotUpdatedAt, workspace])
+
+      /**
+       * 量出提交区当前高度与 Changes 的可用高度。
+       *
+       * 拖动开始时用它取基准：默认高度是算出来的（8 行正文），不量一次就不知道用户是从多少
+       * 像素开始拖的——这与 Diff Preview 的高度手柄是同一个理由。
+       */
+      const measureCommitArea = react.useCallback(() => {
+        const root = stagingRootRef.current
+        const available =
+          root !== null && root !== undefined && typeof root.getBoundingClientRect === 'function'
+            ? root.getBoundingClientRect().height
+            : undefined
+        const card = commitCardRef.current
+        const current =
+          card !== null && card !== undefined && typeof card.getBoundingClientRect === 'function'
+            ? card.getBoundingClientRect().height
+            : undefined
+        return { available, current }
+      }, [])
+
+      /**
+       * 窗口尺寸变了就重新量一次可用高度。
+       *
+       * 需求要求"窗口变小后不能因为之前在大屏上拖到 500px 就把 Changes 撑满"。这里**只更新
+       * 测量值**（`commitRoom`），夹取发生在渲染期（见 `commitAreaHeight`）：于是小窗口里显示
+       * 的是被夹过的矮高度，而**用户当初选的那个值仍然留在 state / localStorage 里**——把窗口
+       * 拉回大尺寸，它原样回来。若在这里直接把 state 夹掉，拖过一次的用户就永久丢失了他的选择。
+       */
+      react.useEffect(() => {
+        const onResize = () => {
+          const { available } = measureCommitArea()
+          setCommitRoom(Number.isFinite(available) ? available : 0)
+        }
+        onResize()
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [measureCommitArea])
 
       /**
        * 量出 Changes 内容的可用宽度。
@@ -6288,10 +6399,23 @@ window.__ModuleLoader__.load({
             }),
       )
 
+      /**
+       * 本帧真正应用的提交区高度（px）。
+       *
+       * 用户拖过的值（或"没拖过"→ 按行数算出来的默认值）在这里夹进当前允许区间。**夹取发生
+       * 在渲染期而不是 state 里**是有意的：窗口变小只需要"这次显示得矮一点"，落盘的仍是用户
+       * 当初选的那个值——换回大窗口时它该原样回来。
+       */
+      const commitAreaHeight = clampCommitAreaHeight(commitHeight, commitRoom)
+      commitHeightRef.current = commitAreaHeight
+
       return react.createElement(
         'div',
         {
           'data-staging': '',
+          // 根节点的高度就是"Changes 可用高度"：提交区的拖动上限按它算（见 clampCommitAreaHeight），
+          // 因此需要在这里量一次。
+          ref: stagingRootRef,
           // 三层结构（视觉顺序）：文件分组（可滚动）→ 提示/错误 → 提交区（固定底部）。
           //
           // 实现方式值得说明：用 flex 的 `order` 把它排到底部，而**DOM 顺序保持不变**
@@ -6320,14 +6444,49 @@ window.__ModuleLoader__.load({
             react.createElement('span', { style: { color: REMOVED } }, `−${files.reduce((sum, file) => sum + (file.removed ?? 0), 0)}`),
           ),
         ),
+        // ---- 提交区顶部的高度手柄 ----
+        //
+        // 放在提交卡片**前面的兄弟位置**（两者都是 `order: 3`，DOM 顺序决定视觉顺序），
+        // 因此它正好压在提交区上边缘：往上拖 = 提交区变高（见 startCommitAreaResize）。
+        //
+        // 为什么不用 textarea 右下角那个原生 resize：① 它只能拖到"输入框自己"的高度，
+        // 而需求要的是整块提交区（含按钮行）一起长高、主区相应让位；② 原生手柄在右下角，
+        // 正好压在「提交并推送」旁边，很难点；③ 两套高度控制会互相打架（拖了原生手柄之后
+        // 顶部手柄的基准就不对了）。
+        react.createElement(
+          'div',
+          {
+            key: 'commit-resize',
+            'data-staging-commit-resize': '',
+            role: 'separator',
+            'aria-orientation': 'horizontal',
+            'aria-label': t('commitResize'),
+            title: t('commitResize'),
+            onPointerDown: startCommitAreaResize(
+              measureCommitArea,
+              (value) => setCommitHeight(value),
+              () => commitAreaHeightStore.set(commitHeightRef.current),
+            ),
+            // 双击复位：回到"没拖过"（即按 8 行算出来的默认高度）。
+            onDoubleClick: () => {
+              commitAreaHeightStore.reset()
+              setCommitHeight(undefined)
+            },
+          },
+          react.createElement('span', { 'data-staging-commit-grip': '', 'aria-hidden': 'true' }),
+        ),
         // ---- 提交卡片 ----
         //
         // 做成一张"卡片"而不是一条普通表单：提交是这块面板的主动作，视觉上也要与下面的
         // 文件清单分开（此前三者都是同样的白底 + 细线，分不出主次）。
+        //
+        // **高度可调**（实机反馈）：整块提交区的高度由顶部手柄决定，内部只有输入框会跟着长，
+        // 按钮行固定高度（`flexShrink: 0`）——拖高时不该把按钮也拉散。
         react.createElement(
           'div',
           {
             'data-staging-commit-card': '',
+            ref: commitCardRef,
             style: {
               display: 'flex',
               flexDirection: 'column',
@@ -6335,8 +6494,17 @@ window.__ModuleLoader__.load({
               // 固定在底部：不参与上面的滚动，也不被文件列表挤走（`order` 见根节点的说明）。
               order: 3,
               flexShrink: 0,
-              margin: '10px 2px 2px',
-              paddingTop: '10px',
+              height: `${commitAreaHeight}px`,
+              boxSizing: 'border-box',
+              // 底部 12px 是实机反馈的第三条：按钮不能再贴着窗口底边。
+              // 左右 8px 让按钮与输入框的圆角不再顶到抽屉边缘。
+              margin: 0,
+              paddingTop: '4px',
+              paddingLeft: '8px',
+              paddingRight: '8px',
+              paddingBottom: '12px',
+              // 长内容不许把这块撑高（输入框自己滚动），否则拖动设置的高度会被内容顶掉。
+              overflow: 'hidden',
               borderTop: `1px solid ${BORDER}`,
             },
           },
@@ -6344,12 +6512,13 @@ window.__ModuleLoader__.load({
             'data-staging-message': '',
             'data-review-input': '',
             value: message,
-            // 4 行（原来 2 行）：提交信息里通常要写"标题 + 一段说明"，2 行只够看到标题，
-            // 用户写着写着就得先手动把框拉大——默认高度应该是能写完一条正常提交信息的高度。
-            rows: 4,
+            // 8 行 = 一行提交摘要 + 一个空行 + 5~6 行正文：一条正常的提交信息（标题 + 三条
+            // 要点）不用先手动拉高就能看全（实机反馈的第一条）。
+            rows: COMMIT_ROWS,
             // 提交信息的占位文案里带上当前分支：分支取自**这份快照自己**（与文件列表同一次
             // 请求），因此不会出现"文件是新的、分支是旧的"。多仓库时再带上仓库名——见
             // `repositoryName` 的说明（提交框离顶部的仓库选择器隔着整个文件列表）。
+            // 第二行是写法提示（摘要 + 空行 + 详细说明），不额外占界面空间。
             placeholder: t('commitMessage', { branch: commitTargetLabel }),
             'aria-label': t('commitMessage', { branch: commitTargetLabel }),
             spellCheck: false,
@@ -6367,9 +6536,11 @@ window.__ModuleLoader__.load({
             style: {
               boxSizing: 'border-box',
               width: '100%',
-              // `rows: 4` 只是初始行数，`minHeight` 才是"用户把框拖小之后仍然够用"的保证
-              // （textarea 的 resize 可以把高度拉到只剩一行）。两行文字 + 内边距 ≈ 90px。
-              minHeight: '90px',
+              // 填满提交区里"按钮行之外"的全部空间：拖动顶部手柄变高的就是这一块。
+              // `minHeight: 0` 是必须的——flex 子项的默认 `min-height: auto` 会让它按内容
+              // 撑住，于是拖小之后输入框还是会顶到按钮行。
+              flex: '1 1 auto',
+              minHeight: 0,
               padding: '7px 9px',
               border: `1px solid ${BORDER}`,
               borderRadius: '8px',
@@ -6378,14 +6549,20 @@ window.__ModuleLoader__.load({
               fontFamily: UI_FONT,
               fontSize: uiPx(12.5),
               lineHeight: 1.55,
-              // 仍然允许纵向拖拽：4 行是"够用"的默认值，不是上限。
-              resize: 'vertical',
+              // **不要**原生的右下角 resize：整块提交区已经由顶部手柄调高（见上面手柄的说明），
+              // 两套高度控制同时存在只会互相打架。
+              resize: 'none',
               transition: 'border-color .13s ease, box-shadow .13s ease',
             },
           }),
           react.createElement(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+            {
+              'data-staging-commit-actions': '',
+              // 按钮行高度**固定**：拖动提交区变高时变大的只能是上面的输入框，
+              // 否则越拖按钮行越散（需求第七节）。
+              style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flexShrink: 0 },
+            },
             react.createElement(
               'button',
               {
@@ -8616,6 +8793,127 @@ window.__ModuleLoader__.load({
      */
     const CHANGES_NARROW_WIDTH = 900
 
+    // =========================================================================
+    // 提交区（Changes 底部 footer）的高度
+    // =========================================================================
+    //
+    // 实机反馈三件事：默认只能看见两行、想从顶部往上拖把它拉高、按钮贴窗口底边太近。
+    // 因此这里把提交区做成一块**真正可调高度的 footer**：
+    //   * 默认高度按"8 行正文 + 按钮行"算出来（不是写死 4 行 / 90px）；
+    //   * 顶部有一条横向手柄（往上拖变高、往下拖变矮，双击复位）；
+    //   * 高度落盘（`dsh.review.commitAreaHeight`），并在窗口变化时重新夹取；
+    //   * 按钮那一行只占固定高度——拖高时变高的**只有输入框**。
+    //
+    // 尺寸全部由 `uiPxNumber()` 从"设计稿基准 14px"换算，因此"设置 → UI 字号"调到 12 / 18
+    // 时，默认高度与最小高度一起同比缩放（与面板里其它尺寸一致）。
+
+    /** 提交区高度的持久化键（px）。 */
+    const COMMIT_AREA_HEIGHT_KEY = 'dsh.review.commitAreaHeight'
+
+    /**
+     * 输入框的默认行数：一行 subject + 一个空行 + 5~6 行正文。
+     *
+     * 一条正常提交信息（`feat(...): xxx` + 三条要点）因此**不用先手动拉高**就能看全——
+     * 这正是实机反馈的第一条。
+     */
+    const COMMIT_ROWS = 8
+
+    /** 允许缩到的最小行数：还能看见 subject 与两三行正文。比它更小就不如收起来。 */
+    const COMMIT_MIN_ROWS = 4
+
+    /** 正文行高（设计稿基准 px）：字号 12.5 × 行高 1.55。 */
+    const COMMIT_LINE_HEIGHT_PX = 12.5 * 1.55
+
+    /** 输入框自身的内边距与边框：`7px` 上下内边距 ×2 + `1px` 边框 ×2。 */
+    const COMMIT_TEXTAREA_CHROME_PX = 16
+
+    /**
+     * 提交区里**输入框之外**的固定高度（设计稿基准 px）。
+     *
+     * 上内边距 4 + 输入框与按钮行的间距 8 + 按钮行约 30 + 底部留白 12 = 54。
+     * 底部那 12px 就是实机反馈的第三条：按钮不能再贴着窗口底边。
+     */
+    const COMMIT_FOOTER_CHROME_PX = 54
+
+    /**
+     * 主区（文件列表 / Diff Preview）至少要留下的高度。
+     *
+     * 拖动上限里必须含这一项：只按视口/容器的百分比算，在矮窗口里"提交区 65%"会把主区压到
+     * 只剩几十像素——那时文件列表与差异都不可操作，等于把 Changes 变成了一个只有提交框的
+     * 面板。留 200px 才能既有几行文件、又有一段差异。
+     */
+    const COMMIT_MAIN_MIN_PX = 200
+
+    /** 输入框 `rows` 行时的自然高度（px，含内边距与边框）。 */
+    const commitTextareaHeight = (rows) => uiPxNumber(rows * COMMIT_LINE_HEIGHT_PX + COMMIT_TEXTAREA_CHROME_PX)
+
+    /** 没拖过时的默认高度：8 行正文 + 按钮行 + 内边距（基准字号下约 225px）。 */
+    const commitDefaultHeight = () => commitTextareaHeight(COMMIT_ROWS) + uiPxNumber(COMMIT_FOOTER_CHROME_PX)
+
+    /** 允许的最小高度（基准字号下约 148px ≈ 4 行正文 + 按钮行）。 */
+    const commitMinHeight = () => commitTextareaHeight(COMMIT_MIN_ROWS) + uiPxNumber(COMMIT_FOOTER_CHROME_PX)
+
+    /**
+     * 夹取提交区高度。
+     *
+     * 上限取三者最小：视口的 55%、Changes 可用高度的 65%、以及"扣掉主区最低高度之后剩下的"。
+     * 三者都在，是因为它们各自会先失效：矮窗口看视口，普通窗口看容器，而"容器很高但主区已经
+     * 很矮"（比如用户把抽屉拉得很扁）时只有第三项能保住主区。
+     *
+     * @param value - 期望高度（px）；`undefined`/非有限值 = 没拖过，用默认高度。
+     * @param available - Changes 这一块的可用高度（px，可能拿不到）。
+     * @returns 夹取后的高度（px，整数）。
+     */
+    function clampCommitAreaHeight(value, available) {
+      const viewport = typeof window === 'undefined' ? 900 : window.innerHeight
+      const min = commitMinHeight()
+      const room = Number.isFinite(available) && available > 0 ? available : viewport * 0.6
+      const max = Math.max(min, Math.min(viewport * 0.55, room * 0.65, room - COMMIT_MAIN_MIN_PX))
+      // 注意判据是"是不是有限数"而**不是**"是不是正数"：往下拖到底时算出来的是负数，
+      // 那是合法的拖动中间值，必须被夹到下限；把它当成"没拖过"会让提交区在拖到底时
+      // **跳回默认高度**（越拖越高，正是实机最反感的那种反直觉）。
+      const raw = Number.isFinite(value) ? value : commitDefaultHeight()
+      return Math.round(Math.max(min, Math.min(max, raw)))
+    }
+
+    /**
+     * 提交区高度的持久化。
+     *
+     * 与另外三个拖动尺寸（面板宽度 / 左栏宽度 / Diff 高度）同一套约定：**没拖过 = 不落盘**，
+     * 于是"默认高度"永远是算出来的（跟随 UI 字号），双击手柄就是回到这个默认值。用户拖过
+     * 之后就存 px——那时他要的是那个精确高度。窗口变小导致当前高度被夹取**不改写**这份记录：
+     * 换回大窗口时用户上次的选择还在。
+     */
+    const commitAreaHeightStore = {
+      /** @returns 持久化高度（px），没记录时 undefined。 */
+      get() {
+        try {
+          const raw = window.localStorage.getItem(COMMIT_AREA_HEIGHT_KEY)
+          if (raw === null) return undefined
+          const stored = Number(raw)
+          return Number.isFinite(stored) && stored > 0 ? stored : undefined
+        } catch {
+          return undefined
+        }
+      },
+      /** @param value - 高度（px）。 */
+      set(value) {
+        try {
+          window.localStorage.setItem(COMMIT_AREA_HEIGHT_KEY, String(Math.round(value)))
+        } catch {
+          // 写失败不影响本次会话。
+        }
+      },
+      /** 双击手柄复位：回到"没拖过"的状态（即按行数算出来的默认高度）。 */
+      reset() {
+        try {
+          window.localStorage.removeItem(COMMIT_AREA_HEIGHT_KEY)
+        } catch {
+          // 同上。
+        }
+      },
+    }
+
     /**
      * 拖动分栏手柄。
      *
@@ -8720,6 +9018,60 @@ window.__ModuleLoader__.load({
         }
         document.addEventListener('mousemove', onMove)
         document.addEventListener('mouseup', onUp)
+      }
+    }
+
+    /**
+     * 拖动提交区**顶部**的横向手柄（上下改变提交区高度）。
+     *
+     * 与另外三个手柄同一套做法（拖动期间给 body 打标记、开始时量一次当前值当基准），只有两点
+     * 不同：
+     *   * **方向反着来**：手柄在提交区上方，因此 `startY - clientY` —— 往上拖（`clientY` 变小）
+     *     提交区变高，往下拖变矮。这与"拖住边缘推它"的直觉一致；
+     *   * **用 Pointer Events + 指针捕获**（需求指定）：拖出这条 8px 的手柄之后事件仍然回到
+     *     它身上。没有 PointerEvent 的环境（老 WebView、单元测试里的假 DOM）退回 mouse 事件，
+     *     行为完全一样。
+     *
+     * @param measure - 返回 `{ current, available }`（提交区当前高度与 Changes 可用高度，px）。
+     * @param onChange - 拖动过程中的回调（每帧，参数是 px）。
+     * @param onCommit - 松手时的回调（用于持久化）。
+     * @returns 指针按下的处理器。
+     */
+    function startCommitAreaResize(measure, onChange, onCommit) {
+      return (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault()
+        const startY = event.clientY
+        const start = typeof measure === 'function' ? measure() : {}
+        const startHeight = clampCommitAreaHeight(start?.current, start?.available)
+        const node = event.currentTarget
+        const pointerId = event.pointerId
+        const captured = typeof node?.setPointerCapture === 'function' && pointerId !== undefined
+        if (captured) {
+          try {
+            node.setPointerCapture(pointerId)
+          } catch {
+            // 捕获失败不影响拖动（下面还挂着 document 上的监听）。
+          }
+        }
+        const usePointer = typeof window !== 'undefined' && typeof window.PointerEvent === 'function' && pointerId !== undefined
+        const moveType = usePointer ? 'pointermove' : 'mousemove'
+        const upType = usePointer ? 'pointerup' : 'mouseup'
+        document.body.dataset.reviewDragging = '1'
+        // 纵向拖动要的是 ns-resize：`body[data-review-dragging='1']` 那条规则只给了 col-resize。
+        document.body.dataset.reviewDraggingAxis = 'vertical'
+        const onMove = (moveEvent) => {
+          onChange(clampCommitAreaHeight(startHeight + (startY - moveEvent.clientY), start?.available))
+        }
+        const onUp = () => {
+          document.removeEventListener(moveType, onMove)
+          document.removeEventListener(upType, onUp)
+          delete document.body.dataset.reviewDragging
+          delete document.body.dataset.reviewDraggingAxis
+          onCommit()
+        }
+        document.addEventListener(moveType, onMove)
+        document.addEventListener(upType, onUp)
       }
     }
 

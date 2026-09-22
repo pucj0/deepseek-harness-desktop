@@ -116,7 +116,7 @@ function collectHostNodes(node, key, queued) {
 const domListeners = new Map()
 globalThis.document = {
   head: { appendChild() {} },
-  body: {},
+  body: { dataset: {} },
   addEventListener(type, handler) {
     if (!domListeners.has(type)) domListeners.set(type, new Set())
     domListeners.get(type).add(handler)
@@ -127,12 +127,19 @@ globalThis.document = {
   querySelector: () => null,
   createElement: () => ({ dataset: {}, style: {}, textContent: '', remove() {} }),
 }
+/** `window` 上的监听器（提交区的"窗口尺寸变化重新夹取"依赖它）。 */
+const windowListeners = new Map()
 globalThis.window = {
   innerWidth: 1400,
   innerHeight: 900,
   localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(type, handler) {
+    if (!windowListeners.has(type)) windowListeners.set(type, new Set())
+    windowListeners.get(type).add(handler)
+  },
+  removeEventListener(type, handler) {
+    windowListeners.get(type)?.delete(handler)
+  },
   __ModuleLoader__: {
     load({ factory }) {
       loaded = factory((specifier) => (specifier === 'react' ? react : {}))
@@ -142,6 +149,13 @@ globalThis.window = {
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => '#ffffff' })
 globalThis.setInterval = () => 0
 globalThis.clearInterval = () => {}
+
+/** 往 `document` / `window` 上派发一个事件（拖动与窗口 resize 的监听都挂在这两处）。 */
+const emitOn = (registry, type, event) => {
+  for (const handler of [...(registry.get(type) ?? [])]) handler(event)
+}
+const emitDocument = (type, event) => emitOn(domListeners, type, event)
+const emitWindow = (type, event) => emitOn(windowListeners, type, event)
 
 // ---- 假 host ---------------------------------------------------------------------
 //
@@ -1431,6 +1445,166 @@ console.log('=== 16. 单仓库项目：请求形状与 1.5.2 逐字一致（一�
   check('16) 单仓库时不带 repository', requests.filter((r) => r.body?.repository !== undefined).length, 0)
   check('   仓库根就是工作区自己', snapshotStore.cellKeyFor(WORKSPACE), REPO_ROOT)
   check('   快照正常取到', snapshotStore.get(WORKSPACE)?.phase, 'ready')
+}
+
+console.log('')
+console.log('=== 17. 提交区：默认 8 行 + 顶部可拖 + 持久化（实机反馈的三条）===')
+{
+  // 这一节要动 `localStorage`（持久化）与 `window.PointerEvent`（拖动走 Pointer Events），
+  // 因此换成可观测的版本，结束时还原——其它小节依赖的是"什么都没写过"的 stub。
+  const realLocalStorage = window.localStorage
+  const realPointerEvent = window.PointerEvent
+  const storage = new Map()
+  window.localStorage = {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => {
+      storage.set(key, String(value))
+    },
+    removeItem: (key) => {
+      storage.delete(key)
+    },
+  }
+  window.PointerEvent = function PointerEvent() {}
+
+  const card = () => find('data-staging-commit-card')
+  const handle = () => find('data-staging-commit-resize')
+  const messageBox = () => find('data-staging-message')
+  const actions = () => find('data-staging-commit-actions')
+  const heightOf = () => Number.parseFloat(String(card()?.props?.style?.height ?? '0'))
+  const storedHeight = () => Number(storage.get('dsh.review.commitAreaHeight'))
+  /**
+   * 假 DOM 里没有布局：把"Changes 可用高度"直接喂给根节点的 ref，并派发一次 resize
+   * 让组件重新测量（真实环境里这件事由布局与窗口事件完成）。
+   */
+  const setRoom = (room) => {
+    find('data-staging').props.ref.current = { getBoundingClientRect: () => ({ height: room }) }
+    emitWindow('resize', {})
+  }
+  /**
+   * 一次完整拖动：按下 → 移动 → 松手。
+   *
+   * 走的是 `onPointerDown` + document 上的 `pointermove`/`pointerup`——与真实浏览器一致
+   * （那里 PointerEvent 一定存在），而不是测试专用的旁路。
+   */
+  const drag = async (deltaY, options = {}) => {
+    const startY = 600
+    handle().props.onPointerDown({
+      button: 0,
+      clientY: startY,
+      pointerId: 7,
+      currentTarget: { setPointerCapture() {} },
+      preventDefault() {},
+    })
+    if (options.onMove !== undefined) options.onMove()
+    emitDocument('pointermove', { clientY: startY + deltaY })
+    await settle()
+    if (options.hold !== true) {
+      emitDocument('pointerup', {})
+      await settle()
+    }
+  }
+
+  // ---- A. 默认 8 行：一条正常提交信息不用先手动拉高 ----
+  await mount()
+  setRoom(700)
+  await settle()
+  const defaultHeight = heightOf()
+  check('17) 输入框默认 8 行', messageBox()?.props?.rows, 8)
+  check('   输入框用 flex 填满提交区', String(messageBox()?.props?.style?.flex), '1 1 auto')
+  check('   输入框最小高度归零（拖小也不会顶破布局）', String(messageBox()?.props?.style?.minHeight), '0')
+  check('   输入框没有原生 resize', messageBox()?.props?.style?.resize, 'none')
+  check('   默认高度按行高算出来（远高于旧版 4 行的 90px）', defaultHeight >= 200 && defaultHeight <= 260, true)
+  check('   提交区顶部有高度手柄', handle() !== null, true)
+  check(
+    '   手柄是横向分隔条语义',
+    `${handle()?.props?.role}/${handle()?.props?.['aria-orientation']}`,
+    'separator/horizontal',
+  )
+  check('   按钮行固定不参与收缩', String(actions()?.props?.style?.flexShrink), '0')
+  check('   底部留白 12px（按钮不再贴窗口底边）', card()?.props?.style?.paddingBottom, '12px')
+  check(
+    '   左右各留白 8px',
+    `${card()?.props?.style?.paddingLeft}/${card()?.props?.style?.paddingRight}`,
+    '8px/8px',
+  )
+
+  // ---- B. 往上拖：提交区变高，且松手前不落盘 ----
+  const beforeUp = heightOf()
+  await drag(-80, {
+    hold: true,
+    onMove: () => {
+      check('   拖动期间给 body 打标记（禁选文本）', document.body.dataset.reviewDragging, '1')
+      check('   纵向拖动用 ns-resize 光标', document.body.dataset.reviewDraggingAxis, 'vertical')
+    },
+  })
+  check('   往上拖 80px → 提交区高 80px', heightOf() - beforeUp, 80)
+  check('   松手前不落盘', storage.has('dsh.review.commitAreaHeight'), false)
+  emitDocument('pointerup', {})
+  await settle()
+  check('   松手后清掉拖动标记', document.body.dataset.reviewDragging, undefined)
+  check('   松手后才落盘', storedHeight(), heightOf())
+
+  // ---- C. 往下拖：不能低于下限（约 4 行 + 按钮行） ----
+  await drag(1000)
+  check('   往下拖超过下限 → 停在最小高度', heightOf(), 148)
+  check('   最小高度仍放得下 4 行正文', heightOf() >= 140, true)
+
+  // ---- D. 往上拖很多：不能超过上限（给主区留位置） ----
+  await drag(-5000)
+  check('   往上拖很多 → 停在允许上限', heightOf(), 455)
+  check('   上限按"容器 65% / 视口 55%"里更小的那个', heightOf() <= 455, true)
+
+  // ---- E. 双击手柄复位 ----
+  handle().props.onDoubleClick()
+  await settle()
+  check('   双击复位到默认高度', heightOf(), defaultHeight)
+  check('   并清掉持久化记录', storage.has('dsh.review.commitAreaHeight'), false)
+
+  // ---- F. 重开抽屉继续用用户的高度 ----
+  await drag(-40)
+  const kept = heightOf()
+  check('   拖过的值已落盘', storedHeight(), kept)
+  await mount()
+  setRoom(700)
+  await settle()
+  check('   重新打开后仍是用户的高度', heightOf(), kept)
+
+  // ---- G. 窗口变小：自动夹取，绝不把主区吃光 ----
+  window.innerHeight = 400
+  setRoom(300)
+  await settle()
+  check('   窗口变矮后自动夹取（不超过视口 55%）', heightOf() <= 220, true)
+  // 容器不算高时，"给主区留 200px"这条约束必须真的生效——它是三项里最小的那个：
+  // 视口 55%（2000 → 1100）、容器 65%（400 → 260）、留白（400 − 200 = 200）。
+  window.innerHeight = 2000
+  setRoom(400)
+  await settle()
+  check('   上限取"可用高度 − 200"（65% 更大时）', heightOf(), 200)
+  check('   因此主区至少留下 200px', 400 - heightOf() >= 200, true)
+  setRoom(1300)
+  await settle()
+  window.innerHeight = 900
+  emitWindow('resize', {})
+  await settle()
+  check('   换回大窗口后仍是用户拖过的值（夹取不覆盖选择）', heightOf(), kept)
+
+  // ---- J. AI 填入的多行提交信息不会被拖动弄丢 ----
+  await mount()
+  await click(find('data-staging-ai'))
+  const generated = messageBox()?.props?.value
+  check('   前置：AI 已填入多行提交信息', generated === aiResponse.message, true)
+  await drag(-30)
+  check('   拖动后内容原样保留', messageBox()?.props?.value, generated)
+  check('   而且仍是同一个 8 行输入框', messageBox()?.props?.rows, 8)
+
+  // ---- K. Ctrl+Enter 仍然提交 ----
+  posts.length = 0
+  messageBox().props.onKeyDown({ key: 'Enter', ctrlKey: true, preventDefault() {}, stopPropagation() {} })
+  await settle()
+  checkTrue('   Ctrl+Enter 仍然提交', posts.some((p) => p.route === 'commit'))
+
+  window.localStorage = realLocalStorage
+  window.PointerEvent = realPointerEvent
 }
 
 console.log('')

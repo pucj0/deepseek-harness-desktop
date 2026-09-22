@@ -343,8 +343,22 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
     defaults to **34%**, clamps between 280px and 50% of the available width, resets on double-click
     and is remembered in `dsh.review.changesFileWidth`); below ~900px of available width the two
     panes stack vertically.
-    The message box (4 rows tall, vertically resizable) and **✨ AI draft / Commit / Commit and
-    Push** are pinned to the bottom and never scroll away with a long file list
+    The message box and **✨ AI draft / Commit / Commit and Push** are pinned to the bottom and never
+    scroll away with a long file list
+    - **The commit area at the bottom is a resizable footer.** It defaults to **8 rows** (subject +
+      blank line + 5–6 body lines, so a normal commit message needs no manual resizing first), and
+      it is derived from "rows × line height + action row + padding", so it scales with
+      *Settings → UI font size*. A **horizontal handle on its top edge** (almost invisible until
+      hovered/dragged, `ns-resize` cursor) grows the area when dragged up and shrinks it when
+      dragged down; double-clicking resets to the default. The range is `4 rows + action row` up to
+      `min(55% of the viewport, 65% of the Changes area, area − 200px)` — the last term keeps the
+      **file list / Diff Preview usable at all times**, and even the minimum still fits 4 body
+      lines. The height you drag to is remembered in `dsh.review.commitAreaHeight`; shrinking the
+      window only makes *this* frame shorter (the clamp happens at render time), and growing it back
+      restores your choice. The textarea itself no longer has the native bottom-right resize grip
+      (two competing height controls fight each other); it fills the commit area with `flex`, so
+      dragging grows only the textarea while the action row keeps its height, and the buttons now
+      sit 12px above the window edge instead of touching it.
     - **Untracked files come in two modes** (threshold **50**): at **≤ 50** the main pane lists
       **every** untracked file (checkbox, add to Git, diff, file history — plus an exact `+N`
       computed within a bounded budget: ≤ 1 MB per file, ≤ 8 MB per round, binaries marked
@@ -807,7 +821,7 @@ was verified rather than assumed:
 | `scripts/test-review-lazy-diff.mjs` | per-file diffs on demand: nothing fetched before a click, exactly one request per file, cache keyed by workspace + HEAD |
 | `scripts/test-review-repo-scope.mjs` | scope split and untracked scale: a subdirectory workspace lists the whole repo, the fast path carries no paths, the lazy tree and bulk `git add` stay bounded (6,846 untracked files in the fixture) |
 | `scripts/test-review-commit-message.mjs` | the AI commit-message draft: the three context caps, the prompt is data, output normalisation, the `finish` semantics (`max-tokens`), and naming the missing host service |
-| `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, the two untracked modes and the Browse dialog, and the AI-draft interaction |
+| `scripts/test-review-staging.mjs` | the staging / commit area: the three groups, per-row actions, the commit box, its resizable footer (8-row default, top handle, clamping, persistence), the two untracked modes and the Browse dialog, and the AI-draft interaction |
 | `scripts/test-review-graph-view.mjs` | the three-pane commit graph: the counter, second-accurate times, scroll-triggered paging, and no hash column |
 | `scripts/test-review-drawer-style.mjs` | the drawer's appearance layer: its data markers and style contract stay intact |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |

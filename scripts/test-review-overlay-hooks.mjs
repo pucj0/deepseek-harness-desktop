@@ -696,9 +696,9 @@ console.log('=== 5c. 提交信息输入框：4 行 + 最小高度（item 8）===
   const nodes = await drainPanel()
   const message = nodes.find((node) => node.props?.['data-staging-message'] !== undefined)
   check('5c) 找到提交信息输入框', message !== undefined, 'true')
-  check('   rows 从 2 提到 4', message?.props?.rows, 4)
-  check('   有最小高度（拖小之后仍然够用）', message?.props?.style?.minHeight, '90px')
-  check('   仍然允许纵向拖拽', message?.props?.style?.resize, 'vertical')
+  check('   rows 提到 8（默认就能写完一条提交信息）', message?.props?.rows, 8)
+  check('   填满提交区（flex）', String(message?.props?.style?.flex), '1 1 auto')
+  check('   没有原生 resize（高度归顶部手柄管）', message?.props?.style?.resize, 'none')
   // Ctrl+Enter 仍然提交：这条不能在"把框加大"的改动里被弄丢。
   let prevented = false
   message?.props?.onKeyDown?.({ key: 'Enter', ctrlKey: true, stopPropagation() {}, preventDefault() { prevented = true } })
@@ -790,18 +790,27 @@ console.log('=== 6b. 提交区固定在底部，不随文件列表滚走 ===')
   check('   提交区不参与收缩', String(card?.props?.style?.flexShrink), '0')
   check('   根是纵向 flex', staging?.props?.style?.flexDirection, 'column')
 
-  // ---- 输入框从 2 行长到 4 行（+90px 最小高度）之后，按钮**仍然不会掉出可视区** ----
+  // ---- 提交区是"固定高度、可拖动"的 footer，按钮**仍然不会掉出可视区** ----
   //
-  // 结构上必须成立的两件事：
-  //   1. 提交区里那个 textarea 用的是 `minHeight` 而**不是** `height`：4 行是默认高度，
-  //      用户还能往下拖大，因此"高度只会增"这件事不能靠固定高度假装；
-  //   2. 主区允许被压缩（`flex: 1 1 auto` + `minHeight: 0`）：输入框变高时被挤掉的必须是
+  // 结构上必须成立的三件事（这一版把提交区从"输入框自己撑高"改成"整块 footer 有高度"）：
+  //   1. 高度挂在**提交卡片**上（`height: Npx`，由顶部手柄与持久化决定），输入框用
+  //      `flex: 1 1 auto` + `minHeight: 0` 填满它——这样拖高时变大的只有输入框，
+  //      按钮行的高度是固定的；
+  //   2. 输入框**不再**有原生 resize（两套高度控制会互相打架）；
+  //   3. 主区允许被压缩（`flex: 1 1 auto` + `minHeight: 0`）：提交区变高时被挤掉的必须是
   //      文件列表 / 代码区的可视高度，而不是把提交区推出容器（那正是"按钮跑到屏幕外"的形态）。
   // 另外提交区必须**不在**主区里——在里就会被一起滚走。
   const message = settledNodes.find((n) => n.props?.['data-staging-message'] !== undefined)
   check('   输入框在提交区里', card !== undefined && message !== undefined, 'true')
-  check('   输入框高度是 minHeight 而不是 height', message?.props?.style?.height, undefined)
-  check('   最小高度够放 4 行', message?.props?.style?.minHeight, '90px')
+  check('   输入框填满提交区（flex）', String(message?.props?.style?.flex), '1 1 auto')
+  check('   输入框允许被压缩到 0（minHeight 0）', String(message?.props?.style?.minHeight), '0')
+  check('   输入框没有原生 resize（高度由顶部手柄管）', message?.props?.style?.resize, 'none')
+  check('   默认 8 行', message?.props?.rows, 8)
+  const defaultHeight = String(card?.props?.style?.height ?? '')
+  check('   提交卡片有固定可调高度', /^\d+px$/u.test(defaultHeight), true)
+  check('   提交卡片按行高算高度（高于旧版 4 行 90px）', Number.parseFloat(defaultHeight) > 160, true)
+  check('   按钮行不参与收缩', String(settledNodes.find((n) => n.props?.['data-staging-commit-actions'] !== undefined)?.props?.style?.flexShrink), '0')
+  check('   底部留白 12px（按钮不再贴底）', card?.props?.style?.paddingBottom, '12px')
   check('   主区可被压缩（flex-basis auto）', String(main?.props?.style?.flex), '1 1 auto')
   check('   主区允许收缩到 0（minHeight 0）', String(main?.props?.style?.minHeight), '0')
   check('   提交区不在主区里', main !== undefined && card !== undefined ? main !== card : false, true)

@@ -150,10 +150,10 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '8) 提交框退回 2 行 → rows 断言变红',
-  from: '            rows: 4,',
-  to: '            rows: 2,',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '8) 提交框退回 4 行 → rows 断言变红',
+  from: '            rows: COMMIT_ROWS,',
+  to: '            rows: 4,',
+  script: 'test-review-staging.mjs',
 })
 
 mutate({
@@ -470,6 +470,75 @@ mutate({
   from: '      const repositoryRoot = activeRepositoryOf(cwd)\n      if (repositoryRoot !== \'\') params.set(\'repository\', repositoryRoot)',
   to: '      const repositoryRoot = activeRepositoryOf(cwd)\n      if (false) params.set(\'repository\', repositoryRoot)',
   script: 'test-gitbar-branch-interaction.mjs',
+})
+
+// ===========================================================================
+// 1.5.6：Changes 底部提交区（默认 8 行 / 顶部可拖 / 持久化）
+// ===========================================================================
+
+mutate({
+  file: CLIENT,
+  label: '25) 拖动方向反了（往下拖变高）→ "往上拖 +80px"变红',
+  from: '          onChange(clampCommitAreaHeight(startHeight + (startY - moveEvent.clientY), start?.available))',
+  to: '          onChange(clampCommitAreaHeight(startHeight + (moveEvent.clientY - startY), start?.available))',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '26) 把"拖出来的负数"当成没拖过 → 拖到底反而跳回默认高度',
+  // 这正是实现时真的写错过一次的地方：`value > 0` 的判据让"往下拖 1000px"变成"用默认值"。
+  from: '      const raw = Number.isFinite(value) ? value : commitDefaultHeight()',
+  to: '      const raw = Number.isFinite(value) && value > 0 ? value : commitDefaultHeight()',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '27) 最小高度放宽到 1 行 → "停在最小高度"变红',
+  from: '    const COMMIT_MIN_ROWS = 4',
+  to: '    const COMMIT_MIN_ROWS = 1',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '28) 上限不再给主区留位置 → "给主区留下至少 200px"变红',
+  from: '      const max = Math.max(min, Math.min(viewport * 0.55, room * 0.65, room - COMMIT_MAIN_MIN_PX))',
+  to: '      const max = Math.max(min, Math.min(viewport * 0.55, room * 0.65))',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '29) 重开抽屉不再读回用户高度 → "重新打开后仍是用户的高度"变红',
+  from: '      const [commitHeight, setCommitHeight] = react.useState(() => commitAreaHeightStore.get())',
+  to: '      const [commitHeight, setCommitHeight] = react.useState(() => undefined)',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '30) 双击手柄不复位持久化 → "清掉持久化记录"变红',
+  from: '            onDoubleClick: () => {\n              commitAreaHeightStore.reset()\n              setCommitHeight(undefined)\n            },',
+  to: '            onDoubleClick: () => {\n              setCommitHeight(undefined)\n            },',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '31) 输入框重新开原生 resize 且不再填满提交区 → "没有原生 resize"变红',
+  from: "              flex: '1 1 auto',\n              minHeight: 0,\n              padding: '7px 9px',",
+  to: "              minHeight: '90px',\n              padding: '7px 9px',",
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '32) 去掉底部留白 → "底部留白 12px"变红',
+  from: "              paddingBottom: '12px',",
+  to: "              paddingBottom: '2px',",
+  script: 'test-review-staging.mjs',
 })
 
 console.log('')
