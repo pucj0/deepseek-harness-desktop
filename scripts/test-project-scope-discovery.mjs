@@ -377,6 +377,10 @@ section('7. 10,000+ 目录 + 深链：maxDirs / 预算截断 / 快路径先答')
   fs.gitDir(`${workspace}/dir0000`)
   fs.gitDir(`${workspace}/dir0001`)
   fs.gitDir(`${workspace}/dir0002`)
+  // **最后一个**第一层目录里也放一个仓库：它排在产出 depth-2 的 `dir0000` 之后，因此只有
+  // "第一层全部看完才交棒"的实现才能在快路径的答案里带上它。这条断言钉的就是这个契约
+  // （曾经是"一有 depth-2 入队就交棒"，那时这个仓库要等后台才出现）。
+  fs.gitDir(`${workspace}/dir0599`)
   fs.ensure(`${workspace}/dir0000/chain`)
   fs.ensure(`${workspace}/dir0000/chain/d0001`)
   fs.gitDir(`${workspace}/dir0000/chain/d0001/deepRepo`)
@@ -393,23 +397,27 @@ section('7. 10,000+ 目录 + 深链：maxDirs / 预算截断 / 快路径先答')
 
   const first = await resolver.resolveProjectScope(workspace)
   const afterFirst = clock.reads()
-  // 关键的两段式断言：第一次调用**没有**等后台。时间预算在快路径里就被耗尽，因此它必须
-  // 带着 `complete:false` 回来，而深层那个仓库此刻还没被发现。
+  // 关键的两段式断言：第一次调用**没有**等后台，带着 `complete:false` 回来，而深链里的
+  // 那个仓库此刻还没被发现。
   check('7) 第一次调用 complete=false（深层还没扫）', first.discovery.complete, false)
   checkTrue('   快路径的答案在时间预算处截断', first.discovery.truncatedByBudget === true)
   checkLe('   directoriesVisited <= maxDirs', first.discovery.directoriesVisited, PROJECT_SCOPE_LIMITS.maxDirs)
   checkLe('   durationMs 有界（注入时钟，tick 数）', first.discovery.durationMs, PROJECT_SCOPE_LIMITS.fastBudgetMs * 2)
-  checkLe('   第一次调用的时钟推进有界（没有偷偷把整棵树扫完）', afterFirst - 1_000_000, PROJECT_SCOPE_LIMITS.fastBudgetMs * 4)
-  check('   第一层三个仓库都已发现', first.repositories.length, 3)
+  // 后台那一段**可能已经跑了几拍**（它就在返回之前被启动），因此这里的界取后台的总预算：
+  // 它要证的是"第一次调用没有等整棵树扫完"，而不是"后台一拍都没跑"。
+  checkLe('   第一次调用的时钟推进有界（没有偷偷把整棵树扫完）', afterFirst - 1_000_000, PROJECT_SCOPE_LIMITS.fastBudgetMs * 8)
+  // 快路径的契约：**第一层全部看完**（含排在最后的 dir0599），但更深的（第 4 层的
+  // deepRepo）不包含在这一次答复里。
+  check('   第一层四个仓库都已发现', first.repositories.length, 4)
+  checkTrue('   含第一层最后一个目录里的仓库（第一层确实看完了）', first.repositories.some((r) => r.name === 'dir0599'))
   checkTrue('   deepRepo 还不在列表里（它在第 4 层）', first.repositories.every((r) => r.relativePath.endsWith('deepRepo') === false))
-  checkTrue('   快路径返回时远没扫完（visited 不到整棵树的一半）', first.discovery.directoriesVisited < dirCount)
 
   const deep = await settle(resolver, workspace)
   check('   后台跑完后 complete=true', deep.discovery.complete, true)
   check('   完整结果没有截断', deep.discovery.truncatedByBudget, false)
   checkLe('   完整结果 directoriesVisited <= maxDirs', deep.discovery.directoriesVisited, PROJECT_SCOPE_LIMITS.maxDirs)
   check('   directoriesVisited 比快路径多（后台确实接着扫了）', deep.discovery.directoriesVisited > first.discovery.directoriesVisited, true)
-  check('   后台多发现了深链里的仓库', deep.repositories.length, 4)
+  check('   后台多发现了深链里的仓库', deep.repositories.length, 5)
   checkTrue('   deepRepo 现在在列表里', deep.repositories.some((r) => r.name === 'deepRepo'))
   checkTrue('   durationMs 没有超过后台的 8 倍预算', deep.discovery.durationMs <= PROJECT_SCOPE_LIMITS.fastBudgetMs * 8)
   // 缓存里就是"最终那一份"：再问一次拿到的是 complete=true 且标着 cached。

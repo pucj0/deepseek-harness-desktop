@@ -386,6 +386,20 @@ export function createRepoContextResolver(options) {
     let until = fastDeadline
     let truncated = false
     let phase = 'fast'
+    /**
+     * 快路径（depth 0/1）里"入队了多少个 depth-1 目录"与"已经看过多少个"。
+     *
+     * 快路径的交棒点是**第一层全部看完**，而不是"刚有 depth-2 入队"：BFS 是按层入队的
+     * （depth-1 全部由根目录那一步入队，depth-2 只能排在它们后面），因此用一个计数器就
+     * 能 O(1) 判断"第一层看完了"。
+     *
+     * 为什么必须等到第一层看完：仓促交棒时，交出去的那份列表可能**只包含第一层的前几个
+     * 目录里发现的仓库**——实机形状恰好是这样（`src/`、`assets/` 之类排在仓库目录前面），
+     * 用户会先看到"这个项目里只有一个仓库"。等第一层看完再交棒，第一次答复就包含全部
+     * 第一层的仓库；更深的仍由后台补。
+     */
+    let shallowQueued = 0
+    let shallowDone = 0
 
     /**
      * 从队首取下一批（最多 `concurrency` 个），并保证**记账上界 `maxDirs` 是硬上限**：
@@ -408,6 +422,15 @@ export function createRepoContextResolver(options) {
       // 时间预算只在**访问目录之间**检查：单次 listDirectory 可能很慢，但不能因为它慢就把
       // 已经开始的这一轮记账丢在半路（`visited` 与实际发生的调用必须一致）。
       if (now() >= until) {
+        if (phase === 'fast' && head < queue.length) {
+          // 快路径预算用尽，但队列里还有事可做：把**已经拿到的答案**交出去，剩余的交后台。
+          // 以前这里直接 `break`（整次发现到此为止），于是在"第一层就有几百上千个目录"的
+          // 真机上，更深的仓库永远不会被发现——直到 60 秒缓存过期才可能重扫一次。
+          phase = 'deep'
+          until = deepUntil
+          yield { fast: true }
+          continue
+        }
         truncated = true
         break
       }
@@ -431,6 +454,7 @@ export function createRepoContextResolver(options) {
 
       for (const { item, names } of listed) {
         state.visited += 1
+        if (item.depth === 1) shallowDone += 1
         if (exists(`${item.path}/.git`)) {
           state.candidates += 1
           state.probes += 1
@@ -453,22 +477,26 @@ export function createRepoContextResolver(options) {
           // 入队目录（不是 depth > maxDepth——那样在第一层全是浅目录时会一个都不数，快路径
           // 会被误判成"整棵树扫完了"）。
           if (depth > 1) state.deepQueued += 1
+          else shallowQueued += 1
           queue.push({ path: directory(`${item.path}/${child.name}`), depth })
         }
       }
 
-      // 快路径边界：第一批 depth 0、之后全是 depth 1，直到底层 BFS 开始产出 depth 2（或更高）
-      // 的目录。"有 depth >= 2 入队"这个判据意味着 depth 0/1 都已经处理完了：
-      //   * 换成一个"队列里还剩几个 depth-1"的计数器会错在"第一层全是叶子目录"——计数器会在
-      //     还没产出任何 depth-2 时归零，于是快路径被误判成"整棵树扫完了"，后台永远不跑
-      //     （真机的形状恰好就是这样：第一层几百上千个叶子目录，仓库埋在其中一个的子目录里）；
-      //   * 换成"队列非空"会错在 depth 0 刚列完就交棒，快路径连第一层都没看。
-      if (phase === 'fast' && state.deepQueued > 0) {
+      /**
+       * 快路径边界：**第一层看完了**，而且确实还有更深的目录（`deepQueued > 0`）。
+       *
+       * 判据不是"队列里还有没有 depth-1"（那要靠遍历队列，宽树上是 O(n²)）而是两个计数器：
+       * depth-1 的入队数与访问数相等；再加上 `shallowQueued > 0`（根本没有子目录时由"队列
+       * 空"那条路径自然结束，不会误交棒）。
+       *
+       * 也不能换成"队列非空"：那会在 depth 0 刚列完就交棒，快路径连第一层都没看。
+       */
+      if (phase === 'fast' && shallowQueued > 0 && shallowDone >= shallowQueued && state.deepQueued > 0) {
         phase = 'deep'
         until = deepUntil
-        // 队列里还有东西 -> 后台那一段有事可做；没有的话（极罕见：deepQueued 来自
-        // maxDirs 截断后的残留）主循环会自然退出。
-        if (head < queue.length) yield { fast: true }      }
+        // 队列里还有东西 -> 后台那一段有事可做；没有的话主循环会自然退出。
+        if (head < queue.length) yield { fast: true }
+      }
     }
 
     // `truncated` 覆盖两种**真的没扫完**：撞到 `maxDirs`，或时间预算耗尽。走到 maxDepth

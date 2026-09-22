@@ -411,8 +411,8 @@ mutate({
 mutate({
   file: HOST,
   label: '21b) 宿主忽略 repository（多仓库时永远操作默认那个）→ 分支/暂存落错仓库变红',
-  from: "  if (typeof repository === 'string' && repository !== '') {",
-  to: "  if (false) {",
+  from: "  const explicit = typeof repository === 'string' && repository !== ''",
+  to: "  const explicit = false && typeof repository === 'string' && repository !== ''",
   script: 'test-review-repo-scope.mjs',
 })
 
