@@ -316,6 +316,8 @@ window.__ModuleLoader__.load({
       }
       [data-review-title] {
         display: flex; align-items: baseline; gap: 7px; min-width: 0;
+        /* 标题是固定文案，不参与收缩：窄面板下该让位的是仓库名（它带省略号）。 */
+        flex: 0 0 auto;
         font-size: ${uiPx(13)}; font-weight: 600; letter-spacing: .01em;
         color: var(--dsw-alias-label-primary);
       }
@@ -328,6 +330,27 @@ window.__ModuleLoader__.load({
         font-family: ${CODE_FONT}; font-size: ${uiPx(11.5)}; font-weight: 500; line-height: ${uiPx(17)};
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
+
+      /* 仓库 scope 选择器：整个 Git 工具窗的作用域。Changes 的文件列表、右侧 diff、
+       * 底部提交框、Log 的分支树/提交图/详情全部只作用于它，因此它住在头栏里、**页签之上**，
+       * 而不是某一个页签的工具条里。宽度封顶 + 省略号，长仓库名不许把标题挤变形。
+       *
+       * 字号刻意不写在这里：它由内联样式给（与抽屉里其它控件同一套 uiPx 派生值），
+       * 样式块里的设计值集合有测试逐字钉着（见 test-review-graph-view 的 9d）。 */
+      [data-review-repo-scope] {
+        display: inline-flex; align-items: center; gap: 5px;
+        /* 头栏是**一行**：标题（固定）+ 仓库 + 分支 + 计数 + 动作。窄面板下能收缩的只有
+         * 这里，因此它带省略号（长仓库名截断，悬停看 title 里的完整路径）。 */
+        flex: 0 1 auto;
+        min-width: 0; max-width: 260px;
+        font-family: ${UI_FONT};
+        color: var(--dsw-alias-label-secondary);
+      }
+      /* 单仓库：这里只是一句静态文案（名字 · 分支），没有可点的东西，因此不给悬停态。 */
+      [data-review-repo-static] { cursor: default; }
+      [data-review-repo-select-button]:hover { background: var(--dsh-review-hover); }
+      [data-review-repo-select-button]:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 1px; }
+      [data-review-repo-option]:hover { background: var(--dsh-review-hover); }
 
         // 分区标题：小号、加粗、次级色，用**字重与颜色**表达层级，不用大写转换
         // （CSS 的 text-transform: uppercase 对中文没有可见效果，却会让混排的英文单词
@@ -3458,6 +3481,55 @@ window.__ModuleLoader__.load({
           label,
         )
 
+      /**
+       * 分支徽标（图标 + 分支名）。
+       *
+       * 抽成一个**普通函数**（不是组件）是为了让头栏与单仓库的仓库 scope 拿到逐字一样的
+       * 标记与外观：`data-review-branch` 是脚本、自动化与样式共同依赖的锚点，两处各写一遍
+       * 迟早会不一致。空分支名返回 null（没有分支可显示时不占位）。
+       *
+       * @param branchName - 分支名。
+       * @returns React 元素或 null。
+       */
+      const branchBadge = (branchName) =>
+        branchName === ''
+          ? null
+          : react.createElement(
+              'span',
+              { 'data-review-branch': branchName, title: branchName },
+              react.createElement(
+                'svg',
+                { width: 11, height: 11, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+                react.createElement('path', {
+                  d: 'M5 3.5a1.6 1.6 0 1 0 0 .01M5 12.5a1.6 1.6 0 1 0 0 .01M11 6.5a1.6 1.6 0 1 0 0 .01M5 5.1v5.8M6.6 4.2h2.9a1.5 1.5 0 0 1 1.5 1.5v.8',
+                  stroke: 'currentColor',
+                  strokeWidth: 1.3,
+                  strokeLinecap: 'round',
+                }),
+              ),
+              branchName,
+            )
+
+      /**
+       * 单仓库项目：仓库 scope 只做静态展示（`名字 · 分支`），不给下拉箭头。
+       *
+       * 没有选择余地的控件只会让人白点一次，因此这一支不渲染按钮、也不渲染菜单。
+       */
+      const singleRepository = repositories.length === 1
+
+      /**
+       * 页签内容的**作用域键**：仓库没换时它是常量，仓库一换它立刻变。
+       *
+       * 用它给两个页签体加 `key`，等价于"切仓库就换一棵新子树"：Log 会重新拉第一页提交图，
+       * 提交框里的草稿、勾选与 AI 建议也会一起清掉。这不是额外开销，而是正确性——A 仓库
+       * 的提交信息、勾选状态与 AI 结果都不该被带到 B 仓库去（数据层换了仓库，UI 的
+       * **本地**状态也必须一起换，否则"勾了 3 个文件"会凭空落到另一个仓库上）。
+       *
+       * 用 `snapshot.repositoryRoot` 而不是选择器里的 active 仓库：前者恰好是"数据真的
+       * 换到新仓库了"那一刻才变，因此不会出现"键已经变了、内容还是旧仓库"的中间帧。
+       */
+      const bodyScopeKey = snapshot?.repositoryRoot ?? ''
+
       return react.createElement(
         'aside',
         {
@@ -3508,30 +3580,43 @@ window.__ModuleLoader__.load({
         }),
         react.createElement(
           'div',
-          { 'data-review-header': '' },
-          // 标题与分支徽标：抽屉里第一个要回答的问题是"我在哪个分支上提交"。
+          {
+            'data-review-header': '',
+            // 头栏也是仓库菜单的**定位父级**：菜单在它下面展开，宽度以它的宽度（= 抽屉宽度）
+            // 为上限。挂在选择器自己身上会有一个真问题——抽屉最窄允许到 320px，而选择器
+            // 位于标题右侧，从那里向右展开 240px 起步的菜单会被抽屉的 `overflow: hidden`
+            // 裁掉一截（英文界面标题更长，裁得更多）。
+            style: { position: 'relative' },
+          },
+          // 标题：抽屉里第一个要回答的问题是"这是哪个项目的 Git"。
           react.createElement(
             'div',
             { 'data-review-title': '' },
             react.createElement('strong', { style: { fontWeight: 600 } }, title),
-            branch === ''
-              ? null
-              : react.createElement(
-                  'span',
-                  { 'data-review-branch': branch, title: branch },
-                  react.createElement(
-                    'svg',
-                    { width: 11, height: 11, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
-                    react.createElement('path', {
-                      d: 'M5 3.5a1.6 1.6 0 1 0 0 .01M5 12.5a1.6 1.6 0 1 0 0 .01M11 6.5a1.6 1.6 0 1 0 0 .01M5 5.1v5.8M6.6 4.2h2.9a1.5 1.5 0 0 1 1.5 1.5v.8',
-                      stroke: 'currentColor',
-                      strokeWidth: 1.3,
-                      strokeLinecap: 'round',
-                    }),
-                  ),
-                  branch,
-                ),
           ),
+          // 仓库 scope 选择器紧跟在标题右边，位于 **Changes | Log 之上**。
+          //
+          // 位置是有意的：它是整个 Git 工具窗的**作用域**（Changes 的文件列表与右侧 diff、
+          // 底部提交框、Log 的分支树/提交图/详情全部只作用于它），必须比两个页签更外一层，
+          // 而且**不随页签切换重新挂载**——它是同一棵子树里的同一个位置，切换页签只换下面
+          // 的页签体，React 连它的 DOM 节点都不会重建（位置因此纹丝不动）。
+          //
+          // 头栏是本抽屉的"第一视觉区域"：打开面板第一眼就能看到当前在哪个仓库、哪个分支，
+          // 而不是要往右上角、或者点开某个页签才看得到。
+          react.createElement(RepositoryScope, {
+            t,
+            repositories,
+            active: activeRepository,
+            onSelect: selectRepository,
+            discovering: discoveringRepositories,
+            // 单仓库时这一块自己写着 `名字 · 分支`（见 RepositoryScope），因此不叠分支徽标。
+            branch,
+          }),
+          // 分支徽标：整个抽屉里"我在哪个分支上提交"是第一个要回答的问题。
+          //
+          // 单仓库时分支已经写在仓库 scope 里（`haiwei-backend · master`），这里不重复；
+          // 多仓库、以及仓库还没解析出来时照旧显示。
+          singleRepository ? null : branchBadge(branch),
           react.createElement('span', { 'data-review-count': '' }, String(fileCount)),
           react.createElement('span', { style: { flex: 1 } }),
           // 刷新：IDEA 的工具窗左上角也有这个动作；这里放在右侧，靠近"关闭"。
@@ -3579,6 +3664,9 @@ window.__ModuleLoader__.load({
         ),
         // 工作区选择器已移除：工作区跟随当前对话，不可编辑、也不展示路径。
         //
+        // 页签行里**只有两个页签**：仓库 scope 选择器在头栏里（见上），因为它是整个工具窗
+        // 的作用域而不是页签的工具条部件。这样切到 Log 之后它的位置、DOM 节点都纹丝不动。
+        //
         // 项目级的两个页签**自己撑满剩余高度**（`flex: 1 1 auto; min-height: 0`）：
         // 提交区要固定在底部，就不允许外层再套一层 `overflow: auto`——那样提交框会跟着
         // 超长文件列表一起滚走（这正是要修掉的一处）。
@@ -3598,30 +3686,14 @@ window.__ModuleLoader__.load({
                 },
                 tabButton('changes', t('changesTab')),
                 tabButton('log', t('logTab')),
-                // 多仓库项目：页签右侧是**仓库选择器**。
-                //
-                // 放在页签这一层（而不是分别塞进 Changes 与 Log）是有意的：一个项目里"当前在
-                // 看哪个仓库"是**整个面板**的状态——Changes 的文件列表、右侧 diff、底部提交框，
-                // 以及 Log 的分支树/提交图/详情都属于它。两处各放一个选择器就会出现"Log 在看
-                // backend、Changes 在提交 frontend"这种自相矛盾的界面。
-                //
-                // 单仓库（含"工作区自己是仓库"与"只有一个子仓库"）时**整块不渲染**：需求明确
-                // 要求不要多套一层没意义的标题。
-                repositories.length > 1
-                  ? react.createElement(RepositorySelect, {
-                      t,
-                      repositories,
-                      active: activeRepository,
-                      onSelect: selectRepository,
-                      discovering: discoveringRepositories,
-                    })
-                  : null,
               ),
               tab === 'log'
                 ? react.createElement(
                     'div',
                     {
-                      key: 'log',
+                      // key 里带**仓库**（见 bodyScopeKey）：切仓库 = 换一棵新子树，
+                      // Log 因此重新拉新仓库的提交图，绝不会留着上一个仓库的提交。
+                      key: `log@${bodyScopeKey}`,
                       'data-review-tab-body': 'log',
                       style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
                     },
@@ -3644,7 +3716,9 @@ window.__ModuleLoader__.load({
                 : react.createElement(
                     'div',
                     {
-                      key: 'changes',
+                      // 同上：切仓库就换一棵新子树。提交框里的草稿、勾选与 AI 建议都属于
+                      // **上一个仓库**，绝不能跟着数据一起漂到新仓库上。
+                      key: `changes@${bodyScopeKey}`,
                       'data-review-tab-body': 'changes',
                       style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
                     },
@@ -3665,7 +3739,7 @@ window.__ModuleLoader__.load({
                       /**
                        * 多仓库项目：提交框的标题里带上"哪个仓库"。
                        *
-                       * 提交框固定在底部，而仓库选择器在顶部页签那一行——中间隔着整个文件
+                       * 提交框固定在底部，而仓库 scope 选择器在头栏里——中间隔着整个文件
                        * 列表。多仓库时**必须**在提交框自己这一层再说一次仓库名，否则用户
                        * 盯着"提交信息 (master)"根本不知道这次提交会落到哪个仓库里。
                        * 单仓库时传空串，标题与 1.5.2 逐字一致。
@@ -4051,22 +4125,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 多仓库项目的**仓库选择器**（页签右侧那一小块）。
+     * **仓库 scope 选择器**（抽屉头栏里、标题右侧那一块）。
      *
-     * 为什么是整个面板级的一个选择器，而不是 Changes 与 Log 各来一个：`active` 仓库决定了
+     * 为什么是整个工具窗级的一个选择器，而不是 Changes 与 Log 各来一个：`active` 仓库决定了
      * 文件列表、右侧 diff、暂存区、提交框、分支树、提交图与提交详情——它是一份全局状态。
-     * 两处各放一个就会出现"Log 在看 backend、Changes 在提交 frontend"。
+     * 两处各放一个就会出现"Log 在看 backend、Changes 在提交 frontend"。它也因此住在头栏里、
+     * 位于两个页签**之上**：它是 scope，不是某一个页签的筛选器。
      *
-     * 单仓库（"工作区自己是仓库"或"只有一个子仓库"）时**整块不渲染**：那是 1.5.2 的一贯
-     * 界面，不该多出一层没有选择余地的标题。
+     * 三种形状（都有测试钉着）：
+     *   * **多仓库**：下拉按钮 `[名字 ▾]`；菜单里每个仓库一行——名字 / 分支 / 改动数，
+     *     当前那一行带 ✓；后台还在发现更多仓库时，**菜单最后一行**给一句轻量状态（它以前
+     *     常驻在头栏右上角，而那是最显眼、最容易被当成数值来读的位置）；
+     *   * **单仓库**：**不渲染下拉**，只显示静态的 `名字 · 分支`——没有选择余地的控件
+     *     只会让人白点一次；
+     *   * **一个仓库都还没解析出来**：整块不渲染（分支徽标照常显示）。
      *
-     * @param props - `{ t, repositories, active, onSelect, discovering }`。
+     * @param props - `{ t, repositories, active, onSelect, discovering, branch }`。
      * @returns React 元素。
      */
-    function RepositorySelect(props) {
+    function RepositoryScope(props) {
       const { t, repositories, active } = props
       const onSelect = typeof props?.onSelect === 'function' ? props.onSelect : () => undefined
       const discovering = props?.discovering === true
+      /** 单仓库时的兜底分支：per-repo 快照可能还没到，而面板自己那份快照已经有分支了。 */
+      const fallbackBranch = typeof props?.branch === 'string' ? props.branch : ''
       const [menuOpen, setMenuOpen] = react.useState(false)
       const rootRef = react.useRef(null)
 
@@ -4093,15 +4175,66 @@ window.__ModuleLoader__.load({
       if (current === undefined) return null
       const branchOf = (entry) => (typeof entry?.snapshot?.branch === 'string' ? entry.snapshot.branch : '')
       const countOf = (entry) => (Number.isFinite(entry?.snapshot?.changedFiles) ? entry.snapshot.changedFiles : 0)
-      const label = `${current.name}${branchOf(current) === '' ? '' : ` (${branchOf(current)})`}`
+      /**
+       * 长名字一律省略号。
+       *
+       * 显示名（目录名）可能很长，而这一块在头栏里、左边是标题、右边是分支与计数：放任它
+       * 撑开就会把标题与动作按钮挤变形。完整路径放在 `title` 里（需求：悬停要看得到仓库根）。
+       */
+      const ELLIPSIS = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }
 
+      // ---- 单仓库：静态文案，没有箭头、没有菜单、没有可点的东西 ----
+      if (repositories.length <= 1) {
+        const branchName = branchOf(current) === '' ? fallbackBranch : branchOf(current)
+        return react.createElement(
+          'span',
+          {
+            'data-review-repo-scope': '',
+            'data-review-repo-static': current.repositoryRoot,
+            // 完整路径：显示名往往只是最后一段目录名，同名仓库只能靠路径区分。
+            title: current.repositoryRoot,
+            style: {
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '5px',
+              minWidth: 0,
+              maxWidth: '260px',
+              fontFamily: UI_FONT,
+              fontSize: uiPx(12),
+              color: 'var(--dsw-alias-label-secondary)',
+            },
+          },
+          react.createElement('span', { style: { flex: '0 1 auto', ...ELLIPSIS } }, current.name),
+          // 单仓库时"名字 · 分支"就是全部信息；分支徽标那一格因此不再重复渲染（见头栏）。
+          branchName === '' ? null : react.createElement('span', { style: { opacity: 0.45, flexShrink: 0 } }, '·'),
+          branchName === ''
+            ? null
+            : react.createElement(
+                'span',
+                { 'data-review-branch': branchName, title: branchName, style: { flexShrink: 1, ...ELLIPSIS } },
+                branchName,
+              ),
+        )
+      }
+
+      // ---- 多仓库：下拉 ----
       return react.createElement(
         'div',
         {
           ref: rootRef,
+          'data-review-repo-scope': '',
           'data-review-repo-select': '',
-          // 页签占满左边，这一块贴右；`marginLeft: 'auto'` 是唯一需要的布局声明。
-          style: { position: 'relative', marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '6px' },
+          style: {
+            // 刻意**不带** `position: relative`：菜单要相对头栏定位（见头栏上的说明），
+            // 因此这里不能自己成为定位父级。
+            display: 'inline-flex',
+            alignItems: 'center',
+            minWidth: 0,
+            maxWidth: '260px',
+            fontFamily: UI_FONT,
+            fontSize: uiPx(12),
+            color: 'var(--dsw-alias-label-secondary)',
+          },
         },
         react.createElement(
           'button',
@@ -4110,14 +4243,19 @@ window.__ModuleLoader__.load({
             'data-review-repo-select-button': '',
             'aria-haspopup': 'menu',
             'aria-expanded': menuOpen,
-            title: t('repoSelectorLabel'),
+            'aria-label': `${t('repoSelectorLabel')}: ${current.name}`,
+            // 完整路径（需求）：显示名可能被省略号截断，悬停必须还能看出是哪一个仓库。
+            title: current.repositoryRoot,
             onClick: () => setMenuOpen(!menuOpen),
             style: {
               display: 'inline-flex',
               alignItems: 'center',
               gap: '6px',
-              maxWidth: '240px',
-              padding: '2px 8px',
+              minWidth: 0,
+              maxWidth: '100%',
+              height: '26px',
+              padding: '0 8px',
+              boxSizing: 'border-box',
               borderRadius: '6px',
               border: `1px solid ${BORDER}`,
               background: 'transparent',
@@ -4127,23 +4265,16 @@ window.__ModuleLoader__.load({
               cursor: 'pointer',
             },
           },
-          // 仓库名 + 分支：**必须同时显示分支**——同名仓库（例如两个 `frontend`）只有分支
-          // 能区分开，而"提交到哪个分支"正是用户点这个按钮时最关心的事。
-          react.createElement('span', { 'data-review-repo-current': current.repositoryRoot, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+          // 只写**仓库名**：分支与改动数就紧跟在这一块后面（头栏里各占一格），重复写一遍
+          // 既挤又没有信息量；同名仓库靠悬停时的完整路径区分。
           react.createElement(
             'span',
-            { 'data-review-repo-current-count': String(countOf(current)), style: { opacity: 0.7 } },
-            String(countOf(current)),
+            { 'data-review-repo-current': current.repositoryRoot, style: { fontWeight: 500, ...ELLIPSIS } },
+            current.name,
           ),
-          react.createElement('span', { 'aria-hidden': 'true', style: { opacity: 0.6 } }, '▾'),
+          // 箭头只在多仓库时出现（单仓库那一支根本没有按钮）。
+          react.createElement('span', { 'aria-hidden': 'true', style: { opacity: 0.6, flexShrink: 0 } }, '▾'),
         ),
-        discovering
-          ? react.createElement(
-              'span',
-              { 'data-review-repo-discovering': '', style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)' } },
-              t('repoDiscovering'),
-            )
-          : null,
         menuOpen
           ? react.createElement(
               'div',
@@ -4152,10 +4283,14 @@ window.__ModuleLoader__.load({
                 role: 'menu',
                 style: {
                   position: 'absolute',
+                  // 相对**头栏**定位（选择器不是定位父级）：菜单从头栏下沿展开，左边与头栏的
+                  // 内边距对齐。
                   top: '100%',
-                  right: 0,
+                  left: '16px',
                   marginTop: '4px',
-                  minWidth: '220px',
+                  // 宽度以头栏（= 抽屉）为上限：窄抽屉里菜单跟着变窄，永远不会被裁掉。
+                  minWidth: 'min(240px, calc(100% - 32px))',
+                  maxWidth: 'min(380px, calc(100% - 32px))',
                   maxHeight: '320px',
                   overflow: 'auto',
                   padding: '4px',
@@ -4176,18 +4311,22 @@ window.__ModuleLoader__.load({
                 },
                 t('repositoryCount', { count: repositories.length }),
               ),
-              ...repositories.map((entry) =>
-                react.createElement(
+              ...repositories.map((entry) => {
+                const isCurrent = entry.repositoryRoot === current.repositoryRoot
+                return react.createElement(
                   'button',
                   {
                     key: entry.repositoryRoot,
                     type: 'button',
                     role: 'menuitemradio',
-                    'aria-checked': entry.repositoryRoot === current.repositoryRoot,
+                    'aria-checked': isCurrent,
                     'data-review-repo-pick': entry.repositoryRoot,
+                    'data-review-repo-option': '',
+                    // 菜单项里的名字同样可能被截断，路径放 title。
+                    title: entry.repositoryRoot,
                     onClick: () => {
                       setMenuOpen(false)
-                      if (entry.repositoryRoot !== current.repositoryRoot) onSelect(entry.repositoryRoot)
+                      if (!isCurrent) onSelect(entry.repositoryRoot)
                     },
                     style: {
                       display: 'flex',
@@ -4205,31 +4344,73 @@ window.__ModuleLoader__.load({
                       cursor: 'pointer',
                     },
                   },
-                  react.createElement('span', { style: { width: '12px', opacity: 0.8 } }, entry.repositoryRoot === current.repositoryRoot ? '✓' : ''),
-                  react.createElement('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, entry.name),
+                  // ✓ 只画在**当前**那一行：它是"这次提交会落到哪儿"的唯一提示。占位宽度
+                  // 保持不变，因此各项的名字左边缘是对齐的。
+                  react.createElement(
+                    'span',
+                    {
+                      'data-review-repo-check': isCurrent ? '1' : '0',
+                      'aria-hidden': 'true',
+                      style: { width: '12px', flexShrink: 0, color: ACCENT, opacity: isCurrent ? 1 : 0 },
+                    },
+                    '✓',
+                  ),
+                  react.createElement(
+                    'span',
+                    { style: { flex: '1 1 auto', fontWeight: isCurrent ? 600 : 400, ...ELLIPSIS } },
+                    entry.name,
+                  ),
                   // 子目录仓库把相对路径一并标出：`haiwei-manage-fronted` 这个名字在
                   // "工作区里有好几个 frontend"时不足以定位，路径才能。
                   entry.relativePath === ''
                     ? null
                     : react.createElement(
                         'span',
-                        { style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' } },
+                        {
+                          style: {
+                            fontSize: uiPx(11),
+                            color: 'var(--dsw-alias-label-tertiary, #8a8f99)',
+                            maxWidth: '120px',
+                            flexShrink: 0,
+                            ...ELLIPSIS,
+                          },
+                        },
                         entry.relativePath,
                       ),
-                  branchOf(entry) === ''
-                    ? null
-                    : react.createElement(
-                        'span',
-                        { 'data-review-repo-branch': entry.repositoryRoot, style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)' } },
-                        branchOf(entry),
-                      ),
+                  // 分支与改动数：菜单里每一项都要有。分支读不到时给一个横线占位，免得同一列
+                  // 在各项之间忽有忽无。
                   react.createElement(
                     'span',
-                    { 'data-review-repo-count': entry.repositoryRoot, style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)' } },
+                    {
+                      'data-review-repo-branch': entry.repositoryRoot,
+                      style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)', maxWidth: '110px', flexShrink: 0, ...ELLIPSIS },
+                    },
+                    branchOf(entry) === '' ? '—' : branchOf(entry),
+                  ),
+                  react.createElement(
+                    'span',
+                    {
+                      'data-review-repo-count': entry.repositoryRoot,
+                      style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' },
+                    },
                     String(countOf(entry)),
                   ),
-                ),
-              ),
+                )
+              }),
+              // 最后一行：后台还在发现更多仓库。
+              //
+              // 放在菜单里而不是头栏右上角——"还在找"是一个**进行中**的状态，常驻在最显眼、
+              // 最容易被当成数值来读的位置只会干扰阅读；要选仓库的人本来就会打开这个菜单。
+              discovering
+                ? react.createElement(
+                    'div',
+                    {
+                      'data-review-repo-discovering': '',
+                      style: { padding: '4px 8px', fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)' },
+                    },
+                    t('repoDiscovering'),
+                  )
+                : null,
             )
           : null,
       )
@@ -5118,7 +5299,7 @@ window.__ModuleLoader__.load({
        * 提交框标题里那句"提交到哪儿"：`分支` 或（多仓库时）`仓库名 · 分支`。
        *
        * 单仓库时**只有一个分支名**（1.5.2 的形状）；多仓库时仓库名是必须的——提交框在底部、
-       * 仓库选择器在顶部页签那一行，中间隔着整个文件列表。
+       * 仓库选择器在顶部头栏里，中间隔着整个文件列表。
        */
       const commitTargetLabel = (() => {
         const branch = snapshot?.branch ?? ''
@@ -6517,7 +6698,7 @@ window.__ModuleLoader__.load({
             rows: COMMIT_ROWS,
             // 提交信息的占位文案里带上当前分支：分支取自**这份快照自己**（与文件列表同一次
             // 请求），因此不会出现"文件是新的、分支是旧的"。多仓库时再带上仓库名——见
-            // `repositoryName` 的说明（提交框离顶部的仓库选择器隔着整个文件列表）。
+            // `repositoryName` 的说明（提交框离头栏里的仓库选择器隔着整个文件列表）。
             // 第二行是写法提示（摘要 + 空行 + 详细说明），不额外占界面空间。
             placeholder: t('commitMessage', { branch: commitTargetLabel }),
             'aria-label': t('commitMessage', { branch: commitTargetLabel }),

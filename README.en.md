@@ -311,13 +311,20 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
   `…/haiwei-manage-backend` are both listed. Results are cached per workspace for 60 seconds with
   single-flight and are **not** part of the 10-second poll. `isRepo:false` is only reported when
   that list is genuinely empty.
-- **In a multi-repository project, "which repository am I looking at" is panel-wide state.** A
-  repository picker (name + branch + change count, with the workspace-relative path) appears next
-  to the tabs, and the `Changes` file list and diffs, the `Log` branch tree / commit graph /
-  details and the commit box all follow it; each repository still gets its own snapshot cell and
-  its own polling loop (two subdirectories of the same repository still share one). Until you pick
-  one, a deterministic default applies (the repository the workspace belongs to, else the first in
-  the list) and the host uses the **same** rule, so the picker can never say A while the panel
+- **In a multi-repository project, "which repository am I looking at" is panel-wide state.** The
+  picker lives in the drawer's title bar, **above** `Changes / Log` (the panel's first visual
+  region; its position and DOM do not move when you switch tabs). With more than one repository it
+  is a `[name ▾]` dropdown whose rows spell out **name / branch / change count** (the current one is
+  check-marked; hover shows the full path that tells same-named repositories apart) and whose last
+  row carries the lightweight "discovering more repositories…" note; a single repository renders a
+  plain `name · branch` with no dropdown at all. The `Changes` file list and diffs, the
+  `Log` branch tree / commit graph / details and the commit box all follow it, and switching
+  repositories rebuilds both tab bodies (the `Log` graph refetches for the new repository, and a
+  draft commit message or AI suggestion written for the old one is dropped) while each repository
+  still gets its own snapshot cell and its own polling loop (two subdirectories of the same
+  repository still share one). Until you pick one, a deterministic default applies (the repository
+  the workspace belongs to, else the first in the list) and the host uses the **same** rule, so the
+  picker can never say A while the panel
   shows B. The badge number is the **sum** over all repositories and says how many there are.
   Staging and committing only ever touch the selected repository (multi-repo requests carry
   `repository`, and the host accepts only repositories it discovered — anything else is a 400

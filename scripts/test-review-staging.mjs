@@ -1382,7 +1382,7 @@ console.log('=== 15. 多仓库：一次只操作 active 那一个仓库 ===')
     firstRepo,
   )
 
-  // 用户在界面上选了 frontend（页签右侧的选择器就是调这一条）。
+  // 用户在界面上选了 frontend（头栏里的仓库选择器就是调这一条）。
   requests.length = 0
   await snapshotStore.selectRepository(WORKSPACE, FRONTEND)
   check('   选过之后记录迁到那个仓库', snapshotStore.cellKeyFor(WORKSPACE), FRONTEND)

@@ -274,6 +274,12 @@ const requests = []
  */
 const baseName = (path) => path.slice(path.lastIndexOf('\\') + 1)
 const scopeOverrides = new Map()
+/**
+ * 让 `/project-git-scope` 回答"后台还在发现更多仓库"（`discovery.complete === false`）。
+ *
+ * 界面上的那一句状态必须**不占头栏**（它以前常驻在最显眼的位置），因此需要能造出这个形状。
+ */
+let discoveryIncomplete = false
 const scopeFor = (workspace) =>
   scopeOverrides.get(workspace) ?? [
     { repositoryRoot: workspace, gitDir: `${workspace}\\.git`, relativePath: '', name: baseName(workspace) },
@@ -292,7 +298,7 @@ globalThis.fetch = async (url, init) => {
       workspaceRoot: workspace,
       repositories,
       discovery: {
-        complete: true,
+        complete: !discoveryIncomplete,
         directoriesVisited: 2,
         candidatesFound: repositories.length,
         gitProbes: repositories.length,
@@ -370,6 +376,20 @@ const textOf = (node) => {
   return textOf(node.props?.children)
 }
 const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
+/**
+ * 一个宿主节点的**直接** children（统一成数组）。
+ *
+ * 用来断言"谁在哪一格"：仓库 scope 必须在头栏里、在分支与计数之前，且**不在页签行里**。
+ * @param node - 宿主节点。
+ * @returns 直接子节点数组。
+ */
+const childrenOf = (node) => {
+  const kids = node?.props?.children
+  if (kids === undefined) return []
+  return Array.isArray(kids) ? kids : [kids]
+}
+/** 去掉空白：静态文案里的 `·` 靠 CSS gap 排版，比对时只看字符。 */
+const squish = (value) => String(value).replace(/\s+/gu, '')
 const makeSelectorHook = (read) => (selector) =>
   react.useSyncExternalStore(
     () => () => {},
@@ -660,11 +680,44 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
   // 徽标：数字是**所有仓库之和**（3 + 1 = 4），并说清是几个仓库——否则用户会把它当成
   // 某一个仓库的改动数。
   has('6) 徽标是所有仓库之和 + 仓库数', badgeText(nodes).includes('projectFilesMulti(count=4,repositories=2)'))
-  check('   页签里有仓库选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)
-  check('   不是一个仓库一个选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)
+  // 目标布局：`项目改动  [仓库 ▾]  分支  计数 … 刷新 关闭`，`Changes | Log` 在它**下面**。
+  // 仓库 scope 住在头栏里（第一视觉区域），而不是右上角、也不是页签行里的一个部件——
+  // 它是整个 Git 工具窗的作用域，且头栏不随页签切换重新挂载（位置因此纹丝不动）。
+  const header = rowsOf(nodes, 'data-review-header')[0]
+  const headerKids = childrenOf(header)
+  check('   头栏是仓库菜单的定位父级（菜单按抽屉宽度收窄）', header?.props?.style?.position, 'relative')
+  has('   头栏第一格是标题', headerKids[0]?.props?.['data-review-title'] !== undefined)
+  check('   第二格是仓库 scope（在页签之上）', headerKids[1]?.type?.name, 'RepositoryScope')
+  has('   第三格是分支徽标', headerKids[2]?.props?.['data-review-branch'] !== undefined)
+  has('   第四格是改动计数', headerKids[3]?.props?.['data-review-count'] !== undefined)
+  has('   最后两格是刷新与关闭', headerKids[headerKids.length - 2]?.props?.title === 'refresh' && headerKids[headerKids.length - 1]?.props?.title === 'collapse')
+  const tablist = rowsOf(nodes, 'data-review-tablist')[0]
+  check('   页签行里只有两个页签（选择器不在这里）', childrenOf(tablist).length, 2)
+  check('   头栏里有且只有一个仓库选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)
   has('   面板里没有说"不是 git 仓库"', !allText(nodes).includes('notRepo') && !allText(nodes).includes('notGitProject'))
   check('   两个仓库各一格（各一套轮询）', store.cells().filter((cell) => String(cell.key).includes('haiwei-manage') && cell.polling).length, 2)
   has('   全程没有 hook 数量变化', hookOrderErrors.length === 0)
+
+  // 选择器按钮：**只写仓库名**（分支与计数在头栏里各占一格），完整路径放 title（长名字兜底）。
+  const selectButton = rowsOf(nodes, 'data-review-repo-select-button')[0]
+  check('   选择器按钮写的是仓库名（不带分支）', textOf(rowsOf(nodes, 'data-review-repo-current')[0] ?? null), 'haiwei-manage-fronted')
+  check('   选择器 title 是完整仓库根', selectButton?.props?.title, FE)
+  check('   头栏分支徽标是当前仓库的分支', textOf(rowsOf(nodes, 'data-review-branch')[0] ?? null), 'master')
+
+  /**
+   * 某一行的 ✓ 是否画着。
+   *
+   * `data-review-repo-check` 挂在菜单项的子树里（占位宽度固定，因此每一项都会渲染），
+   * 值 '1' 才代表"这一行是当前仓库"。要判断"哪一行"，必须从那一行的按钮反查它的子树。
+   * @param list - 当前帧的宿主节点。
+   * @param root - 仓库根。
+   * @returns 画着 ✓ 则 true。
+   */
+  const rowChecked = (list, root) => {
+    const row = list.find((n) => n.props?.['data-review-repo-pick'] === root)
+    if (row === undefined) return false
+    return collectHostNodes(row, undefined, 'pick-probe').some((n) => n.props?.['data-review-repo-check'] === '1')
+  }
 
   // 打开选择器：两项、带各自的相对路径与分支。
   await clickNow('data-review-repo-select-button')
@@ -679,7 +732,9 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
     [FE, BE].sort().join('|'),
   )
   has('   每项标出分支', textOf(rowsOf(nodes, 'data-review-repo-branch')[0] ?? null).length > 0)
-  check('   并标出各自的改动数', rowsOf(nodes, 'data-review-repo-branch').length, 2)
+  check('   每项都有自己的改动数', rowsOf(nodes, 'data-review-repo-count').length, 2)
+  has('   当前那一行（frontend）带 ✓', rowChecked(nodes, FE))
+  has('   另一行（backend）不带 ✓', !rowChecked(nodes, BE))
 
   // 默认项是列表里的第一个（FE），因此"选 FE"是一个空操作；要观察切换就点 **BE**。
   // 切过去之后**所有** A 工作区的读请求都必须带 `repository=BE`。
@@ -699,7 +754,17 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
   )
   // 面板里显示的是 BE 的文件（不是 FE 的，也不是两个混在一起）。
   check('   面板列的是 backend 的 1 个文件', rowsOf(nodes, 'data-staging-row').length, 1)
-  has('   选择器上写着当前仓库 + 分支', textOf(rowsOf(nodes, 'data-review-repo-current')[0] ?? null).includes('main'))
+  // 切换后选择器、分支、计数**一起**换：它们读的是同一个 active 仓库。
+  check('   选择器上写着新仓库', textOf(rowsOf(nodes, 'data-review-repo-current')[0] ?? null), 'haiwei-manage-backend')
+  check('   选择器 title 也换成新仓库根', rowsOf(nodes, 'data-review-repo-select-button')[0]?.props?.title, BE)
+  check('   头栏分支徽标跟着换', textOf(rowsOf(nodes, 'data-review-branch')[0] ?? null), 'main')
+  // 再打开一次菜单：✓ 必须已经挪到 backend 那一行（"当前在提交哪个仓库"只能有一处答案）。
+  await clickNow('data-review-repo-select-button')
+  nodes = await drain()
+  has('   ✓ 跟着切到 backend', rowChecked(nodes, BE))
+  has('   frontend 那一行不再有 ✓', !rowChecked(nodes, FE))
+  await clickNow('data-review-repo-select-button')
+  nodes = await drain()
 
   // 写操作（暂存一行）必须落在同一个仓库上：**提交绝不跨仓库**。
   requests.length = 0
@@ -723,6 +788,126 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
   check('   从不把未登记的仓库根当工作区发请求', [...new Set(strayWorkspaces)].join(','), '')
 
   // 清掉夹具，别影响后面的检查。
+  workspaceData.delete(FE)
+  workspaceData.delete(BE)
+  scopeOverrides.delete(A)
+  store.reset()
+}
+
+console.log('')
+console.log('=== 6b. 单仓库：静态「名字 · 分支」，没有下拉箭头 ===')
+{
+  // 默认夹具就是单仓库（工作区自己就是仓库，名字取目录最后一段）。
+  store.reset()
+  sessionSnapshot = { current: 's1', ids: ['s1', 's2'], byId: { s1: { cwd: A }, s2: { cwd: B } } }
+  let nodes = await openDrawer('single-repo')
+  await drain()
+  nodes = await drain()
+  check('6b) 头栏里有仓库 scope', rowsOf(nodes, 'data-review-repo-scope').length, 1)
+  // 没有选择余地就不该有可点的东西：一个点下去什么都不会变的按钮只会让人白点一次。
+  check('   没有下拉按钮', rowsOf(nodes, 'data-review-repo-select-button').length, 0)
+  check('   没有下拉菜单', rowsOf(nodes, 'data-review-repo-menu').length, 0)
+  has('   也没有箭头', !textOf(rowsOf(nodes, 'data-review-repo-scope')[0] ?? null).includes('▾'))
+  // 直接显示 `仓库名 · 分支`（`·` 靠 CSS gap 排版，比对时只看字符）。
+  check('   静态文案是「仓库名 · 分支」', squish(textOf(rowsOf(nodes, 'data-review-repo-static')[0] ?? null)), 'projA·alpha')
+  // 头栏里**不重复**一个分支徽标：分支已经写在 scope 里了。
+  check('   分支只出现一次', rowsOf(nodes, 'data-review-branch').length, 1)
+  check('   完整路径在 title 里', rowsOf(nodes, 'data-review-repo-static')[0]?.props?.title, A)
+  has('   这一段没有 hook 数量变化', hookOrderErrors.length === 0)
+}
+
+console.log('')
+console.log('=== 6c. 后台还在发现仓库：状态在菜单最后一行，不占头栏 ===')
+{
+  const FE = `${A}\\haiwei-manage-fronted`
+  const BE = `${A}\\haiwei-manage-backend`
+  workspaceData.set(FE, { isRepo: true, branch: 'master', head: 'f'.repeat(40), empty: false, files: [file('fe1.txt')], changedFiles: 1 })
+  workspaceData.set(BE, { isRepo: true, branch: 'main', head: 'e'.repeat(40), empty: false, files: [file('be1.txt')], changedFiles: 1 })
+  scopeOverrides.set(A, [
+    { repositoryRoot: FE, gitDir: `${FE}\\.git`, relativePath: 'haiwei-manage-fronted', name: 'haiwei-manage-fronted' },
+    { repositoryRoot: BE, gitDir: `${BE}\\.git`, relativePath: 'haiwei-manage-backend', name: 'haiwei-manage-backend' },
+  ])
+  discoveryIncomplete = true
+  store.reset()
+  let nodes = await openDrawer('discovering')
+  await drain()
+  nodes = await drain()
+  // 头栏的**直接**子节点里没有它：它不该占最显眼的那一格（那是最容易被当成数值来读的位置）。
+  const head = rowsOf(nodes, 'data-review-header')[0]
+  has('6c) 头栏里没有「正在发现」', childrenOf(head).every((kid) => kid?.props?.['data-review-repo-discovering'] === undefined))
+  has('   菜单没打开时它根本不渲染', rowsOf(nodes, 'data-review-repo-discovering').length === 0)
+  // 打开菜单：状态在**最后一行**（列表之后），因此不会插在仓库项之间。
+  await clickNow('data-review-repo-select-button')
+  nodes = await drain()
+  const menu = rowsOf(nodes, 'data-review-repo-menu')[0]
+  const menuKids = childrenOf(menu)
+  // 菜单挂在头栏上（不是选择器上）：抽屉最窄 320px，挂在选择器上向右展开会被裁掉一截。
+  check('   菜单从头栏左边距开始展开', menu?.props?.style?.left, '16px')
+  has('   菜单宽度以头栏为上限（窄抽屉里也不会被裁掉）', String(menu?.props?.style?.maxWidth ?? '').includes('100%'))
+  has('   菜单最后一行是「正在发现」', menuKids[menuKids.length - 1]?.props?.['data-review-repo-discovering'] !== undefined)
+  check('   文案是「正在发现更多 Git 仓库…」', textOf(menuKids[menuKids.length - 1]), 'repoDiscovering')
+  has('   它前面紧挨着最后一条仓库项', menuKids[menuKids.length - 2]?.props?.['data-review-repo-pick'] !== undefined)
+  check('   仓库项仍然是两个', menuKids.filter((kid) => kid?.props?.['data-review-repo-pick'] !== undefined).length, 2)
+  has('   这一段没有 hook 数量变化', hookOrderErrors.length === 0)
+
+  await clickNow('data-review-repo-select-button')
+  await drain()
+  discoveryIncomplete = false
+  workspaceData.delete(FE)
+  workspaceData.delete(BE)
+  scopeOverrides.delete(A)
+  store.reset()
+}
+
+console.log('')
+console.log('=== 6d. 切页签不重建仓库 scope；切仓库时 Log 也换到新仓库 ===')
+{
+  const FE = `${A}\\haiwei-manage-fronted`
+  const BE = `${A}\\haiwei-manage-backend`
+  workspaceData.set(FE, { isRepo: true, branch: 'master', head: 'f'.repeat(40), empty: false, files: [file('fe1.txt')], changedFiles: 1 })
+  workspaceData.set(BE, { isRepo: true, branch: 'main', head: 'e'.repeat(40), empty: false, files: [file('be1.txt')], changedFiles: 1 })
+  scopeOverrides.set(A, [
+    { repositoryRoot: FE, gitDir: `${FE}\\.git`, relativePath: 'haiwei-manage-fronted', name: 'haiwei-manage-fronted' },
+    { repositoryRoot: BE, gitDir: `${BE}\\.git`, relativePath: 'haiwei-manage-backend', name: 'haiwei-manage-backend' },
+  ])
+  // 上一次选择会落在 localStorage 里（`dsh.review.activeRepository`）：这里清掉，让默认
+  // 选中项回到列表里的第一个，断言才是确定的。
+  delete storage['dsh.review.activeRepository']
+  store.reset()
+  let nodes = await openDrawer('scope-stable')
+  await drain()
+  nodes = await drain()
+  // 先打开选择器菜单，再切到 Log。
+  //
+  // 菜单**还开着**就是"这个组件没有被卸载重建"的证据：`menuOpen` 是它自己的 state，
+  // 一旦重挂载就会被清回 false。这正是需求里"Changes → Log 之后选择器位置完全不变"
+  // 的机制——它在头栏里，也就是两个页签**之外**。
+  await clickNow('data-review-repo-select-button')
+  nodes = await drain()
+  has('6d) 菜单已打开', rowsOf(nodes, 'data-review-repo-menu').length === 1)
+  await clickNow('data-review-tab', 'log')
+  nodes = await drain()
+  has('   切到 Log 后菜单仍然开着（scope 没有被重建）', rowsOf(nodes, 'data-review-repo-menu').length === 1)
+  const head = rowsOf(nodes, 'data-review-header')[0]
+  check('   它仍然在头栏第二格', childrenOf(head)[1]?.type?.name, 'RepositoryScope')
+  check('   整个抽屉里仍然只有一个仓库 scope', rowsOf(nodes, 'data-review-repo-select').length, 1)
+  // 页签确实切过去了（证明上面不是"什么都没发生"）。
+  check('   确实停在 Log 页签', rowsOf(nodes, 'data-review-tab-body')[0]?.props?.['data-review-tab-body'], 'log')
+  const currentRoot = String(rowsOf(nodes, 'data-review-repo-select-button')[0]?.props?.title ?? '')
+  const otherRoot = currentRoot === FE ? BE : FE
+  has('   Log 页签体的 key 带着当前仓库', String(rowsOf(nodes, 'data-review-tab-body')[0]?.props?.key ?? '').includes(currentRoot))
+
+  // 在 Log 页签里切仓库：页签体换成新的一棵子树，提交图因此**重取新仓库**的历史，
+  // 不会留在旧仓库的提交上（这就是"Log 也切到新 repositoryRoot"的落地方式）。
+  await clickNow('data-review-repo-pick', otherRoot)
+  await store.refresh(A)
+  nodes = await drain()
+  nodes = await drain()
+  const afterKey = String(rowsOf(nodes, 'data-review-tab-body')[0]?.props?.key ?? '')
+  has('   切仓库后 Log 页签体换成新仓库', afterKey.includes(otherRoot))
+  has('   而且不再带着旧仓库', !afterKey.includes(currentRoot))
+  has('   这一段没有 hook 数量变化', hookOrderErrors.length === 0)
+
   workspaceData.delete(FE)
   workspaceData.delete(BE)
   scopeOverrides.delete(A)
