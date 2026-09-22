@@ -16,6 +16,8 @@ const INDEX = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'index.js')
 const HOST = INDEX
 /** gitbar 的客户端 bundle（级联菜单的几何在这里）。 */
 const GITBAR_CLIENT = join(ROOT, 'plugins', 'dsh-client-ui-gitbar', 'lib', 'client.js')
+/** gitbar 的 host 半边（路由、作用域解析在这里）。 */
+const GITBAR_HOST = join(ROOT, 'plugins', 'dsh-client-ui-gitbar', 'lib', 'index.js')
 /** 「AI 补充提交信息」的 host 半边（输出预算与 finish 语义在这里）。 */
 const COMMIT_MESSAGE = join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'commit-message.js')
 
@@ -390,6 +392,84 @@ mutate({
   from: '  if (failure !== null && failure !== undefined) {',
   to: '  if (false) {',
   script: 'test-review-commit-message.mjs',
+})
+
+// ===========================================================================
+// 1.5.4：项目级多仓库发现（工作区自己不是仓库时不许再说"不是 git 仓库"）
+// ===========================================================================
+
+mutate({
+  file: HOST,
+  label: '21) 宿主退回"只有唯一子仓库才认"→ 实机那句"不是 git 仓库"变红',
+  // 这就是实机形状：父目录不是仓库、子目录里有两个仓库。旧写法（只在恰好一个时才认）
+  // 会让 `isRepo` 变回 false——界面于是说"当前工作区（haiweiNew）不是 git 仓库"。
+  from: "  if (repositories.length >= 1) return { context: pick(repositories[0]), scope, error: '' }",
+  to: "  if (repositories.length === 1) return { context: pick(repositories[0]), scope, error: '' }",
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '21b) 宿主忽略 repository（多仓库时永远操作默认那个）→ 分支/暂存落错仓库变红',
+  from: "  if (typeof repository === 'string' && repository !== '') {",
+  to: "  if (false) {",
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '21c) 宿主不校验 repository（越界路径也照跑）→ 400 断言变红',
+  from: "    if (match === undefined) return { context: undefined, scope, error: 'repositoryNotAllowed' }",
+  to: "    if (match === undefined) return { context: { workspaceRoot: workspace, repositoryRoot: repository, gitDir: '' }, scope, error: '' }",
+  script: 'test-review-repo-scope.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '22) 客户端"没选过"时不再取第一个仓库（留空）→ 默认项断言变红',
+  from: "        const own = list.find((entry) => entry.relativePath === '')\n        if (own !== undefined) return own.repositoryRoot\n        return list[0].repositoryRoot",
+  to: "        const own = list.find((entry) => entry.relativePath === '')\n        if (own !== undefined) return own.repositoryRoot\n        return ''",
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '22b) 客户端单仓库也带 repository → "1.5.2 请求形状"断言变红',
+  from: '      if (scope === undefined || scope.repositories.length <= 1) return body',
+  to: '      if (scope === undefined) return body',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '22c) 迁移到仓库根那一格时留下旧键 → "记录数只有 1"变红',
+  from: '            records.delete(record.key)\n            record.key = key\n            record.repositoryRoot = repositoryRoot',
+  to: '            record.key = key\n            record.repositoryRoot = repositoryRoot',
+  script: 'test-review-staging.mjs',
+})
+
+mutate({
+  file: GITBAR_HOST,
+  label: '23) gitbar 宿主不回项目级仓库列表 → 多仓库断言变红',
+  from: '            repositories: scope.repositories,\n            discovery: scope.discovery,\n          },\n        }\n  if (context === undefined) return { workspaceRoot: workspace, ...projectScope }',
+  to: '            repositories: [],\n            discovery: scope.discovery,\n          },\n        }\n  if (context === undefined) return { workspaceRoot: workspace, ...projectScope }',
+  script: 'test-gitbar-branches.mjs',
+})
+
+mutate({
+  file: GITBAR_CLIENT,
+  label: '24) gitbar 徽章不再读项目级仓库列表 → "多仓库选择器/计数"断言变红',
+  from: '      const scopeRepositories = Array.isArray(status.projectScope?.repositories) ? status.projectScope.repositories : null',
+  to: '      const scopeRepositories = null',
+  script: 'test-gitbar-branch-interaction.mjs',
+})
+
+mutate({
+  file: GITBAR_CLIENT,
+  label: '24b) gitbar 请求不再带 repository（多仓库时永远操作默认那个）→ 选择器断言变红',
+  from: '      const repositoryRoot = activeRepositoryOf(cwd)\n      if (repositoryRoot !== \'\') params.set(\'repository\', repositoryRoot)',
+  to: '      const repositoryRoot = activeRepositoryOf(cwd)\n      if (false) params.set(\'repository\', repositoryRoot)',
+  script: 'test-gitbar-branch-interaction.mjs',
 })
 
 console.log('')

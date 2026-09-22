@@ -1030,6 +1030,23 @@ const repoContext = createRepoContextResolver({
 })
 
 /**
+ * 只把项目级 scope 铺进响应（没有可用仓库时用）。
+ *
+ * @param scope - `resolveProjectScope` 的结果（可能 undefined）。
+ * @returns 可直接铺进响应的字段。
+ */
+function projectScopeFields(scope) {
+  if (scope === undefined || scope === null) return {}
+  return {
+    projectScope: {
+      workspaceRoot: scope.workspaceRoot,
+      repositories: scope.repositories,
+      discovery: scope.discovery,
+    },
+  }
+}
+
+/**
  * 解析一个工作区所属的仓库。
  *
  * @param workspace - 已通过 `validateWorkspace` 的真实工作区路径。
@@ -1040,20 +1057,92 @@ async function resolveRepo(workspace) {
 }
 
 /**
- * 给响应附上作用域信息（工作区 / 仓库 / 供多仓库模型使用的 scope）。
+ * 从一条 scope 记录构造"当前请求要操作的那个仓库"。
+ *
+ * 客户端给的 `repository` 是**不可信输入**，因此这里只认"这个 workspaceRoot 的
+ * ProjectGitScope 里确实有它"的路径（realpath 比较）：否则 `repository=C:/` 又能越过
+ * 工作区安全边界，让宿主对任意目录跑 git 与读写。
+ *
+ * @param workspace - 已校验的工作区路径。
+ * @param repository - 客户端指定的仓库根（可选）。
+ * @param options - `{ projectScope }`：是否强制现在就把项目级仓库列表算出来（见下）。
+ * @returns `{ context, scope, error }`：`error` 为 `'repositoryNotAllowed'` 时拒绝。
+ */
+async function resolveScopedRepo(workspace, repository, options) {
+  const context = await repoContext.resolve(workspace)
+  /**
+   * 要不要**现在**把项目级仓库列表算出来。
+   *
+   * 发现要跑一次 `rev-parse` 探针（第一次在 250 ms 预算内，之后 60 秒内命中缓存），因此
+   * 不能无条件跑——否则每条轮询路由都会多起一个 git 进程。三种情况才需要它：
+   *   * 客户端指定了 `repository`：必须校验它确实属于这个项目；
+   *   * 工作区自己不是仓库：只有列表能回答"子目录里的仓库在哪"（实机误报的修复点）；
+   *   * 路由声明需要（作用域查询本身就是问这个）。
+   * 其余情况只用已有缓存；客户端的 `projectScopes` 会先打一次 `/project-git-scope`，
+   * 因此缓存通常是热的。
+   */
+  const explicit = typeof repository === 'string' && repository !== ''
+  const wanted = options?.projectScope === true || explicit || context === undefined
+  const scope = wanted ? await repoContext.resolveProjectScope(workspace) : repoContext.peekProjectScope(workspace)
+  const repositories = Array.isArray(scope?.repositories) ? scope.repositories : []
+  const pick = (entry) =>
+    entry === undefined
+      ? undefined
+      : { workspaceRoot: workspace, repositoryRoot: entry.repositoryRoot, gitDir: entry.gitDir, relativePath: entry.relativePath, name: entry.name }
+  if (explicit) {
+    let real
+    try {
+      real = realpathSync.native(repository)
+    } catch {
+      real = undefined
+    }
+    const match = real === undefined ? undefined : repositories.find((entry) => entry.repositoryRoot === real)
+    if (match === undefined) return { context: undefined, scope, error: 'repositoryNotAllowed' }
+    return { context: pick(match), scope, error: '' }
+  }
+  // 没指定：优先"工作区自己所属的仓库"（1.5.2 的行为），其次是**列表里的第一个**。
+  //
+  // 第二条与客户端 `projectScopes.activeOf` 的规则**逐字相同**，这是有意的：客户端
+  // 默认选中哪一个，宿主就必须解析到同一个——否则会出现"选择器上写着 frontend、
+  // 面板里的却是 backend"。发现顺序是确定的（浅层优先、同层按名字），因此默认项稳定。
+  // 它同时修掉了实机的那个 bug：工作区自己不是仓库、子目录里有仓库时，以前这里回
+  // "没有仓库"，界面于是说"当前工作区不是 git 仓库"。
+  const own = repositories.find((entry) => entry.relativePath === '')
+  if (own !== undefined) return { context: pick(own), scope, error: '' }
+  if (repositories.length >= 1) return { context: pick(repositories[0]), scope, error: '' }
+  // 列表是空的（没强制发现、缓存也空）：工作区自己所属的仓库仍然算数（1.5.2 单仓库路径）。
+  return { context, scope, error: '' }
+}
+
+/**
+ * 给响应附上作用域信息（工作区 / 仓库 / 项目级 ProjectGitScope）。
  *
  * 客户端要靠 `repositoryRoot` 决定"这份快照属于哪个仓库"——同仓库的两个子目录必须
- * 共用同一份快照与同一套轮询（见客户端 gitSnapshots 的说明）。
+ * 共用同一份快照与同一套轮询（见客户端 gitSnapshots 的说明）；`projectScope` 则是
+ * 这一版新增的"一个工作区里有哪些仓库"，多仓库 UI（Changes 分组、Log 选择器、
+ * badge 聚合）都读它。
  *
- * @param context - `resolveRepo` 的结果。
+ * @param context - 当前仓库的上下文。
+ * @param scope - `resolveProjectScope` 的结果（可选）。
  * @returns 可直接铺进响应的字段。
  */
-function scopeFields(context) {
+function scopeFields(context, scope) {
   return {
     workspaceRoot: context.workspaceRoot,
     repositoryRoot: context.repositoryRoot,
     ...(context.gitDir === '' ? {} : { gitDir: context.gitDir }),
+    ...(context.relativePath === undefined ? {} : { repositoryRelativePath: context.relativePath }),
+    ...(context.name === undefined ? {} : { repositoryName: context.name }),
     gitScope: createProjectGitScope(context),
+    ...(scope === undefined || scope === null
+      ? {}
+      : {
+          projectScope: {
+            workspaceRoot: scope.workspaceRoot,
+            repositories: scope.repositories,
+            discovery: scope.discovery,
+          },
+        }),
   }
 }
 
@@ -1646,7 +1735,39 @@ function createReviewHandler(ctx) {
       //
       // 客户端只送 workspaceRoot；repositoryRoot 一律由 host 推导，绝不接受客户端传入
       // （否则 `repositoryRoot=C:/` 就能越过工作区安全边界）。
-      const context = await resolveRepo(workspace)
+      const requestedRepository = payload.repository ?? url.searchParams.get('repository')
+
+      // 项目级作用域：一个工作区有哪些仓库（含 discovery 诊断），客户端据此渲染多仓库 UI。
+      if (url.pathname === `${ROUTE_PREFIX}/project-git-scope`) {
+        const scope = await repoContext.resolveProjectScope(workspace, {
+          force: payload.force === true || url.searchParams.get('force') === '1',
+        })
+        sendJson(response, 200, {
+          isRepo: scope.repositories.length > 0,
+          workspaceRoot: scope.workspaceRoot,
+          repositories: scope.repositories,
+          discovery: scope.discovery,
+        })
+        return
+      }
+
+      /**
+       * `/repo-context` 本身就是"作用域查询"，必须现在就有列表；其它路由（`/workspace`、
+       * `/status`、`/untracked`、写操作…）只用已有缓存——客户端的 `projectScopes` 会先打
+       * 一次 `/project-git-scope`，因此缓存通常是热的，而没热的时候不值得为每条轮询多起
+       * 一个探针进程（见 resolveScopedRepo 的说明）。
+       */
+      const { context, scope, error: scopeError } = await resolveScopedRepo(workspace, requestedRepository, {
+        projectScope: url.pathname === `${ROUTE_PREFIX}/repo-context`,
+      })
+      if (scopeError === 'repositoryNotAllowed') {
+        sendJson(response, 400, {
+          error: 'repository not allowed',
+          code: 'repositoryNotAllowed',
+          detail: 'repository must be one of the repositories discovered in this workspace',
+        })
+        return
+      }
 
       // 作用域本身也要能被查询：客户端用它决定"这份数据属于哪个仓库"。
       if (url.pathname === `${ROUTE_PREFIX}/repo-context`) {
@@ -1654,17 +1775,17 @@ function createReviewHandler(ctx) {
           response,
           200,
           context === undefined
-            ? { isRepo: false, workspaceRoot: workspace }
-            : { isRepo: true, ...scopeFields(context) },
+            ? { isRepo: false, workspaceRoot: workspace, ...projectScopeFields(scope) }
+            : { isRepo: true, ...scopeFields(context, scope) },
         )
         return
       }
 
-      // 不是仓库：所有其它路由统一回 `isRepo: false`（界面据此显示"不是 Git 仓库"）。
-      // 以前这条判据散在十几个路由里各写一遍，漏一个就会让那条路由在非仓库目录上抛
-      // git 的英文报错。
+      // 没有可用的仓库：所有其它路由统一回 `isRepo: false`（界面据此显示"不是 Git 仓库"），
+      // 但**带上 scope**——工作区本身不是仓库、下面却有仓库时，界面要能据此进多仓库 UI，
+      // 而不是一口咬定"当前项目不是 Git 项目"（1.5.2 的实机缺口）。
       if (context === undefined) {
-        sendJson(response, 200, { isRepo: false, workspaceRoot: workspace })
+        sendJson(response, 200, { isRepo: false, workspaceRoot: workspace, ...projectScopeFields(scope) })
         return
       }
       const cwd = context.repositoryRoot
@@ -1684,7 +1805,7 @@ function createReviewHandler(ctx) {
         // 基线记的是**仓库**（不是工作区）：会话在同一个仓库里换了子目录时，本轮基线依然
         // 有效，不该被清掉重拍。
         baselines.set(sessionId, { revision, repositoryRoot: cwd, takenAt: Date.now() })
-        sendJson(response, 200, { isRepo: true, revision, ...scopeFields(context) })
+        sendJson(response, 200, { isRepo: true, revision, ...scopeFields(context, scope) })
         return
       }
 
@@ -1741,7 +1862,7 @@ function createReviewHandler(ctx) {
           scope: 'turn',
           revision: stored.revision,
           takenAt: stored.takenAt,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           ...described,
           files,
           ...(oversized ? { diffOversized: true } : {}),
@@ -1788,7 +1909,7 @@ function createReviewHandler(ctx) {
         sendJson(response, 200, {
           isRepo: true,
           scope: 'workspace',
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           /** 当前分支名（游离 HEAD 时为空串）。 */
           branch: parsed.branch,
           /** HEAD 的提交对象；尚无提交时为空串（`empty` 为 true）。 */
@@ -1855,7 +1976,7 @@ function createReviewHandler(ctx) {
             sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
             return
           }
-          sendJson(response, 200, { isRepo: true, path: normalized, ...scopeFields(context), ...result })
+          sendJson(response, 200, { isRepo: true, path: normalized, ...scopeFields(context, scope), ...result })
         } catch (error) {
           // 路径不在仓库里（用户刚删掉、或状态已过期）：这是 404 而不是 500。
           if (/did not match|no such path|exists on disk, but not in|unknown revision|bad revision|could not access/iu.test(String(error?.message ?? error))) {
@@ -1918,7 +2039,7 @@ function createReviewHandler(ctx) {
           const result = await onCommitMessage(commitContext)
           sendJson(response, 200, {
             isRepo: true,
-            ...scopeFields(context),
+            ...scopeFields(context, scope),
             message: result.message,
             subject: result.subject,
             bullets: result.bullets,
@@ -2015,7 +2136,7 @@ function createReviewHandler(ctx) {
         }
         // 还原会改工作区：未跟踪清单（新增文件被删掉）必须重数。
         invalidateUntracked(cwd)
-        sendJson(response, 200, { isRepo: true, ...scopeFields(context), restored, deleted, source })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), restored, deleted, source })
         return
       }
 
@@ -2044,7 +2165,7 @@ function createReviewHandler(ctx) {
         const branch = (
           await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).catch(() => '')
         ).trim()
-        sendJson(response, 200, { isRepo: true, ...scopeFields(context), branch, commits })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), branch, commits })
         return
       }
 
@@ -2070,7 +2191,7 @@ function createReviewHandler(ctx) {
         const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).catch(() => '')).trim()
         sendJson(response, 200, {
           isRepo: true,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           branch,
           ...page,
         })
@@ -2091,7 +2212,7 @@ function createReviewHandler(ctx) {
           return
         }
         try {
-          sendJson(response, 200, { isRepo: true, ...scopeFields(context), ...(await readCommit(cwd, revision)) })
+          sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), ...(await readCommit(cwd, revision)) })
         } catch (error) {
           // 对象不在本地（浅克隆、被 GC 掉的分支）：这是 404，不是 500。
           if (/bad object|unknown revision|bad revision|not a valid object/iu.test(String(error?.message ?? error))) {
@@ -2116,7 +2237,7 @@ function createReviewHandler(ctx) {
           return
         }
         const result = await readCommitFileDiff(cwd, revision, filePath)
-        sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, ...result })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), path: filePath, ...result })
         return
       }
 
@@ -2137,7 +2258,7 @@ function createReviewHandler(ctx) {
         const untracked = describeUntrackedFast(cwd, untrackedEntries)
         sendJson(response, 200, {
           isRepo: true,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           branch: parsed.branch,
           head: parsed.head,
           detached: parsed.detached,
@@ -2185,7 +2306,7 @@ function createReviewHandler(ctx) {
           mode === 'inline' ? countUntrackedLines(cwd, snapshotUntracked.paths.map(untrackedEntry)) : []
         sendJson(response, 200, {
           isRepo: true,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           total,
           mode,
           exact: true,
@@ -2243,7 +2364,7 @@ function createReviewHandler(ctx) {
               const all = await readUntracked(cwd, { force: true })
               normalized = all.paths
               if (normalized.length === 0) {
-                sendJson(response, 200, { isRepo: true, ...scopeFields(context), staged: [], stagedCount: 0 })
+                sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), staged: [], stagedCount: 0 })
                 return
               }
             }
@@ -2268,7 +2389,7 @@ function createReviewHandler(ctx) {
         invalidateUntracked(cwd)
         sendJson(response, 200, {
           isRepo: true,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           ...(addMode === '' ? {} : { addMode }),
           staged: staging ? normalized : [],
           stagedCount: staging ? normalized.length : 0,
@@ -2367,7 +2488,7 @@ function createReviewHandler(ctx) {
         invalidateUntracked(cwd)
         sendJson(response, 200, {
           isRepo: true,
-          ...scopeFields(context),
+          ...scopeFields(context, scope),
           committed: true,
           head,
           ...(pushed === undefined ? {} : { pushed }),
@@ -2406,7 +2527,7 @@ function createReviewHandler(ctx) {
         } catch (error) {
           // 未跟踪的文件没有历史，这不是错误：返回空列表，界面显示"尚无提交记录"。
           if (/does not have any commits|unknown revision|bad revision/iu.test(String(error?.message ?? error))) {
-            sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, commits: [] })
+            sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), path: filePath, commits: [] })
             return
           }
           throw error
@@ -2425,7 +2546,7 @@ function createReviewHandler(ctx) {
               subject: rest.join('\x1f').trim(),
             }
           })
-        sendJson(response, 200, { isRepo: true, ...scopeFields(context), path: filePath, commits })
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), path: filePath, commits })
         return
       }
 
@@ -2448,6 +2569,7 @@ export function apply(ctx) {
   const handler = createReviewHandler(ctx)
   for (const path of [
     `${ROUTE_PREFIX}/repo-context`,
+    `${ROUTE_PREFIX}/project-git-scope`,
     `${ROUTE_PREFIX}/baseline`,
     `${ROUTE_PREFIX}/changes`,
     `${ROUTE_PREFIX}/workspace`,

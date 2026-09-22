@@ -117,7 +117,7 @@ check('第三次点击重新打开审查面板', state.reviewVisible, 'true')
 const body = await evaluate(`
   (() => {
     const text = document.body.innerText || '';
-    const markers = ['个文件', '没有改动任何文件', '尚未记录基线', '不是 git 仓库', '正在读取差异'];
+    const markers = ['个文件', '没有改动任何文件', '尚未记录基线', '没有发现 Git 仓库', '正在读取差异'];
     return markers.find((m) => text.includes(m)) || '(无匹配)';
   })()
 `)

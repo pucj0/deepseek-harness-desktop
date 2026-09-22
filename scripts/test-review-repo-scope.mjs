@@ -102,6 +102,32 @@ try {
   const pagesReal = realpathSync.native(pagesDir)
   const plainReal = realpathSync.native(plainDir)
 
+  // ---- 多仓库项目（第 12 节）------------------------------------------------
+  //
+  // 实机反馈的**原样形状**：`F:\code_buss\haiweiNew` 自己不是 Git 仓库，仓库在
+  // `haiweiNew/haiwei-manage-fronted/.git` 与 `haiweiNew/haiwei-manage-backend/.git`。
+  // 每个仓库各有一个提交与各不相同的分支名，用来断言"请求确实落在选中的那一个上"。
+  const multiRoot = join(root, 'haiweiNew')
+  const multiFrontend = join(multiRoot, 'haiwei-manage-fronted')
+  const multiBackend = join(multiRoot, 'haiwei-manage-backend')
+  mkdirSync(multiFrontend, { recursive: true })
+  mkdirSync(multiBackend, { recursive: true })
+  for (const [dir, branch] of [
+    [multiFrontend, 'frontend-main'],
+    [multiBackend, 'backend-main'],
+  ]) {
+    execFileSync('git', ['init', '-q', '-b', branch, dir])
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com'])
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'test'])
+    execFileSync('git', ['-C', dir, 'config', 'commit.gpgsign', 'false'])
+    touch(join(dir, 'readme.txt'), `${branch}\n`)
+    await git(['add', '.'], dir)
+    await git(['commit', '-q', '-m', `init ${branch}`], dir)
+  }
+  const multiRootReal = realpathSync.native(multiRoot)
+  const multiFrontendReal = realpathSync.native(multiFrontend)
+  const multiBackendReal = realpathSync.native(multiBackend)
+
   // ---- 对照：旧的"完整枚举"在常驻路径上要搬多少字节 ---------------------------
   //
   // 这是给最终报告用的**前后对比**：同一条仓库、同一次调用，`-uall` 与 `-unormal` 的输出
@@ -167,6 +193,7 @@ try {
             w2: { path: srcDir },
             w3: { path: pagesDir },
             w4: { path: plainDir },
+            w5: { path: multiRoot },
           },
         },
       },
@@ -469,6 +496,66 @@ try {
     checkTrue('   差异里有新增行', String(res.body.diff).includes('+x'))
     check('   作用域字段', res.body.repositoryRoot, repoReal)
   }
+  console.log('')
+  console.log('=== 12. 多仓库项目：工作区不是仓库，仓库在子目录里 ===')
+  {
+    // 这一节就是"实机说当前工作区（haiweiNew）不是 git 仓库"的回归测试。
+    const scope = await post('project-git-scope', { workspace: multiRoot })
+    check('12) 200', scope.status, 200)
+    check('   isRepo（项目里有仓库）', scope.body.isRepo, true)
+    check('   发现两个仓库', scope.body.repositories.length, 2)
+    check(
+      '   仓库名就是两个子目录',
+      scope.body.repositories.map((entry) => entry.name).sort().join(','),
+      'haiwei-manage-backend,haiwei-manage-fronted',
+    )
+    check(
+      '   相对路径都是 POSIX 且非空',
+      scope.body.repositories.map((entry) => entry.relativePath).sort().join(','),
+      'haiwei-manage-backend,haiwei-manage-fronted',
+    )
+    check('   没有把父目录自己当成仓库', scope.body.repositories.filter((entry) => entry.relativePath === '').length, 0)
+    check('   每个仓库都带 .git 目录', scope.body.repositories.filter((entry) => entry.gitDir !== '').length, 2)
+    check('   候选数 = 2（发现一个就继续扫兄弟目录）', scope.body.discovery.candidatesFound, 2)
+    checkTrue('   发现过程有账目可查', scope.body.discovery.directoriesVisited >= 2)
+    checkTrue('   在时间预算内完成', scope.body.discovery.durationMs < 10000)
+
+    // 常驻快照：以前这里回 `isRepo:false`（界面于是说"不是 git 仓库"）。
+    const snap = await post('workspace', { workspace: multiRoot })
+    check('   项目快照 isRepo', snap.body.isRepo, true)
+    check('   默认仓库是列表里的第一个', snap.body.repositoryRoot, multiBackendReal)
+    check('   分支来自那一个仓库', snap.body.branch, 'backend-main')
+    check('   带上仓库名（多仓库 UI 要显示）', snap.body.repositoryName, 'haiwei-manage-backend')
+    check('   带上工作区相对路径', snap.body.repositoryRelativePath, 'haiwei-manage-backend')
+
+    const fe = await post('workspace', { workspace: multiRoot, repository: multiFrontend })
+    check('   客户端指定 frontend -> 200', fe.status, 200)
+    check('   repositoryRoot 是 frontend', fe.body.repositoryRoot, multiFrontendReal)
+    check('   分支来自 frontend', fe.body.branch, 'frontend-main')
+    check('   项目级 scope 也一并回', fe.body.projectScope.repositories.length, 2)
+
+    // `repository` 是不可信输入：只认本项目发现过的仓库。
+    const bogus = await post('workspace', { workspace: multiRoot, repository: repo })
+    check('   未发现的仓库 -> 400', bogus.status, 400)
+    check('   code 是 repositoryNotAllowed', bogus.body.code, 'repositoryNotAllowed')
+
+    // 写操作（暂存）只落在选中的仓库里：**提交绝不跨仓库**。
+    touch(join(multiFrontend, 'fe.txt'), 'fe\n')
+    touch(join(multiBackend, 'be.txt'), 'be\n')
+    const staged = await post('stage', { workspace: multiRoot, repository: multiFrontend, paths: ['fe.txt'] })
+    check('   暂存 frontend 的文件 -> 200', staged.status, 200)
+    const stagedInFrontend = (await git(['diff', '--cached', '--name-only'], multiFrontend)).trim()
+    const stagedInBackend = (await git(['diff', '--cached', '--name-only'], multiBackend)).trim()
+    check('   frontend 的索引里有了它', stagedInFrontend, 'fe.txt')
+    check('   backend 的索引里没有它', stagedInBackend, '')
+    check('   响应里的 repositoryRoot 是 frontend', staged.body.repositoryRoot, multiFrontendReal)
+    // 反方向再验一次：指定 backend 暂存 backend 的文件。
+    const stagedBe = await post('stage', { workspace: multiRoot, repository: multiBackend, paths: ['be.txt'] })
+    check('   暂存 backend 的文件 -> 200', stagedBe.status, 200)
+    check('   backend 的索引里有了它', (await git(['diff', '--cached', '--name-only'], multiBackend)).trim(), 'be.txt')
+    check('   frontend 的索引没被它改动', (await git(['diff', '--cached', '--name-only'], multiFrontend)).trim(), 'fe.txt')
+  }
+
 } finally {
   if (child !== undefined) child.kill()
   // 6,846 个文件删除要一点时间，但必须清理（否则临时目录越来越大）。

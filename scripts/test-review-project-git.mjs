@@ -260,12 +260,48 @@ const held = new Map()
 /** 让某个工作区的 `/workspace` 直接失败（测错误相位）。 */
 const failing = new Set()
 const requests = []
+
+/**
+ * `/project-git-scope`（项目级仓库发现）的回答：**默认"工作区自己就是仓库"**。
+ *
+ * 这是 1.5.2 的常见形状，也是"单仓库不许回归"的基准：仓库列表只有一项、`relativePath`
+ * 为空，于是 active 就是它本身、请求里**不带** `repository`，与 1.5.2 逐字一致。
+ * 第 6 节用 `scopeOverrides` 换成"工作区不是仓库、仓库在子目录里"的多仓库形状。
+ *
+ * 注意"工作区"参数也可能是**某个仓库根**：项目级汇总给每个仓库挂订阅时用的就是这个
+ * 身份（见 review 客户端的 syncProjectChildren），那时它必须回答"我自己就是那个仓库"，
+ * 否则那一格永远解析不出仓库根。
+ */
+const baseName = (path) => path.slice(path.lastIndexOf('\\') + 1)
+const scopeOverrides = new Map()
+const scopeFor = (workspace) =>
+  scopeOverrides.get(workspace) ?? [
+    { repositoryRoot: workspace, gitDir: `${workspace}\\.git`, relativePath: '', name: baseName(workspace) },
+  ]
+
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   requests.push({ url: target, route, body })
   const wrap = (payload) => ({ ok: true, text: async () => JSON.stringify(payload) })
+  if (route === 'project-git-scope') {
+    const workspace = body?.workspace
+    const repositories = scopeFor(workspace)
+    return wrap({
+      workspaceRoot: workspace,
+      repositories,
+      discovery: {
+        complete: true,
+        directoriesVisited: 2,
+        candidatesFound: repositories.length,
+        gitProbes: repositories.length,
+        durationMs: 1,
+        truncatedByBudget: false,
+        cached: false,
+      },
+    })
+  }
   if (route === 'workspace' && failing.has(body?.workspace)) {
     return { ok: false, status: 500, text: async () => JSON.stringify({ error: 'isRepo 检查失败（测试注入）' }) }
   }
@@ -274,7 +310,10 @@ globalThis.fetch = async (url, init) => {
   }
   if (route === 'roots') return wrap({ roots: [A, B], current: A })
   if (route === 'workspace') {
-    const payload = workspaceData.get(body?.workspace)
+    // 多仓库时客户端会带上 `repository`（它才是"这一份数据属于哪个仓库"的权威），
+    // 单仓库时不带 —— 两种都要能取到夹具。
+    const key = typeof body?.repository === 'string' && body.repository !== '' ? body.repository : body?.workspace
+    const payload = workspaceData.get(key)
     return wrap(payload ?? { isRepo: true, files: [], changedFiles: 0, branch: '', head: '' })
   }
   if (route === 'workspace-file') {
@@ -428,6 +467,12 @@ console.log('=== 1. 切换项目：A ready → B loading → B ready → 回 A =
   let nodes = await drain()
   has('   A 的入口显示文件数', badgeText(nodes).includes('files(count=2)'))
   check('   Changes 里列出 A 的文件', rowsOf(nodes, 'data-staging-row').length, 2)
+  // 单仓库项目的提交框标题**只有分支**（多仓库才缀仓库名，见第 6 节）。
+  check(
+    '   提交框标题只有分支',
+    nodes.find((n) => n.props?.['data-staging-message'] !== undefined)?.props?.placeholder,
+    'commitMessage(branch=alpha)',
+  )
 
   // 切到 B：B 的响应被挂起 → 必须显示加载态，且**不能**继续显示 A 的文件。
   sessionSnapshot = { ...sessionSnapshot, current: 's2' }
@@ -579,7 +624,113 @@ console.log('=== 5. 快照状态机：loading / ready / stale-while-revalidate /
 }
 
 console.log('')
-console.log('=== 6. 全程没有 hook 数量/顺序变化（等价于真实 React #310）===')
+console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择器 + 操作不跨仓库 ===')
+{
+  // 实机反馈的形状：`F:\code_buss\haiweiNew` 自己**不是** git 仓库，仓库在
+  // `haiwei-manage-fronted`、`haiwei-manage-backend` 两个子目录里。1.5.3 及以前面板会
+  // 说"当前工作区不是 git 仓库"——这一段钉住"有子仓库时绝不是那个结论"。
+  const FE = `${A}\\haiwei-manage-fronted`
+  const BE = `${A}\\haiwei-manage-backend`
+  workspaceData.set(FE, {
+    isRepo: true,
+    branch: 'master',
+    head: 'f'.repeat(40),
+    empty: false,
+    files: [file('fe1.txt'), file('fe2.txt'), file('fe3.txt')],
+    changedFiles: 3,
+  })
+  workspaceData.set(BE, {
+    isRepo: true,
+    branch: 'main',
+    head: 'e'.repeat(40),
+    empty: false,
+    files: [file('be1.txt')],
+    changedFiles: 1,
+  })
+  // 工作区自己不在列表里（`relativePath === ''` 的那一项不存在）——active 因此要用户选。
+  scopeOverrides.set(A, [
+    { repositoryRoot: FE, gitDir: `${FE}\\.git`, relativePath: 'haiwei-manage-fronted', name: 'haiwei-manage-fronted' },
+    { repositoryRoot: BE, gitDir: `${BE}\\.git`, relativePath: 'haiwei-manage-backend', name: 'haiwei-manage-backend' },
+  ])
+  store.reset()
+  sessionSnapshot = { current: 's1', ids: ['s1', 's2'], byId: { s1: { cwd: A }, s2: { cwd: B } } }
+  let nodes = await openDrawer('multi')
+  await drain()
+  await drain()
+  // 徽标：数字是**所有仓库之和**（3 + 1 = 4），并说清是几个仓库——否则用户会把它当成
+  // 某一个仓库的改动数。
+  has('6) 徽标是所有仓库之和 + 仓库数', badgeText(nodes).includes('projectFilesMulti(count=4,repositories=2)'))
+  check('   页签里有仓库选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)
+  check('   不是一个仓库一个选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)
+  has('   面板里没有说"不是 git 仓库"', !allText(nodes).includes('notRepo') && !allText(nodes).includes('notGitProject'))
+  check('   两个仓库各一格（各一套轮询）', store.cells().filter((cell) => String(cell.key).includes('haiwei-manage') && cell.polling).length, 2)
+  has('   全程没有 hook 数量变化', hookOrderErrors.length === 0)
+
+  // 打开选择器：两项、带各自的相对路径与分支。
+  await clickNow('data-review-repo-select-button')
+  nodes = await drain()
+  check('   菜单里列出两个仓库', rowsOf(nodes, 'data-review-repo-pick').length, 2)
+  check(
+    '   菜单项就是两条仓库根',
+    rowsOf(nodes, 'data-review-repo-pick')
+      .map((n) => n.props['data-review-repo-pick'])
+      .sort()
+      .join('|'),
+    [FE, BE].sort().join('|'),
+  )
+  has('   每项标出分支', textOf(rowsOf(nodes, 'data-review-repo-branch')[0] ?? null).length > 0)
+  check('   并标出各自的改动数', rowsOf(nodes, 'data-review-repo-branch').length, 2)
+
+  // 默认项是列表里的第一个（FE），因此"选 FE"是一个空操作；要观察切换就点 **BE**。
+  // 切过去之后**所有** A 工作区的读请求都必须带 `repository=BE`。
+  requests.length = 0
+  await clickNow('data-review-repo-pick', BE)
+  nodes = await drain()
+  // 面板那一帧可能直接用汇总里已经取好的 BE 数据（同一个 store，不会白跑一次请求），
+  // 因此强制刷一次来观察请求体——这正是"切仓库之后读到的是新仓库"的那条路径。
+  await store.refresh(A)
+  nodes = await drain()
+  const aRequests = requests.filter((r) => r.body?.workspace === A && r.body?.repository !== undefined)
+  has('   选过之后 A 的请求都带 repository', aRequests.length >= 1)
+  check(
+    '   带的都是选中的那一个',
+    [...new Set(aRequests.map((r) => r.body?.repository))].join(','),
+    BE,
+  )
+  // 面板里显示的是 BE 的文件（不是 FE 的，也不是两个混在一起）。
+  check('   面板列的是 backend 的 1 个文件', rowsOf(nodes, 'data-staging-row').length, 1)
+  has('   选择器上写着当前仓库 + 分支', textOf(rowsOf(nodes, 'data-review-repo-current')[0] ?? null).includes('main'))
+
+  // 写操作（暂存一行）必须落在同一个仓库上：**提交绝不跨仓库**。
+  requests.length = 0
+  has('   点得中某个「暂存」', await clickNow('data-staging-row-action', 'stage'))
+  nodes = await drain()
+  const writes = requests.filter((r) => r.route === 'stage')
+  has('   暂存发到了 host', writes.length >= 1)
+  check('   写操作带的 workspace 是工作区', writes[writes.length - 1]?.body?.workspace, A)
+  check('   而且带的是选中的仓库（不跨仓库）', writes[writes.length - 1]?.body?.repository, BE)
+  // 提交框在底部、仓库选择器在顶部：多仓库时标题必须自己再说一次仓库名。
+  const messageBox = nodes.find((n) => n.props?.['data-staging-message'] !== undefined)
+  has('   提交框标题里带仓库名 + 分支', String(messageBox?.props?.placeholder ?? '').includes('backend · main'))
+  has('   面板里没有说"不是 git 仓库"', !allText(nodes).includes('notRepo') && !allText(nodes).includes('notGitProject'))
+  check('   这一段没有 hook 数量变化', hookOrderErrors.length, 0)
+  // 项目级汇总会给**每个**仓库建一格，但请求里的 `workspace` 必须始终是**用户登记过的**
+  // 那个路径：仓库根（`…\haiwei-manage-fronted`）通常不在登记表里，拿它当工作区发请求
+  // 会被宿主以 400 `workspaceNotAllowed` 拒掉——多仓库支持反而会让面板彻底不可用。
+  const strayWorkspaces = requests
+    .map((r) => r.body?.workspace)
+    .filter((w) => w !== undefined && w !== A && w !== B)
+  check('   从不把未登记的仓库根当工作区发请求', [...new Set(strayWorkspaces)].join(','), '')
+
+  // 清掉夹具，别影响后面的检查。
+  workspaceData.delete(FE)
+  workspaceData.delete(BE)
+  scopeOverrides.delete(A)
+  store.reset()
+}
+
+console.log('')
+console.log('=== 7. 全程没有 hook 数量/顺序变化（等价于真实 React #310）===')
 {
   if (hookOrderErrors.length > 0) {
     console.log('  发生变化的组件：')
@@ -587,7 +738,7 @@ console.log('=== 6. 全程没有 hook 数量/顺序变化（等价于真实 Reac
       console.log(`    ${item.key}\n      之前: ${item.before}\n      之后: ${item.after}`)
     }
   }
-  check('6) hook 序列稳定的组件数', hookShapes.size > 5, 'true')
+  check('7) hook 序列稳定的组件数', hookShapes.size > 5, 'true')
   check('   发生 hook 数量/顺序变化的组件', hookOrderErrors.length, 0)
   check('   槽位级隔离次数（应为 0：入口从未被替换）', slotErrors.length, 0)
 }

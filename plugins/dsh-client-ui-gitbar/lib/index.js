@@ -685,16 +685,90 @@ const repoContext = createRepoContextResolver({
  *
  * @param workspace - 已校验的工作区路径。
  * @param context - 解析结果（可能 undefined："这里不是仓库"）。
+ * @param scope - 项目级作用域（`resolveProjectScope` 的结果，可选）。
  * @returns 可直接铺进响应的字段。
  */
-function scopeFields(workspace, context) {
-  if (context === undefined) return { workspaceRoot: workspace }
+function scopeFields(workspace, context, scope) {
+  const projectScope =
+    scope === undefined || scope === null
+      ? {}
+      : {
+          projectScope: {
+            workspaceRoot: scope.workspaceRoot,
+            repositories: scope.repositories,
+            discovery: scope.discovery,
+          },
+        }
+  if (context === undefined) return { workspaceRoot: workspace, ...projectScope }
   return {
     workspaceRoot: context.workspaceRoot,
     repositoryRoot: context.repositoryRoot,
     ...(context.gitDir === '' ? {} : { gitDir: context.gitDir }),
+    ...(context.relativePath === undefined ? {} : { repositoryRelativePath: context.relativePath }),
+    ...(context.name === undefined ? {} : { repositoryName: context.name }),
     gitScope: createProjectGitScope(context),
+    ...projectScope,
   }
+}
+
+/**
+ * 解析"这次请求要操作哪个仓库"。
+ *
+ * 客户端可以在 `?repository=` / 请求体里指定多仓库项目中的某一个；它是**不可信输入**，
+ * 因此只认"这个工作区的 ProjectGitScope 里确实有它"的路径（realpath 比较）——否则
+ * `repository=C:/` 又能越过工作区安全边界，让宿主对任意目录跑 git 与读写。
+ *
+ * 没指定时的顺序与 review 插件**逐字相同**：工作区自己所属的仓库 → 列表里的第一个。
+ * 两个插件必须一致，否则同一个项目里 gitbar 的分支徽章与 review 的 Changes 会操作
+ * 两个不同的仓库。
+ *
+ * @param workspace - 已校验的工作区路径。
+ * @param repository - 客户端指定的仓库根（可选）。
+ * @param options - `{ projectScope }`：是否**强制**把项目级仓库列表算出来（见下）。
+ * @returns `{ context, scope, error }`；`error === 'repositoryNotAllowed'` 时拒绝。
+ */
+async function resolveScopedRepo(workspace, repository, options) {
+  const context = await repoContext.resolve(workspace)
+  /**
+   * 要不要**现在**把项目级仓库列表算出来。
+   *
+   * 这是"每条轮询路径都多起一个 git 进程"的那道闸门。发现本身要跑一次 `rev-parse`
+   * 探针（第一次在 250 ms 预算内，之后 60 秒内命中缓存），因此**不能无条件跑**：
+   *   * 客户端指定了 `repository`：必须校验它，因此要列表；
+   *   * 工作区自己不是仓库：只有列表能告诉我们子仓库在哪（实机那条 bug 的修复点）；
+   *   * 路由自己声明需要（徽章要显示"几个仓库"、作用域查询）。
+   * 其余情况（工作区自己是仓库、客户端也没指定）只用**已有缓存**——于是单仓库项目的首屏
+   * 分支列表仍然是"2 个 git 进程"（探针 + for-each-ref），与 1.5.2 逐字一致，而
+   * `?repository=` 与"工作区不是仓库"两条路照常工作。
+   */
+  const explicit = typeof repository === 'string' && repository !== ''
+  const wanted = options?.projectScope === true || explicit || context === undefined
+  const scope = wanted ? await repoContext.resolveProjectScope(workspace) : repoContext.peekProjectScope(workspace)
+  const repositories = Array.isArray(scope?.repositories) ? scope.repositories : []
+  const pick = (entry) => ({
+    workspaceRoot: workspace,
+    repositoryRoot: entry.repositoryRoot,
+    gitDir: entry.gitDir,
+    relativePath: entry.relativePath,
+    name: entry.name,
+  })
+  if (explicit) {
+    let real
+    try {
+      real = realpathSync.native(repository)
+    } catch {
+      real = undefined
+    }
+    const match = real === undefined ? undefined : repositories.find((entry) => entry.repositoryRoot === real)
+    if (match === undefined) return { context: undefined, scope, error: 'repositoryNotAllowed' }
+    return { context: pick(match), scope, error: '' }
+  }
+  const own = repositories.find((entry) => entry.relativePath === '')
+  if (own !== undefined) return { context: pick(own), scope, error: '' }
+  if (repositories.length >= 1) return { context: pick(repositories[0]), scope, error: '' }
+  // 列表里没有仓库（没强制发现、缓存也是空的）：工作区自己所属的仓库仍然算数
+  // ——这正是 1.5.2 的单仓库路径。
+  return { context, scope, error: '' }
 }
 
 /**
@@ -866,15 +940,34 @@ function createGitHandler() {
       // （`.git/MERGE_HEAD`）以前是按 `<工作区>/.git/...` 找的，工作区是仓库子目录时
       // 那个路径根本不存在，于是"正在进行合并"永远显示不出来。
       //
-      // repositoryRoot 只能由 host 推导（见 lib/repo-context.js 的说明）：客户端送来
-      // 的永远只是 workspaceRoot。
-      const context = await repoContext.resolve(workspace)
-      const cwd = context === undefined ? workspace : context.repositoryRoot
-      const scope = scopeFields(workspace, context)
-
+      // 多仓库项目（工作区自己不是仓库、子目录里有两个仓库）时，客户端会在
+      // `?repository=` 里说明"现在在看哪一个"——它同样只由 host 校验（见 resolveScopedRepo）。
+      const requestedRepository = url.searchParams.get('repository')
       const path = url.pathname
+      /**
+       * 哪些路由**必须**现在就有项目级仓库列表：
+       *   * `/status`：徽章要显示"Git · N 个仓库"并给出选择器，它是客户端唯一会读
+       *     `projectScope` 的响应（客户端的 `rememberProjectRepositories` 只认 `status`）；
+       *   * `/repo-context`：它本身就是"作用域查询"，回一个空列表没有意义。
+       * 其它路由（`/branches`、`/branch/sync`、写操作、…）只用已有缓存，因此不会在每次
+       * 轮询上多起一个探针进程（实测：单仓库首屏 `/branches` 仍是 2 个 git 进程）。
+       */
+      const wantsProjectScope = path === `${ROUTE_PREFIX}/status` || path === `${ROUTE_PREFIX}/repo-context`
+      const { context, scope: projectScope, error: scopeError } = await resolveScopedRepo(workspace, requestedRepository, {
+        projectScope: wantsProjectScope,
+      })
+      if (scopeError === 'repositoryNotAllowed') {
+        sendJson(response, 400, {
+          error: 'repository not allowed',
+          code: 'repositoryNotAllowed',
+          detail: 'repository must be one of the repositories discovered in this workspace',
+        })
+        return
+      }
+      const cwd = context === undefined ? workspace : context.repositoryRoot
+      const scope = scopeFields(workspace, context, projectScope)
 
-      // 作用域查询：客户端据此确认"两个目录其实是同一个仓库"。
+      // 作用域查询：客户端据此确认"两个目录其实是同一个仓库"，并据此渲染多仓库徽标。
       if (path === `${ROUTE_PREFIX}/repo-context`) {
         sendJson(response, 200, { isRepo: context !== undefined, ...scope })
         return

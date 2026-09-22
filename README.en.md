@@ -94,7 +94,8 @@ official package is lacking anything.
 | **Copy workspace path** | straight to the clipboard, ready to paste into a terminal |
 | **Project info panel** | workspace path, git branch and change count, runtime version and source, bundled Node and Electron versions, harness home |
 | **Per-turn change review** | after a turn finishes, see every file that turn changed, with unified diffs |
-| **Branch badge and switching** | branch and turn changes above the composer, with long branch names truncated; click to switch to a local or remote branch |
+| **Project changes panel** | top-right drawer, following the current conversation's project; `Changes / Log` tabs (`Changes`: staged / changes / untracked plus a pinned commit box, click a file for its line-level diff; `Log`: branch tree + commit graph + details in three columns with draggable, remembered widths), resizable (double-click to reset, arrow keys to nudge). When the workspace itself is not a Git repository (the repositories live in subdirectories) the sub-repositories are discovered automatically and a repository picker is shown |
+| **Branch badge and switching** | branch and turn changes above the composer, with long branch names truncated; click to switch to a local or remote branch. Multi-repository projects additionally show `Git · N repositories` and a repository picker in front |
 
 ### Updates
 
@@ -233,6 +234,11 @@ composer card visually — the background extends behind the card and reuses the
 **Branch chip** (`dsh-client-ui-gitbar`)
 
 - Shows the current branch, the uncommitted change count, and ahead/behind (`master*  ↑2 ↓1`)
+- **Multi-repository projects** (the workspace itself is not a repository; the repositories are in
+  subdirectories) show `Git · 2 repositories` plus a repository picker first: the branch and change
+  count are always those of the current repository, and switching re-fetches status, branches and
+  remotes immediately. With a single repository this whole block is **not rendered** and requests
+  carry no extra parameter
 - Click to open the branch switcher; a **search box** sits at the top — focused and
   cleared on open, filtering as you type
 - Branch rows behave the way IDEA's do: a **single click** selects the row and opens its
@@ -292,6 +298,31 @@ Both controls are labelled for assistive tech (`aria-label`, `aria-expanded`,
 - **One snapshot and one polling loop per repository.** The snapshot store is keyed by the
   **repository root**, so `repo/src` and `repo/pages` share a single record: changing directories
   no longer clears the branch/Changes/badge, re-scans everything, or starts a second 10-second poll.
+- **A workspace that is not itself a repository no longer reports "not a git repository".** The
+  project-level scope comes from a single `/project-git-scope` route: it probes the workspace
+  itself (`.git` may be a **file** — that is what worktrees and submodules look like, so existence
+  is followed by one `rev-parse --show-toplevel --absolute-git-dir`) and then looks at
+  subdirectories. Discovery is **bounded**: depth ≤ 4, at most 4000 directories visited, a 250 ms
+  budget for the fast path (itself + the first level) after which the partial answer is returned
+  and the rest continues in the background, concurrency 8, and 14 dependency/output directories
+  (`node_modules`, `dist`, `build`, `target`, `.next`, `vendor`, `__pycache__`, …) are never
+  descended into — a `.git` down there is a ghost repository. Finding one repository does **not**
+  stop the scan, so siblings such as `haiweiNew/haiwei-manage-fronted` and
+  `…/haiwei-manage-backend` are both listed. Results are cached per workspace for 60 seconds with
+  single-flight and are **not** part of the 10-second poll. `isRepo:false` is only reported when
+  that list is genuinely empty.
+- **In a multi-repository project, "which repository am I looking at" is panel-wide state.** A
+  repository picker (name + branch + change count, with the workspace-relative path) appears next
+  to the tabs, and the `Changes` file list and diffs, the `Log` branch tree / commit graph /
+  details and the commit box all follow it; each repository still gets its own snapshot cell and
+  its own polling loop (two subdirectories of the same repository still share one). Until you pick
+  one, a deterministic default applies (the repository the workspace belongs to, else the first in
+  the list) and the host uses the **same** rule, so the picker can never say A while the panel
+  shows B. The badge number is the **sum** over all repositories and says how many there are.
+  Staging and committing only ever touch the selected repository (multi-repo requests carry
+  `repository`, and the host accepts only repositories it discovered — anything else is a 400
+  `repositoryNotAllowed`). Single-repository projects send **no** extra parameter at all, exactly
+  as in 1.5.2.
 - **Resident polling takes a fast path, so Git work is decoupled from the number of untracked
   files.** `/workspace` and `/status` use
   `status --porcelain=v2 --branch -z --untracked-files=normal`, which collapses whole untracked

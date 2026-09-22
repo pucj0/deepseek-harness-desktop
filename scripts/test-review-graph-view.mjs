@@ -791,7 +791,7 @@ console.log('=== 7. 空仓库与错误态 ===')
     return originalFetch(url, init)
   }
   await mount()
-  checkTrue('   非仓库给出提示', viewText().includes('notRepo'))
+  checkTrue('   非仓库给出提示', viewText().includes('notGitProject'))
 
   // 出错。
   globalThis.fetch = async (url, init) => {

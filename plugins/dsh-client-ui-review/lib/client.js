@@ -715,6 +715,19 @@ window.__ModuleLoader__.load({
       projectTitle: '项目改动',
       noWorkspace: '当前没有可用的工作区。',
       projectIdle: '项目暂无改动',
+      /**
+       * 多仓库项目：徽标上的数字是**所有仓库之和**，必须一并说明"几个仓库"，否则用户会
+       * 把它当成某一个仓库的改动数。
+       */
+      projectFilesMulti: '{count} 个改动 · {repositories} 个仓库',
+      repositoryCount: '{count} 个仓库',
+      repoSelectorLabel: '切换仓库',
+      repoDiscovering: '正在发现更多 Git 仓库…',
+      /**
+       * "不是 Git 项目"这句话只在**真的一处仓库都没有**时说（宿主已确认工作区与其子目录
+       * 里都没有 `.git`）。以前它在"工作区自己不是仓库、但子目录是"的实机上误报。
+       */
+      notGitProject: '项目 {name} 里没有发现 Git 仓库（工作区本身及其子目录都不是）。',
       workspaceClean: '这个项目当前没有未提交的改动。',
       workspaceEmpty: '这个仓库还没有任何提交。',
       collapse: '收起面板',
@@ -912,6 +925,17 @@ window.__ModuleLoader__.load({
       projectTitle: 'Project changes',
       noWorkspace: 'No workspace is available.',
       projectIdle: 'No project changes',
+      /** Multi-repository project: the badge number is the sum over all repositories. */
+      projectFilesMulti: '{count} changes · {repositories} repositories',
+      repositoryCount: '{count} repositories',
+      repoSelectorLabel: 'Switch repository',
+      repoDiscovering: 'Discovering more Git repositories…',
+      /**
+       * Only said when there really is **no** repository at all (the host already checked the
+       * workspace and every subdirectory for `.git`). It used to be shown for the real-world
+       * case where the workspace itself is not a repository but a subdirectory is.
+       */
+      notGitProject: 'No Git repository was found in project {name} (neither the workspace nor its subdirectories).',
       workspaceClean: 'This project has no uncommitted changes.',
       workspaceEmpty: 'This repository has no commits yet.',
       collapse: 'Collapse panel',
@@ -1280,6 +1304,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 给带 `workspace` 的请求体补上"当前选中的仓库"。
+     *
+     * 单仓库项目里 `repository` 是不必要也不该带的：host 会自己解析出"工作区所属的那个
+     * 仓库"（或**唯一**的那个子仓库），这与 1.5.2 的行为完全一致。只有多仓库、且用户已经
+     * 选定了 active 仓库时才带上它——于是 `stage` / `commit` / `graph` / `revert` /
+     * `untracked` / `workspace-file` / … **所有**仓库级路由自动都在同一个仓库上，
+     * 不会出现"列表是 A 仓库、提交发到 B 仓库"。
+     *
+     * 这条规则只有一处实现（所有请求都经过 `call`），因此不需要在十几个调用点各写一遍。
+     *
+     * @param body - 原始请求体。
+     * @returns 可能补上 `repository` 的请求体。
+     */
+    function withActiveRepository(body) {
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) return body
+      if (typeof body.repository === 'string' && body.repository !== '') return body
+      const workspace = body.workspace
+      if (typeof workspace !== 'string' || workspace === '') return body
+      const scope = projectScopes.peek(workspace)
+      if (scope === undefined || scope.repositories.length <= 1) return body
+      const active = projectScopes.peekActive(workspace)
+      if (typeof active !== 'string' || active === '') return body
+      return { ...body, repository: active }
+    }
+
+    /**
      * 请求宿主侧路由。
      * @param path - 相对 API 前缀的路径。
      * @param body - 请求体（会被 JSON 序列化）。
@@ -1290,7 +1340,7 @@ window.__ModuleLoader__.load({
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withActiveRepository(body)),
       })
       const text = await response.text()
       let payload
@@ -1454,41 +1504,91 @@ window.__ModuleLoader__.load({
     const UNTRACKED_PAGE_SIZE = 200
 
     /**
-     * `workspaceRoot → repositoryRoot` 的解析缓存。
+     * active 仓库的持久化键：`{ [workspaceRoot]: repositoryRoot }`。
+     *
+     * 多仓库时"当前在看哪个仓库"是用户的选择（Changes / Log / 提交都只作用于它），因此必须
+     * 跨开关面板、跨重启保持——否则每次打开都回到第一个仓库，用户会以为"面板跳了"。
+     */
+    const ACTIVE_REPO_KEY = 'dsh.review.activeRepository'
+
+    /**
+     * 项目级 Git 作用域（`workspaceRoot → ProjectGitScope`）的解析与缓存。
      *
      * 为什么客户端也需要它：Git 快照的 store 必须按**仓库**共享（同仓库的两个子目录只能有
-     * 一套轮询），而 store 的键要在订阅的那一刻就确定。先问一次 host（`/repo-context`，
-     * 内部是**一次** `rev-parse`（同时拿 toplevel 与 git 目录）的有界缓存），拿到 repositoryRoot
-     * 再把订阅挂到"仓库那一格"。
+     * 一套轮询），而 store 的键要在订阅的那一刻就确定。
      *
-     * 这里也做缓存与 single-flight：一个工作区只问一次，多个组件（入口徽标 + 抽屉）同时
-     * 订阅不会各问一遍。
+     * 1.5.3 起 host 的 `/project-git-scope` 不再只回答"工作区自己属于哪个仓库"，而是回答
+     * "这个工作区里有**哪些**仓库"（工作区本身不是仓库、下面有独立仓库是实机形状：
+     * `haiweiNew/haiwei-manage-fronted/.git`）。因此这里同时负责：
+     *   * 缓存 scope（single-flight：一个工作区只问一次，多个组件同时订阅不会各问一遍）；
+     *   * 记住用户选的 **active 仓库**（持久化，见 ACTIVE_REPO_KEY）——多仓库时所有
+     *     仓库级 UI（Changes / Log / stage / commit）都只作用于它。
      */
-    const repoContexts = (() => {
-      /** workspaceRoot → repositoryRoot（空串 = 不是仓库）。 */
+    const projectScopes = (() => {
+      /** workspaceRoot → `{ scope, at }`。 */
       const cache = new Map()
       /** workspaceRoot → 在途请求。 */
       const inflight = new Map()
+      /** 已订阅者（scope 变化时通知，让多仓库 UI 立刻反映新发现的仓库）。 */
+      const listeners = new Set()
 
-      const resolve = (workspaceRoot) => {
-        if (typeof workspaceRoot !== 'string' || workspaceRoot === '') return Promise.resolve('')
-        if (cache.has(workspaceRoot)) return Promise.resolve(cache.get(workspaceRoot))
+      const emit = () => {
+        for (const listener of [...listeners]) listener()
+      }
+
+      /** 空 scope：还没取到 / 取不到时用它，形状与 host 一致。 */
+      const emptyScope = (workspaceRoot) => ({
+        workspaceRoot,
+        repositories: [],
+        discovery: { complete: true, directoriesVisited: 0, candidatesFound: 0, gitProbes: 0, durationMs: 0, truncatedByBudget: false, cached: false },
+      })
+
+      /** 把 host 的响应归一成 scope（缺字段时兜底，避免渲染层到处判空）。 */
+      const normalize = (workspaceRoot, payload) => ({
+        workspaceRoot: typeof payload?.workspaceRoot === 'string' ? payload.workspaceRoot : workspaceRoot,
+        repositories: (Array.isArray(payload?.repositories) ? payload.repositories : [])
+          .filter((entry) => typeof entry?.repositoryRoot === 'string' && entry.repositoryRoot !== '')
+          .map((entry) => ({
+            repositoryRoot: entry.repositoryRoot,
+            gitDir: typeof entry.gitDir === 'string' ? entry.gitDir : '',
+            relativePath: typeof entry.relativePath === 'string' ? entry.relativePath : '',
+            name: typeof entry.name === 'string' && entry.name !== '' ? entry.name : basenameOf(entry.repositoryRoot),
+          })),
+        discovery: {
+          complete: payload?.discovery?.complete !== false,
+          directoriesVisited: Number(payload?.discovery?.directoriesVisited ?? 0),
+          candidatesFound: Number(payload?.discovery?.candidatesFound ?? 0),
+          gitProbes: Number(payload?.discovery?.gitProbes ?? 0),
+          durationMs: Number(payload?.discovery?.durationMs ?? 0),
+          truncatedByBudget: payload?.discovery?.truncatedByBudget === true,
+          cached: payload?.discovery?.cached === true,
+        },
+      })
+
+      const load = (workspaceRoot, options = {}) => {
+        if (typeof workspaceRoot !== 'string' || workspaceRoot === '') return Promise.resolve(emptyScope(''))
+        const cached = cache.get(workspaceRoot)
+        // TTL 由 host 负责（60 秒）；客户端这里只在"没有缓存"或显式 force 时才再问一次。
+        if (options.force !== true && cached !== undefined) return Promise.resolve(cached.scope)
         const running = inflight.get(workspaceRoot)
         if (running !== undefined) return running
         const task = (async () => {
           try {
-            const payload = await call('repo-context', { workspace: workspaceRoot })
-            const root =
-              payload?.isRepo === true && typeof payload.repositoryRoot === 'string' && payload.repositoryRoot !== ''
-                ? payload.repositoryRoot
-                : ''
-            cache.set(workspaceRoot, root)
-            return root
+            const payload = await call('project-git-scope', {
+              workspace: workspaceRoot,
+              ...(options.force === true ? { force: true } : {}),
+            })
+            const scope = normalize(workspaceRoot, payload)
+            cache.set(workspaceRoot, { scope, at: Date.now() })
+            emit()
+            return scope
           } catch {
-            // 取不到就按"不是仓库"处理，并把结果记成空串缓存起来避免反复打这条路由
-            // （缓存是短生命周期的：写操作与切换项目都会 invalidate）。
-            cache.set(workspaceRoot, '')
-            return ''
+            // 取不到就按"没有仓库"处理，并缓存起来避免反复打这条路由（写操作与切项目会
+            // invalidate）。注意**不要**因此把界面判成"不是 Git 项目"——那正是实机反馈的
+            // 那句话；这里只是让 UI 显示"检测中/未知"。
+            const scope = emptyScope(workspaceRoot)
+            cache.set(workspaceRoot, { scope, at: Date.now() })
+            return scope
           } finally {
             if (inflight.get(workspaceRoot) === task) inflight.delete(workspaceRoot)
           }
@@ -1497,26 +1597,121 @@ window.__ModuleLoader__.load({
         return task
       }
 
+      /**
+       * 用户选的 active 仓库：`{ [workspaceRoot]: repositoryRoot }`。
+       *
+       * 内存里那一份才是**权威**，localStorage 只是落盘（读不到、写不进时功能照常）：
+       * 每次都现读 localStorage 会让"写进去再读回来"成为一次依赖存储实现的动作——在
+       * 隐私模式、被禁用的 storage、以及测试夹具里都读不回来，表现是"点了另一个仓库，
+       * 界面却还在原来那个"。
+       */
+      let activeMap = null
+
+      const readActive = () => {
+        if (activeMap !== null) return activeMap
+        try {
+          const raw = window.localStorage.getItem(ACTIVE_REPO_KEY)
+          const parsed = raw === null ? undefined : JSON.parse(raw)
+          activeMap = parsed !== null && typeof parsed === 'object' ? parsed : {}
+        } catch {
+          activeMap = {}
+        }
+        return activeMap
+      }
+
+      const writeActive = (map) => {
+        activeMap = map
+        try {
+          window.localStorage.setItem(ACTIVE_REPO_KEY, JSON.stringify(map))
+        } catch {
+          // 存不了不影响本次会话内的选择。
+        }
+      }
+
+      /**
+       * 解析出"这次该用哪个仓库"。
+       *
+       * 顺序：用户选过的（且仍然存在）→ 工作区自己所属的仓库（`relativePath === ''`）→
+       * 列表里的第一个 → 空串（一个仓库都没有）。
+       *
+       * "第一个"这一条是**必须**的，不能留空让 UI 去选：实机场景是"工作区本身不是仓库、
+       * 子目录里有两个仓库"，那时留空意味着面板什么都显示不出来（宿主只能回答"这里没有
+       * git 仓库"）——正是要修掉的那句话。宿主给的顺序是确定的（浅层优先、同层按名字），
+       * 因此默认选中项在多次打开之间稳定；用户改过之后由上面第一条记住。
+       *
+       * @param scope - 已归一化的 scope。
+       * @returns repositoryRoot 或空串。
+       */
+      const activeOf = (scope) => {
+        const list = scope.repositories
+        if (list.length === 0) return ''
+        const saved = readActive()[scope.workspaceRoot]
+        if (typeof saved === 'string' && saved !== '' && list.some((entry) => entry.repositoryRoot === saved)) return saved
+        const own = list.find((entry) => entry.relativePath === '')
+        if (own !== undefined) return own.repositoryRoot
+        return list[0].repositoryRoot
+      }
+
       return {
-        resolve,
-        /** 直接写入（测试与写操作之后用）。 */
-        set(workspaceRoot, repositoryRoot) {
-          cache.set(workspaceRoot, repositoryRoot)
+        load,
+        /** 取当前该用的仓库（会先确保 scope 已加载）。 */
+        async currentRepository(workspaceRoot, options) {
+          const scope = await load(workspaceRoot, options)
+          return activeOf(scope)
         },
-        /** 丢掉一个工作区的解析结果（`git init`、切项目、写操作之后）。 */
+        /** 取 scope（缓存命中即同步返回，否则 undefined）。 */
+        peek(workspaceRoot) {
+          return cache.get(workspaceRoot)?.scope
+        },
+        /** 当前 active 仓库（缓存命中即同步返回）。 */
+        peekActive(workspaceRoot) {
+          const scope = cache.get(workspaceRoot)?.scope
+          return scope === undefined ? undefined : activeOf(scope)
+        },
+        /** 用户切换仓库：持久化并通知（快照 store 会因此换到那一格）。 */
+        setActive(workspaceRoot, repositoryRoot) {
+          if (typeof workspaceRoot !== 'string' || workspaceRoot === '') return
+          const map = readActive()
+          map[workspaceRoot] = String(repositoryRoot)
+          writeActive(map)
+          emit()
+        },
+        /** 测试与写操作之后直接写入一份 scope。 */
+        set(workspaceRoot, scope) {
+          cache.set(workspaceRoot, { scope: normalize(workspaceRoot, scope), at: Date.now() })
+          emit()
+        },
+        /** 丢掉一个工作区的 scope（`git init`、切项目、显式刷新）。 */
         invalidate(workspaceRoot) {
           if (typeof workspaceRoot === 'string' && workspaceRoot !== '') cache.delete(workspaceRoot)
           else cache.clear()
+          emit()
         },
-        peek(workspaceRoot) {
-          return cache.get(workspaceRoot)
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
         },
         reset() {
           cache.clear()
           inflight.clear()
+          listeners.clear()
+          // 用户选过的仓库也一起忘掉：测试之间必须彼此独立，否则"上一节选过 frontend"
+          // 会让下一节的单仓库断言看到带 `repository` 的请求。
+          activeMap = null
         },
       }
     })()
+
+    /**
+     * 取一条路径的最后一段（repo 名字的兜底）。
+     * @param value - 路径。
+     * @returns 最后一段。
+     */
+    function basenameOf(value) {
+      const text = String(value).replace(/[\\/]+$/u, '')
+      const cut = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+      return cut < 0 ? text : text.slice(cut + 1)
+    }
 
     /**
      * 把一个文件的暂存/未暂存状态翻译成 porcelain 的 XY 两列。
@@ -1737,36 +1932,159 @@ window.__ModuleLoader__.load({
         const key = provisionalKey(workspace)
         let record = records.get(key)
         if (record === undefined) {
-          record = {
-            key,
-            workspace,
-            /** 仓库根；解析出来之前是空串（"还不知道"）。 */
-            repositoryRoot: '',
-            /** 是否已经问过 host（避免对"不是仓库"的目录反复解析）。 */
-            resolved: false,
-            generation: 0,
-            /** 这一代里的第几次请求；用于"只看最新那次请求的响应"。 */
-            requestId: 0,
-            snapshot: null,
-            listeners: new Set(),
-            inflight: null,
-            timer: 0,
-            /** 是否正在轮询（用显式布尔，见 startPolling 的说明）。 */
-            polling: false,
-            /** 精确未跟踪枚举的在途请求（按仓库去重）。 */
-            exactInflight: null,
-            /** 上一次精确枚举的时间戳（轮询不重复问同一条路由）。 */
-            exactAt: 0,
-            /** 上一次精确枚举**失败**的时间戳：失败后的退避，避免每 10 秒重试一次。 */
-            exactErrorAt: 0,
-            /** 正在解析仓库根。 */
-            resolving: null,
-          }
+          record = createRecord(key, workspace)
           records.set(key, record)
           record.snapshot = emptySnapshot(record)
         }
         byWorkspace.set(workspace, record)
         return record
+      }
+
+      /** 建一条空记录（`ensure` 与 `ensureRepository` 共用，字段定义只有一处）。 */
+      const createRecord = (key, workspace) => ({
+        key,
+        workspace,
+        /** 仓库根；解析出来前是空串（"还不知道"）。 */
+        repositoryRoot: '',
+        /**
+         * 这一格**指定**要取的仓库（多仓库汇总给每个仓库挂订阅时用）。
+         *
+         * 为什么不是"把 workspace 换成仓库根"：`workspace` 是**用户登记过的路径**，
+         * 宿主拿它做安全校验（未登记的目录一律 400）。项目级汇总要给每个仓库取一份
+         * 快照，但那些仓库根（例如 `haiweiNew/haiwei-manage-frontend`）通常**不在**
+         * 登记表里，拿它当工作区发请求会被拒。因此身份仍是"用户的目录"，仓库则显式带上。
+         */
+        requestRepository: undefined,
+        /**
+         * 这一格是否**钉住**了某个仓库（项目级汇总为每个仓库建的那一格）。
+         *
+         * 面板自己那一格**不钉**：单仓库项目因此一个多余参数都不带（1.5.2 的请求形状）。
+         * 但一格一旦钉住，跨仓库切换时 `requestRepository` 必须跟着换（见 resolveRecord），
+         * 否则会"选了 B、显示的还是 A"。
+         */
+        pinned: false,
+        /** 是否已经问过 host（避免对"不是仓库"的目录反复解析）。 */
+        resolved: false,
+        generation: 0,
+        /** 这一代里的第几次请求；用于"只看最新那次请求的响应"。 */
+        requestId: 0,
+        snapshot: null,
+        listeners: new Set(),
+        inflight: null,
+        timer: 0,
+        /** 是否正在轮询（用显式布尔，见 startPolling 的说明）。 */
+        polling: false,
+        /** 精确未跟踪枚举的在途请求（按仓库去重）。 */
+        exactInflight: null,
+        /** 上一次精确枚举的时间戳（轮询不重复问同一条路由）。 */
+        exactAt: 0,
+        /** 上一次精确枚举**失败**的时间戳：失败后的退避，避免每 10 秒重试一次。 */
+        exactErrorAt: 0,
+        /** 正在解析仓库根。 */
+        resolving: null,
+      })
+
+      /**
+       * 建/取"某个仓库"的那一格（项目级汇总用）。
+       *
+       * 与 `ensure` 的两点不同，都是必须的：
+       *   * 键**直接**是仓库根（不需要解析，因为调用方已经知道）；
+       *   * **不写 `byWorkspace`**——那张表回答"用户的某个目录该落到哪一格"，
+       *     让它指向"某个特定仓库"的格，会把面板的解析污染成"永远只看这一个仓库"。
+       *
+       * @param workspace - 用户的工作区路径（请求里带的就是它，用于宿主的安全校验）。
+       * @param repositoryRoot - 这一格代表的仓库。
+       * @returns 记录。
+       */
+      const ensureRepository = (workspace, repositoryRoot) => {
+        const existing = records.get(repositoryRoot)
+        if (existing !== undefined) return existing
+        const record = createRecord(repositoryRoot, workspace)
+        record.repositoryRoot = repositoryRoot
+        record.requestRepository = repositoryRoot
+        record.pinned = true
+        // 已经知道是哪个仓库了，不需要再解析一次（解析还会去打一次 `/project-git-scope`）。
+        record.resolved = true
+        records.set(repositoryRoot, record)
+        record.snapshot = emptySnapshot(record)
+        return record
+      }
+
+      /**
+       * 项目级汇总：一个工作区里**所有**仓库的快照（多仓库 badge / 分组显示用）。
+       *
+       * 每个仓库仍然是"一格记录 + 一套轮询"（与单仓库时完全一致），这里只把它们的快照汇总
+       * 成一个**引用稳定**的对象：
+       * `{ workspace, scope, repositories: [{ repositoryRoot, name, relativePath, snapshot }], changedFiles, phase }`。
+       *
+       * 为什么要单独一层：`useSyncExternalStore` 需要引用稳定的快照，而"某个子仓库更新了"
+       * 又必须能让 badge 重新渲染——这层正好承担这个职责（否则 badge 只能订阅其中一个仓库）。
+       */
+      const projectAggregates = new Map()
+
+      const ensureProject = (workspace) => {
+        let aggregate = projectAggregates.get(workspace)
+        if (aggregate === undefined) {
+          aggregate = {
+            workspace,
+            listeners: new Set(),
+            /** repositoryRoot → 退订函数。 */
+            children: new Map(),
+            value: undefined,
+          }
+          projectAggregates.set(workspace, aggregate)
+        }
+        return aggregate
+      }
+
+      const detachProject = (aggregate) => {
+        for (const unsubscribe of aggregate.children.values()) unsubscribe()
+        aggregate.children.clear()
+      }
+
+      /** 重建汇总对象并通知（内容确实变了，因此引用每次都换）。 */
+      const rebuildProject = (aggregate) => {
+        const scope = projectScopes.peek(aggregate.workspace)
+        const repositories = (scope?.repositories ?? []).map((entry) => ({
+          repositoryRoot: entry.repositoryRoot,
+          name: entry.name,
+          relativePath: entry.relativePath,
+          snapshot: records.get(entry.repositoryRoot)?.snapshot,
+        }))
+        const changedFiles = repositories.reduce((sum, entry) => sum + (entry.snapshot?.changedFiles ?? 0), 0)
+        aggregate.value = {
+          workspace: aggregate.workspace,
+          scope,
+          repositories,
+          changedFiles,
+          // 项目级相位：还有仓库没取到数据时算 loading（badge 据此显示加载而不是 0）。
+          phase:
+            repositories.length === 0
+              ? scope === undefined
+                ? 'loading'
+                : 'notrepo'
+              : repositories.every((entry) => entry.snapshot?.phase === 'ready')
+                ? 'ready'
+                : 'loading',
+        }
+        for (const listener of [...aggregate.listeners]) listener()
+      }
+
+      /** 确保每个仓库都有一个订阅（幂等：新仓库加订阅、消失的仓库退订）。 */
+      const syncProjectChildren = (aggregate) => {
+        const scope = projectScopes.peek(aggregate.workspace)
+        const wanted = new Set((scope?.repositories ?? []).map((entry) => entry.repositoryRoot))
+        for (const [key, unsubscribe] of [...aggregate.children]) {
+          if (wanted.has(key)) continue
+          unsubscribe()
+          aggregate.children.delete(key)
+        }
+        for (const key of wanted) {
+          if (aggregate.children.has(key)) continue
+          // 用**用户的工作区**作为请求里的工作区（宿主只接受登记过的路径），仓库显式指定。
+          aggregate.children.set(key, subscribeWorkspace(aggregate.workspace, () => rebuildProject(aggregate), key))
+        }
+        rebuildProject(aggregate)
       }
 
       /**
@@ -1787,7 +2105,10 @@ window.__ModuleLoader__.load({
         if (record.resolving !== null) return record.resolving
         const workspace = record.workspace
         record.resolving = (async () => {
-          const repositoryRoot = await repoContexts.resolve(workspace)
+          // 走的是**项目级 scope**：多仓库时用用户选中的那个（见 projectScopes.activeOf）。
+          // 工作区自己不是仓库、下面有独立仓库时，这一步就已经把它选中了——因此"父目录不是
+          // 仓库"这个实机场景不需要 UI 额外做任何事。
+          const repositoryRoot = await projectScopes.currentRepository(workspace)
           record.resolved = true
           if (repositoryRoot === '') return record
           const key = repositoryRoot
@@ -1796,9 +2117,29 @@ window.__ModuleLoader__.load({
             records.delete(record.key)
             record.key = key
             record.repositoryRoot = repositoryRoot
+            /**
+             * 这一格从此**显式**请求这个仓库——但只有"钉住"的格子才这样。
+             *
+             * 必须跟着换：钉住的格可能刚被用户从 A 仓库切到 B（`selectRepository` →
+             * `repickRecord`），而 `requestRepository` 还留着 A——那会让 `load` 继续去取
+             * A 的数据，界面就会"选择了 B、显示的还是 A"，甚至把提交发到 A。
+             *
+             * 面板自己那一格（没钉）保持"不带 `repository`"：单仓库项目的请求形状因此
+             * 与 1.5.2 逐字一致，多仓库时由 `call()` 按当前选中的仓库注入。
+             */
+            record.requestRepository = record.pinned === true ? repositoryRoot : undefined
             records.set(key, record)
-            // 快照引用必须换：`repositoryRoot` 变了，界面据此知道"这是哪个仓库的数据"。
-            record.snapshot = { ...record.snapshot, repositoryRoot }
+            /**
+             * 快照必须换一个**引用**（界面据此知道"这是哪个仓库的数据"），并且在跨仓库时
+             * **整份丢掉**：用户在多仓库里从 A 切到 B 时，这一格原来装的是 A 的文件列表与
+             * 分支，只改 `repositoryRoot` 就等于把 A 的改动冒充成 B 的——commit 会就此落到
+             * 错的仓库上。首次解析（快照还是 idle/loading）时没有数据可丢，因此这条重置
+             * 对 1.5.2 的单仓库路径没有任何影响。
+             */
+            const foreign = record.snapshot?.repositoryRoot !== '' && record.snapshot?.repositoryRoot !== repositoryRoot
+            record.snapshot = foreign
+              ? { ...emptySnapshot(record, 'loading'), generation: record.generation, requestId: record.requestId }
+              : { ...record.snapshot, repositoryRoot }
             emit(record)
             return record
           }
@@ -1825,9 +2166,31 @@ window.__ModuleLoader__.load({
         return record.resolving
       }
 
+      /**
+       * 让一条记录重新解析"该用哪个仓库"。
+       *
+       * 用户在多仓库 UI 里切换仓库时调用：把记录恢复成未解析状态，再解析一次——于是它会
+       * 迁移到新仓库那一格（原来那一格若没人订阅，轮询也就停了）。
+       *
+       * @param record - 记录。
+       * @returns 解析后的记录。
+       */
+      const repickRecord = (record) => {
+        record.resolved = false
+        return resolveRecord(record)
+      }
+
       const emit = (record) => {
         for (const listener of [...record.listeners]) listener()
       }
+
+      // scope 变化（首次发现 / 后台发现更多仓库 / 用户切换仓库 / invalidate）时，重新同步
+      // 每个项目汇总的子订阅。放在这里而不是各处调用点：这样"仓库列表变了"只有一处实现。
+      projectScopes.subscribe(() => {
+        for (const aggregate of projectAggregates.values()) {
+          if (aggregate.listeners.size > 0) syncProjectChildren(aggregate)
+        }
+      })
 
       /** 用一次路由响应构造新的快照对象（**引用必须变**，useSyncExternalStore 靠它比较）。 */
       const commit = (record, payload) => {
@@ -1918,7 +2281,14 @@ window.__ModuleLoader__.load({
         if (fresh) emit(record)
         const promise = (async () => {
           try {
-            const payload = await call('workspace', { workspace: record.workspace })
+            const payload = await call('workspace', {
+              workspace: record.workspace,
+              // 这一格如果指定了仓库（项目级汇总的每一格），就显式带上；否则由 `call()` 按
+              // "当前选中的仓库"注入（面板那条路径）。
+              ...(typeof record.requestRepository === 'string' && record.requestRepository !== ''
+                ? { repository: record.requestRepository }
+                : {}),
+            })
             // 换代（切了工作区）或已有更晚的请求：这次响应属于过去，静默丢弃。
             if (record.generation !== generation || record.requestId !== requestId) return
             commit(record, payload)
@@ -2043,30 +2413,40 @@ window.__ModuleLoader__.load({
         return task
       }
 
+      /**
+       * 订阅某个工作区的快照（第一个订阅者启动轮询并立刻拉一次，最后一个离开时停掉）。
+       *
+       * 抽成一个命名函数（而不是只写在返回对象里）的原因：项目级汇总也要用它给自己的
+       * **每个仓库**挂订阅（见 syncProjectChildren）——同一个仓库必须只有一份订阅、
+       * 一套轮询。以前这里只存在于返回对象的方法里，汇总那一侧就写成了 `subscribe(...)`，
+       * 于是一渲染到多仓库就 `ReferenceError`。
+       */
+      const subscribeWorkspace = (workspace, listener, repositoryRoot) => {
+        const record = repositoryRoot === undefined ? ensure(workspace) : ensureRepository(workspace, repositoryRoot)
+        record.listeners.add(listener)
+        if (record.listeners.size === 1) {
+          startPolling(record)
+        }
+        // 异步解析仓库根：解析完可能**换一条记录**（迁到仓库根、或并进同仓库的另一格），
+        // 因此退订函数要盯住"最终挂在哪条记录上"，而不是闭包里的那条。
+        let attached = record
+        void resolveRecord(record).then((target) => {
+          attached = target
+          // 解析期间组件可能已经退订了：`attached.listeners` 里没有它，什么都不用做。
+          if (!attached.listeners.has(listener)) return
+          if (attached.listeners.size === 1) startPolling(attached)
+          if (attached.snapshot.phase === 'idle' || attached.snapshot.phase === 'loading') void load(attached)
+        })
+        return () => {
+          attached.listeners.delete(listener)
+          record.listeners.delete(listener)
+          if (attached.listeners.size === 0) stopPolling(attached)
+        }
+      }
+
       return {
         /** 订阅：第一个订阅者启动轮询（并立刻拉一次），最后一个离开时停掉。 */
-        subscribe(workspace, listener) {
-          const record = ensure(workspace)
-          record.listeners.add(listener)
-          if (record.listeners.size === 1) {
-            startPolling(record)
-          }
-          // 异步解析仓库根：解析完可能**换一条记录**（迁到仓库根、或并进同仓库的另一格），
-          // 因此退订函数要盯住"最终挂在哪条记录上"，而不是闭包里的那条。
-          let attached = record
-          void resolveRecord(record).then((target) => {
-            attached = target
-            // 解析期间组件可能已经退订了：`attached.listeners` 里没有它，什么都不用做。
-            if (!attached.listeners.has(listener)) return
-            if (attached.listeners.size === 1) startPolling(attached)
-            if (attached.snapshot.phase === 'idle' || attached.snapshot.phase === 'loading') void load(attached)
-          })
-          return () => {
-            attached.listeners.delete(listener)
-            record.listeners.delete(listener)
-            if (attached.listeners.size === 0) stopPolling(attached)
-          }
-        },
+        subscribe: subscribeWorkspace,
         /** 当前快照（引用稳定：没变化时返回同一个对象）。 */
         get(workspace) {
           const record = byWorkspace.get(workspace)
@@ -2094,12 +2474,63 @@ window.__ModuleLoader__.load({
         },
         /** 精确枚举未跟踪（见 requestExactUntracked）。 */
         requestExactUntracked,
+        /**
+         * 多仓库：切换"当前在看的仓库"。
+         *
+         * 只做两件事：记下用户的选择（持久化）→ 让这条记录重新解析并迁到那一格。文件列表、
+         * 分支、未跟踪、提交因此**整体**跟着换，不会出现"列表是 A 仓库、提交发到 B 仓库"。
+         *
+         * @param workspace - 工作区路径。
+         * @param repositoryRoot - 目标仓库根。
+         * @returns 切换完成后的快照。
+         */
+        async selectRepository(workspace, repositoryRoot) {
+          projectScopes.setActive(workspace, repositoryRoot)
+          const record = await repickRecord(ensure(workspace))
+          // 目标仓库可能已经有一份数据（另一个工作区在看它）：那就再补一次刷新，让切换后的
+          // 第一帧就是新的（否则会短暂显示上一份缓存的内容）。
+          return load(record)
+        },
+        /**
+         * 订阅**整个项目**的所有仓库快照（多仓库 badge 用）。
+         *
+         * 每个仓库一格、一套轮询（这一点与单仓库时完全一致），这里只是把它们的
+         * `changedFiles` 汇总起来，并**保留每一条的归属**（需求：不能把路径混成一个假仓库）。
+         *
+         * @param workspace - 工作区路径。
+         * @param listener - 订阅回调。
+         * @returns 退订函数。
+         */
+        subscribeProject(workspace, listener) {
+          const aggregate = ensureProject(workspace)
+          aggregate.listeners.add(listener)
+          if (aggregate.listeners.size === 1) {
+            // 先加载 scope，再给每个仓库挂订阅（"发现更多仓库"时会被下面的全局订阅补上）。
+            void projectScopes.load(workspace).then(() => {
+              if (aggregate.listeners.size === 0) return
+              syncProjectChildren(aggregate)
+            })
+          } else {
+            rebuildProject(aggregate)
+          }
+          return () => {
+            aggregate.listeners.delete(listener)
+            if (aggregate.listeners.size === 0) detachProject(aggregate)
+          }
+        },
+        /** 当前的项目级汇总（引用稳定：没有变化时返回同一个对象）。 */
+        getProject(workspace) {
+          return projectAggregates.get(workspace)?.value
+        },
         /** 只给测试用：直接写入一份快照（免去伪造 host 响应）。 */
         __setForTest(workspace, payload) {
           // 测试里给的快照可以带 `repositoryRoot`：带上就按**仓库**建格（这样"同仓库两个
           // 工作区共享一格"也能在假 DOM 里被断言），不带就退回"一个工作区一格"的旧行为。
           const repoRoot = typeof payload?.repositoryRoot === 'string' && payload.repositoryRoot !== '' ? payload.repositoryRoot : ''
-          if (repoRoot !== '') repoContexts.set(workspace, repoRoot)
+          if (repoRoot !== '') {
+            projectScopes.set(workspace, { workspaceRoot: workspace, repositories: [{ repositoryRoot: repoRoot, gitDir: '', relativePath: '', name: basenameOf(repoRoot) }] })
+            projectScopes.setActive(workspace, repoRoot)
+          }
           let record = ensure(workspace)
           record.resolved = true
           if (repoRoot !== '' && record.key !== repoRoot) {
@@ -2128,7 +2559,9 @@ window.__ModuleLoader__.load({
           for (const record of records.values()) stopPolling(record)
           records.clear()
           byWorkspace.clear()
-          repoContexts.reset()
+          for (const aggregate of projectAggregates.values()) detachProject(aggregate)
+          projectAggregates.clear()
+          projectScopes.reset()
         },
         /** 只给测试用：有没有在途请求。 */
         __inflight(workspace) {
@@ -2192,6 +2625,80 @@ window.__ModuleLoader__.load({
         [workspace],
       )
       return react.useSyncExternalStore(subscribe, getSnapshot)
+    }
+
+    /**
+     * 订阅**整个项目**的仓库快照与 scope（多仓库 badge / 分组显示用）。
+     *
+     * 与 `useWorkspaceGitSnapshot` 的关系：那个回答"当前这个仓库改了什么"，这个回答
+     * "这个项目里有几个仓库、各自改了多少"。多仓库时两者一起用（徽标读这个、Changes 读那个）。
+     *
+     * @param workspace - 工作区路径；undefined 时不订阅。
+     * @returns `{ scope, repositories, changedFiles, phase }` 或 undefined。
+     */
+    function useProjectGitSnapshots(workspace) {
+      const subscribe = react.useCallback(
+        (listener) => {
+          if (typeof workspace !== 'string' || workspace === '') return () => undefined
+          return gitSnapshots.subscribeProject(workspace, listener)
+        },
+        [workspace],
+      )
+      const getSnapshot = react.useCallback(
+        () => (typeof workspace === 'string' && workspace !== '' ? gitSnapshots.getProject(workspace) : undefined),
+        [workspace],
+      )
+      const aggregate = react.useSyncExternalStore(subscribe, getSnapshot)
+      const scopeSubscribe = react.useCallback(
+        (listener) => (typeof workspace === 'string' && workspace !== '' ? projectScopes.subscribe(listener) : () => undefined),
+        [workspace],
+      )
+      const scopeSnapshot = react.useCallback(
+        () => (typeof workspace === 'string' && workspace !== '' ? projectScopes.peek(workspace) : undefined),
+        [workspace],
+      )
+      const scope = react.useSyncExternalStore(scopeSubscribe, scopeSnapshot)
+      // scope 还没加载完时先触发一次加载（订阅者只管渲染，加载在这里兜住）。
+      react.useEffect(() => {
+        if (typeof workspace !== 'string' || workspace === '') return
+        if (projectScopes.peek(workspace) === undefined) void projectScopes.load(workspace)
+      }, [workspace])
+      return aggregate === undefined ? undefined : { ...aggregate, scope: scope ?? aggregate.scope }
+    }
+
+    /**
+     * 当前项目的仓库列表与 active 仓库（多仓库选择器的数据源）。
+     *
+     * @param workspace - 工作区路径。
+     * @returns `{ scope, repositories, active, select }`。
+     */
+    function useProjectGitScope(workspace) {
+      const subscribe = react.useCallback(
+        (listener) => (typeof workspace === 'string' && workspace !== '' ? projectScopes.subscribe(listener) : () => undefined),
+        [workspace],
+      )
+      const getSnapshot = react.useCallback(
+        () => (typeof workspace === 'string' && workspace !== '' ? projectScopes.peek(workspace) : undefined),
+        [workspace],
+      )
+      const scope = react.useSyncExternalStore(subscribe, getSnapshot)
+      react.useEffect(() => {
+        if (typeof workspace !== 'string' || workspace === '') return
+        if (projectScopes.peek(workspace) === undefined) void projectScopes.load(workspace)
+      }, [workspace])
+      const select = react.useCallback(
+        (repositoryRoot) => {
+          if (typeof workspace !== 'string' || workspace === '') return
+          void gitSnapshots.selectRepository(workspace, repositoryRoot)
+        },
+        [workspace],
+      )
+      return {
+        scope,
+        repositories: scope?.repositories ?? [],
+        active: typeof workspace === 'string' && workspace !== '' ? (projectScopes.peekActive(workspace) ?? '') : '',
+        select,
+      }
     }
 
     /**
@@ -2791,6 +3298,30 @@ window.__ModuleLoader__.load({
        */
       const [logToken, setLogToken] = react.useState(0)
       const workspacePath = typeof workspace === 'string' ? workspace : ''
+      /**
+       * 当前项目的仓库列表 + active 仓库。
+       *
+       * 只在**项目级**（`scope === 'workspace'`）订阅：会话级标签页的 Git 数据属于那一轮
+       * 改动，与"项目里有几个仓库"无关，多订阅一份只会多打一条 `/project-git-scope`。
+       *
+       * 用 `activeRepository` / `selectRepository` 这样带前缀的名字，是因为 `scope` 这个
+       * 名字在本组件里已经是"面板的 scope"（`'workspace'` 或会话 id），两者不能混。
+       */
+      const projectGitScope = useProjectGitScope(scope === 'workspace' ? workspacePath : '')
+      /**
+       * 仓库列表**带各自的快照**（分支 + 改动数）。
+       *
+       * 必须走项目级汇总这一路，而不是 `useProjectGitScope` 里那份裸 scope：scope 只回答
+       * "这个项目里有哪几个仓库"，一分数据都没有，选择器于是只显示仓库名，分支与改动数
+       * 是空的。汇总那一层本来就在给每个仓库挂订阅（徽标也要它），因此这里不多花一次
+       * 请求，只是多借一个订阅者。
+       */
+      const projectSnapshots = useProjectGitSnapshots(scope === 'workspace' ? workspacePath : '')
+      const repositories = projectSnapshots?.repositories ?? projectGitScope.repositories
+      const activeRepository = projectGitScope.active
+      const selectRepository = projectGitScope.select
+      /** 后台还在发现更多仓库：选择器上给一句"还在找"，而不是让用户以为已经找全了。 */
+      const discoveringRepositories = projectGitScope.scope?.discovery?.complete === false
 
       /**
        * 打开抽屉时：快照过期就先刷一次。
@@ -3015,6 +3546,24 @@ window.__ModuleLoader__.load({
                 },
                 tabButton('changes', t('changesTab')),
                 tabButton('log', t('logTab')),
+                // 多仓库项目：页签右侧是**仓库选择器**。
+                //
+                // 放在页签这一层（而不是分别塞进 Changes 与 Log）是有意的：一个项目里"当前在
+                // 看哪个仓库"是**整个面板**的状态——Changes 的文件列表、右侧 diff、底部提交框，
+                // 以及 Log 的分支树/提交图/详情都属于它。两处各放一个选择器就会出现"Log 在看
+                // backend、Changes 在提交 frontend"这种自相矛盾的界面。
+                //
+                // 单仓库（含"工作区自己是仓库"与"只有一个子仓库"）时**整块不渲染**：需求明确
+                // 要求不要多套一层没意义的标题。
+                repositories.length > 1
+                  ? react.createElement(RepositorySelect, {
+                      t,
+                      repositories,
+                      active: activeRepository,
+                      onSelect: selectRepository,
+                      discovering: discoveringRepositories,
+                    })
+                  : null,
               ),
               tab === 'log'
                 ? react.createElement(
@@ -3061,6 +3610,18 @@ window.__ModuleLoader__.load({
                       snapshot,
                       // 逐行差异的基线（HEAD）；按需取单文件差异时带上它。
                       revision: snapshot?.head ?? '',
+                      /**
+                       * 多仓库项目：提交框的标题里带上"哪个仓库"。
+                       *
+                       * 提交框固定在底部，而仓库选择器在顶部页签那一行——中间隔着整个文件
+                       * 列表。多仓库时**必须**在提交框自己这一层再说一次仓库名，否则用户
+                       * 盯着"提交信息 (master)"根本不知道这次提交会落到哪个仓库里。
+                       * 单仓库时传空串，标题与 1.5.2 逐字一致。
+                       */
+                      repositoryName:
+                        repositories.length > 1
+                          ? (repositories.find((entry) => entry.repositoryRoot === activeRepository)?.name ?? '')
+                          : '',
                       // 写操作成功后 store 会自己 invalidate + refresh（见 StagingSection.run）；
                       // 这里只需要再通知 Log 页签"历史变了"。
                       onCommitted: () => {
@@ -3351,8 +3912,26 @@ window.__ModuleLoader__.load({
        * 没打开面板时也保持新鲜（否则"有没有改动"这件事要等到点开才知道）。
        */
       const snapshot = useWorkspaceGitSnapshot(switching ? undefined : workspace)
-      // 数字直接就是快照的文件数——不是"再算一遍"，也不是另一条路由的结果。
-      const count = snapshot !== undefined && snapshot.phase === 'ready' ? snapshot.files.length : null
+      /**
+       * 项目级汇总：多仓库时徽标显示的是**所有仓库之和**，且**保留归属**。
+       *
+       * 单仓库项目里它就是那一个仓库（同一个 store 记录，因此不会多一次轮询）；多仓库时它是
+       * 每条仓库各一格、各一套轮询的汇总——"frontend 4 个 + backend 7 个 = 11"这件事在
+       * badge 上只是一个数字，但内部始终知道 4 属于谁、7 属于谁（见 subscribeProject）。
+       */
+      const project = useProjectGitSnapshots(switching ? undefined : workspace)
+      const repositories = project?.repositories ?? []
+      const multiRepository = repositories.length > 1
+      // 数字直接就是快照的改动数——不是"再算一遍"，也不是另一条路由的结果。
+      // 用 `changedFiles`（含未跟踪的条数）而不是 `files.length`：未跟踪大量时 `files` 里
+      // 一条都不放（browse 模式），用 `files.length` 会让徽标少算一截。
+      const count = multiRepository
+        ? project?.phase === 'ready'
+          ? project.changedFiles
+          : null
+        : snapshot !== undefined && snapshot.phase === 'ready'
+          ? snapshot.changedFiles
+          : null
 
       // 拿不到工作区时**也要渲染按钮**：面板会说明当前没有可用的工作区。
       // 此前这里直接 return null，结果在"还没有任何会话与登记工作区"的状态下入口彻底
@@ -3397,6 +3976,8 @@ window.__ModuleLoader__.load({
           hasChanges,
           switching,
           workspace,
+          /** 多仓库时徽标额外标出仓库数（数字是所有仓库之和，必须让用户知道这一点）。 */
+          repositories: multiRepository ? repositories.length : 0,
           onToggle: () => panelStore.set(!open),
         }),
         react.createElement(
@@ -3418,6 +3999,191 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 多仓库项目的**仓库选择器**（页签右侧那一小块）。
+     *
+     * 为什么是整个面板级的一个选择器，而不是 Changes 与 Log 各来一个：`active` 仓库决定了
+     * 文件列表、右侧 diff、暂存区、提交框、分支树、提交图与提交详情——它是一份全局状态。
+     * 两处各放一个就会出现"Log 在看 backend、Changes 在提交 frontend"。
+     *
+     * 单仓库（"工作区自己是仓库"或"只有一个子仓库"）时**整块不渲染**：那是 1.5.2 的一贯
+     * 界面，不该多出一层没有选择余地的标题。
+     *
+     * @param props - `{ t, repositories, active, onSelect, discovering }`。
+     * @returns React 元素。
+     */
+    function RepositorySelect(props) {
+      const { t, repositories, active } = props
+      const onSelect = typeof props?.onSelect === 'function' ? props.onSelect : () => undefined
+      const discovering = props?.discovering === true
+      const [menuOpen, setMenuOpen] = react.useState(false)
+      const rootRef = react.useRef(null)
+
+      /**
+       * 点菜单外面就收起菜单。
+       *
+       * 与抽屉自己的"点外部关闭"同一条原则（捕获阶段、`contains` 判定），但**不能**顺手
+       * 把抽屉一起关掉：菜单就在抽屉子树里，抽屉的处理器天然不会因此触发。
+       */
+      react.useEffect(() => {
+        if (!menuOpen) return undefined
+        const onPointerDown = (event) => {
+          const node = rootRef.current
+          const target = event.target
+          if (node !== null && target != null && typeof node.contains === 'function' && node.contains(target)) return
+          setMenuOpen(false)
+        }
+        document.addEventListener('mousedown', onPointerDown, true)
+        return () => document.removeEventListener('mousedown', onPointerDown, true)
+      }, [menuOpen])
+
+      /** 当前仓库：active 找不到（比如刚发现列表变了）时退回第一个，绝不留空标题。 */
+      const current = repositories.find((entry) => entry.repositoryRoot === active) ?? repositories[0]
+      if (current === undefined) return null
+      const branchOf = (entry) => (typeof entry?.snapshot?.branch === 'string' ? entry.snapshot.branch : '')
+      const countOf = (entry) => (Number.isFinite(entry?.snapshot?.changedFiles) ? entry.snapshot.changedFiles : 0)
+      const label = `${current.name}${branchOf(current) === '' ? '' : ` (${branchOf(current)})`}`
+
+      return react.createElement(
+        'div',
+        {
+          ref: rootRef,
+          'data-review-repo-select': '',
+          // 页签占满左边，这一块贴右；`marginLeft: 'auto'` 是唯一需要的布局声明。
+          style: { position: 'relative', marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '6px' },
+        },
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-review-repo-select-button': '',
+            'aria-haspopup': 'menu',
+            'aria-expanded': menuOpen,
+            title: t('repoSelectorLabel'),
+            onClick: () => setMenuOpen(!menuOpen),
+            style: {
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              maxWidth: '240px',
+              padding: '2px 8px',
+              borderRadius: '6px',
+              border: `1px solid ${BORDER}`,
+              background: 'transparent',
+              color: menuOpen ? ACCENT : 'var(--dsw-alias-label-secondary)',
+              fontSize: uiPx(12),
+              fontFamily: UI_FONT,
+              cursor: 'pointer',
+            },
+          },
+          // 仓库名 + 分支：**必须同时显示分支**——同名仓库（例如两个 `frontend`）只有分支
+          // 能区分开，而"提交到哪个分支"正是用户点这个按钮时最关心的事。
+          react.createElement('span', { 'data-review-repo-current': current.repositoryRoot, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+          react.createElement(
+            'span',
+            { 'data-review-repo-current-count': String(countOf(current)), style: { opacity: 0.7 } },
+            String(countOf(current)),
+          ),
+          react.createElement('span', { 'aria-hidden': 'true', style: { opacity: 0.6 } }, '▾'),
+        ),
+        discovering
+          ? react.createElement(
+              'span',
+              { 'data-review-repo-discovering': '', style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)' } },
+              t('repoDiscovering'),
+            )
+          : null,
+        menuOpen
+          ? react.createElement(
+              'div',
+              {
+                'data-review-repo-menu': '',
+                role: 'menu',
+                style: {
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: '4px',
+                  minWidth: '220px',
+                  maxHeight: '320px',
+                  overflow: 'auto',
+                  padding: '4px',
+                  borderRadius: '8px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-base, #fff)',
+                  boxShadow: '0 6px 20px rgba(0, 0, 0, 0.14)',
+                  zIndex: 20,
+                },
+              },
+              // 标题行：仓库数量。多仓库时"一共几个"必须在菜单里也说得清（后台还在发现时
+              // 这个数字会变，因此它读的是当前这一帧的列表）。
+              react.createElement(
+                'div',
+                {
+                  'data-review-repo-menu-title': '',
+                  style: { padding: '4px 8px', fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)' },
+                },
+                t('repositoryCount', { count: repositories.length }),
+              ),
+              ...repositories.map((entry) =>
+                react.createElement(
+                  'button',
+                  {
+                    key: entry.repositoryRoot,
+                    type: 'button',
+                    role: 'menuitemradio',
+                    'aria-checked': entry.repositoryRoot === current.repositoryRoot,
+                    'data-review-repo-pick': entry.repositoryRoot,
+                    onClick: () => {
+                      setMenuOpen(false)
+                      if (entry.repositoryRoot !== current.repositoryRoot) onSelect(entry.repositoryRoot)
+                    },
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      width: '100%',
+                      padding: '5px 8px',
+                      border: 'none',
+                      borderRadius: '6px',
+                      background: 'transparent',
+                      color: 'var(--dsw-alias-label-primary)',
+                      fontFamily: UI_FONT,
+                      fontSize: uiPx(12),
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                    },
+                  },
+                  react.createElement('span', { style: { width: '12px', opacity: 0.8 } }, entry.repositoryRoot === current.repositoryRoot ? '✓' : ''),
+                  react.createElement('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, entry.name),
+                  // 子目录仓库把相对路径一并标出：`haiwei-manage-fronted` 这个名字在
+                  // "工作区里有好几个 frontend"时不足以定位，路径才能。
+                  entry.relativePath === ''
+                    ? null
+                    : react.createElement(
+                        'span',
+                        { style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-tertiary, #8a8f99)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' } },
+                        entry.relativePath,
+                      ),
+                  branchOf(entry) === ''
+                    ? null
+                    : react.createElement(
+                        'span',
+                        { 'data-review-repo-branch': entry.repositoryRoot, style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)' } },
+                        branchOf(entry),
+                      ),
+                  react.createElement(
+                    'span',
+                    { 'data-review-repo-count': entry.repositoryRoot, style: { fontSize: uiPx(11), color: 'var(--dsw-alias-label-secondary)' } },
+                    String(countOf(entry)),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      )
+    }
+
+    /**
      * 右上角那个"项目改动"入口按钮。
      *
      * 单独成一个组件是**故障隔离**的一部分（见 HeroChangesTrigger 末尾的说明）：它与面板
@@ -3429,6 +4195,8 @@ window.__ModuleLoader__.load({
     function ProjectChangesTriggerButton(props) {
       const { t, open, count, hasChanges, switching, workspace } = props
       const onToggle = typeof props?.onToggle === 'function' ? props.onToggle : () => undefined
+      /** 多仓库项目：徽标上的数字是**所有仓库之和**，因此再缀一句"几个仓库"。 */
+      const repositoryCount = Number.isFinite(props?.repositories) ? props.repositories : 0
       /** 文案：切换项目的瞬间说清楚在等什么，而不是显示上一个项目的数字。 */
       const label =
         switching === true
@@ -3436,7 +4204,9 @@ window.__ModuleLoader__.load({
           : workspace === undefined
             ? t('projectTitle')
             : typeof count === 'number'
-              ? t('files', { count })
+              ? repositoryCount > 1
+                ? t('projectFilesMulti', { count, repositories: repositoryCount })
+                : t('files', { count })
               : t('projectIdle')
       return react.createElement(
         'button',
@@ -4292,6 +5062,18 @@ window.__ModuleLoader__.load({
      */
     function StagingSection(props) {
       const { t, workspace, snapshot } = props
+      /**
+       * 提交框标题里那句"提交到哪儿"：`分支` 或（多仓库时）`仓库名 · 分支`。
+       *
+       * 单仓库时**只有一个分支名**（1.5.2 的形状）；多仓库时仓库名是必须的——提交框在底部、
+       * 仓库选择器在顶部页签那一行，中间隔着整个文件列表。
+       */
+      const commitTargetLabel = (() => {
+        const branch = snapshot?.branch ?? ''
+        const repositoryName = typeof props?.repositoryName === 'string' ? props.repositoryName : ''
+        if (repositoryName === '') return branch
+        return branch === '' ? repositoryName : `${repositoryName} · ${branch}`
+      })()
       /**
        * **唯一的数据来源**：父组件从共享快照 store 订阅到的那一份。
        *
@@ -5156,7 +5938,10 @@ window.__ModuleLoader__.load({
       // 首次进入一个工作区：还没有任何数据 → 加载态。已经在显示旧数据的刷新（`refreshing`）
       // 不会走到这里——那份数据继续显示，用户看不到闪烁（stale-while-revalidate）。
       if (snapshot.phase === 'idle' || snapshot.phase === 'loading') return statusBlock(t('loading'))
-      if (snapshot.phase === 'notrepo') return statusBlock(t('notRepo', { name: projectName(workspace ?? '') }))
+      // `notrepo` 现在的含义已经收窄：**宿主在整个项目里一个仓库都没找到**（工作区自己与
+      // 子目录都探过）。所以这里说的是"这个项目里没有 Git 仓库"，而不是以前那句把责任推给
+      // 工作区路径的"当前工作区（xxx）不是 git 仓库"——后者在"子目录才是仓库"的实机上误报。
+      if (snapshot.phase === 'notrepo') return statusBlock(t('notGitProject', { name: projectName(workspace ?? '') }))
       if (snapshot.phase === 'error') return statusBlock(snapshot.error ?? '', 'error')
       // 尚无任何提交的仓库：没有 HEAD 可比较，说"改动"会误导（用户会以为文件丢了）。
       if (snapshot.empty === true) return statusBlock(t('workspaceEmpty'))
@@ -5563,9 +6348,10 @@ window.__ModuleLoader__.load({
             // 用户写着写着就得先手动把框拉大——默认高度应该是能写完一条正常提交信息的高度。
             rows: 4,
             // 提交信息的占位文案里带上当前分支：分支取自**这份快照自己**（与文件列表同一次
-            // 请求），因此不会出现"文件是新的、分支是旧的"。
-            placeholder: t('commitMessage', { branch: snapshot?.branch ?? '' }),
-            'aria-label': t('commitMessage', { branch: snapshot?.branch ?? '' }),
+            // 请求），因此不会出现"文件是新的、分支是旧的"。多仓库时再带上仓库名——见
+            // `repositoryName` 的说明（提交框离顶部的仓库选择器隔着整个文件列表）。
+            placeholder: t('commitMessage', { branch: commitTargetLabel }),
+            'aria-label': t('commitMessage', { branch: commitTargetLabel }),
             spellCheck: false,
             disabled: busy,
             onChange: (event) => setMessage(event.target.value),
@@ -6357,7 +7143,7 @@ window.__ModuleLoader__.load({
         return statusBlock(message === 'noWorkspace' ? t('noWorkspace') : message, 'error')
       }
       if (result?.isRepo === false) {
-        return statusBlock(t('notRepo', { name: projectName(props.workspace) }))
+        return statusBlock(t('notGitProject', { name: projectName(props.workspace) }))
       }
       if (result?.empty === true) {
         return statusBlock(t('workspaceEmpty'))
@@ -8813,7 +9599,7 @@ window.__ModuleLoader__.load({
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('graphLoading')))
       }
       if (fresh.commits.length === 0 && fresh.phase === 'notRepo') {
-        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notRepo', { name: projectName(workspace) })))
+        return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(t('notGitProject', { name: projectName(workspace) })))
       }
       if (fresh.commits.length === 0 && fresh.phase === 'error') {
         return react.createElement('div', { 'data-graph-view': '', style: { padding: '24px', fontFamily: UI_FONT } }, statusBlock(fresh.error, 'error'))
@@ -9629,6 +10415,14 @@ window.__ModuleLoader__.load({
       cells: () => gitSnapshots.__cells(),
       /** 只给测试用：某个工作区最终挂在哪条记录上（键 = 仓库根）。 */
       cellKeyFor: (workspace) => gitSnapshots.__cellKeyFor(workspace),
+      /** 只给测试用：多仓库——切换 active 仓库 / 读项目级汇总 / 直接写 scope。 */
+      selectRepository: (workspace, repositoryRoot) => gitSnapshots.selectRepository(workspace, repositoryRoot),
+      getProject: (workspace) => gitSnapshots.getProject(workspace),
+      subscribeProject: (workspace, listener) => gitSnapshots.subscribeProject(workspace, listener),
+      /** 只给测试用：直接写入一份项目 scope（免去伪造 `/project-git-scope` 响应）。 */
+      setScope: (workspace, scope) => projectScopes.set(workspace, scope),
+      peekScope: (workspace) => projectScopes.peek(workspace),
+      peekActiveRepository: (workspace) => projectScopes.peekActive(workspace),
     }
     // 工作区闸门与提交图也导出：前者是这条要求的核心机制（换代/丢弃/合并），后者是
     // Log 页签与主区域共用的那个视图，都需要能被单独驱动。

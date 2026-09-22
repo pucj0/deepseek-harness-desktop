@@ -173,9 +173,18 @@ const branches = [
   { name: 'origin/develop', isRemote: true, current: false, remote: 'origin', upstream: '', upstreamGone: false, ahead: 0, behind: 0, diverged: false, syncExact: true, committedAt: '2026-01-01T00:00:00+08:00', hash: 'b'.repeat(40), subject: 'dev work' },
 ]
 const posts = []
+/**
+ * 每一次请求的 `{ route, repository }`。
+ *
+ * 多仓库项目的关键不变量是"这次操作的是哪个仓库"，而它**只**体现在 `?repository=` 上
+ * （见 review/gitbar 宿主侧的 resolveScopedRepo）。因此这里记录的是 URL 查询参数，
+ * 不是请求体——gitbar 的写操作也走 query（body 只放标量名字）。
+ */
+const queries = []
 globalThis.fetch = async (url, init) => {
   const target = new URL(String(url), 'http://localhost')
   const route = target.pathname.slice('/dsh-desktop/gitbar/'.length)
+  queries.push({ route, repository: target.searchParams.get('repository') })
   if (init?.method === 'POST') {
     posts.push({ route, body: init.body === undefined ? undefined : JSON.parse(init.body) })
     return { ok: true, text: async () => JSON.stringify({ ...status, branchesStale: true, remotes: [] }) }
@@ -705,6 +714,66 @@ console.log('=== 6. 二级菜单：外侧级联几何 + 孤儿菜单不可能 ==
   nodes = await current()
   check('   第三次 Esc 收面板', panelOpen(nodes), 'false')
   check('   收完后没有孤儿二级菜单', findAll('data-desktop-sc-menu', nodes).length, 0)
+}
+
+console.log('')
+console.log('=== 7. 多仓库项目：徽标前的仓库计数 + 选择器（单仓库时整块不渲染）===')
+{
+  // 实机形状：工作区自己不是仓库，仓库在子目录里。宿主在 `/status` 里回 `projectScope`，
+  // 徽章据此显示"Git · 2 个仓库"并给出选择器——**分支与改动数永远只是当前仓库的**，
+  // 因此"这个项目里有几个仓库"必须写在徽章旁边，而不是藏进菜单。
+  const FRONTEND = `${WORKSPACE}\\haiwei-manage-fronted`
+  const BACKEND = `${WORKSPACE}\\haiwei-manage-backend`
+  status.projectScope = {
+    workspaceRoot: WORKSPACE,
+    repositories: [
+      { repositoryRoot: BACKEND, gitDir: `${BACKEND}\\.git`, relativePath: 'haiwei-manage-backend', name: 'haiwei-manage-backend' },
+      { repositoryRoot: FRONTEND, gitDir: `${FRONTEND}\\.git`, relativePath: 'haiwei-manage-fronted', name: 'haiwei-manage-fronted' },
+    ],
+    discovery: { complete: true, directoriesVisited: 4, candidatesFound: 2, gitProbes: 2, durationMs: 1, truncatedByBudget: false, cached: false },
+  }
+  rootKey = `multi-${String(Date.now())}`
+  queries.length = 0
+  let nodes = await settle(4)
+  // 计数那一格同时挂了属性与文案：属性是稳定的（'2'），文案走 `t`（桩渲染里的 `t`
+  // 不一定插值，因此只断言"是那个键"，不假定参数被渲染出来）。
+  check('7) 徽标上标出仓库数', find('data-desktop-repo-count', undefined, nodes)?.props?.['data-desktop-repo-count'], '2')
+  checkTrue('   文案用的是仓库数量那句', textOf(find('data-desktop-repo-count', undefined, nodes)).includes('repoCount'))
+  const select = find('data-desktop-repo-select', undefined, nodes)
+  checkTrue('   有仓库选择器', select !== null)
+  check('   两个选项', select.props.children.length, 2)
+  check('   默认选中列表里的第一个（宿主侧的默认规则相同）', select.props.value, BACKEND)
+  // 选择 frontend：必须**立刻**带着它重新请求 status / branches / remotes。
+  queries.length = 0
+  select.props.onChange({ target: { value: FRONTEND } })
+  nodes = await settle(4)
+  check('   切换后重新请求了 status', queries.filter((q) => q.route === 'status').length >= 1, 'true')
+  check(
+    '   每一个新请求都带上了选中的仓库',
+    [...new Set(queries.map((q) => q.repository))].join(','),
+    FRONTEND,
+  )
+  check('   选择器显示切换后的仓库', find('data-desktop-repo-select', undefined, nodes).props.value, FRONTEND)
+
+  // 单仓库（1.5.2 的一贯界面）：整块不渲染，且请求里一个字都不多带。
+  status.projectScope = {
+    workspaceRoot: WORKSPACE,
+    repositories: [{ repositoryRoot: WORKSPACE, gitDir: `${WORKSPACE}\\.git`, relativePath: '', name: 'projA' }],
+    discovery: { complete: true, directoriesVisited: 1, candidatesFound: 1, gitProbes: 1, durationMs: 1, truncatedByBudget: false, cached: false },
+  }
+  rootKey = `single-${String(Date.now())}`
+  queries.length = 0
+  nodes = await settle(4)
+  check('7) 单仓库时没有仓库计数', find('data-desktop-repo-count', undefined, nodes), null)
+  check('   单仓库时没有选择器', find('data-desktop-repo-select', undefined, nodes), null)
+  // 判据是**知道"这个项目只有一个仓库"之后**发出去的请求不再带它：第一次 status 是在
+  // 上一段的仓库列表还留在模块级 store 时发出的（真实场景里换工作区用的是不同的键，
+  // 根本不会有这一次）。因此这里开一次面板，逼一组新请求出来再断言。
+  queries.length = 0
+  await ensurePanel()
+  checkTrue('   确实发了新请求（否则这条断言是空的）', queries.length >= 1)
+  check('   单仓库时请求不带 repository', queries.filter((q) => q.repository !== null).length, 0)
+  delete status.projectScope
 }
 
 console.log('')

@@ -1,3 +1,92 @@
+# 1.5.4
+
+修一条实机误报：项目 `F:\code_buss\haiweiNew` **自己不是** Git 仓库，但 `haiweiNew/haiwei-manage-fronted/.git`
+确实存在，面板却写着 **「当前工作区（haiweiNew）不是 git 仓库。」**——于是整个项目在右侧抽屉、分支徽章、
+暂存与提交里都像"没有 Git"。根因不是权限也不是 git 的报错，而是**把"工作区这一个目录是不是仓库"当成了
+"这个项目有没有 Git"**：以前只有 `git rev-parse --show-toplevel` 的单个结果，父目录不在仓库里就到此为止，
+既不认识"仓库在子目录里"，也就没有任何位置能容纳第二个仓库（`repositoryRoot` 是单数）。
+
+这一版把**项目**这一层补上：一个工作区可以有**多个**仓库，其中"工作区自己所属的仓库"只是可能之一。
+
+## 变更
+
+- **新增项目级仓库发现（`/project-git-scope`）。** 宿主先探工作区自身，再看子目录，返回
+  `{ workspaceRoot, repositories: [{ repositoryRoot, gitDir, relativePath, name }], discovery }`。
+  - **`.git` 是文件也认**（worktree 与 submodule 都是这种形状）：先判存在，再跑**一次**
+    `git rev-parse --show-toplevel --absolute-git-dir` 确认——只有真实 rev-parse 的结果才算数。
+  - **发现是有界的，不做任何递归全树扫描、也不对每个目录各跑一次 `rev-parse`**：深度上限
+    **4**、访问目录上限 **4000**（硬上限，超了如实上报 `truncatedByBudget: true`）、并发 **8**、
+    快路径（自身 + 第一层）**250 ms** 时间预算——超预算就把已经找到的答案**立刻**交出去，
+    更深处交给后台 BFS 继续，跑完替换缓存。
+  - **不下钻** `node_modules` / `dist` / `build` / `target` / `out` / `coverage` / `.cache` /
+    `.gradle` / `.idea` / `.next` / `.nuxt` / `vendor` / `__pycache__` / `.git`（那里的 `.git`
+    是依赖自带的幽灵仓库，报出来只会让面板列出一堆假项目）。
+  - **发现一个仓库后继续扫兄弟目录**，因此 `haiwei-manage-fronted` 与 `haiwei-manage-backend`
+    会同时出现在列表里；`.git` 用 realpath 去重，同一个仓库不会重复出现。
+  - 结果按 `workspaceRoot` 缓存 **60 秒** + single-flight，**不进 10 秒轮询**（`/workspace`
+    与 `/status` 不触发发现），发现跑在后台也不会拖住任何读写路由。
+- **`isRepo: false` 的含义收窄成"整个项目一个仓库都没有"。** 只有"工作区自身不是仓库**且**子目录里
+  也没发现仓库"时才给；文案也从"当前工作区（X）不是 git 仓库"改成**「项目 X 里没有发现 Git 仓库
+  （工作区本身及其子目录都不是）。」**——原来那句话把用户引向"路径选错了"，而实际原因可能是发现没做完
+  或者目录里有依赖自带的 `.git`。
+- **客户端多仓库模型（review 插件）。**
+  - 新增 `projectScopes` store：按 `workspaceRoot` 取项目作用域（缓存 + single-flight + 失效），
+    active 仓库的解析顺序是"用户选过的 → 工作区自己所属的仓库 → 列表里的第一个"。
+  - 顶部页签右侧出现**仓库选择器**（仓库名 + 分支 + 改动数，菜单里带工作区相对路径）：
+    `Changes` 的文件列表与差异、`Log` 的分支树 / 提交图 / 详情、底部提交框**整体**跟随它；
+    **只有一个仓库时整块不渲染**（那是 1.5.2 的一贯界面）。
+  - **每个仓库各占一格快照、各一套轮询**（同一仓库的两个子目录照旧共用一份）；从 A 仓库切到 B
+    仓库时**丢掉 A 的那份数据**再取 B——绝不允许把 A 的文件列表或分支冒充成 B 的（否则提交会落错仓库）。
+  - 徽标上的数字是**所有仓库之和**，并缀一句"几个仓库"（`4 个改动 · 2 个仓库`），归属不外泄成一个
+    混合的假仓库。
+- **宿主只接受"本项目发现过的"仓库。** 客户端为多仓库请求带上 `repository`，宿主用 realpath 校验它
+  确实在这份 ProjectGitScope 里，否则 **400 `repositoryNotAllowed`**（否则 `repository=C:/` 就能越过
+  工作区安全边界）。**暂存与提交永远只作用于选中的那一个仓库**——`commit` 不可能跨仓库。
+- **gitbar 同步支持多仓库**：徽章最前面显示 `Git · 2 个仓库` 并给出仓库选择器，切换会立刻重取
+  status / 分支列表 / 远端列表；单仓库时这一整块不渲染，请求形状与 1.5.2 **逐字一致**（不多带一个参数）。
+- **单仓库项目零回归**：默认项的规则在宿主与客户端是**同一条**（工作区自己所属的仓库 → 列表里的第一个），
+  因此不会出现"选择器写着 A、面板里是 B"；单仓库请求一个多余字段都不带。
+- **发现是懒的，因此没有把每条轮询变重。** 只有"客户端指定了 `repository`""工作区自己不是仓库"
+  "路由明确需要（`/status`、`/repo-context`、`/project-git-scope`）"三种情况才会跑发现，其余
+  路由只用 60 秒缓存——单仓库项目首屏 `/branches` 仍然是 **2 个 git 进程**（探针 + `for-each-ref`），
+  第二次只剩 1 个（实测断言钉住，见 `scripts/test-gitbar-branch-perf.mjs`）。
+- **提交框自己再说一次"提交到哪儿"**：多仓库时标题是 `提交信息 (仓库名 · 分支)`——提交框固定在底部、
+  仓库选择器在顶部页签那一行，中间隔着整个文件列表；单仓库时仍然只有分支（1.5.2 的形状）。
+- **汇总的每一格仍然用"用户登记过的工作区"发请求**（仓库另外显式指定）。仓库根（例如
+  `haiweiNew/haiwei-manage-fronted`）通常**不在**宿主的工作区登记表里，拿它当 `workspace` 发请求
+  会被 400 `workspaceNotAllowed` 拒掉——那样多仓库支持反而会让面板彻底不可用；这条不变量有断言钉住。
+
+## 校验
+
+- **新增 `scripts/test-project-scope-discovery.mjs`（127 项）**：注入式假文件系统覆盖容器仓库、`.git`
+  文件（worktree/submodule）、多层嵌套、发现后继续扫兄弟、排除名单不下钻、TTL 与 single-flight、
+  `invalidateProjectScope` 代次、以及 **10,000+ 个目录的合成宽树**（断言 `directoriesVisited <= 4000`、
+  `truncatedByBudget: true`、`candidatesFound/gitProbes/durationMs` 这些诊断数字都如实上报）。
+- **`scripts/test-review-repo-scope.mjs` 新增第 12 节（真实 git + 真实服务端）**：造出实机同款形状
+  （父目录不是仓库 + 两个子仓库），断言发现列表、相对路径、诊断账目、默认仓库、指定仓库、
+  越界 `repositoryNotAllowed`，并**双向**验证暂存只落在选中仓库的索引里（`frontend` 里 add 的文件
+  绝不出现在 `backend` 的 `diff --cached` 里）。
+- **`scripts/test-gitbar-branches.mjs` 新增第 13 节**：同样的真实形状，走服务端断言 `/status`
+  带 `projectScope`、`?repository=` 生效、分支列表跟着仓库换、越界 400，以及未跟踪文件只出现在
+  它所属的那个仓库里。
+- **`scripts/test-review-staging.mjs` 新增第 15/16 节**：多仓库时只操作 active 仓库（读、写、切换后
+  不再有请求发往旧仓库），以及**单仓库请求形状与 1.5.2 逐字一致**（一个 `repository` 都不带）。
+- **`scripts/test-review-project-git.mjs` 新增第 6 节**：徽标是所有仓库之和（`3+1=4`）、选择器只有
+  一个、有子仓库时**不再出现**"不是 git 仓库"、点选后面板换成该仓库的文件、写操作带的是选中的仓库、
+  提交框标题带仓库名 + 分支，且**从不把未登记的仓库根当 `workspace`** 发请求。
+- **`scripts/test-gitbar-branch-interaction.mjs` 新增第 7 节**：徽章计数、选择器、切换后每个新请求都
+  带 `?repository=`，以及单仓库时整块不渲染、请求不带该参数。
+- **`scripts/mutation-check.mjs` 新增 9 项**（共 **41 项**）：宿主退回"只有唯一子仓库才认"、忽略
+  `repository`、不校验 `repository`、客户端留空默认项、单仓库也带 `repository`、迁移时留下旧键、
+  gitbar 不回仓库列表、徽标不读仓库列表、请求不带 `repository`——每一项都确认"改回旧写法即变红、
+  还原即变绿"。
+- **离线全量 25 个脚本 / 2,292 项断言 0 失败**（唯一失败仍是既有的 `test-unpack.mjs` 4 项，检查的是
+  陈旧归档）；`tsc --noEmit`、`check-imports`、`check-plugin-i18n`、`check-react-rules`、
+  `check-readme`（中英锚点）、`test-i18n`（en/zh 键齐平）、`check-path-length`、`test-plugin-sync`
+  全部通过。
+
+---
+
 # 1.5.3
 
 修一条实机报错：点「✨ AI 补充」会失败，界面上显示 **`AI 补充失败：finish=max-tokens`**，而且

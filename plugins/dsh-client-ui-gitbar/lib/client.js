@@ -54,6 +54,91 @@ window.__ModuleLoader__.load({
     /** 路由前缀，与 host 半边保持一致。 */
     const API = '/dsh-desktop/gitbar'
 
+    /**
+     * 多仓库项目里"用户正在看哪一个仓库"的持久化键。
+     *
+     * 与 review 插件各存各的（两个插件是独立 bundle，拿不到彼此的作用域）：即使两边存的
+     * 不一样，也只是"两个面板各自记着上次看的仓库"，不会出现"徽章在 A、提交发到 B"——
+     * 每一次请求的 `repository` 都由**发请求的那一方**带上，host 只做校验。
+     */
+    const ACTIVE_REPO_KEY = 'dsh.gitbar.activeRepository'
+
+    /**
+     * `workspaceRoot → 当前 active 仓库根`。
+     *
+     * 为什么放在模块级而不是组件里：`call()` 在组件外面（它是一个普通 async 函数），
+     * 所有请求都从它出去，因此"每个请求都带上当前仓库"只需要在**这一处**实现。组件负责
+     * 在渲染期与用户选择时更新它（与文件里 `syncGeneration.current` 那套同一思路）。
+     */
+    const activeRepos = new Map()
+    /**
+     * `workspaceRoot → 发现的仓库列表`（>1 个时才记）。
+     *
+     * 只有它才能回答"要不要带 `repository`"：单仓库（含"工作区自己就是仓库"与"只有一个
+     * 子仓库"）时**一个字都不带**，请求形状与 1.5.2 逐字一致——那些请求已经有测试钉着，
+     * 而多带一个参数就是行为变化。
+     */
+    const multiRepositories = new Map()
+    /** `localStorage` 里那一份的内存副本（读到/写不到时功能照常）。 */
+    let savedActiveRepos = null
+
+    /** 记下这个工作区发现的仓库（列表 ≤1 时反而要清掉，因为项目可能被重新组织过）。 */
+    const rememberProjectRepositories = (workspace, repositories) => {
+      if (typeof workspace !== 'string' || workspace === '') return
+      if (!Array.isArray(repositories) || repositories.length <= 1) {
+        multiRepositories.delete(workspace)
+        return
+      }
+      multiRepositories.set(workspace, repositories)
+    }
+
+    const readSavedActiveRepos = () => {
+      if (savedActiveRepos !== null) return savedActiveRepos
+      try {
+        const raw = window.localStorage.getItem(ACTIVE_REPO_KEY)
+        const parsed = raw === null ? undefined : JSON.parse(raw)
+        savedActiveRepos = parsed !== null && typeof parsed === 'object' ? parsed : {}
+      } catch {
+        savedActiveRepos = {}
+      }
+      return savedActiveRepos
+    }
+
+    /**
+     * 当前该用哪个仓库：**只有多仓库项目才返回非空**（见 multiRepositories 的说明）。
+     *
+     * @param workspace - 工作区路径。
+     * @returns repositoryRoot 或空串。
+     */
+    const activeRepositoryOf = (workspace) => {
+      if (typeof workspace !== 'string' || workspace === '') return ''
+      const list = multiRepositories.get(workspace)
+      if (list === undefined) return ''
+      const known = (value) => typeof value === 'string' && list.some((entry) => entry?.repositoryRoot === value)
+      const memory = activeRepos.get(workspace)
+      if (known(memory)) return memory
+      const saved = readSavedActiveRepos()[workspace]
+      if (known(saved)) return saved
+      // 没选过（或选的那个已经不存在了）：用列表里的第一个。宿主侧的默认规则**逐字相同**
+      // （工作区自己的仓库 → 第一个），因此两边一定指向同一个仓库。
+      const own = list.find((entry) => entry?.relativePath === '')
+      return (own ?? list[0]).repositoryRoot
+    }
+
+    /** 记住用户的选择（内存 + 落盘）。值没变时什么都不做——它在渲染期会被调用。 */
+    const rememberActiveRepository = (workspace, repositoryRoot) => {
+      if (typeof workspace !== 'string' || workspace === '' || typeof repositoryRoot !== 'string') return
+      if (activeRepos.get(workspace) === repositoryRoot) return
+      activeRepos.set(workspace, repositoryRoot)
+      try {
+        const map = { ...readSavedActiveRepos(), [workspace]: repositoryRoot }
+        savedActiveRepos = map
+        window.localStorage.setItem(ACTIVE_REPO_KEY, JSON.stringify(map))
+      } catch {
+        // 存不了不影响本次会话内的选择。
+      }
+    }
+
     /** 本地化命名空间：字典注册到它下面，`ctx.locale.bind(NS)` 得到 `t`。 */
     const NS = 'gitbar'
 
@@ -73,6 +158,15 @@ window.__ModuleLoader__.load({
      */
     const zh = {
       sourceControl: '源代码管理',
+      /**
+       * 多仓库项目：徽章前面先说清"这个项目里有几个仓库"。
+       *
+       * 数字仍然是**当前仓库**的改动数（徽章的主体是分支），因此必须把"有多个仓库"写在
+       * 旁边——否则用户会把某个子仓库的状态当成整个项目的。
+       */
+      repoCount: 'Git · {count} 个仓库',
+      repoSelect: '选择仓库',
+      repoDiscovering: '正在发现更多 Git 仓库…',
       switching: '切换中…',
       working: '处理中…',
       switchBranch: '切换分支',
@@ -174,6 +268,10 @@ window.__ModuleLoader__.load({
 
     const en = {
       sourceControl: 'Source Control',
+      /** Multi-repository project: how many repositories live in this project. */
+      repoCount: 'Git · {count} repositories',
+      repoSelect: 'Choose repository',
+      repoDiscovering: 'Discovering more Git repositories…',
       switching: 'Switching…',
       working: 'Working…',
       switchBranch: 'Switch branch',
@@ -599,6 +697,11 @@ window.__ModuleLoader__.load({
       // 不传的话 host 会用外壳工作区，于是切换项目后徽章仍显示上一个仓库的分支。
       const params = new URLSearchParams()
       if (typeof cwd === 'string' && cwd !== '') params.set('cwd', cwd)
+      // 多仓库项目（工作区自己不是仓库、子目录里有仓库）里再带上"现在在看哪一个"。
+      // host 只把它当**不可信输入**校验（必须是这个工作区里发现过的仓库），因此这里
+      // 带的永远是它自己告诉我们的那一个。单仓库时**一个字都不带**——与 1.5.2 完全一致。
+      const repositoryRoot = activeRepositoryOf(cwd)
+      if (repositoryRoot !== '') params.set('repository', repositoryRoot)
       for (const [key, value] of Object.entries(query ?? {})) params.set(key, String(value))
       const search = params.toString()
       const response = await fetch(`${API}/${path}${search === '' ? '' : `?${search}`}`, {
@@ -880,6 +983,14 @@ window.__ModuleLoader__.load({
       /** 搜索词（面板内的分支过滤）。 */
       const [query, setQuery] = react.useState('')
       const [open, setOpen] = react.useState(false)
+      /**
+       * 用户在**多仓库项目**里选中的仓库（组件状态，只用于渲染选择器本身）。
+       *
+       * 真正的"这次请求用哪个仓库"住在模块级的 `activeRepos` 里（`call()` 在组件外，
+       * 见它的说明）；这里这一份是为了让"选择器显示的是不是当前那一个"这件事立刻跟着
+       * 用户的选择变，而不必等下一次 status 回来。
+       */
+      const [pickedRepo, setPickedRepo] = react.useState('')
       /**
        * 视口内真正可见的分支名（由 SourcePanel 用 DOM 相交报上来，见
        * collectVisibleBranchNames）。补算只从这里 + 选中项取候选。
@@ -1549,6 +1660,52 @@ window.__ModuleLoader__.load({
 
       if (!status.isRepo) return null
 
+      /**
+       * 项目级仓库列表（宿主在 `/status` 里一并给）。
+       *
+       * 只有 **>1** 个时才渲染选择器：单仓库（"工作区自己就是仓库"或"只有一个子仓库"）
+       * 是 1.5.2 的一贯界面，多一个没有选择余地的下拉框只会占地方。
+       */
+      const scopeRepositories = Array.isArray(status.projectScope?.repositories) ? status.projectScope.repositories : null
+      const projectRepositories = scopeRepositories ?? []
+      const multiRepository = projectRepositories.length > 1
+      if (scopeRepositories !== null) {
+        // **每次都要同步**（不只是多仓库时）：项目可能被重新组织成单仓库，那时必须把
+        // "多仓库"这件事**忘掉**，否则 `repository` 参数会继续带着一个已经不在列表里的
+        // 仓库根——单仓库的请求形状因此悄悄变成了多仓库的。
+        // **渲染期**同步给模块级 store：`loadBranches` / `loadRemotes` 这些 effect 在本次
+        // 渲染之后立刻发出请求，它们必须已经知道"这次操作哪个仓库"。放在 effect 里就晚
+        // 了一拍——那一拍会把上一个仓库的分支列表带进来（正是"徽章在 A、面板在 B"）。
+        rememberProjectRepositories(workspace, scopeRepositories)
+        if (multiRepository) {
+          const effective = activeRepositoryOf(workspace)
+          if (effective !== '') rememberActiveRepository(workspace, effective)
+        }
+      }
+
+      /** 选择器当前显示的仓库：刚点过的那一个优先，其次模块级 store 里的。 */
+      const currentRepository =
+        (pickedRepo !== '' && projectRepositories.some((entry) => entry.repositoryRoot === pickedRepo) ? pickedRepo : '') ||
+        activeRepositoryOf(workspace) ||
+        projectRepositories[0]?.repositoryRoot ||
+        ''
+
+      /**
+       * 用户在选择器里换了仓库：记住 → 更新显示 → **立刻重取**。
+       *
+       * 三份数据都要重取，因为它们都属于"那一个仓库"：status（分支/改动数）、branches
+       * （分支列表）、remotes（远端列表）。只刷 status 会留下"分支列表还是上一个仓库的"
+       * ——而分支列表正是这个徽章点开后的主体。
+       */
+      const pickRepository = (event) => {
+        const next = String(event?.target?.value ?? '')
+        if (next === '' || next === currentRepository) return
+        rememberProjectRepositories(workspace, projectRepositories)
+        rememberActiveRepository(workspace, next)
+        setPickedRepo(next)
+        void Promise.all([refresh(), loadBranches(), loadRemotes()])
+      }
+
       const label = status.detached ? '(detached)' : status.branch || '(no branch)'
       const flags = []
       if (status.changedFiles > 0) flags.push(`*${status.changedFiles}`)
@@ -1563,6 +1720,63 @@ window.__ModuleLoader__.load({
           'data-desktop-branch': '',
           style: { position: 'relative', display: 'inline-flex', flex: '1 1 120px', minWidth: 0, maxWidth: '100%' },
         },
+        // 多仓库项目：先说"这个项目里有几个仓库"，再让用户选一个。
+        //
+        // 顺序是有意的——徽章上的分支与改动数**永远只是当前仓库的**，那句"Git · 2 个仓库"
+        // 是用户判断"我现在看的是不是全部"的唯一依据，不能藏在菜单里。
+        multiRepository
+          ? react.createElement(
+              'span',
+              {
+                'data-desktop-repo-count': String(projectRepositories.length),
+                title: t('repoDiscovering'),
+                style: {
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  height: '28px',
+                  padding: '0 6px',
+                  color: 'var(--dsw-alias-label-tertiary, #8a8f99)',
+                  fontSize: '11.5px',
+                  fontFamily: UI_FONT,
+                  whiteSpace: 'nowrap',
+                },
+              },
+              t('repoCount', { count: projectRepositories.length }),
+            )
+          : null,
+        multiRepository
+          ? react.createElement(
+              'select',
+              {
+                'data-desktop-repo-select': '',
+                'aria-label': t('repoSelect'),
+                title: t('repoSelect'),
+                value: currentRepository,
+                onChange: pickRepository,
+                style: {
+                  height: '28px',
+                  maxWidth: '180px',
+                  padding: '0 4px',
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'transparent',
+                  color: 'var(--dsw-alias-label-secondary)',
+                  fontSize: '12px',
+                  fontFamily: UI_FONT,
+                },
+              },
+              projectRepositories.map((entry) =>
+                react.createElement(
+                  'option',
+                  { key: entry.repositoryRoot, value: entry.repositoryRoot, 'data-desktop-repo-option': entry.repositoryRoot },
+                  // 同名仓库（两个 `frontend`）只能靠相对路径区分，因此有路径就一并写出来。
+                  entry.relativePath === '' || entry.relativePath === undefined
+                    ? entry.name
+                    : `${entry.name} (${entry.relativePath})`,
+                ),
+              ),
+            )
+          : null,
         react.createElement(
           'button',
           {

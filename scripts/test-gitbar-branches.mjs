@@ -81,6 +81,26 @@ try {
   await git(['tag', 'v1.0.0'], repo)
   writeFileSync(join(repo, 'untracked.txt'), 'x\n')
 
+  // 多仓库项目（第 13 节）：父目录自己**不是**仓库，两个子目录各是一个仓库。
+  // 这是实机反馈的形状（`haiweiNew/haiwei-manage-fronted/.git`）。
+  const parent = join(root, 'haiweiNew')
+  const frontendRepo = join(parent, 'haiwei-manage-fronted')
+  const backendRepo = join(parent, 'haiwei-manage-backend')
+  mkdirSync(frontendRepo, { recursive: true })
+  mkdirSync(backendRepo, { recursive: true })
+  for (const [dir, branch] of [
+    [frontendRepo, 'frontend-main'],
+    [backendRepo, 'backend-main'],
+  ]) {
+    execFileSync('git', ['init', '-q', '-b', branch, dir])
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com'])
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'test'])
+    execFileSync('git', ['-C', dir, 'config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, 'readme.txt'), `${branch}\n`)
+    await git(['add', '.'], dir)
+    await git(['commit', '-q', '-m', `init ${branch}`], dir)
+  }
+
   // 记录 develop 顶端，供 cherry-pick 用。
   const developHead = (await git(['rev-parse', 'develop'], repo)).trim()
 
@@ -136,7 +156,7 @@ try {
       {
         unit: { name: 'workspace', version: 2 },
         global: { initialized: true, workspaceIds: [], archivedSessionIds: [] },
-        tables: { workspaces: { w1: { path: repo } } },
+        tables: { workspaces: { w1: { path: repo }, w2: { path: parent } } },
       },
       null,
       2,
@@ -579,6 +599,66 @@ try {
 
   const wrongMethod = await fetch(`${base}/dsh-desktop/gitbar/status${query}`, { method: 'POST', body: '{}' })
   check('12) GET 路由用 POST -> 404（不是 405，路径不匹配）', wrongMethod.status, 404)
+
+  // =========================================================================
+  console.log('')
+  console.log('=== 13. 多仓库项目：宿主发现子仓库 + repository 参数 ===')
+  //
+  // 实机形状：工作区自己**不是**仓库，仓库在子目录里。1.5.3 及以前这种工作区在 gitbar
+  // 里什么都显示不出来（徽章消失），因为宿主只问"工作区自己是不是仓库"。
+  const parentQuery = `?cwd=${encodeURIComponent(parent)}`
+  const getAt = async (route, extra = '') => {
+    const response = await fetch(`${base}/dsh-desktop/gitbar/${route}${parentQuery}${extra}`)
+    return { status: response.status, body: await response.json() }
+  }
+  res = await getAt('status')
+  check('13) 父目录（自己不是仓库）也有状态 -> 200', res.status, 200)
+  check('   isRepo 为真（找到了子仓库）', res.body.isRepo, true)
+  check('   发现两个仓库', res.body.projectScope.repositories.length, 2)
+  check(
+    '   仓库名就是两个子目录',
+    res.body.projectScope.repositories.map((entry) => entry.name).sort().join(','),
+    'haiwei-manage-backend,haiwei-manage-fronted',
+  )
+  checkTrue(
+    '   每一项都带工作区相对路径',
+    res.body.projectScope.repositories.every((entry) => entry.relativePath !== ''),
+  )
+  check('   候选数=2', res.body.projectScope.discovery.candidatesFound, 2)
+  // 没指定 repository 时宿主与客户端用**同一条**默认规则：没有"工作区自己所属的仓库"，
+  // 于是取列表里的第一个（浅层优先、同层按名字）。
+  check('   默认落在列表的第一个', res.body.repositoryRoot, res.body.projectScope.repositories[0].repositoryRoot)
+  check('   默认那个就是 backend', res.body.branch, 'backend-main')
+
+  // 指定 frontend：分支与仓库根都必须换过去。
+  const frontend = join(parent, 'haiwei-manage-fronted')
+  const backend = join(parent, 'haiwei-manage-backend')
+  res = await getAt('status', `&repository=${encodeURIComponent(frontend)}`)
+  check('13) 指定 frontend -> 200', res.status, 200)
+  check('   repositoryRoot 是 frontend', res.body.repositoryRoot, frontend)
+  check('   分支来自 frontend', res.body.branch, 'frontend-main')
+  const feBranches = await getAt('branches', `&repository=${encodeURIComponent(frontend)}`)
+  checkTrue('   分支列表也来自 frontend', feBranches.body.branches.some((b) => b.name === 'frontend-main'))
+  checkTrue('   且不含 backend 的分支', !feBranches.body.branches.some((b) => b.name === 'backend-main'))
+
+  res = await getAt('status', `&repository=${encodeURIComponent(backend)}`)
+  check('   指定 backend 也能用', res.body.branch, 'backend-main')
+
+  // 安全边界：`repository` 是不可信输入，只认本项目发现过的仓库。
+  const bogus = await getAt('status', `&repository=${encodeURIComponent(root)}`)
+  check('13) 未发现的仓库 -> 400', bogus.status, 400)
+  check('   code 是 repositoryNotAllowed', bogus.body.code, 'repositoryNotAllowed')
+  const traversal = await getAt('status', `&repository=${encodeURIComponent('C:\\')}`)
+  check('   越界路径 -> 400', traversal.status, 400)
+  check('   code 同样是 repositoryNotAllowed', traversal.body.code, 'repositoryNotAllowed')
+
+  // 写操作也必须落在指定的仓库上：**不跨仓库**。
+  // 在 frontend 里造一个未跟踪文件，然后通过 gitbar 之外的 git 确认"改的是 frontend"。
+  writeFileSync(join(frontend, 'from-gitbar.txt'), 'x\n')
+  const writeStatus = await getAt('status', `&repository=${encodeURIComponent(frontend)}`)
+  check('   写前 frontend 有 1 个改动', writeStatus.body.changedFiles, 1)
+  const backendStatus = await getAt('status', `&repository=${encodeURIComponent(backend)}`)
+  check('   同一个未跟踪文件不出现在 backend', backendStatus.body.changedFiles, 0)
 
   child.kill()
 } catch (error) {

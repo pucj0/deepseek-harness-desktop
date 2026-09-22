@@ -187,6 +187,27 @@ const requests = []
 const REPO_ROOT = 'F:\\code\\projA'
 
 /**
+ * `/project-git-scope` 的仓库列表（项目级发现的结果）。
+ *
+ * 默认单仓库：工作区自己就是仓库根（`relativePath === ''`）。改成两个仓库就能测"多仓库时
+ * 只有 active 那一个被操作"（见第 15 节）。
+ */
+let scopeRepositories = () => [
+  { repositoryRoot: REPO_ROOT, gitDir: `${REPO_ROOT}\\.git`, relativePath: '', name: 'projA' },
+]
+
+/** 发现诊断信息（第 21 节要求这些数字可见）。默认"一次就找全了"。 */
+let scopeDiscovery = () => ({
+  complete: true,
+  directoriesVisited: 3,
+  candidatesFound: 1,
+  gitProbes: 1,
+  durationMs: 2,
+  truncatedByBudget: false,
+  cached: false,
+})
+
+/**
  * `/untracked` 的响应。
  *
  * 默认给一份"大量未跟踪 + 一层目录 + 一页 200 条"的形状，用来验证惰性树与分页；测试可以
@@ -315,6 +336,23 @@ const fetchBase = async (url, init) => {
   }
   if (route === 'repo-context') {
     return { ok: true, text: async () => JSON.stringify({ isRepo: true, workspaceRoot: body?.workspace, repositoryRoot: REPO_ROOT }) }
+  }
+  // 项目级仓库发现（多仓库模型）。1.5.4 起客户端不再问 `/repo-context`——它问的是这一条，
+  // 因为"工作区自己是仓库"只是众多情况之一（工作区可能只是某个仓库的父目录）。
+  //
+  // 默认回答**单仓库**且 `relativePath === ''`（工作区自己就是仓库）：于是 active 仓库就是
+  // 它本身，所有请求都不带 `repository`，行为与 1.5.2 逐字一致——这一节与第 14 节钉的就是
+  // "单仓库没有回归"。多仓库场景见 `scopeRepositories`。
+  if (route === 'project-git-scope') {
+    return {
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          workspaceRoot: body?.workspace,
+          repositories: scopeRepositories(),
+          discovery: scopeDiscovery(),
+        }),
+    }
   }
   if (route === 'untracked') {
     // 可以挂起（用来观察"还没统计出来"那一帧，并在其间断言"不重复发请求"）。
@@ -723,7 +761,7 @@ console.log('=== 9. 空仓库与干净工作区 ===')
 {
   workspaceResponse = () => ({ isRepo: false })
   await mount()
-  checkTrue('   非仓库给出提示', viewText().includes('notRepo'))
+  checkTrue('   非仓库给出提示', viewText().includes('notGitProject'))
 }
 {
   workspaceResponse = () => SNAPSHOT
@@ -1299,6 +1337,100 @@ console.log('=== 14. 同一个仓库的两个工作区：只有一格、一套�
   unsubA()
   unsubB()
   check('   全部退订后停止轮询', snapshotStore.cells()[0]?.polling, false)
+}
+
+console.log('')
+console.log('=== 15. 多仓库：一次只操作 active 那一个仓库 ===')
+{
+  // 实机场景：工作区 `haiweiNew` 自己**不是**仓库，仓库在子目录里。因此这里给的列表里
+  // 没有 `relativePath === ''` 的那一项——"工作区自己所属的仓库"这次不存在。
+  snapshotStore.reset()
+  const FRONTEND = `${WORKSPACE}\\haiwei-manage-fronted`
+  const BACKEND = `${WORKSPACE}\\haiwei-manage-backend`
+  scopeRepositories = () => [
+    { repositoryRoot: FRONTEND, gitDir: `${FRONTEND}\\.git`, relativePath: 'haiwei-manage-fronted', name: 'haiwei-manage-fronted' },
+    { repositoryRoot: BACKEND, gitDir: `${BACKEND}\\.git`, relativePath: 'haiwei-manage-backend', name: 'haiwei-manage-backend' },
+  ]
+  requests.length = 0
+  posts.length = 0
+  // 走一次**真实请求**（`reload`）：默认选中项只有真发请求时才看得见——直接写快照的那条
+  // 路径根本不发 `/workspace`（它是夹具，不是行为）。
+  await mount({ reload: true })
+  check('15) 发现两个仓库', snapshotStore.cells().length, 1)
+  // 用户还没选过时用的是**默认项**：列表里的第一个（没有"工作区自己所属的仓库"）。
+  // 宿主侧的 `resolveScopedRepo` 用的是同一条规则，因此两边一定指向同一个仓库；这条
+  // 断言同时钉住"客户端不会自己挑一个别的"。
+  const firstRepo = `${WORKSPACE}\\haiwei-manage-fronted`
+  check('   默认解析到列表里的第一个仓库', snapshotStore.cellKeyFor(WORKSPACE), firstRepo)
+  check(
+    '   而且请求带的就是那一个',
+    [...new Set(requests.filter((r) => r.route === 'workspace').map((r) => r.body?.repository))].join(','),
+    firstRepo,
+  )
+
+  // 用户在界面上选了 frontend（页签右侧的选择器就是调这一条）。
+  requests.length = 0
+  await snapshotStore.selectRepository(WORKSPACE, FRONTEND)
+  check('   选过之后记录迁到那个仓库', snapshotStore.cellKeyFor(WORKSPACE), FRONTEND)
+  check('   仍然只有一格（不是每个仓库一格）', snapshotStore.cells().length, 1)
+  checkTrue('   切换后立刻就有那一份数据', snapshotStore.get(WORKSPACE)?.phase === 'ready')
+  const afterFrontend = requests.filter((r) => r.route === 'workspace' || r.route === 'untracked')
+  checkTrue('   之后的读请求都带上了该仓库', afterFrontend.length >= 1)
+  check(
+    '   每一个都带同一个 repository',
+    [...new Set(afterFrontend.map((r) => r.body?.repository))].join(','),
+    FRONTEND,
+  )
+
+  // 列表里的写操作（暂存一行）也必须落在同一个仓库上——"提交/暂存跨仓库"是硬禁止项。
+  const stageRow = findAll('data-staging-row').find(
+    (n) => n.props['data-staging-row'] === 'unstaged.txt' && n.props['data-staging-side'] === 'unstaged',
+  )
+  const stageButton = collectHostNodes(stageRow, 'probe').find((n) => n.props?.['data-staging-row-action'] !== undefined)
+  posts.length = 0
+  await click(stageButton)
+  check('   暂存发到 host', posts[posts.length - 1]?.route, 'stage')
+  check('   写操作也带同一个 repository', posts[posts.length - 1]?.body?.repository, FRONTEND)
+
+  // 切到 backend：**从这一刻起**没有任何请求还带着 frontend。
+  requests.length = 0
+  posts.length = 0
+  await snapshotStore.selectRepository(WORKSPACE, BACKEND)
+  check('   切到另一个仓库后记录也换了', snapshotStore.cellKeyFor(WORKSPACE), BACKEND)
+  check('   仍然只有一格', snapshotStore.cells().length, 1)
+  check(
+    '   切走之后不再有请求发往旧仓库',
+    requests.filter((r) => r.body?.repository === FRONTEND).length,
+    0,
+  )
+  const afterBackend = requests.filter((r) => r.route === 'workspace')
+  check(
+    '   新请求都带新的 repository',
+    [...new Set(afterBackend.map((r) => r.body?.repository))].join(','),
+    BACKEND,
+  )
+
+  // 收尾：把夹具与 store 还原，后面的断言（若有）仍在单仓库世界里。
+  scopeRepositories = () => [
+    { repositoryRoot: REPO_ROOT, gitDir: `${REPO_ROOT}\\.git`, relativePath: '', name: 'projA' },
+  ]
+  snapshotStore.reset()
+}
+
+console.log('')
+console.log('=== 16. 单仓库项目：请求形状与 1.5.2 逐字一致（一个字都不多带）===')
+{
+  // 多仓库那一套（`repository` 参数）**绝不能**渗进单仓库：宿主侧也有测试钉着它，但那条
+  // 只能证明"多带了也能工作"，证明不了"没多带"——而后者才是 1.5.2 的行为契约。
+  scopeRepositories = () => [
+    { repositoryRoot: REPO_ROOT, gitDir: `${REPO_ROOT}\\.git`, relativePath: '', name: 'projA' },
+  ]
+  snapshotStore.reset()
+  requests.length = 0
+  await mount({ reload: true })
+  check('16) 单仓库时不带 repository', requests.filter((r) => r.body?.repository !== undefined).length, 0)
+  check('   仓库根就是工作区自己', snapshotStore.cellKeyFor(WORKSPACE), REPO_ROOT)
+  check('   快照正常取到', snapshotStore.get(WORKSPACE)?.phase, 'ready')
 }
 
 console.log('')
