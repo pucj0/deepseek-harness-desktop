@@ -1,3 +1,73 @@
+# 1.5.7
+
+这一版有两件事：**1.5.6 的提交区改造**（1.5.6 因上游依赖只发布了一半而没构建出安装包，见下）与
+**构建侧那处依赖闭包的修复**。
+
+## 提交区（原本在 1.5.6，这里一并交付）
+
+Changes 底部的提交区改成**真正可调高度的 footer**：
+
+- **默认 8 行**：一行提交摘要 + 一个空行 + 5~6 行正文，一条正常的提交信息不用先手动拉高。8 行只是
+  `rows`，高度按"行数 × 行高 + 输入框内边距边框 + 按钮行与留白"算出来，因此跟随「设置 → UI 字号」
+  一起缩放；`minHeight: '90px'` 与原生 `resize` 都删掉了。
+- **顶部一条横向手柄**（`ns-resize`，默认几乎不可见、悬停/拖动时显形）：往上拖变高、往下拖变矮，
+  **双击复位**。走 Pointer Events + `setPointerCapture`，拖出这条 8px 手柄也不丢事件。
+- **高度范围**：`4 行 + 按钮行`（约 148px）到 `min(视口 55%, Changes 可用高度 65%, 可用高度 − 200px)`
+  ——最后一项保证文件列表 / Diff Preview **始终留下 200px 的可操作区域**。
+- **持久化 `dsh.review.commitAreaHeight`**（松手才落盘）；窗口变小只在**渲染期**夹取，所以小屏被夹矮
+  之后把窗口拉回大尺寸，用户选的高度原样恢复。
+- 输入框用 `flex` 填满提交区，按钮行高度固定（拖高只长输入框）；按钮下方留 12px，不再贴窗口底边；
+  输入框不再有右下角原生 resize（两套高度控制会互相打架）。
+- 主区继续 `flex + minHeight: 0 + overflow: auto`：让位的是主区，抽屉不产生页面级滚动。
+
+## 构建：内置运行时的依赖闭包按发布时间取
+
+CI 三个平台在 **1.5.6** 上同时倒在"准备内置运行时"这一步：
+
+```
+npm error code ETARGET
+npm error notarget No matching version found for
+  @deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3.
+```
+
+根因不在这个仓库：`@deepseek-ai/dsh-*` 子包之间用 `^0.1.5-rc.2` 这样的**范围**互相依赖，而今天上午
+上游把 **rc.3 那一波发布了一半**（几十个子包陆续上架，`…sidebar-documentpreview@0.1.5-rc.3` 缺失，
+镜像与上游都是 404）。于是装 `latest`（= **0.1.5-rc.2**）时，`^` 范围被**向上**解析到那半波 rc.3，
+直接失败——与我们要装的版本毫无关系。1.5.4 / 1.5.5 的构建都在那波发布之前，所以一直是好的。
+
+修法不是把版本号写死（那只是把同一个坑留到下一次），而是**按版本发布时间取依赖闭包**：
+`stage:runtime` 先解析这次要装的 dsh 版本（`latest` 或显式版本），取它的发布时间，再给 npm
+`--before=<发布时间 + 24h>`：
+
+- 同一次发布波里的兄弟包晚几分钟到几小时上架都能等到（24 小时窗口）；
+- 下一波预发布绝不会被卷进来（rc.2 → rc.3 相隔 12 天）；
+- 拿不到发布时间时**不猜**，退回不加 `--before`（也就是改动前的行为）；
+- `DSH_STAGE_BEFORE=off` 关闭、`DSH_STAGE_BEFORE=<ISO>` 显式指定；
+- 取到的时间点写进 `runtime/runtime.json` 的 `closureBefore`，并在实际装到的版本与解析出的版本
+  不一致时打警告。
+
+实测（本机、走 npmmirror）：`--before` 生效后 `npm run stage:runtime` 装出的是干净的
+**0.1.5-rc.2 闭包**（`runtime/package-lock.json` 里 242 个 `@deepseek-ai/*` 包，**0 个 rc.3**），
+`runtime.json` 记录 `"closureBefore": "2026-09-11T14:57:10.790Z"`。
+
+## 校验
+
+- `scripts/test-review-staging.mjs` 新增第 17 节（31 项，对应提交区改造的 A~K）：8 行默认、上下拖动与
+  夹取（含"拖到底不会跳回默认高度"）、双击复位、重开持久化、窗口变小夹取且给主区留 200px、底部留白
+  12px、没有原生 resize、AI 多行内容拖动后不丢、Ctrl+Enter 仍提交。
+- `scripts/test-stage-runtime.mjs`（**新**，24 项，纯离线）：dist-tag / 精确版本 / 未知版本的解析、
+  截止时间 = 发布时间 + 24h 且确实把下一波挡在外面、拿不到 `time` 时不猜、两个逃生口、以及 npm 参数里
+  "该带 `--before` 时才带"。
+- `scripts/test-review-overlay-hooks.mjs` 的提交区断言按新契约改写；`scripts/mutation-check.mjs`
+  扩到 **49 项**（新增 8 项覆盖拖动方向、负数被当成"没拖过"、最小行数、上限不给主区留位置、重开不
+  读回高度、双击不复位、原生 resize 回来、去掉底部留白）。
+- 离线全量 25 个脚本 / 约 2,400 项断言 0 失败；`tsc --noEmit`、`check-imports`、
+  `check-plugin-i18n`、`check-react-rules`、`check-readme`（中英）、`test-i18n`、
+  `check-path-length`、`test-plugin-sync` 全绿；`node scripts/test-stage-runtime.mjs` 通过，
+  并已在本机真实跑通一次 `npm run stage:runtime`。
+
+---
+
 # 1.5.6
 
 把 Changes 底部的提交区做成**真正可调高度的 footer**。实机反馈三条：默认能看见的内容太少（4 行、

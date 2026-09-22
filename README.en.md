@@ -825,6 +825,7 @@ was verified rather than assumed:
 | `scripts/test-review-graph-view.mjs` | the three-pane commit graph: the counter, second-accurate times, scroll-triggered paging, and no hash column |
 | `scripts/test-review-drawer-style.mjs` | the drawer's appearance layer: its data markers and style contract stay intact |
 | `scripts/check-react-rules.mjs` | static guard for React #310 (hook order) and #290 (`ref` used as a business prop) |
+| `scripts/test-stage-runtime.mjs` | the staged runtime's dependency-closure cutoff: taken from the release's publish time, never guessed when unavailable, the escape hatches, and the npm argv |
 | `scripts/mutation-check.mjs` | mutation check: every fix in this round is reverted to its old form and the matching assertion has to go red |
 | `scripts/measure-workspace-snapshot.mjs` | real measurements of the project snapshot: git processes and wall time, before vs after |
 | `scripts/probe-commit-message.mjs` | **real-model** smoke test for "✨ AI draft": what `finish` the provider actually returns (costs one real call) |

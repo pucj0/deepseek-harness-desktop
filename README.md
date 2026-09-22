@@ -531,6 +531,9 @@ set ELECTRON_BUILDER_BINARIES_MIRROR=https://registry.npmmirror.com/-/binary/ele
 
 `scripts/build.mjs` 与 `build.bat` 会自动带上这些设置。
 
+**内置运行时的依赖闭包按版本发布时间取。** `npm run stage:runtime` 会先解析这次要装的 dsh 版本（`latest` / 指定版本），取它的发布时间，再给 npm 加 `--before=<发布时间 + 24h>`：
+`@deepseek-ai/dsh-*` 子包之间用 `^0.1.5-rc.2` 这样的**范围**互相依赖，所以上游只要有一波新版本"上架到一半"（例如 rc.3 的几十个子包到齐了、其中一个还缺），装 `latest`（= rc.2）就会被 `^` 范围**向上**解析到那半波而直接失败——这与要装的版本无关，纯属构建被上游的发布节奏牵连。`--before` 把闭包钉在"那个版本发布当时的仓库状态"，同一次发布波里的兄弟包晚几小时到齐也能等到（24 小时窗口），而下一波预发布绝不会被卷进来。`DSH_STAGE_BEFORE=off` 关闭、`DSH_STAGE_BEFORE=<ISO 时间>` 显式指定；拿不到发布时间时**不猜**，退回不加 `--before`。这次取到的时间点会记进 `runtime/runtime.json` 的 `closureBefore`。离线断言见 `node scripts/test-stage-runtime.mjs`。
+
 ### 开发新插件
 
 三个内置插件是本仓库最好的范例，照它们的结构新增一个即可：
@@ -579,6 +582,7 @@ node scripts/test-review-staging.mjs         # 暂存/提交区：三组分组�
 node scripts/test-review-graph-view.mjs      # 提交图三栏：计数、时间到秒、滚动自动分页、不显示哈希
 node scripts/test-review-drawer-style.mjs    # 抽屉外观层：数据标记与样式契约不被改写
 node scripts/check-react-rules.mjs           # 静态挡住 React #310（hook 顺序）与 #290（把 ref 当业务字段传）
+node scripts/test-stage-runtime.mjs          # 内置运行时的依赖闭包截止时间：按发布时间取、拿不到就不猜、逃生口、npm 参数
 node scripts/mutation-check.mjs              # 变异验证：把本轮的每个修复逐个改回旧写法，断言必须变红
 node scripts/measure-workspace-snapshot.mjs  # 实测项目级快照的进程数与耗时（重构前 vs 重构后）
 node scripts/probe-commit-message.mjs        # **真实模型** smoke：「AI 补充」的 finish 到底是什么（会消耗一次真实调用）
