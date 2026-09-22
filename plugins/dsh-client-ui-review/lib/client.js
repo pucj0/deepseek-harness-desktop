@@ -1454,7 +1454,8 @@ window.__ModuleLoader__.load({
      *
      * 为什么客户端也需要它：Git 快照的 store 必须按**仓库**共享（同仓库的两个子目录只能有
      * 一套轮询），而 store 的键要在订阅的那一刻就确定。先问一次 host（`/repo-context`，
-     * 内部是两次 `rev-parse` 的有界缓存），拿到 repositoryRoot 再把订阅挂到"仓库那一格"。
+     * 内部是**一次** `rev-parse`（同时拿 toplevel 与 git 目录）的有界缓存），拿到 repositoryRoot
+     * 再把订阅挂到"仓库那一格"。
      *
      * 这里也做缓存与 single-flight：一个工作区只问一次，多个组件（入口徽标 + 抽屉）同时
      * 订阅不会各问一遍。

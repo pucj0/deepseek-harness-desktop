@@ -1021,8 +1021,8 @@ async function currentTree(repositoryRoot, sessionId) {
  * ——从子目录跑会少报文件。统一到仓库根之后，两件事同时成立：路径基准唯一（界面不会
  * 时而 `../src/a.js` 时而 `src/a.js`），未跟踪枚举也完整。
  *
- * 探测用短超时（5 秒）：它只是两次 `rev-parse`，超过这个时间说明磁盘/仓库异常，
- * 拖住整个路由没有意义。
+ * 探测用短超时（5 秒）：它只是**一次** `rev-parse`（同时取 toplevel 与 git 目录），超过这个
+ * 时间说明磁盘/仓库异常，拖住整个路由没有意义。
  */
 const repoContext = createRepoContextResolver({
   runGit: (args, cwd) => git(args, cwd, undefined, GIT_MAX_BUFFER, REPO_PROBE_TIMEOUT_MS),
