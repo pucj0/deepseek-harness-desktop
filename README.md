@@ -10,7 +10,7 @@ DeepSeek Harness Desktop 是 [DeepSeek Harness (`dsh`)](https://github.com/deeps
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-当前仓库版本：**1.5.8**。详细变更见 [发布记录](RELEASE_NOTES.md)。
+当前仓库版本：**1.5.9**。详细变更见 [发布记录](RELEASE_NOTES.md)。
 
 ## 为什么需要桌面版
 
@@ -41,11 +41,14 @@ dsh web
 
 这些能力由本仓库的 `gitbar` 和 `review` 插件提供，运行在官方 Harness Web UI 中：
 
-- **Git 工具条：**显示当前分支、未提交状态及相对上游的领先/落后；可搜索本地和远程分支并切换。只有用户明确选择“暂存并切换”时才会先创建 stash。
-- **项目改动（Changes）：**按已暂存、未暂存和未跟踪文件查看改动；支持逐文件 diff、暂存、取消暂存、提交，以及使用当前 Harness 模型起草提交信息。
+- **Git 工具条：**显示当前分支、未提交状态及相对上游的领先/落后；可搜索本地和远程分支并切换。分支行右键可按 IDEA 的习惯操作（切换、从它新建分支、合并/变基到当前、重命名、推送、删除、复制分支名）。只有用户明确选择“暂存并切换”时才会先创建 stash。
+- **更新与推送：**「更新项目」（fetch → pull）与「推送」直接执行，不再弹二次确认，进度显示在动作行上。首次推送自动建立上游（等价 `push -u`）；被拒绝时给出「更新项目」与受确认保护的**强制推送**（只用 `--force-with-lease`，不会覆盖协作者刚推上去的提交）；没有上游、没有配置远端、认证失败、远端不可达各有各的提示。除破坏性操作（还原、删除分支、强制推送、签出标记或修订）外都不再二次确认。
+- **合并冲突：**Changes 里冲突文件单独成组（不再同时出现在已暂存/未暂存里，也不再提供会丢掉改动的还原按钮）；点开是**冲突解决面板**——逐块显示 Current / Incoming 两侧、按块选择「用当前 / 用对方 / 两者都要」、可直接编辑结果，另有「标记为已解决」（宿主会复扫文件，残留标记一律拒绝）与按操作类型给出的「继续 / 中止」（合并 / 变基 / 摘取 / 还原）。合并、变基、摘取、还原的进行中状态由宿主判定，界面不猜。
+- **项目改动（Changes）：**按冲突、已暂存、未暂存和未跟踪文件查看改动；支持逐文件 diff、暂存、取消暂存、提交，以及使用当前 Harness 模型起草提交信息。
 - **提交记录（Log）：**分支树、提交图与提交详情；可查看提交中的文件差异。
-- **多仓库工作区：**识别工作区所属 Git 仓库，并在工作区下有多个独立仓库时提供仓库选择器。发现过程有目录深度、数量和时间上限，不保证遍历任意深度的目录。
+- **多仓库工作区：**识别工作区所属 Git 仓库，并在工作区下有多个独立仓库时提供仓库选择器；所有 Git 操作（含更新、推送、提交、冲突解决）都只作用于当前选中的仓库。发现过程有目录深度、数量和时间上限，不保证遍历任意深度的目录。
 - **本轮修改审查：**在任务轮次开始时记录 Git 快照，比较轮次后的工作区状态，以区分本轮修改和开始前已有的未提交改动。
+- **实现约定：**所有 Git 命令都以仓库根为工作目录、用 `execFile` + 参数数组执行（不拼字符串），客户端只能传标量，引用/远端/提交号逐一校验；网络与 `--continue` 类操作以非交互方式执行（不会挂在不存在的终端提示或编辑器上）。
 
 ## 下载安装
 
@@ -132,7 +135,7 @@ build/                    图标和打包资源
 .github/workflows/        跨平台发布工作流
 ```
 
-关键实现位于 `src/main/index.ts`、`window.ts`、`dsh-server.ts`、`updater.ts`、`shell-updater.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`git.ts` 和 `i18n.ts`。
+关键实现位于 `src/main/index.ts`、`window.ts`、`titlebar.ts`、`menu.ts`、`dsh-server.ts`、`updater.ts`、`shell-updater.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`workspace-switch.ts`、`git.ts` 和 `i18n.ts`。
 
 ## 开发与测试
 

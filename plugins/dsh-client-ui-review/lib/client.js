@@ -831,6 +831,45 @@ window.__ModuleLoader__.load({
       statusDeleted: '删除',
       statusRenamed: '重命名',
       statusOther: '变更',
+      // ---- 冲突解决 ----
+      statusConflict: '冲突',
+      conflictGroupTitle: '合并冲突',
+      conflictResolveAction: '解决冲突',
+      conflictCurrent: '当前（ours）',
+      conflictIncoming: '对方（theirs）',
+      conflictResult: '结果（可直接编辑后保存）',
+      conflictAcceptOurs: '用当前',
+      conflictAcceptTheirs: '用对方',
+      conflictAcceptBoth: '两者都要',
+      conflictApply: '应用选择',
+      conflictMarkResolved: '标记为已解决',
+      conflictSaveResult: '保存结果',
+      conflictReload: '重新读取',
+      conflictDecided: '已决定 {decided}/{total} 块',
+      conflictBlock: '冲突块 {index}（第 {line} 行）',
+      conflictNoMarkers: '这个文件里已经没有冲突标记，可以直接标记为已解决。',
+      conflictRemaining: '还有 {count} 个文件有冲突',
+      conflictStillPending: '还有冲突没有解决，先把它们标记为已解决再继续。',
+      conflictApplied: '已应用，文件已更新。',
+      conflictSaved: '结果已保存到工作区文件。',
+      conflictMarked: '已标记为已解决（已加入索引）。',
+      conflictContinued: '操作已继续。',
+      conflictAborted: '已中止，工作区回到操作前的状态。',
+      conflictOpMerge: '合并进行中',
+      conflictOpRebase: '变基进行中',
+      conflictOpCherryPick: '摘取提交进行中',
+      conflictOpRevert: '还原进行中',
+      conflictCommitMerge: '提交合并',
+      conflictContinueRebase: '继续变基',
+      conflictContinueCherryPick: '继续摘取',
+      conflictContinueRevert: '继续还原',
+      conflictAbortMerge: '中止合并',
+      conflictAbortRebase: '中止变基',
+      conflictAbortCherryPick: '中止摘取',
+      conflictAbortRevert: '中止还原',
+      conflictContinueBlocked: '还有冲突文件没解决',
+      error_markersRemain: '文件里还有冲突标记，先解决它们（或用「保存结果」写下最终内容）再标记为已解决。',
+      error_writeFailed: '无法写入工作区文件。',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
@@ -1039,6 +1078,45 @@ window.__ModuleLoader__.load({
       statusDeleted: 'deleted',
       statusRenamed: 'renamed',
       statusOther: 'changed',
+      // ---- conflict resolution ----
+      statusConflict: 'conflict',
+      conflictGroupTitle: 'Merge conflicts',
+      conflictResolveAction: 'Resolve',
+      conflictCurrent: 'Current (ours)',
+      conflictIncoming: 'Incoming (theirs)',
+      conflictResult: 'Result (edit and save it if you want)',
+      conflictAcceptOurs: 'Take current',
+      conflictAcceptTheirs: 'Take incoming',
+      conflictAcceptBoth: 'Take both',
+      conflictApply: 'Apply choices',
+      conflictMarkResolved: 'Mark as resolved',
+      conflictSaveResult: 'Save result',
+      conflictReload: 'Reload',
+      conflictDecided: '{decided}/{total} blocks decided',
+      conflictBlock: 'Conflict block {index} (line {line})',
+      conflictNoMarkers: 'This file no longer has conflict markers; you can mark it resolved.',
+      conflictRemaining: '{count} file(s) still conflicted',
+      conflictStillPending: 'Some conflicts are still unresolved; mark them resolved first.',
+      conflictApplied: 'Applied — the file on disk has been updated.',
+      conflictSaved: 'Result saved to the working tree file.',
+      conflictMarked: 'Marked as resolved (added to the index).',
+      conflictContinued: 'The operation continued.',
+      conflictAborted: 'Aborted — the working tree is back to its pre-operation state.',
+      conflictOpMerge: 'merge in progress',
+      conflictOpRebase: 'rebase in progress',
+      conflictOpCherryPick: 'cherry-pick in progress',
+      conflictOpRevert: 'revert in progress',
+      conflictCommitMerge: 'Commit merge',
+      conflictContinueRebase: 'Continue rebase',
+      conflictContinueCherryPick: 'Continue cherry-pick',
+      conflictContinueRevert: 'Continue revert',
+      conflictAbortMerge: 'Abort merge',
+      conflictAbortRebase: 'Abort rebase',
+      conflictAbortCherryPick: 'Abort cherry-pick',
+      conflictAbortRevert: 'Abort revert',
+      conflictContinueBlocked: 'Conflicted files are still unresolved',
+      error_markersRemain: 'The file still contains conflict markers. Resolve them (or save the final content) before marking it resolved.',
+      error_writeFailed: 'Could not write the working tree file.',
       binaryDiff: 'This file is binary; no line diff is shown.',
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
@@ -1212,10 +1290,20 @@ window.__ModuleLoader__.load({
       nothingToCommit: 'error_nothingToCommit',
       commitFailed: 'error_commitFailed',
       workspaceNotAllowed: 'error_workspaceNotAllowed',
+      // 冲突解决：这两个 code 只在解决流程里出现（`stageFailed` 已经映射到通用短句）。
+      markersRemain: 'error_markersRemain',
+      writeFailed: 'error_writeFailed',
     }
 
     /** 状态字母对应的颜色，让列表一眼能分辨增删改。 */
-    const STATUS_COLORS = { A: ADDED, M: 'var(--dsw-alias-state-warn-label, #9a6700)', D: REMOVED, R: ACCENT }
+    const STATUS_COLORS = {
+      A: ADDED,
+      M: 'var(--dsw-alias-state-warn-label, #9a6700)',
+      D: REMOVED,
+      R: ACCENT,
+      /** 冲突用错误色：它是"必须处理"的状态，不是普通改动。 */
+      U: 'var(--dsw-alias-state-error-primary, #d1242f)',
+    }
 
     /**
      * 常驻面板开关的持久化状态。
@@ -4754,9 +4842,22 @@ window.__ModuleLoader__.load({
       const index = typeof entry?.index === 'string' ? entry.index : ' '
       const worktree = typeof entry?.worktree === 'string' ? entry.worktree : ' '
       const untracked = index === '?' || worktree === '?'
+      /**
+       * 冲突（未合并）条目。
+       *
+       * 宿主把 porcelain v2 的 `u` 记录标成 `conflict: true` 并带上 XY（`UU`/`AA`/`DU`…），
+       * 那是第一判据；`U` 字母兜住另一条来路（本轮改动的 `/changes` 用的是 porcelain v1，
+       * 那里没有这个标记）。
+       *
+       * 冲突**不属于**已暂存也不属于未暂存：它既没被解决、也没进索引，而且必须自己占一组
+       * （最先看到）。此前 `UU` 会同时落进 staged 与 unstaged 两组，同一个文件出现两次，
+       * 而用户最该先处理的冲突反而混在普通改动里。
+       */
+      const conflicted = entry?.conflict === true || index === 'U' || worktree === 'U'
       return {
-        staged: !untracked && index !== ' ',
-        unstaged: !untracked && worktree !== ' ',
+        conflicted,
+        staged: !conflicted && !untracked && index !== ' ',
+        unstaged: !conflicted && !untracked && worktree !== ' ',
       }
     }
 
@@ -4768,7 +4869,7 @@ window.__ModuleLoader__.load({
       R: { key: 'statusRenamed', color: STATUS_COLORS.R },
       C: { key: 'statusAdded', color: STATUS_COLORS.A },
       '?': { key: 'statusAdded', color: STATUS_COLORS.A },
-      U: { key: 'statusModified', color: STATUS_COLORS.M },
+      U: { key: 'statusConflict', color: STATUS_COLORS.U },
     }
 
     /**
@@ -4778,7 +4879,10 @@ window.__ModuleLoader__.load({
      */
     function StatusBadge(props) {
       const letter = typeof props?.letter === 'string' && props.letter !== '' ? props.letter : '?'
-      const meta = PORCELAIN_STATUS[letter] ?? { key: 'statusOther', color: 'var(--dsw-alias-label-secondary)' }
+      const meta =
+        props?.conflict === true
+          ? { key: 'statusConflict', color: STATUS_COLORS.U }
+          : PORCELAIN_STATUS[letter] ?? { key: 'statusOther', color: 'var(--dsw-alias-label-secondary)' }
       return react.createElement(
         'span',
         {
@@ -4797,6 +4901,527 @@ window.__ModuleLoader__.load({
           },
         },
         letter,
+      )
+    }
+
+    /**
+     * 冲突解决面板（Changes 右侧那一栏）。
+     *
+     * 与普通差异的区别在于**它不是只读的**：每一块冲突都要决定留哪一侧，决定之后写回
+     * 工作区文件，最后「标记为已解决」把它加进索引。因此这里的每个动作都走后端：
+     *   * 读三路内容与冲突块 → `/conflict`
+     *   * 逐块选择 / 手工编辑结果 / 标记已解决 → `/conflict-resolve`
+     *   * 「继续 / 中止」→ gitbar 宿主（进行中的操作由它拥有）
+     *
+     * 「Current / Incoming」用的是 **git 写在标记里的名字**（`<<<<<<< HEAD` / `>>>>>>> x`），
+     * 而不是我们猜的分支名：变基时 git 的 ours 是"变基到的那一侧"，与直觉相反，只有标记里
+     * 的名字永远是对的。
+     *
+     * @param props - `{ t, workspace, repositoryRoot, path, code, operationType, busy, run, onCommitted, onClose }`。
+     * @returns React 元素。
+     */
+    function ConflictResolver(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const path = typeof props?.path === 'string' ? props.path : ''
+      const workspace = props?.workspace ?? ''
+      const run = props?.run
+      const onCommitted = props?.onCommitted
+      const [state, setState] = react.useState({ phase: 'loading', data: null, error: '', message: '' })
+      const [choices, setChoices] = react.useState({})
+      const [result, setResult] = react.useState('')
+      const [dirty, setDirty] = react.useState(false)
+
+      /** 取三路内容 + 冲突块。 */
+      const load = react.useCallback(async () => {
+        setState((current) => ({ ...current, phase: current.data === null ? 'loading' : 'ready', error: '' }))
+        try {
+          const payload = await call('conflict', { workspace, path })
+          const blocks = Array.isArray(payload?.blocks) ? payload.blocks : []
+          const next = {}
+          // 默认全选"当前侧"是危险的（用户可能不看就点保存），因此默认**不选**：未决定的块
+          // 会原样保留标记，界面据此提示"还有 N 块未处理"。
+          setChoices(next)
+          setResult(typeof payload?.worktree === 'string' ? payload.worktree : '')
+          setDirty(false)
+          setState({ phase: 'ready', data: payload, error: '', message: '' })
+          return payload
+        } catch (error) {
+          setState((current) => ({ ...current, phase: 'error', error: String(error?.message ?? error) }))
+          return undefined
+        }
+      }, [workspace, path])
+
+      react.useEffect(() => {
+        void load()
+      }, [load])
+
+      const data = state.data
+      const blocks = Array.isArray(data?.blocks) ? data.blocks : []
+      const decided = blocks.filter((block) => choices[block.index] !== undefined).length
+      const operationType = typeof props?.operationType === 'string' ? props.operationType : ''
+      const operationKey =
+        operationType === 'merge'
+          ? 'conflictOpMerge'
+          : operationType === 'rebase'
+            ? 'conflictOpRebase'
+            : operationType === 'cherry-pick'
+              ? 'conflictOpCherryPick'
+              : operationType === 'revert'
+                ? 'conflictOpRevert'
+                : ''
+      const continueKey =
+        operationType === 'merge'
+          ? 'conflictCommitMerge'
+          : operationType === 'rebase'
+            ? 'conflictContinueRebase'
+            : operationType === 'cherry-pick'
+              ? 'conflictContinueCherryPick'
+              : 'conflictContinueRevert'
+      const abortKey =
+        operationType === 'merge'
+          ? 'conflictAbortMerge'
+          : operationType === 'rebase'
+            ? 'conflictAbortRebase'
+            : operationType === 'cherry-pick'
+              ? 'conflictAbortCherryPick'
+              : 'conflictAbortRevert'
+      const conflictCount = typeof props?.conflictCount === 'number' ? props.conflictCount : 0
+
+      /**
+       * 写回文件（可选同时标记为已解决）。
+       * @param options - `{ resolutions?, content?, markResolved?, allowMarkers? }`。
+       * @param successKey - 成功后的提示文案键。
+       * @returns 无。
+       */
+      const apply = async (options, successKey) => {
+        if (typeof run !== 'function') return
+        const result = await run('conflict-resolve', { workspace, path, ...options }, successKey)
+        if (result === undefined) return
+        if (result.markedResolved === true) {
+          // 解决完通常还有"继续/中止"要按，但文件列表必须先刷新（冲突计数要减一）。
+          if (typeof onCommitted === 'function') onCommitted()
+          await load()
+          return
+        }
+        setResult(typeof result.content === 'string' ? result.content : result)
+        setDirty(false)
+        setState((current) => ({ ...current, data: { ...(current.data ?? {}), blocks: result.blocks ?? [], hasMarkers: result.hasMarkers === true } }))
+      }
+
+      /**
+       * 对 gitbar 宿主发一条写请求（进行中的操作由它拥有：merge/rebase/cherry-pick/revert）。
+       * @param route - `op/continue` 或 `op/abort`。
+       * @param body - 请求体。
+       * @returns 结果，或 undefined（失败）。
+       */
+      const callGitbar = async (route, body) => {
+        const repositoryRoot = props?.repositoryRoot ?? ''
+        const query = new URLSearchParams({ cwd: workspace })
+        if (repositoryRoot !== '') query.set('repository', repositoryRoot)
+        try {
+          const response = await fetch(`/dsh-desktop/gitbar/${route}?${query.toString()}`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify(body ?? {}),
+          })
+          const text = await response.text()
+          let payload
+          try {
+            payload = JSON.parse(text)
+          } catch {
+            payload = {}
+          }
+          if (!response.ok) {
+            const code = typeof payload?.code === 'string' ? payload.code : ''
+            setState((current) => ({
+              ...current,
+              message: '',
+              error: code === 'conflictPending' ? t('conflictStillPending') : String(payload?.detail ?? payload?.error ?? `HTTP ${response.status}`),
+            }))
+            return undefined
+          }
+          return payload
+        } catch (error) {
+          setState((current) => ({ ...current, error: String(error?.message ?? error) }))
+          return undefined
+        }
+      }
+
+      const blockRow = (block) =>
+        react.createElement(
+          'div',
+          {
+            key: `block:${block.index}`,
+            'data-conflict-block': String(block.index),
+            style: {
+              border: `1px solid ${BORDER}`,
+              borderRadius: '6px',
+              padding: '6px 8px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+              fontFamily: UI_FONT,
+              fontSize: reviewFont.meta,
+            },
+          },
+          react.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--dsw-alias-label-tertiary)' } },
+            react.createElement('span', { 'data-conflict-block-label': String(block.index) }, t('conflictBlock', { index: block.index + 1, line: block.startLine })),
+            react.createElement('span', { style: { flex: '1 1 auto' } }),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-conflict-take': 'ours',
+                disabled: props?.busy === true,
+                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'ours' })),
+                style: conflictChoiceStyle(choices[block.index] === 'ours'),
+              },
+              t('conflictAcceptOurs'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-conflict-take': 'theirs',
+                disabled: props?.busy === true,
+                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'theirs' })),
+                style: conflictChoiceStyle(choices[block.index] === 'theirs'),
+              },
+              t('conflictAcceptTheirs'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-conflict-take': 'both',
+                disabled: props?.busy === true,
+                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'both' })),
+                style: conflictChoiceStyle(choices[block.index] === 'both'),
+              },
+              t('conflictAcceptBoth'),
+            ),
+          ),
+          react.createElement(
+            'div',
+            { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' } },
+            conflictSide(t, 'current', block.ours, String(block.oursLabel ?? '')),
+            conflictSide(t, 'incoming', block.theirs, String(block.theirsLabel ?? '')),
+          ),
+        )
+
+      const body =
+        state.phase === 'loading'
+          ? react.createElement('div', { style: { padding: '12px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT } }, t('loading'))
+          : state.phase === 'error'
+            ? react.createElement('div', { 'data-conflict-state': 'error', style: { padding: '12px', color: STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.normal } }, state.error)
+            : react.createElement(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0, flex: '1 1 auto', overflowY: 'auto', padding: '8px' } },
+                react.createElement(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                  react.createElement(StatusBadge, { letter: 'U', conflict: true }),
+                  react.createElement('span', { 'data-conflict-path': path, style: { fontFamily: UI_FONT, fontSize: reviewFont.normal, wordBreak: 'break-all' } }, path),
+                  operationKey === ''
+                    ? null
+                    : react.createElement(
+                        'span',
+                        { 'data-conflict-operation': operationType, style: { color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: reviewFont.meta } },
+                        t(operationKey),
+                      ),
+                  react.createElement('span', { style: { flex: '1 1 auto' } }),
+                  react.createElement(
+                    'button',
+                    { type: 'button', 'data-conflict-close': '', onClick: () => props?.onClose?.(), title: t('close'), style: conflictButtonStyle() },
+                    '✕',
+                  ),
+                ),
+                blocks.length === 0
+                  ? react.createElement(
+                      'div',
+                      { 'data-conflict-state': 'clean', style: { color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: reviewFont.normal } },
+                      t('conflictNoMarkers'),
+                    )
+                  : react.createElement(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                      ...blocks.map(blockRow),
+                    ),
+                react.createElement(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                  react.createElement(
+                    'span',
+                    { 'data-conflict-unresolved': String(blocks.length - decided), style: { color: blocks.length - decided === 0 ? ADDED : STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.meta } },
+                    t('conflictDecided', { decided, total: blocks.length }),
+                  ),
+                  react.createElement('span', { style: { flex: '1 1 auto' } }),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-conflict-apply': '',
+                      disabled: props?.busy === true || decided === 0,
+                      onClick: () => void apply({ resolutions: choices }, 'conflictApplied'),
+                      style: conflictButtonStyle(false, props?.busy === true || decided === 0),
+                    },
+                    t('conflictApply'),
+                  ),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-conflict-mark': '',
+                      disabled: props?.busy === true,
+                      onClick: () => void apply({ resolutions: choices, markResolved: true }, 'conflictMarked'),
+                      style: conflictButtonStyle(true, props?.busy === true),
+                    },
+                    t('conflictMarkResolved'),
+                  ),
+                ),
+                react.createElement(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+                  react.createElement('label', { style: { color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: reviewFont.meta } }, t('conflictResult')),
+                  react.createElement('textarea', {
+                    'data-conflict-result': '',
+                    value: result,
+                    spellCheck: false,
+                    onChange: (event) => {
+                      setResult(event.target.value)
+                      setDirty(true)
+                    },
+                    style: {
+                      minHeight: '120px',
+                      resize: 'vertical',
+                      fontFamily: CODE_FONT,
+                      fontSize: reviewFont.code,
+                      background: 'var(--dsw-alias-bg-base, transparent)',
+                      color: 'inherit',
+                      border: `1px solid ${BORDER}`,
+                      borderRadius: '6px',
+                      padding: '6px',
+                    },
+                  }),
+                  react.createElement(
+                    'div',
+                    { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+                    react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-conflict-save': '',
+                        disabled: props?.busy === true || dirty !== true,
+                        onClick: () => void apply({ content: result }, 'conflictSaved'),
+                        style: conflictButtonStyle(false, props?.busy === true || dirty !== true),
+                      },
+                      t('conflictSaveResult'),
+                    ),
+                    react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-conflict-reload': '',
+                        disabled: props?.busy === true,
+                        onClick: () => void load(),
+                        style: conflictButtonStyle(false, props?.busy === true),
+                      },
+                      t('conflictReload'),
+                    ),
+                  ),
+                ),
+                operationType === ''
+                  ? null
+                  : react.createElement(
+                      'div',
+                      { 'data-conflict-op-actions': operationType, style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', borderTop: `1px solid ${BORDER}`, paddingTop: '6px' } },
+                      react.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-conflict-continue': '',
+                          disabled: props?.busy === true || conflictCount > 0,
+                          title: conflictCount > 0 ? t('conflictContinueBlocked') : '',
+                          onClick: async () => {
+                            const payload = await callGitbar('op/continue', {})
+                            if (payload === undefined) return
+                            setState((current) => ({ ...current, error: '', message: t('conflictContinued') }))
+                            if (typeof onCommitted === 'function') onCommitted()
+                          },
+                          style: conflictButtonStyle(true, props?.busy === true || conflictCount > 0),
+                        },
+                        t(continueKey),
+                      ),
+                      react.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-conflict-abort': '',
+                          disabled: props?.busy === true,
+                          onClick: async () => {
+                            const payload = await callGitbar('op/abort', { kind: operationType })
+                            if (payload === undefined) return
+                            setState((current) => ({ ...current, error: '', message: t('conflictAborted') }))
+                            if (typeof onCommitted === 'function') onCommitted()
+                          },
+                          style: conflictButtonStyle(false, props?.busy === true),
+                        },
+                        t(abortKey),
+                      ),
+                      conflictCount > 0
+                        ? react.createElement(
+                            'span',
+                            { 'data-conflict-remaining': String(conflictCount), style: { color: STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.meta } },
+                            t('conflictRemaining', { count: conflictCount }),
+                          )
+                        : null,
+                    ),
+                state.message === ''
+                  ? null
+                  : react.createElement('div', { 'data-conflict-notice': '', style: { color: ADDED, fontFamily: UI_FONT, fontSize: reviewFont.meta } }, state.message),
+              )
+
+      return react.createElement(
+        'div',
+        { 'data-conflict-resolver': path, style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' } },
+        body,
+      )
+    }
+
+    /** 冲突块里一侧的只读预览。 */
+    function conflictSide(t, kind, text, label) {
+      const isCurrent = kind === 'current'
+      return react.createElement(
+        'div',
+        { 'data-conflict-side': kind, style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 } },
+        react.createElement(
+          'span',
+          { style: { color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: reviewFont.meta } },
+          `${isCurrent ? t('conflictCurrent') : t('conflictIncoming')}${label === '' ? '' : ` · ${label}`}`,
+        ),
+        react.createElement(
+          'pre',
+          {
+            style: {
+              margin: 0,
+              maxHeight: '120px',
+              overflow: 'auto',
+              fontFamily: CODE_FONT,
+              fontSize: reviewFont.code,
+              whiteSpace: 'pre-wrap',
+              background: 'color-mix(in srgb, var(--dsw-alias-label-tertiary) 8%, transparent)',
+              borderRadius: '4px',
+              padding: '4px 6px',
+            },
+          },
+          text,
+        ),
+      )
+    }
+
+    /** 冲突面板里的按钮样式（与抽屉其余部分的扁平风格一致）。 */
+    function conflictButtonStyle(primary = false, disabled = false) {
+      return {
+        border: `1px solid ${primary ? 'transparent' : BORDER}`,
+        borderRadius: '5px',
+        padding: '2px 8px',
+        background: primary ? `color-mix(in srgb, ${ACCENT} 16%, transparent)` : 'transparent',
+        color: disabled ? 'var(--dsw-alias-label-tertiary)' : 'inherit',
+        fontFamily: UI_FONT,
+        fontSize: reviewFont.meta,
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
+      }
+    }
+
+    /** 逐块选择按钮的样式（选中态用强调色，未选中是平的）。 */
+    function conflictChoiceStyle(active) {
+      return {
+        border: `1px solid ${active ? 'transparent' : BORDER}`,
+        borderRadius: '5px',
+        padding: '1px 7px',
+        background: active ? `color-mix(in srgb, ${ACCENT} 16%, transparent)` : 'transparent',
+        color: 'inherit',
+        fontFamily: UI_FONT,
+        fontSize: reviewFont.meta,
+        cursor: 'pointer',
+      }
+    }
+
+    /**
+     * 冲突分组里的一行。
+     *
+     * 与普通文件行的区别：**没有暂存/还原按钮**——未合并的文件在解决之前，`stage` 与
+     * `discard` 都没有意义（前者会把标记一起加进索引，后者会丢掉用户还没看过的改动）。
+     * 点击整行打开右侧的冲突解决面板。
+     *
+     * @param props - `{ t, entry, busy, selected, onOpen }`。
+     * @returns React 元素。
+     */
+    function ConflictRow(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const entry = props?.entry ?? {}
+      const selected = props?.selected === true
+      return react.createElement(
+        'div',
+        {
+          'data-staging-row': entry.path,
+          'data-staging-side': 'conflicted',
+          'data-staging-conflict-row': entry.path,
+          'data-staging-selected': selected ? 'true' : 'false',
+          'aria-selected': selected,
+          onClick: () => props?.onOpen?.(entry.path),
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '7px',
+            minHeight: 'var(--dsh-review-row-h, 28px)',
+            boxSizing: 'border-box',
+            padding: '2px 6px 2px 18px',
+            borderRadius: '6px',
+            fontSize: uiPx(12.5),
+            fontFamily: UI_FONT,
+            cursor: 'pointer',
+            background: selected ? `color-mix(in srgb, ${STATUS_COLORS.U} 10%, transparent)` : 'transparent',
+          },
+        },
+        react.createElement(StatusBadge, { letter: String(entry.code ?? 'U').charAt(0), conflict: true }),
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-staging-diff-toggle': entry.path,
+            'data-review-file': '',
+            'aria-selected': selected,
+            title: `${entry.path}\n${t('statusConflict')}`,
+            onClick: () => props?.onOpen?.(entry.path),
+            style: {
+              flex: '1 1 auto',
+              minWidth: 0,
+              display: 'block',
+              padding: '2px 4px',
+              border: 'none',
+              borderRadius: '5px',
+              background: 'transparent',
+              color: 'inherit',
+              font: 'inherit',
+              textAlign: 'left',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              cursor: 'pointer',
+            },
+          },
+          entry.path,
+        ),
+        react.createElement(
+          'span',
+          { 'data-staging-conflict-code': String(entry.code ?? 'UU'), style: { flexShrink: 0, color: STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.meta } },
+          t('conflictResolveAction'),
+        ),
       )
     }
 
@@ -5750,6 +6375,14 @@ window.__ModuleLoader__.load({
       // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
       const staged = files.filter((entry) => classifyEntry(entry).staged)
       const unstaged = files.filter((entry) => entry.untracked !== true && classifyEntry(entry).unstaged)
+      /**
+       * 冲突（未合并）文件：自己的分组，排在最前面。
+       *
+       * 用 `classifyEntry` 判定（它不是"已暂存"也不是"未暂存"），而不是直接用宿主的
+       * `conflicts` 数组：两侧必须同源，否则会出现"分组标题写 3、里面只有 2 行"。宿主那份
+       * 数组仍然有用——它是 `conflictCount` 的权威值，用于"还有几个文件没解决"的提示。
+       */
+      const conflicted = files.filter((entry) => classifyEntry(entry).conflicted)
       // ---- 未跟踪：双模式 ----
       //
       // 数量与模式来自快照的 `untracked` 摘要（**不是**本地数 `files` 里的未跟踪条目）：
@@ -5761,7 +6394,7 @@ window.__ModuleLoader__.load({
       const untrackedPaths = untrackedFiles.map((entry) => entry.path)
       const untrackedCount = untrackedInfo.count
       const untrackedMode = untrackedInfo.exact === false && untrackedInfo.mode === 'pending' ? 'pending' : untrackedInfo.mode
-      const clean = staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
+      const clean = conflicted.length === 0 && staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
       // 已勾选（准备"加入 git"）的未跟踪文件。
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
@@ -6251,6 +6884,32 @@ window.__ModuleLoader__.load({
       // 同一个文件同时有已暂存与未暂存改动（porcelain 的 `MM`）时会出现在两组里——这是
       // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
       const fileGroups = [
+        conflicted.length === 0
+          ? null
+          : react.createElement(
+              'div',
+              { key: 'g:conflicted', 'data-staging-group': 'conflicted' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'conflicted',
+                label: t('conflictGroupTitle'),
+                count: conflicted.length,
+                collapsed: collapsed.conflicted,
+                onToggle: () => setCollapsed((value) => ({ ...value, conflicted: !value.conflicted })),
+                action: null,
+              }),
+              collapsed.conflicted
+                ? null
+                : conflicted.map((entry) =>
+                    react.createElement(ConflictRow, {
+                      key: `conflict:${entry.path}`,
+                      t,
+                      entry,
+                      selected: selectedFile === entry.path,
+                      onOpen: (path) => setSelectedFile(path),
+                    }),
+                  ),
+            ),
         dedupe(staged).length === 0
           ? null
           : react.createElement(
@@ -6568,7 +7227,24 @@ window.__ModuleLoader__.load({
               { style: { padding: '16px', fontFamily: UI_FONT, fontSize: reviewFont.normal, color: 'var(--dsw-alias-label-tertiary)' } },
               t('changesDiffEmpty'),
             )
-          : react.createElement(LazyFileDiff, {
+          : classifyEntry(previewEntry).conflicted
+            ? react.createElement(ConflictResolver, {
+                // key 带 workspace + 路径：换文件/换仓库时换实例，避免把上一个文件的
+                // 三路内容与已选好的块带到下一个文件上。
+                key: `conflict:${workspace}:${previewEntry.path}`,
+                t,
+                workspace,
+                repositoryRoot: snapshot?.repositoryRoot ?? '',
+                path: previewEntry.path,
+                code: previewEntry.code,
+                operationType: snapshot?.operationType ?? '',
+                conflictCount: typeof snapshot?.conflictCount === 'number' ? snapshot.conflictCount : 0,
+                busy,
+                run,
+                onCommitted: props?.onCommitted,
+                onClose: () => setSelectedFile(''),
+              })
+            : react.createElement(LazyFileDiff, {
               // key 带 workspace + HEAD + 路径：切项目 / 提交之后换实例，旧差异不会被复用。
               key: `wsdiff:${workspace}:${props.revision ?? snapshot?.head ?? ''}:${previewEntry.path}`,
               t,
@@ -10920,6 +11596,9 @@ window.__ModuleLoader__.load({
     // 直接断言比隔着界面点更可靠。
     exports.__stagingClassifyForTest = classifyEntry
     exports.__stagingSectionForTest = StagingSection
+    // 冲突解决面板也单独导出：它的数据来自 `/conflict`（三路内容 + 冲突块），逐块选择与
+    // 「标记为已解决」是两个不同的请求，直接挂载断言比隔着抽屉点更可靠。
+    exports.__conflictResolverForTest = ConflictResolver
     // 共享快照 store 也导出给测试：竞态（A→B→A 之后必须是 A）、"外部数字 == 抽屉里的
     // files.length"这两条要求，直接对着 store 断言比隔着组件点更可靠，也能把"有没有
     // 第二个数据源"这件事钉死。

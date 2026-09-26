@@ -20,7 +20,7 @@
 //   5. 不做自动 stash、不加 --force、不 --discard-changes：切换分支会改变用户工作区，
 //      必须由用户明确选择。
 import { execFile } from 'node:child_process'
-import { readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 
@@ -137,6 +137,10 @@ function git(args, cwd, options) {
         timeout: options?.timeoutMs ?? GIT_TIMEOUT_MS,
         windowsHide: true,
         maxBuffer: 8 * 1024 * 1024,
+        // 有些操作必须非交互（见 NON_INTERACTIVE_ENV）：`rebase --continue` 会开编辑器，
+        // push/fetch 遇到要密码时会**挂在终端提示上**直到超时。给子进程的 env 是叠加的，
+        // 不覆盖用户自己的 git 配置。
+        ...(options?.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
       },
       (error, stdout, stderr) => {
         if (error !== null) {
@@ -151,6 +155,26 @@ function git(args, cwd, options) {
     )
   })
 }
+
+/**
+ * 需要非交互执行的操作的环境变量。
+ *
+ * `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR`：`rebase --continue` 与 `cherry-pick --continue`
+ * 在提交前会**打开编辑器**让人确认提交信息。宿主是个没有终端的子进程，一旦编辑器被
+ * 打开就会永久挂住（直到 240 秒超时），用户看到的是"点了继续没反应"。
+ * `GIT_TERMINAL_PROMPT=0`：fetch/push 需要凭据时立刻失败，而不是等着人在不存在的
+ * 终端里输入——失败信息（`could not read Username`）才能被映射成"需要凭据"而不是超时。
+ *
+ * `true` 是 Git for Windows 自带 sh 里的内建命令，`GIT_EDITOR=true` 在 Windows 上同样
+ * 有效（这也是其它 Electron Git 扩展的通行做法）。
+ */
+const NON_INTERACTIVE_ENV = {
+  GIT_EDITOR: 'true',
+  GIT_SEQUENCE_EDITOR: 'true',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ASKPASS: '',
+}
+
 
 /**
  * 解析外壳启动时的工作区。
@@ -203,6 +227,217 @@ function collectAllowedRoots() {
 }
 
 /**
+ * 找到这个仓库真正的 git 目录。
+ *
+ * 为什么不直接拼 `<cwd>/.git`：在 worktree 与 submodule 里 `.git` 是一个**文件**
+ * （`gitdir: …`），所有进行中操作的标记都在别处。此前只按 `.git/…` 找，于是 worktree
+ * 里"合并进行中"永远检测不到（冲突面板也不会出现）。常见的 `.git` 目录形态走零成本的
+ * stat 判断，只有它是文件时才多起一次 `rev-parse`。
+ *
+ * @param cwd - 仓库根。
+ * @returns git 目录绝对路径，或 undefined（读不到）。
+ */
+async function resolveGitDir(cwd) {
+  const dotGit = join(cwd, '.git')
+  try {
+    if (statSync(dotGit).isDirectory()) return dotGit
+  } catch {
+    // 下面退回 rev-parse。
+  }
+  try {
+    const raw = (await git(['rev-parse', '--absolute-git-dir'], cwd)).trim()
+    return raw === '' ? undefined : raw
+  } catch {
+    return undefined
+  }
+}
+
+/** 读一个标记文件的首行（`MERGE_MSG` / `rebase-merge/onto` 之类），读不到返回 undefined。 */
+function readMarkerLine(gitDir, relative) {
+  try {
+    const value = readFileSync(join(gitDir, relative), 'utf8').split('\n')[0].trim()
+    return value === '' ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 把某个版本号描述成人能读的名字：优先"指向它的分支"，否则短 SHA + 提交标题。
+ *
+ * 冲突界面上「Current: main / Incoming: feature/foo」比「OURS / THEIRS」有用得多，而
+ * git 只给了 SHA。指向它的分支用 `for-each-ref --points-at` 问（合并时 MERGE_HEAD 通常
+ * 正是被合并分支的尖端）；查不到（合并一个已被移动的分支、或直接合并某个提交）就退回
+ * 短 SHA + 提交标题，仍然比裸 SHA 清楚。
+ *
+ * @param cwd - 仓库根。
+ * @param revision - 版本号（如 `MERGE_HEAD`、`HEAD`）。
+ * @returns 展示用标签。
+ */
+async function describeRevision(cwd, revision) {
+  try {
+    const names = (await git(['for-each-ref', '--format=%(refname:short)', `--points-at=${revision}`, 'refs/heads', 'refs/remotes'], cwd))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+    // 本地分支优先于远端跟踪分支：用户认的是 `feature/foo`，不是 `origin/feature/foo`。
+    const local = names.find((name) => !name.includes('/'))
+    if (local !== undefined) return local
+    if (names.length > 0) return names[0]
+  } catch {
+    // 继续用短 SHA。
+  }
+  try {
+    const short = (await git(['rev-parse', '--short', revision], cwd)).trim()
+    const subject = (await git(['log', '-1', '--format=%s', revision], cwd)).trim()
+    return subject === '' ? short : `${short} ${subject}`
+  } catch {
+    return revision
+  }
+}
+
+/**
+ * 检测仓库进行中的操作（merge / rebase / cherry-pick / revert）。
+ *
+ * 这是"冲突解决模式"的唯一判据，**在 backend 里做**：UI 不去读 `.git`。
+ * 注意语义：git 的 `ours`（stage 2）在 **rebase** 下是"你变基到的那个分支"，
+ * `theirs`（stage 3）才是"你正在重放的提交"——与 merge 正好相反。界面必须能显示
+ * 真实名字，所以这里把两侧都解析出来，并用 `labelsSwapped` 告诉界面这一点。
+ *
+ * @param cwd - 仓库根。
+ * @returns `{ type, currentLabel, incomingLabel, labelsSwapped }` 或 null（没有进行中的操作）。
+ */
+async function readOperation(cwd) {
+  const gitDir = await resolveGitDir(cwd)
+  if (gitDir === undefined) return null
+  const has = (relative) => existsSync(join(gitDir, relative))
+
+  /** 当前侧（git 的 ours / stage 2）的展示名。 */
+  const oursLabel = async () => {
+    const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).catch(() => '')).trim()
+    if (branch !== '' && branch !== 'HEAD') return branch
+    const short = (await git(['rev-parse', '--short', 'HEAD'], cwd).catch(() => '')).trim()
+    return short === '' ? 'HEAD' : `detached at ${short}`
+  }
+
+  if (has('MERGE_HEAD')) {
+    return {
+      type: 'merge',
+      currentLabel: await oursLabel(),
+      incomingLabel: await describeRevision(cwd, 'MERGE_HEAD'),
+      // merge：ours = 当前分支，theirs = 被合并进来的分支，与界面一致。
+      labelsSwapped: false,
+    }
+  }
+
+  const rebasing = has('rebase-merge') || has('rebase-apply')
+  if (rebasing) {
+    const dir = has('rebase-merge') ? 'rebase-merge' : 'rebase-apply'
+    // `head-name` 是"被变基的分支"（= git 的 theirs），`onto` 是"变基到哪"（= git 的 ours）。
+    const headName = readMarkerLine(gitDir, `${dir}/head-name`)
+    const onto = readMarkerLine(gitDir, `${dir}/onto`)
+    const rebased = headName === undefined ? undefined : headName.replace(/^refs\/heads\//u, '')
+    const ontoShort = onto === undefined ? undefined : (await git(['rev-parse', '--short', onto], cwd).catch(() => '')).trim()
+    return {
+      type: 'rebase',
+      currentLabel: ontoShort === undefined || ontoShort === '' ? 'onto' : `onto ${ontoShort}`,
+      incomingLabel: rebased === undefined ? await oursLabel() : rebased,
+      labelsSwapped: true,
+    }
+  }
+
+  if (has('CHERRY_PICK_HEAD')) {
+    return {
+      type: 'cherry-pick',
+      currentLabel: await oursLabel(),
+      incomingLabel: await describeRevision(cwd, 'CHERRY_PICK_HEAD'),
+      labelsSwapped: false,
+    }
+  }
+
+  if (has('REVERT_HEAD')) {
+    return {
+      type: 'revert',
+      currentLabel: await oursLabel(),
+      incomingLabel: await describeRevision(cwd, 'REVERT_HEAD'),
+      labelsSwapped: false,
+    }
+  }
+
+  return null
+}
+
+/** 当前分支名；游离 HEAD 时返回 undefined（`rev-parse` 会给出 `HEAD`）。 */
+async function currentBranchName(cwd) {
+  try {
+    const name = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)).trim()
+    return name === '' || name === 'HEAD' ? undefined : name
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 「第一次推送该推到哪个远端」。
+ *
+ * 这个函数存在的唯一理由是一个**必须显式给远端**的 git 语义：`git push --set-upstream`
+ * 光杆会以 "no upstream branch" 失败，而只给分支时 git 会把 `feature:feature` 当成**远端名**
+ * （实测报 `'feature:feature' does not appear to be a git repository`）。因此"发布分支"
+ * 与"推送某个非当前分支"都必须自己解析出一个远端名。
+ *
+ * 取值顺序与 git 自己的默认一致：`remote.pushDefault` → `branch.<name>.remote` → 远端列表里
+ * 第一个可用的。`.`（git 用它表示"本地这个仓库"）不是一个可推送的远端，跳过。
+ *
+ * @param cwd - 仓库根。
+ * @param branch - 目标分支名（可省略：省略时跳过 `branch.<name>.remote`）。
+ * @returns 已通过 `REMOTE_PATTERN` 的远端名，或 undefined。
+ */
+async function resolvePushRemote(cwd, branch) {
+  const configValue = async (key) => {
+    try {
+      return (await git(['config', '--get', key], cwd)).trim()
+    } catch {
+      // 没有这个配置项：git config 以非零退出，这是常态而不是错误。
+      return ''
+    }
+  }
+  const candidates = [await configValue('remote.pushDefault')]
+  if (branch !== undefined) candidates.push(await configValue(`branch.${branch}.remote`))
+  try {
+    candidates.push(...(await git(['remote'], cwd)).split('\n').map((line) => line.trim()))
+  } catch {
+    // 一个远端都没有：让调用方给出 noRemote。
+  }
+  return candidates.find((name) => name !== '' && name !== '.' && REMOTE_PATTERN.test(name))
+}
+
+/**
+ * 从 porcelain v2 的输出里取出未合并（冲突）条目。
+ *
+ * `u` 记录的形状：`u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`。XY 两列是
+ * git 的既有语义（`UU` 两边都改、`AA` 两边都新增、`DU`/`UD` 删除与修改冲突…），界面按它
+ * 显示冲突类型，因此原样带出去而不是折叠成一个布尔。
+ *
+ * `-z` 下路径是 NUL 分隔、**不做引号转义**，含空格/中文的路径都能原样取到。
+ *
+ * @param raw - `status --porcelain=v2 --branch -z` 的原始输出。
+ * @returns `{ path, code }` 数组。
+ */
+function parseConflicts(raw) {
+  const fields = String(raw).split('\0')
+  const conflicts = []
+  for (const line of fields) {
+    if (!line.startsWith('u ')) continue
+    const parts = line.split(' ')
+    // 路径在最后一段（`-z` 下无引号转义，因此可以直接 join 回去）。
+    const path = parts.slice(10).join(' ')
+    if (path === '') continue
+    conflicts.push({ path, code: parts[1] ?? 'UU' })
+  }
+  return conflicts
+}
+
+/**
  * 读取当前分支与工作区状态。
  *
  * 一次 `status --porcelain=v2 --branch` 同时给出分支、上游、领先/落后与改动文件数，
@@ -212,7 +447,7 @@ function collectAllowedRoots() {
  * @returns 供客户端渲染的状态对象。
  */
 async function readStatus(cwd) {
-  const raw = await git(['status', '--porcelain=v2', '--branch'], cwd)
+  const raw = await git(['status', '--porcelain=v2', '--branch', '-z'], cwd)
 
   const state = {
     isRepo: true,
@@ -228,9 +463,18 @@ async function readStatus(cwd) {
     /** 合并/变基进行中：有冲突待解决时界面要给出"中止"入口。 */
     merging: false,
     rebasing: false,
+    /** 进行中的操作（merge/rebase/cherry-pick/revert）或 null。 */
+    operation: null,
+    /** 未解决的冲突文件：`{ path, code }`。 */
+    conflicts: [],
+    /** 尚无提交（空仓库）：界面显示"No commits yet"而不是报错。 */
+    noCommits: false,
+    /** 当前分支是否有上游；没有时 UI 提供「发布分支」。 */
+    hasUpstream: false,
   }
 
-  for (const line of raw.split('\n')) {
+  // `-z` 下记录以 NUL 分隔，字段仍以空格分隔，因此先按 NUL 切开再逐条解析。
+  for (const line of raw.split('\0')) {
     if (line.startsWith('# branch.head ')) {
       const value = line.slice('# branch.head '.length).trim()
       // git 在游离 HEAD 上会给出 "(detached)"。
@@ -247,31 +491,29 @@ async function readStatus(cwd) {
     } else if (line.startsWith('# branch.oid ')) {
       const value = line.slice('# branch.oid '.length).trim()
       // 空仓库时是 "(initial)"，此时没有提交可展示。
-      if (value !== '(initial)') state.head = value
+      if (value === '(initial)') state.noCommits = true
+      else state.head = value
     } else if (line.startsWith('? ')) {
       state.untrackedFiles += 1
+    } else if (line.startsWith('u ')) {
+      // 冲突条目由 parseConflicts 统一解析（下面再用一次，保证两处判定一致）。
+      state.changedFiles += 1
     } else if (line !== '' && !line.startsWith('#')) {
       state.changedFiles += 1
     }
   }
+  state.conflicts = parseConflicts(raw)
+  state.conflictCount = state.conflicts.length
+  state.hasUpstream = state.upstream !== ''
 
   // 未跟踪文件也计入改动文件总数：徽章上的 `*N` 表示"工作区与 HEAD 的差异条数"，
   // 把新增文件排除在外会让用户以为"文件没被识别"。但两组分开计数，界面可以分别显示。
   state.changedFiles += state.untrackedFiles
 
-  // 进行中的操作：git 在冲突时会留下这些目录。用来决定是否显示"中止合并/变基"。
-  const marker = (relative) => {
-    try {
-      realpathSync.native(join(cwd, relative))
-      return true
-    } catch {
-      return false
-    }
-  }
-  // `.git` 可能是文件（worktree / submodule），此时这些标记在别处；读不到就当没有，
-  // 不为了这个额外跑一次 `rev-parse --git-dir`。
-  state.merging = marker('.git/MERGE_HEAD')
-  state.rebasing = marker('.git/rebase-merge') || marker('.git/rebase-apply')
+  // 进行中的操作。`merging` / `rebasing` 保留（既有客户端在用），新代码读 `operation`。
+  state.operation = await readOperation(cwd)
+  state.merging = state.operation?.type === 'merge'
+  state.rebasing = state.operation?.type === 'rebase'
   if (state.upstream !== '') {
     // `status --branch` 在上游被删时不写 ab 行，用一条 for-each-ref 语义的判定代替：
     // 上游 ref 不存在即为 gone。
@@ -283,6 +525,7 @@ async function readStatus(cwd) {
   }
   return state
 }
+
 
 /**
  * 计算一个分支相对其上游的领先/落后提交数——**精确值，每调用一次起一个 git 进程**。
@@ -1380,7 +1623,7 @@ function createGitHandler() {
           return
         }
 
-        const network = { timeoutMs: GIT_NETWORK_TIMEOUT_MS }
+        const network = { timeoutMs: GIT_NETWORK_TIMEOUT_MS, env: NON_INTERACTIVE_ENV }
         if (action === 'fetch') {
           await runWrite(
             cwd,
@@ -1423,6 +1666,39 @@ function createGitHandler() {
         }
         if (action === 'push') {
           const setUpstream = payload?.setUpstream === true
+          /**
+           * 强推必须**显式**请求：`--force-with-lease` 而不是裸 `--force`。
+           *
+           * `--force` 会无条件覆盖远端，包括协作者在你 fetch 之后推上去的提交；
+           * `--force-with-lease` 在远端与本地记录不一致时会拒绝，因此只在"确实是你在
+           * 改写的分支"上生效。UI 仍然会二次确认（这是少数必须确认的操作之一）。
+           */
+          const forceWithLease = payload?.forceWithLease === true
+          /**
+           * 远端名与 refspec。
+           *
+           * 需要"显式远端 + 显式 refspec"的只有两种形态，而这两种恰好是这次新增的能力：
+           *   * `setUpstream`（第一次推送 / 发布分支）
+           *   * 推送**某个指定分支**（分支行菜单里的「推送」）
+           *
+           * `git push -u origin`、`git push -u` 都不会设置上游（前者报 "no upstream
+           * branch"，后者仍缺 refspec），`git push -u feature:feature` 更是把
+           * `feature:feature` 当远端名。因此这里自己把两面都补全。**普通的
+           * `git push`（当前分支、已有上游）一个参数都不加**，push.default 由用户配置决定。
+           */
+          const needsTarget = setUpstream || branch !== undefined
+          const source = branch ?? (needsTarget ? await currentBranchName(cwd) : undefined)
+          const target = needsTarget ? remote ?? (await resolvePushRemote(cwd, source)) : undefined
+          if (needsTarget && target === undefined) {
+            // 一个远端都没配：这是"没地方可推"，与网络失败、被拒绝都不同。
+            sendJson(response, 409, { error: 'no remote configured', code: 'noRemote' })
+            return
+          }
+          if (needsTarget && source === undefined) {
+            // 游离 HEAD：没有分支名可以建立跟踪关系（`git push -u` 在这里也没有意义）。
+            sendJson(response, 409, { error: 'detached HEAD', code: 'detachedHead' })
+            return
+          }
           await runWrite(
             cwd,
             scope,
@@ -1431,19 +1707,32 @@ function createGitHandler() {
               const args = ['push']
               // 只有明确要求时才 `--set-upstream`：它会改变本地的跟踪配置。
               if (setUpstream) args.push('--set-upstream')
-              if (remote !== undefined) args.push(remote)
-              if (branch !== undefined) args.push(`${branch}:${branch}`)
-              // **不提供 --force 的任何形式**：强推会重写远端历史，从 UI 一键可达太危险。
-              // 需要它的人在终端里做。
+              if (forceWithLease) args.push('--force-with-lease')
+              if (target !== undefined) args.push(target)
+              if (source !== undefined) args.push(`${source}:${source}`)
               await git(args, cwd, network)
-              return {}
+              return { pushed: source ?? 'HEAD', remote: target ?? '', forceWithLease }
             },
             (error) => {
               const message = String(error?.message ?? error)
-              if (/rejected|non-fast-forward|fetch first|behind/iu.test(message)) {
+              // 顺序有意义：先判"没有上游"（它也会带上 rejected 之类的字样），
+              // 否则用户看到的是"推送被拒绝"，而真正要做的是「发布分支」。
+              if (/has no upstream branch|no upstream branch/iu.test(message)) {
+                return { status: 409, code: 'noUpstream' }
+              }
+              if (/stale info|force-with-lease|fetch first/iu.test(message)) {
                 return { status: 409, code: 'pushRejected' }
               }
-              if (/could not read|Could not resolve|unable to access|Authentication failed|Permission denied/iu.test(message)) {
+              if (/rejected|non-fast-forward|behind/iu.test(message)) {
+                return { status: 409, code: 'pushRejected' }
+              }
+              if (/could not read Username|Authentication failed|Permission denied|terminal prompts disabled/iu.test(message)) {
+                return { status: 502, code: 'authFailed' }
+              }
+              if (/does not appear to be a git repository|No such remote|no remote/iu.test(message)) {
+                return { status: 409, code: 'noRemote' }
+              }
+              if (/could not read|Could not resolve|unable to access|Connection refused|timed out/iu.test(message)) {
                 return { status: 502, code: 'networkFailed' }
               }
               return undefined
@@ -1455,7 +1744,51 @@ function createGitHandler() {
         return
       }
 
-      // 中止进行中的合并/变基/摘取。表单 `{ kind }`。
+      // 结束进行中的合并/变基/摘取/还原（冲突全部解决之后）。表单 `{}`。
+      //
+      // 这是「冲突解决」的最后一步，必须按**当前实际进行中的操作**选命令：合并是
+      // "把已解决的索引提交成一个合并提交"，变基/摘取/还原是 `--continue`。四者的命令
+      // 完全不同，猜错会让用户停在一个自己不认识的中间状态里。
+      if (path === `${ROUTE_PREFIX}/op/continue`) {
+        const operation = await readOperation(cwd)
+        if (operation === null) {
+          sendJson(response, 409, { error: 'no operation in progress', code: 'noOperation' })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            if (operation.type === 'merge') {
+              // `--no-edit` 用 MERGE_MSG：宿主没有终端，不能让它去开编辑器。
+              await git(['commit', '--no-edit'], cwd, { env: NON_INTERACTIVE_ENV })
+            } else if (operation.type === 'rebase') {
+              await git(['rebase', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+            } else if (operation.type === 'cherry-pick') {
+              await git(['cherry-pick', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+            } else {
+              await git(['revert', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+            }
+            return { continued: operation.type }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            // 还有没解决的冲突：git 会拒绝提交/继续。这是"还没做完"，不是失败。
+            if (/unmerged|needs merge|you have unmerged files|Resolve all conflicts|conflict/iu.test(message)) {
+              return { status: 409, code: 'conflictPending' }
+            }
+            if (/nothing to commit|no cherry-pick or revert in progress|no rebase in progress|not currently merging/iu.test(message)) {
+              return { status: 409, code: 'noOperation' }
+            }
+            if (/would be overwritten|local changes/iu.test(message)) return { status: 409, code: 'localChanges' }
+            return undefined
+          },
+        )
+        return
+      }
+
+      // 中止进行中的合并/变基/摘取/还原。表单 `{ kind }`。
       if (path === `${ROUTE_PREFIX}/op/abort`) {
         const kind = payload?.kind
         const args =
@@ -1465,13 +1798,15 @@ function createGitHandler() {
               ? ['rebase', '--abort']
               : kind === 'cherry-pick'
                 ? ['cherry-pick', '--abort']
-                : undefined
+                : kind === 'revert'
+                  ? ['revert', '--abort']
+                  : undefined
         if (args === undefined) {
           sendJson(response, 400, { error: 'unknown operation', code: 'unknown' })
           return
         }
         await runWrite(cwd, scope, response, async () => {
-          await git(args, cwd)
+          await git(args, cwd, { env: NON_INTERACTIVE_ENV })
           return { aborted: kind }
         })
         return
@@ -1527,6 +1862,7 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/cherry-pick`,
     `${ROUTE_PREFIX}/remote`,
     `${ROUTE_PREFIX}/op/abort`,
+    `${ROUTE_PREFIX}/op/continue`,
   ]
   for (const path of routes) {
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }), `gitbar: ${path}`)

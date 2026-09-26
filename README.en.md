@@ -10,7 +10,7 @@ It packages the official `@deepseek-ai/dsh` runtime, a portable Node.js runtime,
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-Repository version: **1.5.8**. See [release notes](RELEASE_NOTES.md) for the version history.
+Repository version: **1.5.9**. See [release notes](RELEASE_NOTES.md) for the version history.
 
 ## Why a desktop client?
 
@@ -41,11 +41,14 @@ The app boots the official `dsh-base` and `dsh-web-app` bundles. Harness feature
 
 The repository's `gitbar` and `review` plugins add these controls to the official Harness Web UI:
 
-- **Git toolbar:** current branch, dirty state, and ahead/behind counts; searchable local and remote branches with switching. A stash is created before switching only when the user explicitly chooses that action.
-- **Project Changes:** staged, unstaged, and untracked groups; per-file diffs, stage, unstage, commit, and an AI-assisted commit message draft using the configured Harness model.
+- **Git toolbar:** current branch, dirty state, and ahead/behind counts; searchable local and remote branches with switching. A branch row's context menu follows IDEA's layout (checkout, new branch from here, merge/rebase into current, rename, push, delete, copy branch name). A stash is created before switching only when the user explicitly chooses that action.
+- **Update and push:** “Update project” (fetch → pull) and “Push” run directly instead of asking for a second confirmation, and report progress on the action row. The first push sets the upstream automatically (equivalent to `push -u`). A rejected push offers “Update project” plus a confirmation-protected **force push** that only ever uses `--force-with-lease`, so a collaborator's newer commit is never overwritten. Missing upstream, no configured remote, authentication failure, and an unreachable remote each get their own message. Only destructive actions (discard, delete branch, force push, checkout tag or revision) still ask first.
+- **Merge conflicts:** conflicted files form their own group in Changes (they no longer appear under both staged and unstaged, and no longer offer a discard that would throw the work away). Opening one shows the **conflict resolver**: Current and Incoming side by side per block, per-block “take current / take incoming / take both”, an editable result, “mark as resolved” (the host re-scans the file and refuses leftover markers), and per-operation “continue / abort” for merge, rebase, cherry-pick and revert. The host decides which operation is in progress; the UI never guesses.
+- **Project Changes:** conflicts, staged, unstaged, and untracked groups; per-file diffs, stage, unstage, commit, and an AI-assisted commit message draft using the configured Harness model.
 - **Log:** a branch tree, commit graph, commit details, and diffs for files in a commit.
-- **Multiple repositories:** a selector for independent Git repositories found beneath a workspace, as well as the repository containing the workspace. Discovery has depth, directory-count, and time limits; it is not an unlimited filesystem scan.
+- **Multiple repositories:** a selector for independent Git repositories found beneath a workspace, as well as the repository containing the workspace. Every Git operation (including update, push, commit and conflict resolution) applies only to the selected repository. Discovery has depth, directory-count, and time limits; it is not an unlimited filesystem scan.
 - **Per-turn change review:** a Git snapshot taken at the start of a turn is compared with the later workspace state, separating that turn's changes from pre-existing uncommitted work.
+- **Implementation rules:** every Git command runs with the repository root as its working directory and through `execFile` with argument arrays (no string concatenation); the client may only send scalars, and refs, remotes and revisions are validated individually. Network and `--continue` operations run non-interactively, so they can never hang on a missing terminal prompt or editor.
 
 ## Download
 
@@ -132,7 +135,7 @@ build/                    Icons and packaging resources
 .github/workflows/        Cross-platform release workflow
 ```
 
-The main implementation is in `src/main/index.ts`, `window.ts`, `dsh-server.ts`, `updater.ts`, `shell-updater.ts`, `credentials.ts`, `plugin-sync.ts`, `workspace.ts`, `git.ts`, and `i18n.ts`.
+The main implementation is in `src/main/index.ts`, `window.ts`, `titlebar.ts`, `menu.ts`, `dsh-server.ts`, `updater.ts`, `shell-updater.ts`, `credentials.ts`, `plugin-sync.ts`, `workspace.ts`, `workspace-switch.ts`, `git.ts`, and `i18n.ts`.
 
 ## Development and testing
 

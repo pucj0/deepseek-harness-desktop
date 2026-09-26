@@ -16,7 +16,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { collectCommitContext, createCommitMessageGenerator } from './commit-message.js'
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 
@@ -550,7 +550,14 @@ function parseStatusV2(raw) {
     }
     if (kind === 'u') {
       const parts = line.split(' ')
-      files.push(entryFromXY(parts.slice(10).join(' '), parts[1] ?? '..'))
+      // 未合并（冲突）条目：`u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`。
+      // 单独打标记而不是当成普通改动，因为界面上它属于**自己的分组**（冲突要最先看到），
+      // 而且它既不是"已暂存"也不是"未暂存"——`classifyEntry` 会据 `conflict` 跳过这两组。
+      files.push({
+        ...entryFromXY(parts.slice(10).join(' '), parts[1] ?? '..'),
+        conflict: true,
+        code: parts[1] ?? 'UU',
+      })
       continue
     }
   }
@@ -1642,6 +1649,225 @@ async function readWorkspaceFileDiff(cwd, revision, path, untracked) {
 }
 
 /**
+ * 冲突标记的扫描器：把一份带冲突标记的文件切成"普通文本 / 冲突块"两类片段。
+ *
+ * 为什么由 backend 做：渲染进程既不该读 `.git`，也不该自己解析 `<<<<<<<`；而"接受某
+ * 一侧"这件事必须在**服务端**重组文件——那才有唯一一份实现，也才能顺手校验结果里还有
+ * 没有残留标记。
+ *
+ * 标记形状（git 的 `merge.conflictStyle` 默认 `merge`，`zdiff3`/`diff3` 会多一个 `|||||||`
+ * 基础段，这里都支持）：
+ *
+ *     <<<<<<< ours
+ *     ...当前侧...
+ *     ||||||| base      ← 可选（diff3 风格）
+ *     ...基础版本...
+ *     =======
+ *     ...对方侧...
+ *     >>>>>>> theirs
+ *
+ * 行尾统一按 `\n` 处理但**保留原文行尾**：`split(/\r?\n/)` 之后用原文的行分隔符重组，
+ * 否则一个 CRLF 仓库里的文件会被整体改成 LF（那是用户没做过的改动）。
+ *
+ * @param text - 文件原文。
+ * @returns `{ segments, blocks, hasMarkers }`；segments 是 `{ kind: 'text'|'block', ... }`。
+ */
+function scanConflictSegments(text) {
+  const source = String(text)
+  // 保留 CRLF：先按行切开，但记住每一行原本用什么结尾。
+  const lines = source.split('\n')
+  const eol = source.includes('\r\n') ? '\r\n' : '\n'
+  const strip = (line) => (line.endsWith('\r') ? line.slice(0, -1) : line)
+
+  const segments = []
+  const blocks = []
+  let buffer = []
+  let index = 0
+
+  const flushText = () => {
+    if (buffer.length === 0) return
+    segments.push({ kind: 'text', text: buffer.join('\n') })
+    buffer = []
+  }
+
+  for (let cursor = 0; cursor < lines.length; cursor += 1) {
+    const line = strip(lines[cursor])
+    if (!line.startsWith('<<<<<<<')) {
+      buffer.push(lines[cursor])
+      continue
+    }
+    // 收集一个冲突块：ours → 可选 base → theirs。
+    //
+    // 每一侧都收两份：`raw`（保留行尾的 `\r`，用于**写回**时保持用户的换行风格）与
+    // `clean`（去掉 `\r`，用于**展示**与逐块选择）。只留 raw 会让界面上拿到的文本拖着一个
+    // 看不见的裸 `\r`——比较、复制、再参与重组时都会出怪事。
+    const start = cursor
+    const raw = { ours: [], base: [], theirs: [] }
+    const clean = { ours: [], base: [], theirs: [] }
+    let section = 'ours'
+    let end = -1
+    let markerLabels = { ours: line.slice(7).trim(), theirs: '' }
+    for (cursor += 1; cursor < lines.length; cursor += 1) {
+      const current = strip(lines[cursor])
+      if (section === 'ours' && current.startsWith('|||||||')) {
+        section = 'base'
+        continue
+      }
+      if (section !== 'theirs' && current.startsWith('=======')) {
+        section = 'theirs'
+        continue
+      }
+      if (section === 'theirs' && current.startsWith('>>>>>>>')) {
+        markerLabels = { ...markerLabels, theirs: current.slice(7).trim() }
+        end = cursor
+        break
+      }
+      raw[section].push(lines[cursor])
+      clean[section].push(current)
+    }
+    if (end === -1) {
+      // 标记不完整（用户正在手编、或文件被改坏）：按普通文本处理，别把它吞掉。
+      buffer.push(lines[start])
+      continue
+    }
+    flushText()
+    const block = {
+      index,
+      startLine: start + 1,
+      endLine: end + 1,
+      ours: clean.ours.join('\n'),
+      theirs: clean.theirs.join('\n'),
+      ...(clean.base.length === 0 ? {} : { base: clean.base.join('\n') }),
+      /** 写回时用这两份（保留原始行尾）。 */
+      rawOurs: raw.ours.join('\n'),
+      rawTheirs: raw.theirs.join('\n'),
+      ...(raw.base.length === 0 ? {} : { rawBase: raw.base.join('\n') }),
+      oursLabel: markerLabels.ours,
+      theirsLabel: markerLabels.theirs,
+    }
+    blocks.push(block)
+    segments.push({ kind: 'block', ...block })
+    index += 1
+    // for 的 cursor += 1 会跳过 `>>>>>>>` 那一行——正是我们要的。
+  }
+  flushText()
+
+  return { segments, blocks, hasMarkers: blocks.length > 0, eol }
+}
+
+/**
+ * 按"逐块选择"重组文件内容。
+ *
+ * @param text - 带标记的文件原文。
+ * @param resolutions - `{ [blockIndex]: 'ours' | 'theirs' | 'both' }`；缺省表示"还没决定"，
+ *   那一块**保持原样**（这样用户可以先解决一半再保存）。
+ * @param order - `both` 时两侧的先后：`ours-first`（默认）或 `theirs-first`。
+ * @returns `{ content, blocks, unresolved, hasMarkers }`。
+ */
+function composeConflictText(text, resolutions, order) {
+  const scan = scanConflictSegments(text)
+  const pick = resolutions ?? {}
+  let unresolved = 0
+  const parts = []
+  for (const segment of scan.segments) {
+    if (segment.kind === 'text') {
+      parts.push(segment.text)
+      continue
+    }
+    const choice = pick[String(segment.index)]
+    if (choice === 'ours') {
+      parts.push(segment.rawOurs ?? segment.ours)
+    } else if (choice === 'theirs') {
+      parts.push(segment.rawTheirs ?? segment.theirs)
+    } else if (choice === 'both') {
+      const first = order === 'theirs-first' ? (segment.rawTheirs ?? segment.theirs) : (segment.rawOurs ?? segment.ours)
+      const second = order === 'theirs-first' ? (segment.rawOurs ?? segment.ours) : (segment.rawTheirs ?? segment.theirs)
+      parts.push([first, second].filter((value) => value !== '').join('\n'))
+    } else {
+      unresolved += 1
+      // 未决定：原样保留标记与两侧内容（包含可选的 base 段），不丢信息。
+      const marked = [`<<<<<<< ${segment.oursLabel}`]
+      if (segment.base !== undefined) marked.push('||||||| base', segment.rawBase ?? segment.base)
+      marked.push(segment.rawOurs ?? segment.ours, '=======', segment.rawTheirs ?? segment.theirs, `>>>>>>> ${segment.theirsLabel}`)
+      parts.push(marked.join('\n'))
+    }
+  }
+  return {
+    content: parts.join('\n'),
+    blocks: scan.blocks,
+    unresolved,
+    hasMarkers: scan.hasMarkers,
+    eol: scan.eol,
+  }
+}
+
+/**
+ * 解析 `git ls-files -u -z -- <path>` 的输出，得到索引里存在哪些未合并阶段。
+ *
+ * 形状：`<mode> <sha> <stage>\t<path>\0`。阶段 1/2/3 分别是 base / ours / theirs——
+ * 界面据此判断"这个冲突有没有基础版本"（两边都是新增文件时没有 stage 1）。
+ *
+ * @param raw - `-z` 输出。
+ * @returns `{ stage, mode, sha }[]`。
+ */
+function parseUnmergedStages(raw) {
+  const stages = []
+  for (const record of String(raw).split('\0')) {
+    if (record === '') continue
+    const tab = record.indexOf('\t')
+    const meta = (tab === -1 ? record : record.slice(0, tab)).trim().split(/\s+/u)
+    if (meta.length < 3) continue
+    const stage = Number(meta[2])
+    if (stage !== 1 && stage !== 2 && stage !== 3) continue
+    stages.push({ stage, mode: meta[0], sha: meta[1] })
+  }
+  return stages
+}
+
+/**
+ * 读取工作区里某个文件的文本（读不到返回 undefined：冲突文件可能被删了）。
+ * @param absolute - 绝对路径。
+ * @returns 文本，或 undefined。
+ */
+function readWorktreeText(absolute) {
+  try {
+    if (!statSync(absolute).isFile()) return undefined
+    return readFileSync(absolute, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 轻量检测"进行中的操作类型"。
+ *
+ * 只做几次 `statSync`（git 在冲突期间会留下这些标记），**不起 git 进程**——这条路径挂在
+ * 每 10 秒一次的 `/workspace` 轮询上，多一个子进程就是每 10 秒一次的固定开销。
+ *
+ * `.git` 在 worktree/submodule 里是**文件**，此时标记不在 `<cwd>/.git/` 下；那种情况这里
+ * 返回空串（界面退回"不在任何操作中"），而不是去多跑一次 rev-parse——真正需要精确判定的
+ * 地方（continue/abort）在 gitbar 宿主里，那边会解析真实的 git 目录。
+ *
+ * @param cwd - 仓库根。
+ * @returns `'merge' | 'rebase' | 'cherry-pick' | 'revert' | ''`。
+ */
+function readOperationType(cwd) {
+  const marker = (relative) => {
+    try {
+      statSync(join(cwd, '.git', relative))
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (marker('MERGE_HEAD')) return 'merge'
+  if (marker('rebase-merge') || marker('rebase-apply')) return 'rebase'
+  if (marker('CHERRY_PICK_HEAD')) return 'cherry-pick'
+  if (marker('REVERT_HEAD')) return 'revert'
+  return ''
+}
+
+/**
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
@@ -1905,6 +2131,20 @@ function createReviewHandler(ctx) {
         const files = parsed.initial
           ? trackedEntries.map((file) => ({ ...file, added: null, removed: null }))
           : withLineCounts(trackedEntries, numstat)
+        /**
+         * 冲突文件必须**无条件**留在 `files` 里。
+         *
+         * `withLineCounts` 会丢掉"status 说有改动、numstat 里却没有它"的已跟踪文件——
+         * 而未合并路径正是这种情形（`git diff HEAD` 对它们不产出普通的 numstat 行）。
+         * 丢掉它们的后果最严重：界面上"冲突"那一组会是空的，用户在最需要看到冲突的时候
+         * 什么也看不到。
+         */
+        const conflicts = trackedEntries.filter((file) => file.conflict === true)
+        for (const entry of conflicts) {
+          if (!files.some((file) => file.path === entry.path)) {
+            files.push({ ...entry, added: null, removed: null })
+          }
+        }
         const untracked = describeUntrackedFast(cwd, untrackedEntries)
         sendJson(response, 200, {
           isRepo: true,
@@ -1923,6 +2163,20 @@ function createReviewHandler(ctx) {
           /** 已跟踪改动（等价于需求里的 `trackedFiles`）。 */
           files,
           /**
+           * 未解决的冲突文件：`{ path, code }`。code 是 porcelain 的 XY（`UU`/`AA`/`DU`…），
+           * 界面按它显示冲突类型。
+           */
+          conflicts: conflicts.map((file) => ({ path: file.path, code: file.code ?? 'UU' })),
+          conflictCount: conflicts.length,
+          /**
+           * 进行中的操作**类型**（`merge`/`rebase`/`cherry-pick`/`revert`，没有则为空串）。
+           *
+           * 这里只给类型：冲突界面上"Current / Incoming 各是谁"由冲突标记自己写着
+           * （`<<<<<<< HEAD` / `>>>>>>> feature/foo`），比让宿主再猜一遍更准。类型用来决定
+           * 「提交合并 / 继续变基 / 继续摘取」与「中止」的文案和动作。
+           */
+          operationType: readOperationType(cwd),
+          /**
            * 未跟踪摘要：`{ count, exact, mode, collapsed, inlineFiles }`。
            *
            *   `mode: 'inline'`  少量（≤ 50）→ 界面逐行列出 `inlineFiles`
@@ -1936,6 +2190,154 @@ function createReviewHandler(ctx) {
           // （`untracked.exact === false`），界面上不该声称精确。
           changedFiles: files.length + untracked.count,
           changedFilesExact: untracked.exact,
+        })
+        return
+      }
+
+      // ---- 冲突：一个文件的三路内容 + 冲突块 --------------------------------
+      //
+      // 渲染进程既不该读 `.git`，也不该自己解析 `<<<<<<<`：索引里的三个阶段（base/ours/
+      // theirs）只有宿主能取，而"接受某一侧"必须在服务端重组——那才有唯一一份实现。
+      //
+      // 三个阶段的语义（git 的定义，UI 必须照原样用，不能自己改叫法）：
+      //   :1: = base   共同祖先（两边都是新增文件时不存在）
+      //   :2: = ours   **进行中的操作**下的"我方"（merge 时是当前分支；rebase 时是变基到
+      //                的那个分支——这一点与直觉相反，所以界面显示的是标记里的真实名字）
+      //   :3: = theirs 对方
+      if (url.pathname === `${ROUTE_PREFIX}/conflict`) {
+        const filePath = payload.path ?? url.searchParams.get('path')
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const target = normalizePath(filePath)
+        const absolute = resolve(cwd, target)
+        // 纵深防御：SAFE_PATH_PATTERN 已挡住绝对路径与 `..`，这里再确认它真的落在仓库里。
+        if (absolute !== resolve(cwd) && !absolute.startsWith(`${resolve(cwd)}${sep}`)) {
+          sendJson(response, 400, { error: 'path escapes repository', code: 'unsafePath' })
+          return
+        }
+        const stageRaw = await git(['ls-files', '-u', '-z', '--', target], cwd).catch(() => '')
+        const stages = parseUnmergedStages(stageRaw)
+        const readStage = async (stage) => {
+          if (!stages.some((entry) => entry.stage === stage)) return undefined
+          return await git(['show', `:${stage}:${target}`], cwd, undefined, GIT_MAX_BUFFER).catch(() => undefined)
+        }
+        const [base, ours, theirs] = await Promise.all([readStage(1), readStage(2), readStage(3)])
+        const worktree = readWorktreeText(absolute)
+        // 冲突块从**工作区文件**里解析（那才是用户现在看到、也是要写回去的那份文本）。
+        const scan = scanConflictSegments(worktree ?? '')
+        // 冲突类型（`UU`/`AA`/`DU`…）只在 porcelain 的 `u` 记录里，`ls-files -u` 没有。
+        const statusRaw = await git(['status', '--porcelain=v2', '-z', '--', target], cwd).catch(() => '')
+        const record = statusRaw.split('\0').find((line) => line.startsWith('u '))
+        const code = record === undefined ? '' : (record.split(' ')[1] ?? 'UU')
+        sendJson(response, 200, {
+          isRepo: true,
+          ...scopeFields(context, scope),
+          path: target,
+          code,
+          stages,
+          // 三个阶段的完整文本（缺某个阶段就是 undefined：例如 AA 没有 base）。
+          ...(base === undefined ? {} : { base }),
+          ...(ours === undefined ? {} : { ours }),
+          ...(theirs === undefined ? {} : { theirs }),
+          ...(worktree === undefined ? {} : { worktree }),
+          /** 冲突块（含两侧文本与标记里的原始名字）。 */
+          blocks: scan.blocks,
+          blockCount: scan.blocks.length,
+          hasMarkers: scan.hasMarkers,
+          operationType: readOperationType(cwd),
+        })
+        return
+      }
+
+      // ---- 冲突：按逐块选择重组并写回 ---------------------------------------
+      //
+      // 表单 `{ path, resolutions?, order?, content?, markResolved?, allowMarkers? }`。
+      //   resolutions  `{ 块序号: 'ours' | 'theirs' | 'both' }`，`both` 时用 order 决定先后
+      //   content      直接采用这份文本（用户在 Result 里手动编辑过）
+      //   markResolved true 时在**确认没有残留标记**之后 `git add` —— 也就是「标记为已解决」
+      //
+      // 「标记为已解决」必须校验残留标记：把带 `<<<<<<<` 的文件加进索引，会让用户以为冲突
+      // 解决了，而提交里留下的是标记文本（这是最难发现的一类错误）。要强行跳过必须显式传
+      // allowMarkers。
+      if (url.pathname === `${ROUTE_PREFIX}/conflict-resolve`) {
+        if (request.method !== 'POST') {
+          response.setHeader('allow', 'POST')
+          sendJson(response, 405, { error: 'method not allowed' })
+          return
+        }
+        const filePath = payload.path
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const target = normalizePath(filePath)
+        const absolute = resolve(cwd, target)
+        if (absolute !== resolve(cwd) && !absolute.startsWith(`${resolve(cwd)}${sep}`)) {
+          sendJson(response, 400, { error: 'path escapes repository', code: 'unsafePath' })
+          return
+        }
+        const source = typeof payload.content === 'string' ? payload.content : undefined
+        const hasResolutions = payload.resolutions !== null && typeof payload.resolutions === 'object'
+        const onDisk = readWorktreeText(absolute)
+        if (source === undefined && onDisk === undefined && payload.markResolved !== true) {
+          // 工作区里没有这个文件、也没给内容：多半是用户把它删掉了（删除也是一种解决方式），
+          // 这种情况交给 `markResolved` 用 `git add` 记录删除；单独读它则是 404。
+          sendJson(response, 404, { error: 'no such path', code: 'noSuchPath' })
+          return
+        }
+        const current = source ?? onDisk ?? ''
+        const composed =
+          source === undefined
+            ? composeConflictText(current, payload.resolutions, payload.order)
+            : { content: source, blocks: scanConflictSegments(source).blocks, unresolved: 0 }
+        // 只有真的要改文件时才写：既没有 content 也没有 resolutions 的请求是纯读取。
+        if (source !== undefined || hasResolutions) {
+          try {
+            writeFileSync(absolute, composed.content, 'utf8')
+          } catch (error) {
+            sendJson(response, 409, {
+              error: 'cannot write file',
+              code: 'writeFailed',
+              detail: String(error?.message ?? error),
+            })
+            return
+          }
+        }
+        // 校验以**磁盘上的内容**为准：markResolved 要挡住的正是"写进去的文件里还留着标记"。
+        const verify = scanConflictSegments(readWorktreeText(absolute) ?? composed.content)
+        if (payload.markResolved === true) {
+          if (verify.hasMarkers && payload.allowMarkers !== true) {
+            sendJson(response, 409, {
+              error: 'conflict markers remain',
+              code: 'markersRemain',
+              detail: `${verify.blocks.length}`,
+            })
+            return
+          }
+          try {
+            await git(['add', '--', target], cwd)
+          } catch (error) {
+            sendJson(response, 409, {
+              error: 'stage failed',
+              code: 'stageFailed',
+              detail: String(error?.message ?? error),
+            })
+            return
+          }
+          invalidateUntracked(cwd)
+        }
+        sendJson(response, 200, {
+          isRepo: true,
+          ...scopeFields(context, scope),
+          path: target,
+          content: composed.content,
+          blocks: verify.blocks,
+          blockCount: verify.blocks.length,
+          unresolved: composed.unresolved ?? 0,
+          hasMarkers: verify.hasMarkers,
+          markedResolved: payload.markResolved === true,
         })
         return
       }
@@ -2574,6 +2976,8 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/changes`,
     `${ROUTE_PREFIX}/workspace`,
     `${ROUTE_PREFIX}/workspace-file`,
+    `${ROUTE_PREFIX}/conflict`,
+    `${ROUTE_PREFIX}/conflict-resolve`,
     `${ROUTE_PREFIX}/commit-message`,
     `${ROUTE_PREFIX}/revert`,
     `${ROUTE_PREFIX}/history`,

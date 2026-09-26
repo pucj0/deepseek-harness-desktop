@@ -169,6 +169,13 @@ window.__ModuleLoader__.load({
       repoDiscovering: '正在发现更多 Git 仓库…',
       switching: '切换中…',
       working: '处理中…',
+      // ---- 直连动作的进度与结果 ----
+      //
+      // 「更新项目」与「推送」不再弹对话框，进度因此写在动作行本身、结果写进提示区。
+      updating: '更新中…',
+      updated: '已更新',
+      pushing: '推送中…',
+      pushed: '已推送',
       switchBranch: '切换分支',
       searchBranches: '搜索分支和操作',
       loadingBranches: '正在加载分支…',
@@ -189,6 +196,9 @@ window.__ModuleLoader__.load({
       actionPush: '推送…',
       actionNewBranch: '新建分支…',
       actionCheckoutRef: '签出标记或修订…',
+      /** 推送被拒之后的两条出路：先更新（主）或强制推送（需确认）。 */
+      publishBranch: '发布分支',
+      forcePushAction: '强制推送…',
       // ---- 分组标题 ----
       sectionRecent: '最近',
       sectionLocal: '本地',
@@ -212,6 +222,7 @@ window.__ModuleLoader__.load({
       menuPush: '推送…',
       menuRename: '重命名…',
       menuDelete: '删除',
+      menuCopyBranchName: '复制分支名',
       menuFetch: '抓取',
       // ---- 对话框 ----
       dialogNewTitle: '新建分支',
@@ -227,6 +238,14 @@ window.__ModuleLoader__.load({
       dialogMergeNoFf: '始终产生合并提交（--no-ff）',
       dialogConfirm: '确定',
       dialogCancel: '取消',
+      /**
+       * 强制推送：少数**必须**保留确认的操作之一。
+       *
+       * 它改写的是远端历史（`--force-with-lease` 只保证"不是别人刚推的"，不保证别人没拉过），
+       * 因此对话框本身就是那次确认，正文只讲这一句后果。
+       */
+      dialogForcePushTitle: '强制推送',
+      confirmForcePush: '强制推送会改写远端历史：远端上已有的提交会被覆盖。',
       dialogRefHint: '可以填标签（如 v1.0.0）、分支或提交哈希。签出标记会进入游离 HEAD。',
       mergingInto: '把「{name}」合并到「{into}」',
       rebasingOnto: '把「{branch}」变基到「{onto}」',
@@ -243,6 +262,30 @@ window.__ModuleLoader__.load({
       abortMerge: '中止合并',
       abortRebase: '中止变基',
       aborted: '已中止',
+      /**
+       * 进行中的操作卡片：类型、两侧名字、以及"继续/中止"的说法。
+       *
+       * 四类操作的继续动作完全不同（合并是提交一个合并提交，变基/摘取/还原是各自的
+       * `--continue`），因此文案必须跟着 host 给的 `operation.type` 走，不能按
+       * merging/rebasing 两个布尔猜——那是旧的字段，只够区分两件事。
+       */
+      opInProgress: '{type}进行中：{incoming} → {current}',
+      opTypeMerge: '合并',
+      opTypeRebase: '变基',
+      opTypeCherryPick: '摘取',
+      opTypeRevert: '还原',
+      opContinue: '继续',
+      opCommitMerge: '提交合并',
+      opContinueRebase: '继续变基',
+      opContinueCherryPick: '继续摘取',
+      opContinueRevert: '继续还原',
+      opAbort: '中止操作',
+      opAbortMerge: '中止合并',
+      opAbortRebase: '中止变基',
+      opAbortCherryPick: '中止摘取',
+      opAbortRevert: '中止还原',
+      opConflicts: '还有 {count} 个文件有冲突',
+      opContinueBlocked: '先把冲突全部解决（还有 {count} 个文件）',
       pushRejectedHint: '远端有你本地没有的提交，先「更新项目」再推送。',
       emptyCherryPick: '该提交的改动已经在当前分支里，没有需要摘取的内容。',
       // ---- 错误（按 host 的稳定 code）----
@@ -262,6 +305,9 @@ window.__ModuleLoader__.load({
       error_rebaseConflict: '变基有冲突，需要在终端里解决。',
       error_cherryPickConflict: '摘取有冲突，需要在终端里解决。',
       error_pushRejected: '推送被拒绝：远端有更早的提交。',
+      error_noUpstream: '这个分支还没有上游分支，先「发布分支」再推送。',
+      error_noRemote: '这个仓库没有配置任何远端，先添加一个远端（remote）再推送。',
+      error_detachedHead: '当前是游离 HEAD（不在任何分支上），先新建或切换到一个分支再推送。',
       error_networkFailed: '与远端通信失败（网络或凭据问题）。',
       error_unknown: '操作失败。',
     }
@@ -274,6 +320,11 @@ window.__ModuleLoader__.load({
       repoDiscovering: 'Discovering more Git repositories…',
       switching: 'Switching…',
       working: 'Working…',
+      /** Direct actions (update / push) report progress on the action row itself. */
+      updating: 'Updating…',
+      updated: 'Updated',
+      pushing: 'Pushing…',
+      pushed: 'Pushed',
       switchBranch: 'Switch branch',
       searchBranches: 'Search branches and actions',
       loadingBranches: 'Loading branches…',
@@ -293,6 +344,9 @@ window.__ModuleLoader__.load({
       actionPush: 'Push…',
       actionNewBranch: 'New branch…',
       actionCheckoutRef: 'Checkout tag or revision…',
+      /** Two ways out of a rejected push: update first (primary), or force push (asks first). */
+      publishBranch: 'Publish branch',
+      forcePushAction: 'Force push…',
       sectionRecent: 'Recent',
       sectionLocal: 'Local',
       sectionRemote: 'Remote',
@@ -312,6 +366,7 @@ window.__ModuleLoader__.load({
       menuPush: 'Push…',
       menuRename: 'Rename…',
       menuDelete: 'Delete',
+      menuCopyBranchName: 'Copy branch name',
       menuFetch: 'Fetch',
       dialogNewTitle: 'New branch',
       dialogRenameTitle: 'Rename branch',
@@ -326,6 +381,9 @@ window.__ModuleLoader__.load({
       dialogMergeNoFf: 'Always create a merge commit (--no-ff)',
       dialogConfirm: 'OK',
       dialogCancel: 'Cancel',
+      /** Force push is one of the few operations that keeps a confirmation of its own. */
+      dialogForcePushTitle: 'Force push',
+      confirmForcePush: 'Force pushing rewrites the remote history: commits already there will be overwritten.',
       dialogRefHint: 'A tag (such as v1.0.0), a branch, or a commit hash. Checking out a tag gives you a detached HEAD.',
       mergingInto: 'Merge "{name}" into "{into}"',
       rebasingOnto: 'Rebase "{branch}" onto "{onto}"',
@@ -341,6 +399,24 @@ window.__ModuleLoader__.load({
       abortMerge: 'Abort merge',
       abortRebase: 'Abort rebase',
       aborted: 'Aborted',
+      /** In-progress operation card: type, both sides, and the continue/abort wording. */
+      opInProgress: '{type} in progress: {incoming} → {current}',
+      opTypeMerge: 'Merge',
+      opTypeRebase: 'Rebase',
+      opTypeCherryPick: 'Cherry-pick',
+      opTypeRevert: 'Revert',
+      opContinue: 'Continue',
+      opCommitMerge: 'Commit merge',
+      opContinueRebase: 'Continue rebase',
+      opContinueCherryPick: 'Continue cherry-pick',
+      opContinueRevert: 'Continue revert',
+      opAbort: 'Abort operation',
+      opAbortMerge: 'Abort merge',
+      opAbortRebase: 'Abort rebase',
+      opAbortCherryPick: 'Abort cherry-pick',
+      opAbortRevert: 'Abort revert',
+      opConflicts: '{count} files still have conflicts',
+      opContinueBlocked: 'Resolve every conflict first ({count} files left)',
       pushRejectedHint: 'The remote has commits you do not have. Run "Update project" first.',
       emptyCherryPick: 'That commit is already in this branch; nothing to cherry-pick.',
       error_localChanges: 'git refused the switch: you have uncommitted changes it would overwrite.',
@@ -359,6 +435,9 @@ window.__ModuleLoader__.load({
       error_rebaseConflict: 'The rebase has conflicts; resolve them in a terminal.',
       error_cherryPickConflict: 'The cherry-pick has conflicts; resolve them in a terminal.',
       error_pushRejected: 'Push rejected: the remote has earlier commits.',
+      error_noUpstream: 'This branch has no upstream yet; publish it first.',
+      error_noRemote: 'This repository has no remote configured; add one before pushing.',
+      error_detachedHead: 'HEAD is detached (not on any branch); create or switch to a branch before pushing.',
       error_networkFailed: 'Could not reach the remote (network or credentials).',
       error_unknown: 'The operation failed.',
     }
@@ -768,8 +847,25 @@ window.__ModuleLoader__.load({
       rebaseConflict: 'error_rebaseConflict',
       cherryPickConflict: 'error_cherryPickConflict',
       pushRejected: 'error_pushRejected',
+      // 没有上游是**可以就地解决**的失败（发布分支即可），因此必须让它带上 code 走到界面上；
+      // 未知 code 会被 describeError 折成空串，那一栏的「发布分支」按钮就永远不会出现。
+      noUpstream: 'error_noUpstream',
+      // 「没地方可推」与「网络不通」「被远端拒绝」是三件不同的事：前者要用户先加远端。
+      noRemote: 'error_noRemote',
+      detachedHead: 'error_detachedHead',
       networkFailed: 'error_networkFailed',
     }
+
+    /**
+     * 进行中的操作类型 → 字典键。
+     *
+     * 继续/中止两类按钮都要按类型取文案：合并的"继续"是提交一个合并提交，变基/摘取/还原
+     * 是各自的 `--continue`，四者的命令与说法都不同。放在组件外面是因为它们是纯数据，
+     * 而且三个映射必须**同源**——各写一份迟早会有一个类型漏掉。
+     */
+    const OP_TYPE_KEYS = { merge: 'opTypeMerge', rebase: 'opTypeRebase', 'cherry-pick': 'opTypeCherryPick', revert: 'opTypeRevert' }
+    const OP_CONTINUE_KEYS = { merge: 'opCommitMerge', rebase: 'opContinueRebase', 'cherry-pick': 'opContinueCherryPick', revert: 'opContinueRevert' }
+    const OP_ABORT_KEYS = { merge: 'opAbortMerge', rebase: 'opAbortRebase', 'cherry-pick': 'opAbortCherryPick', revert: 'opAbortRevert' }
 
     /**
      * 把错误整理成"字典键 + 原始细节"。
@@ -846,6 +942,43 @@ window.__ModuleLoader__.load({
       const cut = value.indexOf('/')
       if (cut < 0) return { remote: '', branch: value }
       return { remote: value.slice(0, cut), branch: value.slice(cut + 1) }
+    }
+
+    /**
+     * 把一段文本写进剪贴板（行菜单里的「复制分支名」）。
+     *
+     * 两条路都要试：`navigator.clipboard` 只在**安全上下文**里存在（本应用是本地 Web GUI，
+     * 不能假设它一定在），退化路径是一次性的 textarea + `document.execCommand('copy')`
+     * ——它虽已废弃，却是非安全上下文里唯一可用的办法。
+     *
+     * **绝不抛**：复制只是菜单里的一个便利动作，失败也不该把整个面板带崩（没有剪贴板权限、
+     * 或者宿主环境里根本没有 DOM 时，这里安静地什么都不做）。
+     *
+     * @param text - 要复制的文本。
+     * @returns 是否已交给剪贴板（调用方无需对失败做任何事）。
+     */
+    function copyToClipboard(text) {
+      try {
+        const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
+        if (clipboard !== undefined && typeof clipboard.writeText === 'function') {
+          void clipboard.writeText(text)
+          return true
+        }
+        const area = document.createElement('textarea')
+        area.value = text
+        area.setAttribute('readonly', '')
+        // 固定在视口外并全透明：选中它不会让页面滚动或闪一下。
+        area.style.position = 'fixed'
+        area.style.top = '-1000px'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        const copied = document.execCommand('copy')
+        document.body.removeChild(area)
+        return copied === true
+      } catch {
+        return false
+      }
     }
 
     /**
@@ -1059,6 +1192,15 @@ window.__ModuleLoader__.load({
       const [serial, setSerial] = react.useState(0)
 
       /**
+       * 正在执行的**直连动作**（`'update'` / `'push'` / `''`）。
+       *
+       * 「更新项目」与「推送」不再弹对话框，进度就写在动作行上（更新中… / 推送中…），
+       * 因此需要知道"跑的是哪一个"。不能用 `busy` 代替：它是所有写操作共用的，
+       * 更新时那一行写"推送中…"显然是错的。
+       */
+      const [directAction, setDirectAction] = react.useState('')
+
+      /**
        * 单击/双击的定时器、菜单归属与"一次双击一次 checkout"的守卫。
        *
        * 这几个 ref 与下面两个关闭回调**必须声明在这里**（所有会用到它们的回调之前），
@@ -1233,9 +1375,14 @@ window.__ModuleLoader__.load({
        *     发起的读都不再允许落地（哪怕先返回）：写回的是最新状态。
        *   * 分支列表**不在写响应里**（host 回 `branchesStale: true`）。因此这里不 await
        *     任何分支列表的补算，写操作的反馈立刻可见，分支列表由一次异步刷新收敛。
+       *
+       * @param route - 写路由（`remote` / `branch/create` / `op/abort`…）。
+       * @param body - 表单内容。
+       * @param onSuccess - 可选：成功时调用，返回一句**更具体**的结果提示（例如「已更新」
+       *   「已推送」），覆盖下面那几条通用提示；返回空值时保持通用提示不变。
        */
       const run = react.useCallback(
-        async (route, body) => {
+        async (route, body, onSuccess) => {
           const { ticket, promise } = gate.run(`write:${route}`, () => send(route, workspace, body), {
             slices: ['status', 'branches'],
           })
@@ -1262,6 +1409,10 @@ window.__ModuleLoader__.load({
             else if (result?.detached === true) changes.notice = t('detachedNotice')
             else if (result?.empty === true) changes.notice = t('emptyCherryPick')
             else if (typeof result?.aborted === 'string') changes.notice = t('aborted')
+            // 调用方补的那句写在最后，因此能覆盖上面几条：那几条是"成功但需要额外告知"的
+            // 通用兜底，而调用方知道的是这次操作**具体**干了什么（更新了、推送了）。
+            const specific = typeof onSuccess === 'function' ? onSuccess(result) : undefined
+            if (typeof specific === 'string' && specific !== '') changes.notice = specific
             patch(ticket, changes)
           } else {
             // 已有更晚的请求接手这两份状态：只收起自己的 busy。
@@ -1280,6 +1431,72 @@ window.__ModuleLoader__.load({
         },
         [gate, workspace, generation, patch, loadBranches, t],
       )
+
+      /**
+       * 「更新项目」：fetch → pull，两步都成功才算完成。
+       *
+       * 抽成一个函数是**必需**的：面板顶部的快捷操作、以及推送被拒后的错误面板都要用它，
+       * 两处各写一遍 fetch→pull 迟早会有一处改了、另一处没改。它也不再弹对话框——
+       * 更新是日常动作，多一次确认只是多一次点击。
+       */
+      const updateProject = react.useCallback(async () => {
+        setDirectAction('update')
+        try {
+          // 先 fetch：它把远端新提交取回本地对象库，也让领先/落后立刻变准（pull 自己虽然
+          // 也会 fetch，但合并失败时用户至少已经看到了最新的远端状态）。fetch 失败就不再
+          // pull——远端都没通，pull 只会再报一次同样的错。
+          const fetched = await run('remote', { action: 'fetch' })
+          if (fetched === undefined) return undefined
+          return await run('remote', { action: 'pull' }, () => t('updated'))
+        } finally {
+          setDirectAction('')
+        }
+      }, [run, t])
+
+      /**
+       * 直接推送**当前分支**（不再弹对话框）。
+       *
+       * 没有上游时顺手建立跟踪（`setUpstream`）：这就是"第一次推送"的常规含义，少了它
+       * 用户只会看到一次 noUpstream 失败、再手动点一次「发布分支」。
+       */
+      const pushCurrent = react.useCallback(async () => {
+        setDirectAction('push')
+        try {
+          return await run(
+            'remote',
+            { action: 'push', ...(status?.hasUpstream === true ? {} : { setUpstream: true }) },
+            () => t('pushed'),
+          )
+        } finally {
+          setDirectAction('')
+        }
+      }, [run, t, status])
+
+      /**
+       * 直接推送**某一行**的分支（行菜单里的「推送」）。
+       *
+       * 与被点的那一行绑定的三条与旧对话框完全一致：只推本地分支、没有上游就建立跟踪；
+       * 变化的只有"选哪个远端"那个下拉——它随对话框一起去掉了，多远端时由 push.default
+       * 决定默认远端（要改的是一行配置，不是每次推送都问一遍）。
+       */
+      const pushBranch = react.useCallback(async (entry) => {
+        setDirectAction('push')
+        try {
+          return await run(
+            'remote',
+            {
+              action: 'push',
+              // 只推**本地分支**：远程分支条目上"推送"等于把远端状态推回它自己，无意义。
+              ...(entry?.isRemote === true ? {} : { branch: entry?.name }),
+              // 没有上游的分支第一次推送要建立跟踪，否则下次 push 还得指定远端。
+              ...(entry?.upstream === '' ? { setUpstream: true } : {}),
+            },
+            () => t('pushed'),
+          )
+        } finally {
+          setDirectAction('')
+        }
+      }, [run, t])
 
       const switchTo = react.useCallback(
         async (branch, options) => {
@@ -1708,6 +1925,10 @@ window.__ModuleLoader__.load({
 
       const label = status.detached ? '(detached)' : status.branch || '(no branch)'
       const flags = []
+      // 冲突排在最前：它比"改了几个文件"更决定用户**现在能做什么**，也是错误面板之外
+      // 唯一能在徽章上一眼看到的状态（`*N` 只是改动数，冲突是"停下来了"）。
+      const conflictCount = Number(status.conflictCount ?? 0)
+      if (conflictCount > 0) flags.push(`\u26a0${conflictCount}`)
       if (status.changedFiles > 0) flags.push(`*${status.changedFiles}`)
       if (status.ahead > 0) flags.push(`\u2191${status.ahead}`)
       if (status.behind > 0) flags.push(`\u2193${status.behind}`)
@@ -1845,6 +2066,18 @@ window.__ModuleLoader__.load({
               selected: selectedBranch,
               onRefresh: () => void Promise.all([refresh(), loadBranches(), loadRemotes()]),
               onFetch: () => void run('remote', { action: 'fetch' }),
+              /**
+               * 直连的「更新项目」与「推送」。
+               *
+               * 两个函数住在 BranchChip 里：错误面板里的"先更新再推"必须复用**同一个**
+               * fetch→pull，不能在这里再写一遍。`directAction` 只是让动作行显示
+               * 「更新中…」/「推送中…」——`busy` 是所有写操作共用的，区分不出是哪一个。
+               */
+              onUpdate: updateProject,
+              onPush: pushCurrent,
+              directAction,
+              /** 冲突解决的最后一步：host 按仓库现状判定该提交还是 `--continue`，这里不传类型。 */
+              onContinue: () => void run('op/continue', {}),
               onSwitch: (branch) => void switchTo(branch),
               onStashSwitch: () => void switchTo(pendingBranch, { stash: true }),
               onDialog: openDialog,
@@ -1885,6 +2118,8 @@ window.__ModuleLoader__.load({
                 onClose: closeBranchMenu,
                 onSwitch: (branch) => void switchTo(branch),
                 onDialog: openDialog,
+                /** 行菜单里的「推送」也直连，对象是被点的那一行（见 pushBranch）。 */
+                onPush: (entry) => void pushBranch(entry),
               })
             : null,
         ),
@@ -1907,7 +2142,6 @@ window.__ModuleLoader__.load({
                 t,
                 dialog,
                 busy,
-                remotes,
                 onCancel: () => setDialog(null),
                 onClose: () => setDialog(null),
                 run,
@@ -1938,6 +2172,7 @@ window.__ModuleLoader__.load({
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
         selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
+        directAction, onUpdate, onPush, onContinue,
       } = props
 
       /**
@@ -2018,6 +2253,39 @@ window.__ModuleLoader__.load({
           glyph,
           react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0 } }, label),
           extra ?? null,
+        )
+
+      /**
+       * 错误面板里的"下一步"按钮（先更新再推、发布分支、强制推送…）。
+       *
+       * 它们与「暂存并切换」是同一类东西：错误区里的按钮都不是普通操作，而是**针对这次
+       * 失败的建议动作**，因此形状必须一致（撑满整行、小一号字）。`primary` 给首选的
+       * 那一个（更新项目），其余是次要选项。
+       */
+      const errorAction = (key, label, onClick, options) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            'data-desktop-sc-error-action': key,
+            disabled: busy,
+            onClick,
+            style: {
+              marginTop: '6px',
+              width: '100%',
+              padding: '6px 8px',
+              borderRadius: '6px',
+              border: `1px solid ${options?.primary === true ? 'transparent' : 'color-mix(in srgb, currentColor 25%, transparent)'}`,
+              background: options?.primary === true ? ACCENT : SURFACE,
+              color: options?.primary === true ? '#fff' : 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12px',
+              cursor: busy ? 'default' : 'pointer',
+              opacity: busy ? 0.6 : 1,
+            },
+          },
+          label,
         )
 
       /**
@@ -2226,6 +2494,19 @@ window.__ModuleLoader__.load({
       const local = visible.filter((entry) => !entry.isRemote)
       const remote = visible.filter((entry) => entry.isRemote)
 
+      /**
+       * 进行中的操作与还剩下的冲突。
+       *
+       * 以 host 的 `operation` 为准（它带类型与两侧的真实名字）；`merging` / `rebasing`
+       * 是旧字段，只在拿不到 `operation` 时兜底——那两个布尔只够区分两件事，而"继续"
+       * 在四类操作里是完全不同的命令。冲突数是 `/status` 直接给的，界面不再自己数。
+       */
+      const operation = status?.operation ?? null
+      const opType = operation?.type ?? (status?.rebasing === true ? 'rebase' : status?.merging === true ? 'merge' : null)
+      const opConflicts = Number(status?.conflictCount ?? 0)
+      // 类型名跟着字典走；万一来一个没见过的类型，宁可显示 host 的原样字符串也不猜。
+      const opTypeLabel = OP_TYPE_KEYS[opType] === undefined ? opType : t(OP_TYPE_KEYS[opType])
+
       return react.createElement(
         'div',
         {
@@ -2300,12 +2581,15 @@ window.__ModuleLoader__.load({
         }),
 
         // 快速操作。四个都在 host 侧有对应路由，没有一个是装饰。
+        //
+        // 「更新项目」与「推送」**直连**执行：它们是日常动作，弹一次"确定"只是多一次点击。
+        // 进度因此写在动作行上（更新中… / 推送中…），结果写进下面的提示区。
         react.createElement(
           'div',
           { style: { display: 'flex', flexDirection: 'column', flexShrink: 0, paddingBottom: '4px', borderBottom: `1px solid ${BORDER}` } },
-          action('update', refreshGlyph, busy ? t('working') : t('actionUpdate'), () => onDialog({ kind: 'update' })),
+          action('update', refreshGlyph, directAction === 'update' ? t('updating') : t('actionUpdate'), onUpdate),
           action('commit', refreshGlyph, t('actionCommit'), () => onDialog({ kind: 'commit' })),
-          action('push', cloudGlyph, t('actionPush'), () => onDialog({ kind: 'push' })),
+          action('push', cloudGlyph, directAction === 'push' ? t('pushing') : t('actionPush'), onPush),
         ),
 
         react.createElement(
@@ -2315,13 +2599,14 @@ window.__ModuleLoader__.load({
           action('tag', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(BranchGlyph)), t('actionCheckoutRef'), () => onDialog({ kind: 'checkout-ref' })),
         ),
 
-        // 进行中的合并/变基：这是**必须**露出来的一条，因为它表示仓库停在一个
-        // 用户可能不知道的状态上。给一个中止入口，让人不至于只能去终端里收拾。
-        status.merging || status.rebasing
-          ? react.createElement(
+        // 进行中的合并/变基/摘取/还原：这是**必须**露出来的一条，因为它表示仓库停在一个
+        // 用户可能不知道的状态上。给"继续"与"中止"两个入口，让人不至于只能去终端里收拾。
+        opType === null
+          ? null
+          : react.createElement(
               'div',
               {
-                'data-desktop-sc-progress': status.rebasing ? 'rebase' : 'merge',
+                'data-desktop-sc-progress': opType,
                 style: {
                   flexShrink: 0,
                   margin: '6px 2px 0',
@@ -2334,13 +2619,25 @@ window.__ModuleLoader__.load({
                   lineHeight: 1.5,
                 },
               },
-              react.createElement('div', null, t(status.rebasing ? 'rebaseInProgress' : 'mergeInProgress')),
+              // 有 operation 就把两侧说清楚（谁正在进到谁上面）；没有时退回旧的那句状态说明。
+              operation === null
+                ? react.createElement('div', null, t(opType === 'rebase' ? 'rebaseInProgress' : 'mergeInProgress'))
+                : react.createElement(
+                    'div',
+                    { 'data-desktop-sc-operation': operation.type },
+                    t('opInProgress', { type: opTypeLabel, current: operation.currentLabel, incoming: operation.incomingLabel }),
+                  ),
+              // 还有文件没解决时先报数量：用户据此决定"现在到底能不能提交"。
+              opConflicts > 0
+                ? react.createElement('div', { 'data-desktop-sc-conflicts': String(opConflicts) }, t('opConflicts', { count: opConflicts }))
+                : null,
               react.createElement(
                 'button',
                 {
                   type: 'button',
                   disabled: busy,
-                  onClick: () => onAbort(status.rebasing ? 'rebase' : 'merge'),
+                  // 中止按**实际类型**发：合并是 `merge --abort`，变基/摘取/还原各有各的。
+                  onClick: () => onAbort(opType),
                   style: {
                     marginTop: '6px',
                     padding: '4px 8px',
@@ -2353,10 +2650,37 @@ window.__ModuleLoader__.load({
                     cursor: busy ? 'default' : 'pointer',
                   },
                 },
-                t(status.rebasing ? 'abortRebase' : 'abortMerge'),
+                t(OP_ABORT_KEYS[opType] ?? 'opAbort'),
               ),
-            )
-          : null,
+              // 「继续」只在冲突全部解决之后才可点：还有冲突时 git 会拒绝，按钮留在那里
+              // 完整可点只会让人白点一次（并收获一条看不懂的报错）。
+              operation === null
+                ? null
+                : react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-desktop-sc-continue': operation.type,
+                      disabled: busy || opConflicts > 0,
+                      title: opConflicts > 0 ? t('opContinueBlocked', { count: opConflicts }) : undefined,
+                      onClick: onContinue,
+                      style: {
+                        marginTop: '6px',
+                        marginLeft: '6px',
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                        background: SURFACE,
+                        color: 'inherit',
+                        fontFamily: UI_FONT,
+                        fontSize: '12px',
+                        cursor: busy || opConflicts > 0 ? 'default' : 'pointer',
+                        opacity: busy || opConflicts > 0 ? 0.55 : 1,
+                      },
+                    },
+                    t(OP_CONTINUE_KEYS[opType] ?? 'opContinue'),
+                  ),
+            ),
 
         // 失败原因必须显示在面板里。原先只写进按钮的 hover 提示，而面板照常
         // 关闭——用户看到的就是"点了没反应"。
@@ -2420,6 +2744,20 @@ window.__ModuleLoader__.load({
               // 推送被拒是"先更新再推"这个动作序列的提示，单独给一句该怎么办。
               error.key === 'error_pushRejected'
                 ? react.createElement('div', { style: { marginTop: '5px' } }, t('pushRejectedHint'))
+                : null,
+              // 推送被拒之后要给出**下一步**，而不只是一句解释：先更新（与顶部快捷操作
+              // 走同一个 fetch→pull），或者在本分支确实该被改写时强制推送（它会改写远端
+              // 历史，是少数必须保留确认的操作，因此进对话框）。
+              error.code === 'pushRejected'
+                ? errorAction('update', t('actionUpdate'), onUpdate, { primary: true })
+                : null,
+              error.code === 'pushRejected'
+                ? errorAction('force-push', t('forcePushAction'), () => onDialog({ kind: 'force-push' }))
+                : null,
+              // 没有上游 = 这个分支还没发布过：建立跟踪即可，没有需要确认的事情。
+              // 走的就是顶部那个直连推送（没有上游时它自己会带上 setUpstream）。
+              error.code === 'noUpstream'
+                ? errorAction('publish', t('publishBranch'), onPush, { primary: true })
                 : null,
             ),
 
@@ -2543,12 +2881,12 @@ window.__ModuleLoader__.load({
      * 给出禁用项而不是隐藏，是为了让菜单的形状稳定——用户靠位置记忆点操作，
      * 条目时有时无会让第二次点击点错。
      *
-     * @param props - `{ t, menu, menuRef, status, busy, onClose, onSwitch, onDialog }`；
+     * @param props - `{ t, menu, menuRef, status, busy, onClose, onSwitch, onDialog, onPush }`；
      *   `menu` 的形状是 `{ branch, rowAnchor, panelAnchor }`（见 cascadeMenuPosition）。
      * @returns React 元素。
      */
     function BranchContextMenu(props) {
-      const { t, menu, menuRef, status, busy, onClose, onSwitch, onDialog } = props
+      const { t, menu, menuRef, status, busy, onClose, onSwitch, onDialog, onPush } = props
       const entry = menu.branch
       const current = status?.branch ?? ''
 
@@ -2683,7 +3021,9 @@ window.__ModuleLoader__.load({
         }),
       )
       items.push(separator('sep2'))
-      items.push(item('push', t('menuPush'), act(() => onDialog({ kind: 'push', branch: entry }))))
+      // 「推送」直连：选远端那个下拉随对话框一起去掉了，对象仍然是被点的那一行
+      // （见 pushBranch：只推本地分支、没有上游就建立跟踪）。
+      items.push(item('push', t('menuPush'), act(() => onPush(entry))))
       items.push(
         item('rename', t('menuRename'), act(() => onDialog({ kind: 'rename', branch: entry })), {
           // 远程分支不能重命名：本地改名只会把跟踪引用换个名字，远端那个分支纹丝不动，
@@ -2698,6 +3038,10 @@ window.__ModuleLoader__.load({
           danger: true,
         }),
       )
+      // 复制分支名：与破坏性动作之间隔一条分隔线，免得"删除"底下紧挨着一条日常动作。
+      // 剪贴板不可用时 copyToClipboard 会安静地失败（它绝不抛），菜单照常收掉。
+      items.push(separator('sep3'))
+      items.push(item('copy-name', t('menuCopyBranchName'), act(() => copyToClipboard(entry.name))))
 
       return react.createElement(
         'div',
@@ -2717,15 +3061,19 @@ window.__ModuleLoader__.load({
     /**
      * 统一的输入对话框。
      *
-     * 一个组件覆盖新建/重命名/合并/变基/签出标记/删除确认/推送/更新这几种形态：它们
+     * 一个组件覆盖新建/重命名/合并/变基/签出标记/删除确认/强制推送这几种形态：它们
      * 都是"显示一段说明 + 至多两个输入 + 确定/取消"，差别只在文案与提交时调哪条路由。
      * 为每种操作各写一个组件会让"确定按钮该禁用还是该报错"这类规则散落八处。
      *
-     * @param props - `{ t, dialog, busy, remotes, onCancel, run, onDone }`。
+     * 注意「更新项目」与「推送」**都不在**这里：它们是日常动作，直连执行（见
+     * `updateProject` / `pushCurrent`）。留在弹窗里的只有真正需要确认的那几个
+     * （删除分支、强制删除、强制推送、签出标记）。
+     *
+     * @param props - `{ t, dialog, busy, onCancel, run, onDone }`。
      * @returns React 元素或 null。
      */
     function ActionDialog(props) {
-      const { t, dialog, busy, remotes, onCancel, run, onDone } = props
+      const { t, dialog, busy, onCancel, run, onDone } = props
       const kind = dialog.kind
       const branch = dialog.branch
 
@@ -2740,8 +3088,6 @@ window.__ModuleLoader__.load({
       const [ref, setRef] = react.useState('')
       const [checkout, setCheckout] = react.useState(kind === 'create')
       const [noFf, setNoFf] = react.useState(false)
-      // 推送需要选定远端；只有一个远端时直接选中它，多远端时让用户挑。
-      const [remote, setRemote] = react.useState(remotes?.[0]?.name ?? '')
       // 强制删除的二次确认：未并入的分支第一次会被 git 拒绝，第二次才带上 force。
       const [forceConfirmed, setForceConfirmed] = react.useState(false)
 
@@ -2896,49 +3242,26 @@ window.__ModuleLoader__.load({
             : { name: branch.name, ...(forceConfirmed ? { force: true } : {}) })
           if (result !== undefined) onDone()
         }
-      } else if (kind === 'push') {
-        title = t('actionPush')
+      } else if (kind === 'force-push') {
+        /**
+         * 强制推送：对话框本身就是那次确认。
+         *
+         * 与「更新项目」不同，这一个**必须**问一次——`--force-with-lease` 只挡住"别人在你
+         * fetch 之后又推了东西"，它挡不住"别人已经拉走了你要覆盖掉的提交"。正文只说这一句
+         * 后果，多的解释在这个位置没人读。
+         *
+         * 没有 `branch` 时推的是当前分支（错误面板给的那个入口就是这样，见 pushCurrent）。
+         */
+        title = t('dialogForcePushTitle')
         body = [
-          react.createElement('div', { key: 'text', style: { fontSize: '12.5px', lineHeight: 1.6, overflowWrap: 'anywhere' } }, branch?.isRemote === true ? branch.name : branch?.name ?? ''),
-          remotes.length > 1
-            ? react.createElement(
-                'label',
-                { key: 'remote', style: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px', color: SECONDARY } },
-                t('remoteTag'),
-                react.createElement(
-                  'select',
-                  {
-                    value: remote,
-                    'data-desktop-sc-field': 'remote',
-                    onChange: (event) => setRemote(event.target.value),
-                    style: { height: '32px', borderRadius: '7px', border: `1px solid ${BORDER}`, background: SURFACE, color: 'inherit', fontFamily: UI_FONT, fontSize: '12.5px' },
-                  },
-                  remotes.map((item) => react.createElement('option', { key: item.name, value: item.name }, item.name)),
-                ),
-              )
-            : null,
+          react.createElement('div', { key: 'text', style: { fontSize: '12.5px', lineHeight: 1.6, overflowWrap: 'anywhere' } }, t('confirmForcePush')),
         ]
         submit = async () => {
           const result = await run('remote', {
             action: 'push',
-            ...(remote === '' ? {} : { remote }),
-            // 只推**本地分支**：远程分支条目上"推送"等于把远端状态推回它自己，无意义。
-            ...(branch !== undefined && branch.isRemote !== true ? { branch: branch.name } : {}),
-            // 没有上游的分支第一次推送要建立跟踪，否则下次 push 还得指定远端。
-            ...(branch !== undefined && branch.upstream === '' ? { setUpstream: true } : {}),
-          })
-          if (result !== undefined) onDone()
-        }
-      } else if (kind === 'update') {
-        title = t('actionUpdate')
-        body = [react.createElement('div', { key: 'text', style: { fontSize: '12.5px', lineHeight: 1.6 } }, `${t('menuFetch')} → pull`)]
-        submit = async () => {
-          // 先 fetch 再 pull：fetch 会把远端新提交取回本地对象库，也让领先/落后数字
-          // 在拉取之前就是准的；pull 自己虽然也会 fetch，但合并失败时用户至少已经
-          // 看到了最新的远端状态。
-          const fetched = await run('remote', { action: 'fetch' })
-          if (fetched === undefined) return
-          const result = await run('remote', { action: 'pull' })
+            forceWithLease: true,
+            ...(branch ? { branch: branch.name } : {}),
+          }, () => t('pushed'))
           if (result !== undefined) onDone()
         }
       } else if (kind === 'commit') {

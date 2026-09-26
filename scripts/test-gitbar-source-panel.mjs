@@ -903,14 +903,14 @@ await ui.click('data-desktop-sc-button', 'confirm')
 check('   改了就发 rename', JSON.stringify(posts[0]?.body), '{"from":"develop","to":"develop-v2"}')
 
 console.log('')
-console.log('=== 15. 推送：带远端；有上游时不改跟踪配置 ===')
+console.log('=== 15. 推送：直接执行，不再弹二次确认 ===')
 posts.length = 0
 await ui.openPanel()
 await ui.contextMenu('develop')
 await ui.click('data-desktop-sc-menuitem', 'push')
-posts.length = 0
-await ui.click('data-desktop-sc-button', 'confirm')
-check('15) 发出 remote 路由', posts.map((p) => p.route).join(','), 'remote')
+// 点击即执行：不再有「推送」对话框，也不再需要再点一次确定。
+check('15) 菜单项点击后没有跳出推送对话框', ui.find('data-desktop-sc-dialog', 'push') === null, 'true')
+check('   发出 remote 路由', posts.map((p) => p.route).join(','), 'remote')
 const pushBody = posts[0]?.body
 check('   action 是 push', pushBody?.action, 'push')
 check('   带分支名', pushBody?.branch, 'develop')

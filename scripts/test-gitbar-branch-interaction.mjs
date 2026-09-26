@@ -409,7 +409,9 @@ console.log('=== 4. 右键：与单击**同一套**菜单 ===')
   clickRow(rowOf('develop', nodes))
   await sleep(260)
   const single = await readMenu('develop')
-  check('4) 单击菜单有 7 个条目', single.length, 7)
+  // 8 项：checkout / new-from / merge / rebase / push / rename / delete / copy-name。
+  // 最后一项「复制分支名」排在「删除」之后、单独一段（前面有分隔线），它是这次新加的。
+  check('4) 单击菜单有 8 个条目', single.length, 8)
   // 收起后走右键：同一行、同一套条目。
   nodes = await closeMenu()
   contextMenuRow(rowOf('develop', nodes))
@@ -420,7 +422,7 @@ console.log('=== 4. 右键：与单击**同一套**菜单 ===')
   check(
     '   条目顺序稳定（动作位置可记忆）',
     right.join(','),
-    'checkout:on,new-from:on,merge:on,rebase:on,push:on,rename:on,delete:on',
+    'checkout:on,new-from:on,merge:on,rebase:on,push:on,rename:on,delete:on,copy-name:on',
   )
   // 右键菜单里的条目真的能点开对话框（不是只有一个壳）。
   const newFrom = find('data-desktop-sc-menu', 'develop', nodes).props.children.find(

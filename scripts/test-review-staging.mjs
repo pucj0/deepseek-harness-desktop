@@ -440,16 +440,20 @@ const checkTrue = (label, actual) => check(label, actual === true, true)
 console.log('=== 1. classifyEntry：porcelain 的 XY 两列 ===')
 const classify = loaded.__stagingClassifyForTest
 checkTrue('1) 导出了 classifyEntry', typeof classify === 'function')
-check('1) `A ` 只有已暂存', JSON.stringify(classify({ index: 'A', worktree: ' ' })), '{"staged":true,"unstaged":false}')
-check('   ` M` 只有未暂存', JSON.stringify(classify({ index: ' ', worktree: 'M' })), '{"staged":false,"unstaged":true}')
+check('1) `A ` 只有已暂存', JSON.stringify(classify({ index: 'A', worktree: ' ' })), '{"conflicted":false,"staged":true,"unstaged":false}')
+check('   ` M` 只有未暂存', JSON.stringify(classify({ index: ' ', worktree: 'M' })), '{"conflicted":false,"staged":false,"unstaged":true}')
 // 这一条是本区块最容易做错的地方：同一个文件两边都有改动时，它必须在**两组里都出现**。
-check('   `MM` 两边都有', JSON.stringify(classify({ index: 'M', worktree: 'M' })), '{"staged":true,"unstaged":true}')
-check('   `??` 两组都不算（它是未跟踪）', JSON.stringify(classify({ index: '?', worktree: '?' })), '{"staged":false,"unstaged":false}')
-check('   `D ` 已暂存的删除', JSON.stringify(classify({ index: 'D', worktree: ' ' })), '{"staged":true,"unstaged":false}')
-check('   ` M`（删除未暂存）', JSON.stringify(classify({ index: ' ', worktree: 'D' })), '{"staged":false,"unstaged":true}')
+check('   `MM` 两边都有', JSON.stringify(classify({ index: 'M', worktree: 'M' })), '{"conflicted":false,"staged":true,"unstaged":true}')
+check('   `??` 两组都不算（它是未跟踪）', JSON.stringify(classify({ index: '?', worktree: '?' })), '{"conflicted":false,"staged":false,"unstaged":false}')
+check('   `D ` 已暂存的删除', JSON.stringify(classify({ index: 'D', worktree: ' ' })), '{"conflicted":false,"staged":true,"unstaged":false}')
+check('   ` M`（删除未暂存）', JSON.stringify(classify({ index: ' ', worktree: 'D' })), '{"conflicted":false,"staged":false,"unstaged":true}')
+// 未合并（冲突）是**第三类**：它既不属于已暂存也不属于未暂存，而是自己的那一组——冲突行上
+// 的 stage / revert 都是错的（前者会把 `<<<<<<<` 加进索引，后者会丢掉用户还没看过的改动）。
+check('   `UU` 是冲突，不算已暂存也不算未暂存', JSON.stringify(classify({ index: 'U', worktree: 'U' })), '{"conflicted":true,"staged":false,"unstaged":false}')
+check('   宿主给的 conflict 标记同样判为冲突', JSON.stringify(classify({ index: 'A', worktree: 'A', conflict: true })), '{"conflicted":true,"staged":false,"unstaged":false}')
 // 形状不对时不许抛错：面板在中间态下会照样调用它。
-check('   空对象不抛错', JSON.stringify(classify({})), '{"staged":false,"unstaged":false}')
-check('   undefined 不抛错', JSON.stringify(classify(undefined)), '{"staged":false,"unstaged":false}')
+check('   空对象不抛错', JSON.stringify(classify({})), '{"conflicted":false,"staged":false,"unstaged":false}')
+check('   undefined 不抛错', JSON.stringify(classify(undefined)), '{"conflicted":false,"staged":false,"unstaged":false}')
 
 // ---- 渲染 ------------------------------------------------------------------------
 const Staging = loaded.__stagingSectionForTest
