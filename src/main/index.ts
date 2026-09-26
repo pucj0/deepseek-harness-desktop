@@ -16,9 +16,11 @@ import { CredentialStore } from './credentials'
 import { DshServer } from './dsh-server'
 import type { ServerReady } from './dsh-server'
 import { formatGitBadge, readGitInfo } from './git'
-import { format, initShellStrings, t } from './i18n'
+import { readLocalePreference, watchLocalePreference } from './harness-locale'
+import { format, initShellStrings, resolveShellLocale, setShellLocale, t } from './i18n'
 import { healModuleFallback } from './module-heal'
-import { menuBarEntries, openMenuAt } from './menu'
+import { applicationMenuTemplate, dumpMenuTemplate, menuBarEntries, openMenuAt } from './menu'
+import type { ApplicationMenuDeps } from './menu'
 import type { PanelRow } from './panel'
 import { resolveRuntime } from './paths'
 import type { RuntimeLocation } from './paths'
@@ -27,7 +29,8 @@ import { ensureRuntimeUnpacked } from './runtime-unpack'
 import { showProjectInfo } from './project-info'
 import { readSettings } from './settings'
 import { ShellUpdater } from './shell-updater'
-import { installCloseToTray, createTray } from './tray'
+import { installCloseToTray, createTray, refreshTray } from './tray'
+import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
 import { RuntimeUpdater, locateNpmCli } from './updater'
 import { createMainWindow } from './window'
@@ -42,6 +45,9 @@ const SHELL_VERSION: string = (() => {
     return '0.0.0'
   }
 })()
+
+/** 发布页面地址（帮助菜单里的外部链接）。 */
+const RELEASES_URL = 'https://github.com/pucj0/deepseek-harness-desktop/releases'
 
 /** Populated during startup, read by the shutdown path. */
 interface Session {
@@ -97,10 +103,6 @@ async function main(): Promise<void> {
   nativeTheme.themeSource = 'system'
   await app.whenReady()
 
-  // Localization must be resolved after ready: the system locale is not available
-  // before it. Every shell-owned string (menus, tray, dialogs) reads from here.
-  const strings = initShellStrings()
-
   const userDataDir = process.env.DSH_DESKTOP_HOME ?? app.getPath('userData')
   // 本进程生命周期内不变：切换工作区靠重启应用，而不是就地替换（见 workspace-switch.ts）。
   const workspace = resolveWorkspace(process.argv, userDataDir)
@@ -108,6 +110,15 @@ async function main(): Promise<void> {
   // separate from a command-line `dsh` install, so the two can coexist.
   const dshHome = join(userDataDir, 'home')
   mkdirSync(dshHome, { recursive: true })
+
+  // Localization: the source of truth is **Harness's own language setting**, persisted in the
+  // host settings document under `locale.preference` (see harness-locale.ts). Read it before the
+  // window exists so the very first frame is already in the right language — no English flash
+  // that later flips to Chinese. With no stored preference the system language is used, which is
+  // exactly Harness's own browser-derived fallback. Every shell-owned string (menus, tray,
+  // dialogs) reads from this same table; `applyShellLocale` refreshes what is built rather than
+  // read per use.
+  const strings = initShellStrings(readLocalePreference(dshHome))
 
   const credentials = new CredentialStore(userDataDir)
 
@@ -277,18 +288,79 @@ async function main(): Promise<void> {
     })
   }
 
+  /**
+   * 语言之外的应用菜单输入：命令回调与动态数据。
+   *
+   * 抽成一份可复用的对象，是因为菜单在**语言变化时会被重建**：重建必须换文案、绝不能换命令，
+   * 而复用同一份 deps 正好把这件事变成结构上的保证（测试也直接比对中英两份模板）。
+   *
+   * @param projectInfo - 「项目信息」入口。
+   * @param openUpdates - 「检查更新」入口。
+   * @returns 交给 `applicationMenuTemplate` 的输入（文案与外壳版本由调用方补上）。
+   */
+  const menuDepsFor = (
+    projectInfo: () => void,
+    openUpdates: () => void,
+  ): Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> => {
+    const actions = createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace })
+    return {
+      recent: actions.recent,
+      runtimeVersion,
+      openFolder: actions.openFolder,
+      openRecent: actions.openRecent,
+      projectInfo,
+      revealWorkspace: actions.revealWorkspace,
+      copyWorkspacePath: actions.copyWorkspacePath,
+      openUpdates,
+      openReleases: () => void shell.openExternal(RELEASES_URL),
+    }
+  }
+
+  /** 菜单输入（语言变化时用它重建菜单；在诊断模式与正常模式下各装配一次）。 */
+  let menuDeps: Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> | undefined
+  /** 停止监听 Harness 语言设置（退出时收尾）。 */
+  let stopLocaleWatch: (() => void) | undefined
+  let tray: Tray | undefined
+  let trayActions: TrayActions | undefined
+
+  /**
+   * 把"Harness 的语言变了"应用到已经构建出来的界面上。
+   *
+   * 三件事，缺一不可：
+   *   * 应用菜单——重建它（标题栏的菜单按钮与原生下拉的文案都来自它）；
+   *   * 托盘菜单——它是启动时构建的，不重建就会留在旧语言；
+   *   * 标题栏状态——推一次状态，页面据此改写 `<html lang>`、导航按钮文案并重新取菜单按钮。
+   *
+   * 对话框、项目信息窗口、更新窗口不在这里：它们拿的是同一份**活**文案表（`strings`），
+   * 读的时候已经是新语言。
+   *
+   * @param locale - 新的语言偏好（原始值；undefined 表示偏好被清空 → 回退系统语言）。
+   */
+  const applyShellLocale = (locale: string | undefined): void => {
+    // 没有偏好（第一次使用，或用户把设置清空）时回退系统语言——与启动路径同一个判定。
+    if (!setShellLocale(resolveShellLocale(locale))) return
+    if (menuDeps !== undefined) buildApplicationMenu(menuDeps)
+    if (tray !== undefined && trayActions !== undefined) refreshTray(tray, trayActions)
+    mainWindow.publishShellState()
+  }
+
+  // 退出时关掉设置文档的监听（两条启动路径都经过这里注册的这一处）。
+  app.on('will-quit', () => {
+    stopLocaleWatch?.()
+  })
+
   // 纯菜单诊断：菜单不依赖服务端，而启动服务端要 ~11 秒。以
   // DSH_DESKTOP_DUMP_MENU=1 启动时，构建完菜单就直接退出，让菜单可以被脚本
   // 快速断言，而不是每次等十几秒。
   if (process.env.DSH_DESKTOP_DUMP_MENU === '1') {
-    buildApplicationMenu(
-      window,
-      updater,
-      runtimeVersion,
-      () => {},
-      createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace }),
-      () => {},
-    )
+    menuDeps = menuDepsFor(() => {}, () => {})
+    buildApplicationMenu(menuDeps)
+    // 诊断实例默认打完就退；`DSH_DESKTOP_MENU_WATCH=1` 时让它活着并跟着语言重建菜单，
+    // 于是"运行中切换语言"可以只靠 stderr 就被断言（见 test-shell-locale.mjs）。
+    if (process.env.DSH_DESKTOP_MENU_WATCH === '1') {
+      stopLocaleWatch = watchLocalePreference(dshHome, applyShellLocale)
+      return
+    }
     app.exit(0)
     return
   }
@@ -343,7 +415,7 @@ async function main(): Promise<void> {
     })
   }
 
-  const tray = createTray(iconPath, {
+  trayActions = {
     show: () => {
       window.show()
       window.focus()
@@ -359,7 +431,8 @@ async function main(): Promise<void> {
       if (session !== undefined) session.quitting = true
       app.quit()
     },
-  })
+  }
+  tray = createTray(iconPath, trayActions)
 
   installCloseToTray(window, () => tray !== undefined && session?.quitting !== true)
   window.on('closed', () => {
@@ -367,17 +440,18 @@ async function main(): Promise<void> {
     if (tray === undefined) app.quit()
   })
 
-  buildApplicationMenu(
-    window,
-    updater,
-    runtimeVersion,
+  menuDeps = menuDepsFor(
     () => {
       showProjectInfoFor(window, workspace, dshHome, userDataDir, runtime, runtimeVersion, strings)
     },
-    createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace }),
     openUpdates,
   )
+  buildApplicationMenu(menuDeps)
   session = { server, window, ...(tray !== undefined ? { tray } : {}), updater, quitting: false }
+
+  // 跟随 Harness 的语言设置：宿主把用户选择写进 `<dshHome>/settings.yaml` 的
+  // `locale.preference`，这里盯着同一个文件，改了就重建菜单/托盘并刷标题栏——**不重启应用**。
+  stopLocaleWatch = watchLocalePreference(dshHome, applyShellLocale)
 
   // 启动时**不再**静默检查外壳更新。
   //
@@ -834,122 +908,31 @@ export interface WorkspaceActions {  /** 弹出目录选择器，切换工作区
   recent: Array<{ label: string; path: string }>
 }
 
-/** Application menu, reduced to what a desktop shell should own. */
+/**
+ * Application menu, reduced to what a desktop shell should own.
+ *
+ * The content lives in `menu.ts` as a pure template (labels from `t()`), so this function only
+ * has to install it and emit the diagnostic dump. Rebuilding is cheap and idempotent — that is
+ * what makes a runtime language switch possible without restarting the app.
+ *
+ * @param deps - commands and dynamic data for the template.
+ * @returns the installed template (for diagnostics/tests).
+ */
 function buildApplicationMenu(
-  window: BrowserWindow,
-  updater: RuntimeUpdater,
-  runtimeVersion: string,
-  openProjectInfo: () => void,
-  workspaceActions: WorkspaceActions,
-  openUpdates: () => void,
-): void {
-  const s = t()
-  const template: Electron.MenuItemConstructorOptions[] = [
-    {
-      label: s.menuFile,
-      submenu: [
-        { label: s.itemOpenFolder, accelerator: 'CmdOrCtrl+O', click: workspaceActions.openFolder },
-        {
-          label: s.itemOpenRecent,
-          submenu:
-            workspaceActions.recent.length === 0
-              ? [{ label: s.itemNoRecent, enabled: false }]
-              : workspaceActions.recent.map((entry) => ({
-                  label: entry.label,
-                  toolTip: entry.path,
-                  click: () => workspaceActions.openRecent(entry.path),
-                })),
-        },
-        { type: 'separator' },
-        { label: s.itemProjectInfo, accelerator: 'CmdOrCtrl+I', click: openProjectInfo },
-        {
-          label: s.itemRevealWorkspace,
-          click: workspaceActions.revealWorkspace,
-        },
-        { label: s.itemCopyWorkspacePath, click: workspaceActions.copyWorkspacePath },
-        { type: 'separator' },
-        { label: s.itemReload, role: 'reload' },
-        { label: s.itemForceReload, role: 'forceReload' },
-        { label: s.itemToggleDevTools, role: 'toggleDevTools' },
-        { type: 'separator' },
-        { label: s.itemQuit, role: 'quit' },
-      ],
-    },
-    {
-      label: s.menuEdit,
-      submenu: [
-        { label: s.itemUndo, role: 'undo' },
-        { label: s.itemRedo, role: 'redo' },
-        { type: 'separator' },
-        { label: s.itemCut, role: 'cut' },
-        { label: s.itemCopy, role: 'copy' },
-        { label: s.itemPaste, role: 'paste' },
-        { label: s.itemSelectAll, role: 'selectAll' },
-      ],
-    },
-    {
-      label: s.menuView,
-      submenu: [
-        { label: s.itemResetZoom, role: 'resetZoom' },
-        { label: s.itemZoomIn, role: 'zoomIn' },
-        { label: s.itemZoomOut, role: 'zoomOut' },
-        { type: 'separator' },
-        { label: s.itemToggleFullScreen, role: 'togglefullscreen' },
-      ],
-    },
-    {
-      // 更新入口是一等公民：它是用户唯一能主动让应用变新的地方。
-      //
-      // 这里**不再**列出两行版本号。原先那种「智能体运行时 0.1.5-rc.1 / 外壳 1.0.0」
-      // 的写法把元数据混进行动菜单，读起来像选项却点不动，观感很怪。版本信息改到
-      // 更新窗口里展示——那里还能同时给出「最新版本」与来源，信息更完整。
-      label: s.menuUpdate,
-      submenu: [
-        {
-          label: s.itemCheckUpdates,
-          accelerator: 'CmdOrCtrl+Shift+U',
-          click: () => void openUpdates(),
-        },
-      ],
-    },
-    {
-      label: s.menuHelp,
-      submenu: [
-        { label: s.itemCheckUpdates, click: () => void openUpdates() },
-        { type: 'separator' },
-        {
-          label: s.itemOpenReleases,
-          click: () => void shell.openExternal('https://github.com/pucj0/deepseek-harness-desktop/releases'),
-        },
-        { type: 'separator' },
-        // 静态元数据放在帮助菜单里，并明确标为不可点击的信息。
-        { label: `${s.itemRuntimeVersion}  ${runtimeVersion}`, enabled: false },
-        { label: `${s.itemShellVersion}  ${SHELL_VERSION}`, enabled: false },
-      ],
-    },
-  ]
+  deps: Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'>,
+): Electron.MenuItemConstructorOptions[] {
+  // 文案每次都从当前语言取：菜单会在语言变化时被重建（见 applyShellLocale）。
+  const template = applicationMenuTemplate({ ...deps, strings: t(), shellVersion: SHELL_VERSION })
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
-
   // 诊断开关：DSH_DESKTOP_DUMP_MENU=1 时把菜单结构打到 stderr。
   //
   // 存在的理由：菜单在主进程里，渲染进程的 CDP 读不到；而没有可读的输出，
-  // "菜单改对了吗"就只能靠人肉截图去猜。有了它，菜单结构可以被脚本断言。
+  // "菜单改对了吗"就只能靠人肉截图去猜。有了它，菜单结构可以被脚本断言——语言切换会
+  // 再打一次，因此"运行中切换语言"同样可断言。
   if (process.env.DSH_DESKTOP_DUMP_MENU === '1') {
-    const dump = (items: Electron.MenuItemConstructorOptions[], indent = ''): string =>
-      items
-        .map((item) => {
-          const label = item.label ?? (item.role === undefined ? '(分隔)' : `role=${item.role}`)
-          const accel = item.accelerator === undefined ? '' : `  [${item.accelerator}]`
-          const disabled = item.enabled === false ? '  (禁用)' : ''
-          const head = `${indent}${label}${accel}${disabled}`
-          const children = Array.isArray(item.submenu)
-            ? '\n' + dump(item.submenu as Electron.MenuItemConstructorOptions[], `${indent}    `)
-            : ''
-          return head + children
-        })
-        .join('\n')
-    process.stderr.write(`[menu]\n${dump(template)}\n[/menu]\n`)
+    process.stderr.write(`[menu]\n${dumpMenuTemplate(template)}\n[/menu]\n`)
   }
+  return template
 }
 
 /** Best-effort shell self-update; never blocks startup. */

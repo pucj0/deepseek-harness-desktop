@@ -1,14 +1,29 @@
 /**
  * Shell localization.
  *
- * Only *this* shell's own chrome needs translating: the official web UI already
- * localizes itself from its own locale setting. These strings cover the window
- * menu, the tray menu, and the update/error dialogs.
+ * Only *this* shell's own chrome needs translating: the official web UI localizes
+ * itself. These strings cover the window menu, the tray menu, and the update/error
+ * dialogs.
  *
- * The language follows the operating system, matching how the harness UI behaves:
- * a Chinese system gets Chinese, everything else gets English.
+ * ## One locale source of truth: the Harness preference
+ *
+ * The language is **not** chosen here. Harness owns the setting (`@deepseek-ai/dsh-client-locale`
+ * persists it as `locale.preference` in the host settings document — see `harness-locale.ts`),
+ * and this module only maps that value onto a catalog. `normalizeLocale` is the single place
+ * that decides what a raw locale means, so no call site has to compare against `'zh'` itself.
+ *
+ * When Harness has no explicit preference yet, the effective locale is the browser-derived one
+ * (its own fallback), which for this app is the operating system's language list — hence
+ * {@link systemLanguage}. That keeps today's behaviour for a user who never opened the setting.
+ *
+ * {@link setShellLocale} swaps the catalog **in place** (see {@link LIVE}), so every component
+ * that captured `t()` or the object returned by `initShellStrings` follows a runtime change
+ * without re-plumbing.
  */
 import { app } from 'electron'
+
+/** The languages this shell ships, as canonical ids. */
+export type ShellLocale = 'zh-CN' | 'en-US'
 
 /** Every user-visible string this shell owns. */
 export interface ShellStrings {
@@ -439,55 +454,132 @@ const zh: ShellStrings = {
   buttonOk: '确定',
 }
 
-/** Language tag used before `app` is ready; the system locale is unavailable then. */
-const FALLBACK_LANGUAGE = 'en'
-
-/** All shipped languages, keyed by a lowercase language subtag. */
-const CATALOG: Record<string, ShellStrings> = {
-  en,
-  zh,
+/** All shipped languages, keyed by canonical id. */
+const CATALOG: Record<ShellLocale, ShellStrings> = {
+  'en-US': en,
+  'zh-CN': zh,
 }
 
-let current: ShellStrings | undefined
+/**
+ * Normalize any locale-ish string to a shipped canonical id.
+ *
+ * Accepts the spellings that actually reach us: Harness stores `zh` / `en` (its built-in
+ * dictionary ids), a language pack could register `zh-Hans` or `en-GB`, and a browser says
+ * `zh-CN` / `en_US`. Matching is on the primary subtag because the shell ships **one** Chinese
+ * and **one** English catalog — the same simplification the harness dictionaries make.
+ *
+ * @param locale - raw locale (`zh`, `zh-CN`, `zh_CN`, `en-US`, …); may be empty or undefined.
+ * @returns canonical id, or undefined when the language is not one this shell ships.
+ */
+export function normalizeLocale(locale: string | undefined): ShellLocale | undefined {
+  if (typeof locale !== 'string') return undefined
+  const primary = locale.trim().toLowerCase().split(/[-_]/u)[0] ?? ''
+  if (primary === 'zh') return 'zh-CN'
+  if (primary === 'en') return 'en-US'
+  return undefined
+}
 
 /**
- * Pick the language for a locale string.
+ * The live string table.
  *
- * Matches on the primary subtag so `zh-CN`, `zh-Hans-CN`, and `zh-TW` all resolve
- * to the Chinese catalog — the harness UI itself does not distinguish them either.
+ * A single mutable object rather than "the current catalog": menus, the tray, dialogs and the
+ * project-info window all receive this object once, and mutating it is what makes a runtime
+ * locale switch reach every one of them without touching their call sites. Its keys are exactly
+ * {@link ShellStrings}, and it starts as English so a lookup before startup cannot be blank.
+ */
+const LIVE: ShellStrings = { ...en }
+
+/** Canonical id of the catalog currently copied into {@link LIVE}. */
+let activeLocale: ShellLocale = 'en-US'
+
+/**
+ * Pick the catalog for a locale string.
+ *
+ * Unknown languages fall back to English, matching the harness dictionary chain (English is its
+ * terminal fallback).
  *
  * @param locale - a BCP-47 locale such as `zh-CN`; may be empty or undefined.
  * @returns the matching catalog, or English.
  */
 export function catalogFor(locale: string | undefined): ShellStrings {
-  if (locale === undefined || locale === '') return en
-  const primary = locale.toLowerCase().split(/[-_]/u)[0] ?? ''
-  return CATALOG[primary] ?? en
+  return CATALOG[normalizeLocale(locale) ?? 'en-US'] ?? en
 }
 
 /**
- * Resolve the shell's strings from the operating system language.
+ * Resolve the language from the operating system.
  *
- * Must be called after `app.whenReady()`, because `getPreferredSystemLanguages()`
- * and `getLocale()` are only populated then.
+ * This is only the **fallback** for "Harness has no explicit preference": the official client
+ * derives its own provisional locale from `navigator.languages` in exactly the same situation,
+ * so following the system here is following Harness rather than inventing a rule.
  *
- * @returns the active catalog.
+ * @returns a system language tag, or undefined when `app` is unavailable (plain-node tests).
  */
-export function initShellStrings(): ShellStrings {
-  const preferred = app.getPreferredSystemLanguages()
-  const locale = preferred.length > 0 ? preferred[0] : app.getLocale()
-  current = catalogFor(locale ?? FALLBACK_LANGUAGE)
-  return current
+function systemLanguage(): string | undefined {
+  try {
+    const preferred = app?.getPreferredSystemLanguages?.() ?? []
+    if (preferred.length > 0) return preferred[0]
+    return app?.getLocale?.() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Apply a locale to the live string table.
+ *
+ * @param locale - raw locale from Harness (or anything else); unknown values mean English.
+ * @returns whether the **active language** changed (so callers can skip redundant work).
+ */
+export function setShellLocale(locale: string | undefined): boolean {
+  const next = normalizeLocale(locale) ?? 'en-US'
+  const changed = next !== activeLocale
+  Object.assign(LIVE, CATALOG[next])
+  activeLocale = next
+  return changed
+}
+
+/** The canonical id of the language currently on screen. */
+export function currentLocale(): ShellLocale {
+  return activeLocale
+}
+
+/**
+ * Resolve the language to use for a raw Harness preference.
+ *
+ * The preference wins; an absent/blank one means "Harness has nothing stored", and then the
+ * operating system decides — the same fallback Harness itself uses (its provisional locale comes
+ * from the browser's language list). Note this is the **only** place that fallback happens, so a
+ * runtime switch to "no preference" re-resolves exactly like a fresh start does.
+ *
+ * @param locale - raw Harness preference (`zh`, `en`, …), possibly empty/undefined.
+ * @param fallback - the language to use when there is no preference; defaults to the system's.
+ *   Injectable so the rule itself can be tested without depending on the host machine.
+ * @returns the locale to apply (possibly still undefined when nothing is known).
+ */
+export function resolveShellLocale(locale: string | undefined, fallback?: string): string | undefined {
+  if (typeof locale === 'string' && locale.trim() !== '') return locale
+  return fallback ?? systemLanguage()
+}
+
+/**
+ * Initialize the shell strings for this process.
+ *
+ * @param locale - the Harness locale preference when there is one; when omitted, the operating
+ *   system's language is used (Harness's own browser-derived fallback).
+ * @returns the live string table (see {@link LIVE}).
+ */
+export function initShellStrings(locale?: string): ShellStrings {
+  setShellLocale(resolveShellLocale(locale))
+  return LIVE
 }
 
 /**
  * The active catalog.
  *
- * Falls back to English when read before {@link initShellStrings}, so a string
- * lookup can never throw during early startup.
+ * Returns the live table, so callers always see the current language.
  */
 export function t(): ShellStrings {
-  return current ?? en
+  return LIVE
 }
 
 /**

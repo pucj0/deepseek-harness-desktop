@@ -35,6 +35,7 @@ The app boots the official `dsh-base` and `dsh-web-app` bundles. Harness feature
 - A native folder picker, recent workspaces, a file-manager action, and a copy-workspace-path action.
 - Single-instance behavior, remembered window size and position, and external links opened in the system browser.
 - Workspace switching that restarts the app and navigates the existing window. The new directory is registered in Harness's own project list on the next launch, so the official sidebar really switches to it — not just the shell and the Git plugins. The selected workspace is remembered.
+- **The shell's language follows Harness's own language setting**: the menu bar, title bar, tray and shell dialogs all read that one source, so changing the language inside Harness takes effect immediately — no restart. Only when Harness has no stored language does the system language decide.
 - Chinese and English shell text, plus a separate UI font-size plugin.
 
 ### Git workflow
@@ -155,13 +156,14 @@ npm run dev
 npm run typecheck
 npm run test:i18n
 npm run test:startup
+npm run test:locale
 npm run test:git
 npm run dist:win
 npm run dist:linux
 npm run dist:mac
 ```
 
-Build each package on its target platform. `npm run test:git` runs the whole Git workflow regression chain: conflicts (merge, rebase, cherry-pick and revert, all on real temporary repositories), the end-to-end publish flow, the branch toolbar and its source panel, and the review drawer's conflict UI and staging area. `scripts/` also contains tests for Git branches, repository discovery, change review, staging and commits, plugin sync, runtime staging, and Electron/CDP smoke runs. Tests that drive a real window need a graphical session.
+Build each package on its target platform. `npm run test:locale` verifies that the shell language follows Harness: locale normalization, settings-document parsing and watching, the menu template (Chinese vs English, with the commands proven unchanged), a live switch inside a real app instance (no restart), a workspace switch that does not reset the language, and the title-bar buttons plus the document `lang`. `npm run test:git` runs the whole Git workflow regression chain: conflicts (merge, rebase, cherry-pick and revert, all on real temporary repositories), the end-to-end publish flow, the branch toolbar and its source panel, and the review drawer's conflict UI and staging area. `scripts/` also contains tests for Git branches, repository discovery, change review, staging and commits, plugin sync, runtime staging, and Electron/CDP smoke runs. Tests that drive a real window need a graphical session.
 
 ## Releases
 

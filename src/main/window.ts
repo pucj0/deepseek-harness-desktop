@@ -43,6 +43,7 @@ import {
   type WebContents,
 } from 'electron'
 import type { ShellMenuBarEntry } from './menu'
+import { currentLocale, t } from './i18n'
 import { shellPageHtml } from './shell-page'
 import {
   TITLEBAR_HEIGHT,
@@ -93,6 +94,16 @@ interface ShellState {
   canGoBack: boolean
   canGoForward: boolean
   theme: ShellTheme
+  /**
+   * 当前语言（规范 id，如 `zh-CN`）。
+   *
+   * 标题栏页面用它做两件事：把文档的 `lang` 写对，以及在**语言变化**时重新取一次菜单按钮
+   * （菜单按钮的文案来自原生菜单，语言一变主进程会重建菜单，页面必须再拉一次才看得到）。
+   */
+  locale: string
+  /** 前进/后退按钮的无障碍文案（随语言变化，因此走状态推送而不是只在加载时给一次）。 */
+  backLabel: string
+  forwardLabel: string
 }
 
 /** 读取持久化的窗口几何。 */
@@ -159,11 +170,24 @@ export function createMainWindow(options: MainWindowOptions): {
   /** 更新加载页的提示文案（例如解包进度）。 */
   setSplashHint: (hint: string) => void
   setGitBadge: (badge: string | undefined) => void
+  /**
+   * 重新推一次标题栏状态。
+   *
+   * 语言变化时由 `index.ts` 调用：重建原生菜单之后，标题栏必须再拉一次菜单按钮才会显示
+   * 新文案（状态里带着 `locale`，页面据此知道该重取）。
+   */
+  publishShellState: () => void
   close: () => void
 } {
   const { userDataDir, iconPath, splashTitle, splashHint, menu } = options
-  const backLabel = options.backLabel ?? 'Back'
-  const forwardLabel = options.forwardLabel ?? 'Forward'
+  /**
+   * 导航按钮的无障碍文案。
+   *
+   * 显式传入的优先（标题栏测试会固定文案），否则**每次读取当前语言**——语言可以在运行中
+   * 变化，因此这里不能像以前那样在创建窗口时取一次就存下来。
+   */
+  const backLabel = (): string => options.backLabel ?? t().titlebarBack
+  const forwardLabel = (): string => options.forwardLabel ?? t().titlebarForward
   const state = loadState(userDataDir)
   const custom = usesCustomTitleBar()
   const titlebarHeight = custom ? TITLEBAR_HEIGHT : 0
@@ -243,8 +267,9 @@ export function createMainWindow(options: MainWindowOptions): {
           menus: drawsMenusInTitleBar(),
           splashTitle,
           splashHint: hint,
-          backLabel,
-          forwardLabel,
+          backLabel: backLabel(),
+          forwardLabel: forwardLabel(),
+          locale: currentLocale(),
           dark: theme.dark === true,
         }),
         'utf8',
@@ -332,6 +357,11 @@ export function createMainWindow(options: MainWindowOptions): {
     fullScreen: window.isFullScreen(),
     ...historyAvailability(),
     theme,
+    // 语言与它的两个按钮文案都是**当前值**：语言在运行中会变（见 index.ts 的 locale 监听），
+    // 标题栏据此写对 <html lang> 并重新取菜单按钮。
+    locale: currentLocale(),
+    backLabel: backLabel(),
+    forwardLabel: forwardLabel(),
   })
 
   /** 推一次完整状态给标题栏页面。 */
@@ -537,6 +567,7 @@ export function createMainWindow(options: MainWindowOptions): {
       title = badge === undefined ? baseTitle : `${baseTitle} — ${badge}`
       if (!window.isDestroyed()) window.setTitle(title)
     },
+    publishShellState: publishState,
     close: (): void => {
       if (!window.isDestroyed()) window.destroy()
     },

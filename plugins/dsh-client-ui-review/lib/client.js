@@ -831,6 +831,13 @@ window.__ModuleLoader__.load({
       statusDeleted: '删除',
       statusRenamed: '重命名',
       statusOther: '变更',
+      // git 的文件头（`diff --git` / `index` / `---` / `+++`）默认折叠成一条，这里就是那一条
+      // 的文案。它们是**界面文案**，因此必须走字典——此前写死成英文，于是中文界面里会突然
+      // 冒出一行「File changed」。
+      diffHeaderAdded: '新增文件',
+      diffHeaderDeleted: '删除文件',
+      diffHeaderRenamed: '重命名文件',
+      diffHeaderChanged: '文件已更改',
       // ---- 冲突解决 ----
       statusConflict: '冲突',
       conflictGroupTitle: '合并冲突',
@@ -1078,6 +1085,11 @@ window.__ModuleLoader__.load({
       statusDeleted: 'deleted',
       statusRenamed: 'renamed',
       statusOther: 'changed',
+      /** Wording of the collapsed git file header (see the zh dictionary for why it is here). */
+      diffHeaderAdded: 'New file',
+      diffHeaderDeleted: 'Deleted file',
+      diffHeaderRenamed: 'Renamed file',
+      diffHeaderChanged: 'File changed',
       // ---- conflict resolution ----
       statusConflict: 'conflict',
       conflictGroupTitle: 'Merge conflicts',
@@ -2980,6 +2992,35 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 折叠文件头要用的四条文案（默认英文）。
+     *
+     * 解析本身是纯函数（拿不到 `t`），因此文案由调用方从字典里取好传进来；默认值只服务于
+     * 拿不到翻译函数的非界面调用点——界面路径一律走字典，否则中文界面里会冒出一行英文
+     * （这正是这一版修掉的缺陷：此前 `File changed` 写死在这里）。
+     */
+    const DEFAULT_DIFF_HEADERS = {
+      added: 'New file',
+      deleted: 'Deleted file',
+      renamed: 'Renamed file',
+      changed: 'File changed',
+    }
+
+    /**
+     * 取当前语言的折叠文件头文案。
+     * @param t - 组件拿到的翻译函数（缺失时退回英文）。
+     * @returns `{ added, deleted, renamed, changed }`。
+     */
+    function diffHeaderLabels(t) {
+      if (typeof t !== 'function') return DEFAULT_DIFF_HEADERS
+      return {
+        added: t('diffHeaderAdded'),
+        deleted: t('diffHeaderDeleted'),
+        renamed: t('diffHeaderRenamed'),
+        changed: t('diffHeaderChanged'),
+      }
+    }
+
+    /**
      * 把统一差异解析成带行号的行。
      *
      * 行号是"看清改动"的关键：只有增删标记而没有位置，很难判断改在文件的哪一处。
@@ -2992,9 +3033,11 @@ window.__ModuleLoader__.load({
      * hunk 之前**折叠——万一 diff 由多段拼成，中间的头部行不会被误吞。
      *
      * @param diff - 单个文件的统一差异文本。
+     * @param headers - 折叠文件头的文案（见 {@link diffHeaderLabels}）。
      * @returns `{ kind, oldLine, newLine, text, meta? }` 数组；kind 为 fileheader/hunk/context/add/del/meta。
      */
-    function parseDiffRows(diff) {
+    function parseDiffRows(diff, headers) {
+      const labels = headers ?? DEFAULT_DIFF_HEADERS
       // `diff.split('\n')` 在 host 给回非字符串（例如被截断成对象、或 `null`）时直接抛
       // `split is not a function`。差异面板在抽屉里，一次抛就把整块面板带走。
       const text = typeof diff === 'string' ? diff : diff === undefined || diff === null ? '' : String(diff)
@@ -3010,7 +3053,7 @@ window.__ModuleLoader__.load({
         if (headerLines.length === 0) return
         rows.push({
           kind: 'fileheader',
-          text: headerKind === 'new' ? 'New file' : headerKind === 'deleted' ? 'Deleted file' : headerKind === 'rename' ? 'Renamed file' : 'File changed',
+          text: headerKind === 'new' ? labels.added : headerKind === 'deleted' ? labels.deleted : headerKind === 'rename' ? labels.renamed : labels.changed,
           meta: headerLines.join('\n'),
         })
         headerLines = []
@@ -3085,11 +3128,12 @@ window.__ModuleLoader__.load({
      *
      * @param diff - 单个文件的统一差异文本。
      * @param wrap - 是否自动换行。
+     * @param headers - 折叠文件头的文案（界面路径传 `diffHeaderLabels(t)`）。
      * @returns React 元素数组。
      */
-    function renderDiff(diff, wrap) {
+    function renderDiff(diff, wrap, headers) {
       const palette = diffPalette(isDarkTheme())
-      const rows = parseDiffRows(diff)
+      const rows = parseDiffRows(diff, headers)
       const columns = `${reviewMetrics.lineColWidth} ${reviewMetrics.lineColWidth} ${reviewMetrics.signColWidth} minmax(0, 1fr)`
       const codeWrapStyle =
         wrap === true
@@ -8041,7 +8085,7 @@ window.__ModuleLoader__.load({
               : react.createElement(
                   'div',
                   { 'data-review-diff-body-wrap': '', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
-                  react.createElement(DiffBody, { diff, wrap }),
+                  react.createElement(DiffBody, { diff, wrap, t }),
                 ),
       )
     }
@@ -8076,7 +8120,7 @@ window.__ModuleLoader__.load({
      *
      * 纵向不在这里滚：由外层（Changes 的文件滚动区 / Diff Preview 的 body）负责，避免嵌套滚动。
      *
-     * @param props - `{ diff, wrap }`。
+     * @param props - `{ diff, wrap, t }`；`t` 用于折叠文件头的文案（缺失时退回英文）。
      * @returns React 元素。
      */
     function DiffBody(props) {
@@ -8096,7 +8140,7 @@ window.__ModuleLoader__.load({
             overflowY: 'hidden',
           },
         },
-        renderDiff(props?.diff, wrap),
+        renderDiff(props?.diff, wrap, diffHeaderLabels(props?.t)),
       )
     }
 

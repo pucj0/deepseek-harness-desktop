@@ -38,6 +38,13 @@ export interface ShellPageOptions {
   /** 导航按钮的无障碍文案（窗口控制按钮是原生的，由系统提供文案）。 */
   backLabel: string
   forwardLabel: string
+  /**
+   * 当前语言（规范 id，如 `zh-CN`）。
+   *
+   * 写进文档的 `lang`：屏幕阅读器与拼写检查据此工作，而它必须与 Harness 的语言一致
+   * （页面里画的就是中文菜单，`lang="en"` 是错的）。
+   */
+  locale: string
   /** 深色主题下的初始配色（跟随系统）。 */
   dark: boolean
 }
@@ -170,8 +177,27 @@ const SCRIPT = `
   var hint = document.getElementById('startup-hint')
   var state = { ready: false, maximized: false, fullScreen: false, canGoBack: false, canGoForward: false }
   var layout = { custom: true, menus: true }
+  // 已经画出来的语言。语言一变，菜单按钮的文案（来自原生菜单）必须重新拉一次。
+  var locale = null
 
   if (!api) { return }
+
+  /** 把语言落到文档与导航按钮上。 */
+  function applyLocale(next) {
+    if (!next || typeof next.locale !== 'string' || next.locale === '') { return false }
+    var changed = next.locale !== locale
+    locale = next.locale
+    root.lang = next.locale
+    if (back && typeof next.backLabel === 'string') {
+      back.setAttribute('aria-label', next.backLabel)
+      back.title = next.backLabel
+    }
+    if (forward && typeof next.forwardLabel === 'string') {
+      forward.setAttribute('aria-label', next.forwardLabel)
+      forward.title = next.forwardLabel
+    }
+    return changed
+  }
 
   /** 把主题令牌落到 CSS 变量（缺项保持初始值）。 */
   function applyTheme(theme) {
@@ -275,6 +301,10 @@ const SCRIPT = `
     state = next
     applyLayout(next)
     applyTheme(next.theme)
+    // 语言变化：菜单按钮的文案在主进程重建菜单之后才更新，因此这里必须再拉一次。
+    if (applyLocale(next)) {
+      api.getMenu().then(function (entries) { buildMenubar(entries || []) }).catch(function () {})
+    }
     renderState()
   })
   api.onSplash(function (text) {
@@ -285,6 +315,7 @@ const SCRIPT = `
     state = initial
     applyLayout(initial)
     applyTheme(initial.theme)
+    applyLocale(initial)
     renderState()
     return api.getMenu()
   }).then(function (entries) {
@@ -301,12 +332,14 @@ const SCRIPT = `
  */
 export function shellPageHtml(options: ShellPageOptions): string {
   const theme = options.dark ? 'dark' : 'light'
+  // 缺省时用英文的规范 id：`lang` 必须是合法标签，不能让一个缺字段的调用把页面写坏。
+  const lang = escapeHtml(typeof options.locale === 'string' && options.locale !== '' ? options.locale : 'en-US')
   const menus = options.menus ? '' : ' hidden'
   // 不自绘标题栏（Linux 保留原生边框）时整条都不画，加载页铺满整个窗口。
   const bar = options.custom ? '' : ' hidden'
   const splashInset = options.custom ? 'var(--tb-height)' : '0px'
   return `<!doctype html>
-<html lang="zh" data-platform="${escapeHtml(options.platform)}" data-theme="${theme}">
+<html lang="${lang}" data-platform="${escapeHtml(options.platform)}" data-theme="${theme}">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">

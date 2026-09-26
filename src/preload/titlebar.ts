@@ -40,6 +40,16 @@ export interface ShellState {
   canGoBack: boolean
   canGoForward: boolean
   theme: ShellTheme
+  /**
+   * Active language, as a canonical id (`zh-CN` / `en-US`).
+   *
+   * The page writes it into `<html lang>` and — when it changes — re-reads the menu buttons,
+   * because their labels come from the native menu that the main process rebuilds.
+   */
+  locale: string
+  /** Accessibility text for the navigation buttons (changes with the language). */
+  backLabel: string
+  forwardLabel: string
 }
 
 interface ShellMenuBarEntry {

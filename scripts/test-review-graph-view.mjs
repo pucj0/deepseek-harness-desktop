@@ -1190,7 +1190,10 @@ console.log('=== 11. Diff Preview：高度拖动/持久化、Escape、工具栏�
     const nodes = collectHostNodes(body ?? { props: {} }, 'probe')
     const header = nodes.filter((n) => n.props?.['data-review-diff-fileheader'] !== undefined)
     check('   折叠后的文件头只有一条', header.length, 1)
-    checkTrue('   文件头文案是 "File changed"', textOf(header[0] ?? null).includes('File changed'))
+    // 文案必须走字典：这里用的假 `t` 原样返回键名，因此看到 `diffHeaderChanged` 就证明它
+    // 是从 `t('diffHeaderChanged')` 来的。此前这四个标签（`File changed` 等）写死在解析器里，
+    // 中文界面下会突然冒出一行英文——这条断言就是那个缺陷的回归。
+    checkTrue('   文件头文案走字典（t("diffHeaderChanged")）', textOf(header[0] ?? null).includes('diffHeaderChanged'))
     checkTrue('   原始头部行仍在 title 里（可追溯）', String(header[0]?.props?.title ?? '').includes('diff --git'))
     const kinds = nodes.filter((n) => n.props?.['data-review-diff-kind'] !== undefined).map((n) => n.props['data-review-diff-kind'])
     check('   没有把 diff --git / index / --- / +++ 当成代码行', kinds.filter((k) => k === 'meta').length, 0)

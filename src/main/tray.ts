@@ -29,8 +29,25 @@ export function createTray(iconPath: string | undefined, actions: TrayActions): 
   const image = nativeImage.createFromPath(iconPath)
   if (image.isEmpty()) return undefined
 
-  const strings = t()
   const tray = new Tray(image.resize({ width: 16, height: 16 }))
+  refreshTray(tray, actions)
+  tray.on('click', actions.show)
+  tray.on('double-click', actions.show)
+  return tray
+}
+
+/**
+ * Re-apply the current language to an existing tray.
+ *
+ * The tray menu is built once at startup, so a language change (which the shell follows from
+ * Harness's locale) would otherwise leave the tray in the previous language — the exact
+ * half-translated state this feature exists to avoid.
+ *
+ * @param tray - the tray to update.
+ * @param actions - the same callbacks it was created with.
+ */
+export function refreshTray(tray: Tray, actions: TrayActions): void {
+  const strings = t()
   tray.setToolTip(strings.trayTooltip)
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -43,9 +60,6 @@ export function createTray(iconPath: string | undefined, actions: TrayActions): 
       { label: strings.trayQuit, click: actions.quit },
     ]),
   )
-  tray.on('click', actions.show)
-  tray.on('double-click', actions.show)
-  return tray
 }
 
 /**

@@ -49,6 +49,12 @@ writeFileSync(
   join(scratch, 'settings.json'),
   JSON.stringify({ workspace: recentA, recent: [recentA, missing, recentB] }, null, 2) + '\n',
 )
+// 菜单文案跟随 **Harness 的语言设置**（`<harness home>/settings.yaml` 的
+// `locale.preference`），不再跟随系统语言。这里把它固定成中文，于是这份"菜单清单"在任何
+// 机器上都是同一份断言（此前它其实依赖跑测试的机器是中文系统）。
+const dshHome = join(scratch, 'home')
+mkdirSync(dshHome, { recursive: true })
+writeFileSync(join(dshHome, 'settings.yaml'), 'locale:\n  preference: zh\n', 'utf8')
 
 const result = spawnSync(electronBinary, [root, `--user-data-dir=${isolatedUserData}`], {
   cwd: root,
@@ -135,6 +141,13 @@ await check('运行时与外壳版本都是禁用项', () => {
     assert.ok(line !== undefined, `没有版本行：${label}`)
     assert.ok(line.includes('(禁用)'), `${label} 应当是禁用项：${line}`)
   }
+})
+
+console.log('')
+console.log('=== 6. 语言来自 Harness 的设置，而不是系统语言 ===')
+await check('菜单语言 = Harness 的 locale.preference（本用例固定为 zh）', () => {
+  assert.ok(/^\s*文件\s*$/mu.test(dump), '菜单不是中文——说明它没有跟随 Harness 的设置')
+  assert.ok(!/^\s*File\s*$/mu.test(dump), '菜单是英文——说明语言没有跟随 Harness 的设置')
 })
 
 try {

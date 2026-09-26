@@ -36,6 +36,7 @@ const { app, Menu } = require('electron')
 const { createMainWindow } = require('../dist/main/window')
 const { menuBarEntries } = require('../dist/main/menu')
 const { TITLEBAR_HEIGHT } = require('../dist/main/titlebar')
+const { initShellStrings, setShellLocale, t } = require('../dist/main/i18n')
 
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-titlebar-ui-'))
 app.setPath('userData', scratch)
@@ -100,12 +101,14 @@ async function run() {
   ])
   Menu.setApplicationMenu(appMenu)
 
+  // 语言走**生产路径**：先按 Harness 的语言初始化文案表，再创窗口。这样导航按钮的无障碍
+  // 文案也来自活文案表（生产代码已经不传死文案了），下面的语言用例才能验证它会跟着变。
+  initShellStrings('zh')
+
   const mainWindow = createMainWindow({
     userDataDir: scratch,
     splashTitle: 'DeepSeek Harness',
     splashHint: '正在启动…',
-    backLabel: '返回',
-    forwardLabel: '前进',
     menu: {
       entries: () => menuBarEntries(Menu.getApplicationMenu() ?? Menu.buildFromTemplate([])),
       // 生产实现是 openMenuAt(...)，弹出真正的系统菜单；这里换成记录式实现——真弹层会盖住
@@ -357,6 +360,76 @@ async function run() {
     const appBg = await appEval(`getComputedStyle(document.body).backgroundColor`)
     const barBg = await shellEval(`getComputedStyle(document.getElementById('titlebar')).backgroundColor`)
     assert.equal(barBg, appBg)
+  })
+
+  // ---- 语言：跟随 Harness 的设置，运行中切换不重启窗口 ----------------------
+  //
+  // 这里用的是**生产实现**：`dist/main/i18n` 的活文案表 + `dist/main/menu` 的模板 +
+  // 窗口的 `publishShellState()`。语言变化时主进程做的事就是这三件（见 index.ts 的
+  // applyShellLocale），因此这个用例能证明"切换语言后标题栏自己会更新"。
+  const menuTemplate = require('../dist/main/menu')
+  const menuDeps = {
+    recent: [],
+    runtimeVersion: '0.1.5-rc.2',
+    openFolder: () => {},
+    openRecent: () => {},
+    projectInfo: () => {},
+    revealWorkspace: () => {},
+    copyWorkspacePath: () => {},
+    openUpdates: () => {},
+    openReleases: () => {},
+  }
+  /** 复刻 index.ts 的 applyShellLocale：换文案 → 重建菜单 → 推状态。 */
+  const applyLocale = (locale) => {
+    setShellLocale(locale)
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate(menuTemplate.applicationMenuTemplate({ ...menuDeps, strings: t(), shellVersion: '1.5.9' })),
+    )
+    mainWindow.publishShellState()
+  }
+  const titlebarLabels = async () =>
+    JSON.parse(await shellEval(`JSON.stringify([...document.querySelectorAll('#menubar button')].map((b) => b.textContent))`))
+
+  const shellContentsId = shell.id
+  applyLocale('zh')
+  await wait(400)
+  await check('Harness = 中文 → 标题栏按钮是 文件 / 编辑 / 视图 / 更新 / 帮助', async () =>
+    assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '更新', '帮助']))
+  await check('文档语言同步为 zh-CN（无障碍与拼写检查据此工作）', async () =>
+    assert.equal(await shellEval(`document.documentElement.lang`), 'zh-CN'))
+  await check('导航按钮的无障碍文案也是中文', async () => {
+    assert.equal(await shellEval(`document.getElementById('nav-back').getAttribute('aria-label')`), '返回')
+    assert.equal(await shellEval(`document.getElementById('nav-forward').getAttribute('title')`), '前进')
+  })
+
+  applyLocale('en')
+  await wait(400)
+  await check('切到 English → 同一个窗口里按钮立刻变成 File / Edit / View / Update / Help', async () => {
+    assert.deepEqual(await titlebarLabels(), ['File', 'Edit', 'View', 'Update', 'Help'])
+    // 没有重建窗口/页面：同一个 webContents。
+    assert.equal(shell.id, shellContentsId)
+  })
+  await check('文档语言同步为 en-US', async () =>
+    assert.equal(await shellEval(`document.documentElement.lang`), 'en-US'))
+  await check('导航按钮文案跟着变英文', async () => {
+    assert.equal(await shellEval(`document.getElementById('nav-back').getAttribute('aria-label')`), 'Back')
+    assert.equal(await shellEval(`document.getElementById('nav-forward').getAttribute('title')`), 'Forward')
+  })
+
+  applyLocale('zh-CN')
+  await wait(400)
+  await check('再切回中文 → 立即回到中文（可反复切换）', async () =>
+    assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '更新', '帮助']))
+
+  opened.length = 0
+  await shellEval(
+    `(() => { const buttons = [...document.querySelectorAll('#menubar button')]; buttons[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return true })()`,
+  )
+  await wait(200)
+  await check('语言变了，按钮背后的命令没变（仍弹出第 0 个顶层菜单 = 原生菜单里的那一个）', () => {
+    assert.equal(opened.length, 1)
+    assert.equal(opened[0].index, 0)
+    assert.equal(appMenu.items[0].label, '文件')
   })
 
   await server.close()

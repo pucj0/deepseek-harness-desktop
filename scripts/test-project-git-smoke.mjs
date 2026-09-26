@@ -508,7 +508,13 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
     has('   有「自动换行」开关', first.hasWrapToggle === true)
     check('   行号栏不可选中', first.gutterUserSelect, 'none')
     check('   旧/新行号各占一列（不重复）', first.gutterGrid, '1/2')
-    has('   文件头被折叠成一条', first.hasHeader && /File changed|New file|Deleted file|Renamed file/.test(first.headerText))
+    // 文案随 Harness 的语言走，因此两种语言都算过（这个冒烟脚本跑在真实实例上，
+    // 实例当前是中文还是英文由 Harness 的设置决定）。
+    has(
+      '   文件头被折叠成一条',
+      first.hasHeader &&
+        /File changed|New file|Deleted file|Renamed file|文件已更改|新增文件|删除文件|重命名文件/.test(first.headerText),
+    )
     check('   默认高度是百分比', first.flex, '0 0 40%')
     check('   这一段没有 React error / ReferenceError', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
 
