@@ -1058,6 +1058,55 @@ window.__ModuleLoader__.load({
       revertedCommitNotice: '已还原 {short}',
       cherryPickConflictNotice: '摘取有冲突：请在冲突面板里逐块解决，然后「继续摘取」或「中止」。',
       revertConflictNotice: '还原有冲突：请在冲突面板里逐块解决，然后「继续还原」或「中止」。',
+      // ---- 交互式变基（`git rebase -i`）----
+      interactiveRebaseHere: '从此处开始交互式变基…',
+      interactiveRebaseHint: '改写这段历史：重排、合并、改信息、丢弃',
+      rebaseDialogTitle: '交互式变基',
+      rebaseDialogSummary: '把 {count} 个提交重放到 {short} 之上',
+      rebaseDialogLoading: '正在读取提交…',
+      rebaseDialogEmpty: '这条提交之后没有可改写的提交。',
+      rebaseDialogActions: '动作',
+      rebasePlanLabel: '变基计划',
+      rebaseReorder: '重排',
+      rebaseReorderHint: '用每行右侧的 ↑ / ↓ 调整顺序（不做文本编辑）。',
+      rebaseActionPick: 'Pick（保留）',
+      rebaseActionReword: 'Reword（只改信息）',
+      rebaseActionEdit: 'Edit（停下来修改）',
+      rebaseActionSquash: 'Squash（合并并保留信息）',
+      rebaseActionFixup: 'Fixup（合并并丢弃信息）',
+      rebaseActionDrop: 'Drop（丢弃）',
+      rebaseMoveUp: '上移',
+      rebaseMoveDown: '下移',
+      rebaseSquashMessage: '合并后的提交信息',
+      rebaseRewordMessage: '新的提交信息',
+      rebaseDropBadge: '丢弃',
+      rebaseDropWarning: '{count} 个提交会被丢弃。',
+      rebaseRewriteWarning: '交互式变基会改写这段历史：被重放的提交都是新的提交（SHA 变化）。已经推送过的分支之后只能用 --force-with-lease 推送。',
+      rebasePublishedTitle: '改写已发布的历史',
+      rebasePublishedWarning: '这段历史已经推送到 {upstream}：改写它会影响其他人。',
+      rebaseStart: '开始交互式变基',
+      rebaseProgress: '正在变基 {step}/{total}',
+      rebaseCurrent: '当前：{short} {subject}',
+      rebasePausedForEdit: '变基已暂停（Edit）',
+      rebaseRewordBadge: 'Reword',
+      rebaseEditHint: '在工作区里修改文件并暂存，然后 Amend 折进这个提交，或者直接继续变基。',
+      rebaseConflictBanner: '{count} 个文件有冲突：在冲突面板里解决后按「继续变基」。',
+      rebaseCommitMessage: '提交信息',
+      rebaseAmend: 'Amend Commit',
+      rebaseAmendHint: '只包含已暂存的改动（在变更面板里暂存）。',
+      rebaseContinue: '继续变基',
+      rebaseSkip: '跳过这个提交：{short} {subject}',
+      rebaseSkipHint: 'git rebase --skip：丢掉这个提交并继续',
+      rebaseAbort: '中止交互式变基',
+      rebasePausedNotice: '变基停在 Edit：改完文件后按「继续变基」。',
+      rebaseDoneNotice: '交互式变基完成（{count} 个提交）。',
+      rebaseConflictNotice: '变基遇到冲突：在冲突面板里解决后按「继续变基」。',
+      rebaseProgressNotice: '变基已推进；仍在下一次停点上。',
+      rebaseSkippedNotice: '已跳过 {short} {subject}',
+      rebaseSkipNoopNotice: '{short} 已经应用过了，跳过等于继续（它没有被丢掉）。',
+      rebaseAbortedNotice: '已中止交互式变基：分支回到变基之前的位置。',
+      rebaseAmendedNotice: '已把改动折进 {short}',
+      rebaseFailed: '交互式变基失败：{detail}',
       // ---- 文件历史 ----
       showFileHistory: '查看文件历史',
       fileHistoryCommitDiff: '这个提交里对该文件的改动',
@@ -1502,6 +1551,55 @@ window.__ModuleLoader__.load({
       revertedCommitNotice: 'Reverted {short}',
       cherryPickConflictNotice: 'The cherry-pick has conflicts: resolve them block by block in the conflict panel, then "Continue cherry-pick" or "Abort".',
       revertConflictNotice: 'The revert has conflicts: resolve them block by block in the conflict panel, then "Continue revert" or "Abort".',
+      // ---- Interactive rebase (`git rebase -i`) ----
+      interactiveRebaseHere: 'Interactive Rebase from Here…',
+      interactiveRebaseHint: 'Rewrite this history: reorder, squash, reword, drop',
+      rebaseDialogTitle: 'Interactive Rebase',
+      rebaseDialogSummary: 'Replay {count} commits onto {short}',
+      rebaseDialogLoading: 'Loading commits…',
+      rebaseDialogEmpty: 'There is nothing to rewrite after this commit.',
+      rebaseDialogActions: 'Action',
+      rebasePlanLabel: 'Rebase Plan',
+      rebaseReorder: 'Reorder',
+      rebaseReorderHint: 'Reorder with the ↑ / ↓ buttons on each row (no text editing).',
+      rebaseActionPick: 'Pick (keep)',
+      rebaseActionReword: 'Reword (message only)',
+      rebaseActionEdit: 'Edit (stop and amend)',
+      rebaseActionSquash: 'Squash (merge, keep message)',
+      rebaseActionFixup: 'Fixup (merge, discard message)',
+      rebaseActionDrop: 'Drop (remove)',
+      rebaseMoveUp: 'Move up',
+      rebaseMoveDown: 'Move down',
+      rebaseSquashMessage: 'Squashed commit message',
+      rebaseRewordMessage: 'New commit message',
+      rebaseDropBadge: 'Drop',
+      rebaseDropWarning: '{count} commits will be dropped.',
+      rebaseRewriteWarning: 'Interactive rebase rewrites this history: every replayed commit becomes a new commit (new SHA). Once pushed, the branch can only be pushed again with --force-with-lease.',
+      rebasePublishedTitle: 'Rewrite published history',
+      rebasePublishedWarning: 'This history is already pushed to {upstream}: rewriting it affects other people.',
+      rebaseStart: 'Start Interactive Rebase',
+      rebaseProgress: 'Rebasing {step}/{total}',
+      rebaseCurrent: 'Current: {short} {subject}',
+      rebasePausedForEdit: 'Rebase paused for edit',
+      rebaseRewordBadge: 'Reword',
+      rebaseEditHint: 'Modify and stage files in the workspace, then amend them into this commit, or just continue the rebase.',
+      rebaseConflictBanner: '{count} files have conflicts: resolve them in the conflict panel, then press "Continue Rebase".',
+      rebaseCommitMessage: 'Commit message',
+      rebaseAmend: 'Amend Commit',
+      rebaseAmendHint: 'Staged changes only (stage them in the Changes panel).',
+      rebaseContinue: 'Continue Rebase',
+      rebaseSkip: 'Skip this commit: {short} {subject}',
+      rebaseSkipHint: 'git rebase --skip: drop this commit and carry on',
+      rebaseAbort: 'Abort Interactive Rebase',
+      rebasePausedNotice: 'The rebase stopped for an edit: press "Continue Rebase" when you are done.',
+      rebaseDoneNotice: 'Interactive rebase finished ({count} commits).',
+      rebaseConflictNotice: 'The rebase hit a conflict: resolve it in the conflict panel, then press "Continue Rebase".',
+      rebaseProgressNotice: 'The rebase advanced and stopped again.',
+      rebaseSkippedNotice: 'Skipped {short} {subject}',
+      rebaseSkipNoopNotice: '{short} was already applied, so skipping just continued (it was not dropped).',
+      rebaseAbortedNotice: 'Interactive rebase aborted: the branch is back where it was.',
+      rebaseAmendedNotice: 'Amended the changes into {short}',
+      rebaseFailed: 'Interactive rebase failed: {detail}',
       // ---- File history ----
       showFileHistory: 'Show File History',
       fileHistoryCommitDiff: "This commit's change to the file",
@@ -6390,7 +6488,9 @@ window.__ModuleLoader__.load({
             'aria-modal': 'true',
             [marker]: value,
             style: {
-              width: 'min(440px, calc(100vw - 48px))',
+              // 交互式变基的计划要一行放下"动作 + SHA + 主题 + 上移/下移"，因此允许调用方
+              // 指定更宽的宽度；其余弹窗保持原来的 440。
+              width: typeof options.width === 'string' && options.width !== '' ? options.width : 'min(440px, calc(100vw - 48px))',
               borderRadius: '10px',
               border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
               background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
@@ -6580,7 +6680,503 @@ window.__ModuleLoader__.load({
           { 'data-graph-menu-danger': '', style: { padding: '2px 10px 4px', color: GRAPH_DIM, fontSize: uiPx(11) } },
           t('graphMenuDanger'),
         ),
+        // 交互式变基：它**改写这段历史**（重排/合并/丢弃都会换掉 SHA），因此和重置同属危险段。
+        // 它排在最前：比"把分支重置到这里"更常用，而两者都是改写入口，位置一起更好辨认。
+        item('interactive-rebase', t('interactiveRebaseHere'), () => onAction('interactive-rebase', commit), {
+          danger: true,
+          title: t('interactiveRebaseHint'),
+        }),
         item('reset', t('resetMenuTitle'), () => onReset(commit), { danger: true }),
+      )
+    }
+
+    /**
+     * 「从此处开始交互式变基」的计划对话框（需求 1–10）。
+     *
+     * 渲染的是**结构化计划**：一行一个提交、动作用下拉框选、顺序用上移/下移改、合并后的
+     * 提交信息在行内编辑——**没有** git 的 todo 文本，也没有任何终端编辑器（vim/nano 永不出现）。
+     *
+     * 交给宿主的只有 `[{ sha, action, message }]`（见 `onSubmit`）：宿主会校验动作白名单、
+     * 提交集合与顺序，然后自己生成 todo 并驱动**真正的** `git rebase -i`。因此渲染进程既无法
+     * 注入 shell/编辑器命令，也无法把 `onto..HEAD` 之外的提交塞进来。
+     *
+     * 「开始」按钮**就是**需求要求的那一次风险确认：Drop 在行内有醒目标记、已发布历史有单独
+     * 一行警告，但**不再弹第二个对话框**。
+     *
+     * @param props - `{ t, plan, busy, error, onCancel, onSubmit }`。
+     * @returns React 元素。
+     */
+    function InteractiveRebaseDialog(props) {
+      const { t, plan, busy, error, onCancel, onSubmit } = props
+      const commits = Array.isArray(plan?.commits) ? plan.commits : []
+      /** 计划行；`message` 是**原始**提交信息（合并后的信息默认由它拼出来）。 */
+      const [rows, setRows] = react.useState(() =>
+        commits.map((commit) => ({
+          sha: String(commit.sha ?? ''),
+          short: String(commit.short ?? String(commit.sha ?? '').slice(0, 7)),
+          subject: String(commit.subject ?? ''),
+          message: String(commit.message ?? ''),
+          action: 'pick',
+        })),
+      )
+      /** 用户改过的"合并后的信息"，按**组首提交的 SHA** 记：换顺序也不会丢。 */
+      const [squashText, setSquashText] = react.useState({})
+      /** 用户改过的 reword 信息，按提交 SHA 记。 */
+      const [rewordText, setRewordText] = react.useState({})
+      useEscapeToClose(busy === true ? () => undefined : onCancel)
+
+      /** 这一行所在的 squash/fixup **连续段**的起止下标。 */
+      const runStart = (list, index) => {
+        let start = index
+        while (start > 0 && (list[start - 1].action === 'squash' || list[start - 1].action === 'fixup')) start -= 1
+        return start
+      }
+      const runEnd = (list, index) => {
+        let end = index
+        while (end + 1 < list.length && (list[end + 1].action === 'squash' || list[end + 1].action === 'fixup')) end += 1
+        return end
+      }
+      /**
+       * 段里**最后一次** `squash` 的下标（信息编辑器挂在它上面）。
+       *
+       * 为什么不挂在段尾：段尾可能是 `fixup`——它**不产生信息编辑**（信息被丢掉），此时用户
+       * 写下的合并信息属于前一个 `squash`（git 正是用那一次编辑的结果作为最终信息）。
+       */
+      const lastSquash = (list, index) => {
+        for (let at = runEnd(list, index); at >= runStart(list, index); at -= 1) {
+          if (list[at].action === 'squash') return at
+        }
+        return -1
+      }
+      /** 合并信息的**归属提交**（段首之前的那个提交）：用户改过的信息按它记，换顺序也不会丢。 */
+      const headShaOf = (list, index) => {
+        const start = runStart(list, index)
+        return String(list[start > 0 ? start - 1 : start]?.sha ?? '')
+      }
+      /**
+       * 组内各提交信息用空行连接——与 git 自己拼出来的默认 squash 信息一致：
+       * 段首之前的那个提交 + 段内每个 `squash`（`fixup` 的信息会被丢掉，因此不算进去）。
+       */
+      const groupDefault = (list, index) => {
+        const start = runStart(list, index)
+        const parts = []
+        if (start > 0) {
+          const text = String(list[start - 1].message ?? '').trim()
+          if (text !== '') parts.push(text)
+        }
+        for (let at = start; at <= index; at += 1) {
+          if (list[at].action !== 'squash') continue
+          const text = String(list[at].message ?? '').trim()
+          if (text !== '') parts.push(text)
+        }
+        return parts.join('\n\n')
+      }
+      const squashMessageFor = (list, index) => {
+        const key = headShaOf(list, index)
+        return Object.hasOwn(squashText, key) ? squashText[key] : groupDefault(list, index)
+      }
+      const rewordMessageFor = (row) => (Object.hasOwn(rewordText, row.sha) ? rewordText[row.sha] : row.message)
+
+      const move = (index, delta) => {
+        setRows((list) => {
+          const target = index + delta
+          if (target < 0 || target >= list.length) return list
+          const next = list.slice()
+          const [row] = next.splice(index, 1)
+          next.splice(target, 0, row)
+          return next
+        })
+      }
+      const setAction = (index, action) => {
+        setRows((list) => list.map((row, at) => (at === index ? { ...row, action } : row)))
+      }
+      const submit = () => {
+        onSubmit(
+          rows.map((row, index) => ({
+            sha: row.sha,
+            action: row.action,
+            // 只有 reword / squash 需要带信息：fixup 会丢掉信息，pick/edit/drop 用 git 自己的。
+            ...(row.action === 'reword' ? { message: rewordMessageFor(row) } : {}),
+            ...(row.action === 'squash' ? { message: squashMessageFor(rows, index) } : {}),
+          })),
+        )
+      }
+
+      const dropped = rows.filter((row) => row.action === 'drop').length
+      const ontoShort = String(plan?.onto?.short ?? '')
+      const actionOptions = [
+        ['pick', 'rebaseActionPick'],
+        ['reword', 'rebaseActionReword'],
+        ['edit', 'rebaseActionEdit'],
+        ['squash', 'rebaseActionSquash'],
+        ['fixup', 'rebaseActionFixup'],
+        ['drop', 'rebaseActionDrop'],
+      ]
+      /** 行内小按钮（上移/下移）。 */
+      const rowButton = (key, row, label, onClick, disabled, marker) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            [marker]: row.sha,
+            title: label,
+            'aria-label': label,
+            disabled: disabled === true,
+            onClick: (event) => {
+              event.stopPropagation()
+              if (disabled === true) return
+              onClick()
+            },
+            style: {
+              flexShrink: 0,
+              width: '22px',
+              height: '20px',
+              padding: 0,
+              borderRadius: '4px',
+              border: `1px solid ${BORDER}`,
+              background: 'transparent',
+              color: disabled === true ? GRAPH_DIM : 'inherit',
+              font: 'inherit',
+              cursor: disabled === true ? 'default' : 'pointer',
+              opacity: disabled === true ? 0.45 : 1,
+            },
+          },
+          key === 'up' ? '↑' : '↓',
+        )
+
+      const rowElement = (row, index) => {
+        const showsSquashEditor = row.action === 'squash' && index === lastSquash(rows, index)
+        const showsRewordEditor = row.action === 'reword'
+        /**
+         * 合并信息的归属提交（段首之前的那个提交）。**编辑与读取必须用同一个键**：用户改过的
+         * 内容按它存，默认值也按它查——早先用"这一行自己的 SHA"存、用"归属提交"查，于是用户
+         * 写下的合并信息在提交时被静默换成了默认值（实测被测试逮到）。
+         */
+        const mergeOwnerSha = headShaOf(rows, index)
+        /** 这一行是"合并段的段首之前那一个提交"：它的信息会被下面的 squash 一起带进合并信息。 */
+        const opensMergeRun = runEnd(rows, index) > index && runStart(rows, index) === index && row.action !== 'squash' && row.action !== 'fixup'
+        return react.createElement(
+          'div',
+          {
+            key: row.sha,
+            'data-rebase-row': row.sha,
+            'data-rebase-action': row.action,
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '4px',
+              padding: '5px 6px',
+              border: `1px solid ${row.action === 'drop' ? `color-mix(in srgb, ${REMOVED} 45%, transparent)` : BORDER}`,
+              borderRadius: '7px',
+              background: row.action === 'drop' ? `color-mix(in srgb, ${REMOVED} 8%, transparent)` : 'transparent',
+            },
+          },
+          react.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+            react.createElement('span', { style: { color: GRAPH_DIM, flexShrink: 0, width: '1.4em', textAlign: 'right' } }, String(index + 1)),
+            react.createElement(
+              'select',
+              {
+                'data-rebase-select': row.sha,
+                value: row.action,
+                'aria-label': t('rebaseDialogActions'),
+                onChange: (event) => setAction(index, String(event.target.value)),
+                style: {
+                  flexShrink: 0,
+                  height: '22px',
+                  borderRadius: '5px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                  color: 'inherit',
+                  font: 'inherit',
+                  fontSize: uiPx(11.5),
+                },
+              },
+              actionOptions.map(([value, key]) =>
+                react.createElement('option', { key: value, value, 'data-rebase-option': `${row.sha}:${value}` }, t(key)),
+              ),
+            ),
+            react.createElement('code', { style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: uiPx(11.5), color: ACCENT } }, row.short),
+            react.createElement(
+              'span',
+              { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: row.subject },
+              row.subject,
+            ),
+            row.action === 'drop'
+              ? react.createElement(
+                  'span',
+                  { 'data-rebase-dropped': row.sha, style: { flexShrink: 0, color: REMOVED, fontSize: uiPx(11) } },
+                  t('rebaseDropBadge'),
+                )
+              : null,
+            row.action === 'squash' || row.action === 'fixup'
+              ? react.createElement(
+                  'span',
+                  { 'data-rebase-merged': row.sha, style: { flexShrink: 0, color: ADDED, fontSize: uiPx(11) } },
+                  row.action === 'squash' ? 'squash' : 'fixup',
+                )
+              : null,
+            rowButton('up', row, t('rebaseMoveUp'), () => move(index, -1), index === 0, 'data-rebase-up'),
+            rowButton('down', row, t('rebaseMoveDown'), () => move(index, 1), index === rows.length - 1, 'data-rebase-down'),
+          ),
+          showsSquashEditor
+            ? react.createElement('textarea', {
+                'data-rebase-message': row.sha,
+                'data-review-input': '',
+                value: squashMessageFor(rows, index),
+                rows: 3,
+                spellCheck: false,
+                disabled: busy === true,
+                'aria-label': t('rebaseSquashMessage'),
+                title: t('rebaseSquashMessage'),
+                placeholder: t('rebaseSquashMessage'),
+                onChange: (event) => setSquashText((current) => ({ ...current, [mergeOwnerSha]: event.target.value })),
+                onKeyDown: (event) => event.stopPropagation(),
+                style: {
+                  boxSizing: 'border-box',
+                  width: '100%',
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                  color: 'inherit',
+                  fontFamily: CODE_FONT,
+                  fontSize: uiPx(11.5),
+                  padding: '4px 6px',
+                  resize: 'vertical',
+                },
+              })
+            : null,
+          showsRewordEditor
+            ? react.createElement('textarea', {
+                'data-rebase-reword': row.sha,
+                'data-review-input': '',
+                value: rewordMessageFor(row),
+                rows: 2,
+                spellCheck: false,
+                disabled: busy === true,
+                'aria-label': t('rebaseRewordMessage'),
+                title: t('rebaseRewordMessage'),
+                placeholder: t('rebaseRewordMessage'),
+                onChange: (event) => setRewordText((current) => ({ ...current, [row.sha]: event.target.value })),
+                onKeyDown: (event) => event.stopPropagation(),
+                style: {
+                  boxSizing: 'border-box',
+                  width: '100%',
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                  color: 'inherit',
+                  fontFamily: CODE_FONT,
+                  fontSize: uiPx(11.5),
+                  padding: '4px 6px',
+                  resize: 'vertical',
+                },
+              })
+            : null,
+          // 段首提示：这个提交会被下面的 squash/fixup 一起合并（信息编辑器在段尾那次 squash 上）。
+          opensMergeRun
+            ? react.createElement(
+                'div',
+                { 'data-rebase-group': row.sha, style: { color: GRAPH_DIM, fontSize: uiPx(11) } },
+                t('rebaseSquashMessage'),
+              )
+            : null,
+        )
+      }
+
+      return dialogShell(
+        {
+          t,
+          title: t('rebaseDialogTitle'),
+          busy: busy === true,
+          onCancel,
+          onSubmit: submit,
+          marker: 'data-rebase-dialog',
+          value: String(rows.length),
+          confirmKey: 'rebaseStart',
+          width: 'min(720px, calc(100vw - 48px))',
+        },
+        react.createElement(
+          'div',
+          { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } },
+          plan?.loading === true ? t('rebaseDialogLoading') : t('rebaseDialogSummary', { count: rows.length, short: ontoShort }),
+        ),
+        // 已经推送到远端：**必须**在动手之前说清楚（需求 10）。
+        plan?.published === true
+          ? react.createElement(
+              'div',
+              { 'data-rebase-published': String(plan?.upstream ?? ''), style: { color: REMOVED, fontSize: uiPx(11.5), lineHeight: 1.5 } },
+              react.createElement('span', { style: { fontWeight: 600 } }, t('rebasePublishedTitle')),
+              ` · ${t('rebasePublishedWarning', { upstream: String(plan?.upstream ?? '') })}`,
+            )
+          : null,
+        react.createElement(
+          'div',
+          { 'data-rebase-rewrite-warning': '', style: { color: GRAPH_DIM, fontSize: uiPx(11.5), lineHeight: 1.5 } },
+          t('rebaseRewriteWarning'),
+        ),
+        dropped === 0
+          ? null
+          : react.createElement('div', { 'data-rebase-drop-warning': String(dropped), style: { color: REMOVED, fontSize: uiPx(11.5) } }, t('rebaseDropWarning', { count: dropped })),
+        rows.length === 0
+          ? react.createElement('div', { 'data-rebase-empty': '', style: { color: GRAPH_DIM } }, plan?.loading === true ? t('rebaseDialogLoading') : t('rebaseDialogEmpty'))
+          : react.createElement(
+              'div',
+              { 'data-rebase-plan-label': String(rows.length), style: { display: 'flex', alignItems: 'baseline', gap: '8px', color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(11.5) } },
+              react.createElement('span', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, t('rebasePlanLabel')),
+              // 顺序只能这样改：需求明确要求"不许用文本编辑 todo"。
+              react.createElement('span', { 'data-rebase-reorder-hint': '' }, `${t('rebaseReorder')} · ${t('rebaseReorderHint')}`),
+            ),
+        rows.length === 0
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-rebase-plan': String(rows.length), style: { display: 'flex', flexDirection: 'column', gap: '5px', maxHeight: '46vh', overflowY: 'auto', paddingRight: '2px' } },
+              rows.map(rowElement),
+            ),
+        error === ''
+          ? null
+          : react.createElement('div', { 'data-rebase-error': '', role: 'alert', style: { color: REMOVED, fontSize: uiPx(11.5), lineHeight: 1.5 } }, error),
+      )
+    }
+
+    /**
+     * 交互式变基的**进行状态横幅**（需求 8 / 16 / 17）。
+     *
+     * 显示的是"变基到第几个、当前停在哪个提交"（不是转圈），并给出这个停点上能做的事：
+     *   * `edit` 停点：说明"改文件 → 暂存 → Amend 或继续"，并内嵌**应用内的提交信息编辑器**
+     *     （宿主的 `GIT_EDITOR` 永远不会打开系统编辑器）；
+     *   * 冲突停点：把用户送到冲突面板（Mark Resolved → 继续），并给「跳过这个提交」——
+     *     按钮文案里点名是谁被跳过（`git rebase --skip` 是真实调用）。
+     *
+     * @param props - `{ t, operation, conflictCount, busy, notice, message, onMessage, onContinue, onSkip, onAmend, onAbort }`。
+     * @returns React 元素。
+     */
+    function GraphRebaseBanner(props) {
+      const { t, operation, conflictCount, busy, notice, message, onMessage, onContinue, onSkip, onAmend, onAbort } = props
+      const step = Number(operation?.step ?? 0)
+      const total = Number(operation?.total ?? 0)
+      const sha = String(operation?.stoppedSha ?? operation?.currentSha ?? '')
+      const short = sha.slice(0, 7)
+      const subject = String(operation?.currentSubject ?? '')
+      const planned = String(operation?.plannedAction ?? '')
+      const conflicted = Number(conflictCount ?? 0) > 0
+      const paused = operation?.pausedForEdit === true
+      /** 停点上可以做的动作按钮（统一形状：`data-rebase-*` 让行为可断言）。 */
+      const button = (key, label, onClick, options) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            [options?.marker ?? `data-rebase-${key}`]: '',
+            title: options?.title ?? label,
+            disabled: busy === true,
+            onClick: (event) => {
+              event.stopPropagation()
+              if (busy === true) return
+              onClick()
+            },
+            style: {
+              flexShrink: 0,
+              height: '22px',
+              padding: '0 9px',
+              borderRadius: '6px',
+              border: `1px solid ${options?.danger === true ? `color-mix(in srgb, ${REMOVED} 45%, transparent)` : `color-mix(in srgb, ${ACCENT} 40%, transparent)`}`,
+              background: 'transparent',
+              color: options?.danger === true ? REMOVED : ACCENT,
+              fontFamily: UI_FONT,
+              fontSize: uiPx(11.5),
+              cursor: busy === true ? 'default' : 'pointer',
+              opacity: busy === true ? 0.55 : 1,
+            },
+          },
+          label,
+        )
+      return react.createElement(
+        'div',
+        {
+          'data-graph-rebase': sha === '' ? 'stopped' : sha,
+          role: 'status',
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '5px',
+            flexShrink: 0,
+            padding: '6px 8px',
+            borderBottom: `1px solid ${BORDER}`,
+            background: conflicted ? `color-mix(in srgb, ${REMOVED} 7%, transparent)` : `color-mix(in srgb, ${ACCENT} 7%, transparent)`,
+            fontFamily: UI_FONT,
+            fontSize: uiPx(11.5),
+            color: conflicted ? REMOVED : ACCENT,
+          },
+        },
+        // 进度：**具体到第几个、当前是谁**（需求 17 明确不要"只转圈"）。
+        react.createElement(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+          react.createElement('span', { 'data-rebase-progress': String(step), style: { flexShrink: 0, fontWeight: 600 } }, t('rebaseProgress', { step, total })),
+          react.createElement(
+            'span',
+            { 'data-rebase-current': sha, style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: subject },
+            t('rebaseCurrent', { short, subject }),
+          ),
+          paused ? react.createElement('span', { 'data-rebase-paused': planned, style: { flexShrink: 0, fontWeight: 600 } }, planned === 'reword' ? t('rebaseRewordBadge') : t('rebasePausedForEdit')) : null,
+          // `edit` 停点上继续（冲突停点的"继续"归冲突面板所有：Mark Resolved → 继续）。
+          paused && !conflicted ? button('continue', t('rebaseContinue'), () => onContinue()) : null,
+          // 冲突停点：跳过**这个**提交（点名是谁）。
+          conflicted ? button('skip', t('rebaseSkip', { short, subject }), () => onSkip(), { title: t('rebaseSkipHint') }) : null,
+          button('abort', t('rebaseAbort'), () => onAbort(), { danger: true }),
+        ),
+        conflicted
+          ? react.createElement('div', { 'data-rebase-conflict-hint': String(conflictCount), style: { color: 'inherit' } }, t('rebaseConflictBanner', { count: Number(conflictCount ?? 0) }))
+          : null,
+        paused && !conflicted
+          ? react.createElement('div', { 'data-rebase-edit-hint': '', style: { color: 'var(--dsw-alias-label-secondary)' } }, t('rebaseEditHint'))
+          : null,
+        // 应用内的提交信息编辑器：git 需要信息时**从不**打开系统编辑器（需求 11 / 14）。
+        paused && !conflicted
+          ? react.createElement(
+              'div',
+              { style: { display: 'flex', alignItems: 'flex-start', gap: '8px' } },
+              react.createElement('textarea', {
+                'data-rebase-message': '',
+                'data-review-input': '',
+                value: String(message ?? ''),
+                rows: 3,
+                spellCheck: false,
+                disabled: busy === true,
+                'aria-label': t('rebaseCommitMessage'),
+                placeholder: t('rebaseCommitMessage'),
+                onChange: (event) => onMessage(event.target.value),
+                onKeyDown: (event) => event.stopPropagation(),
+                style: {
+                  boxSizing: 'border-box',
+                  flex: '1 1 auto',
+                  minWidth: 0,
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                  color: 'var(--dsw-alias-label-primary)',
+                  fontFamily: CODE_FONT,
+                  fontSize: uiPx(11.5),
+                  padding: '4px 6px',
+                  resize: 'vertical',
+                },
+              }),
+              react.createElement(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 } },
+                button('amend', t('rebaseAmend'), () => onAmend()),
+                react.createElement('span', { 'data-rebase-amend-hint': '', style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11), maxWidth: '12em' } }, t('rebaseAmendHint')),
+              ),
+            )
+          : null,
+        notice === ''
+          ? null
+          : react.createElement('div', { 'data-rebase-notice': '', role: 'status', style: { color: 'var(--dsw-alias-label-secondary)' } }, notice),
       )
     }
 
@@ -14019,6 +14615,34 @@ window.__ModuleLoader__.load({
       const [menuNotice, setMenuNotice] = react.useState('')
       const [menuBusy, setMenuBusy] = react.useState(false)
 
+      // ---- 交互式变基（`git rebase -i`）--------------------------------------
+      //
+      // 界面这一侧只做三件事：读**计划**（`/rebase/plan`）、把用户排好的**结构化计划**发出去
+      // （`/rebase/interactive`）、把进行中的**状态**显示出来（进度 / 停点 / 冲突）。
+      // 所有 rebase 语义（todo 生成、动作白名单、真实 `git rebase -i` 的驱动、冲突后的继续、
+      // 中止、跳过）都在 gitbar 宿主里，这里不复制任何一条。
+      /** 计划对话框的数据；null = 没打开。`{ commits, onto, published, upstream, loading }`。 */
+      const [rebasePlan, setRebasePlan] = react.useState(null)
+      /** 对话框里的错误（打开计划失败、计划被宿主拒绝）。 */
+      const [rebaseError, setRebaseError] = react.useState('')
+      /** 进行中的**交互式变基**（gitbar `/status` 的 `operation`）；null = 没有。 */
+      const [rebaseOp, setRebaseOp] = react.useState(null)
+      const [rebaseConflictCount, setRebaseConflictCount] = react.useState(0)
+      const [rebaseNotice, setRebaseNotice] = react.useState('')
+      const [rebaseBusy, setRebaseBusy] = react.useState(false)
+      /** 停点上"提交信息"编辑器里的内容（edit 停点的 Amend 用它）。 */
+      const [rebaseMessage, setRebaseMessage] = react.useState('')
+      /**
+       * 项目的 Git 快照。
+       *
+       * 这里用它当"操作状态变了"的**信号源**：快照由 review 自己每 10 秒轮询一次，且用户
+       * 在冲突面板里解决/继续之后它会变（操作类型、冲突数）。提交图因此不需要自己起定时器，
+       * 也不会因为"图开着就一直多跑 git 进程"而拖慢轮询。
+       */
+      const graphSnapshot = useWorkspaceGitSnapshot(workspace)
+      const graphOperationType = graphSnapshot?.operationType ?? ''
+      const graphConflictCount = typeof graphSnapshot?.conflictCount === 'number' ? graphSnapshot.conflictCount : 0
+
       /** 关掉 Preview：只收起，保留 `selectedDiffFile`（再点同一文件即原样恢复）。 */
       const closeDiff = react.useCallback(() => setDiffVisible(false), [])
 
@@ -14418,6 +15042,213 @@ window.__ModuleLoader__.load({
       )
 
       /**
+       * 读一次交互式变基的**进行状态**（gitbar `/status` 的 `operation`）。
+       *
+       * 只认"rebase + interactive"：普通变基没有进度可言，它的界面是既有的冲突分组。
+       * 取不到就保持现状——横幅是附加信息，不该因为它把整个 Log 变成错误页。
+       */
+      const refreshRebaseStatus = react.useCallback(async () => {
+        if (workspace === undefined) return
+        try {
+          const status = await callGitbarGet('status', { workspace })
+          const operation = status?.operation ?? null
+          setRebaseOp(operation !== null && operation.type === 'rebase' && operation.interactive === true ? operation : null)
+          setRebaseConflictCount(typeof status?.conflictCount === 'number' ? status.conflictCount : 0)
+        } catch {
+          // 忽略（见上）。
+        }
+      }, [workspace])
+
+      /**
+       * 打开计划对话框：先问宿主"这条提交之后有哪些提交可以被重放"。
+       *
+       * 计划**只能来自宿主**（`rev-list` + 提交摘要 + 是否已发布），界面不自己数提交、也不
+       * 自己判断哪一段历史属于这个仓库。
+       */
+      const openInteractiveRebase = react.useCallback(
+        (commit) => {
+          if (workspace === undefined) return
+          const sha = String(commit?.hash ?? commit?.sha ?? '')
+          setCommitMenu(null)
+          if (sha === '') return
+          // 先打开一个空的（loading）对话框：取计划要走一次 git，不能等到取回来才给反馈。
+          setRebaseError('')
+          setRebasePlan({ loading: true, commits: [], onto: null })
+          void (async () => {
+            try {
+              const plan = await callGitbarGet('rebase/plan', { workspace, revision: sha })
+              setRebasePlan({ ...plan, loading: false })
+            } catch (cause) {
+              const error = cause instanceof Error ? cause : new Error(String(cause))
+              setRebasePlan({ loading: false, commits: [], onto: null })
+              setRebaseError(String(error.detail ?? error.message))
+            }
+          })()
+        },
+        [workspace],
+      )
+
+      /**
+       * 把用户排好的计划发出去，让宿主驱动真正的 `git rebase -i`。
+       *
+       * `acknowledgeRewrite: true` 是**那一次**风险确认（对话框上的「开始」按钮）；宿主会
+       * 拒绝不带它的请求，因此"误点一下就改写历史"在协议层不可能发生。
+       */
+      const submitRebasePlan = react.useCallback(
+        async (steps) => {
+          if (workspace === undefined || rebasePlan === null) return
+          const onto = String(rebasePlan?.onto?.sha ?? '')
+          setRebaseBusy(true)
+          setRebaseError('')
+          try {
+            const result = await callGitbarRoute('rebase/interactive', { workspace, onto, plan: steps, acknowledgeRewrite: true })
+            setRebaseBusy(false)
+            setRebasePlan(null)
+            await gitSnapshots.invalidate(workspace).catch(() => undefined)
+            await refreshRebaseStatus()
+            void reload(fresh.ref)
+            /**
+             * 提示挂在哪里取决于变基**还有没有在跑**：停在 edit 停点时挂横幅上，直接跑完时挂
+             * 常驻提示行——横幅在变基结束那一刻就消失了，挂它上面等于什么都没说。
+             */
+            const running = result?.operation !== null && result?.operation !== undefined
+            if (running) {
+              setRebaseNotice(t('rebasePausedNotice'))
+              setMenuNotice('')
+            } else {
+              setRebaseNotice('')
+              setMenuNotice(t('rebaseDoneNotice', { count: steps.length }))
+            }
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            const code = typeof error.code === 'string' ? error.code : ''
+            if (code === 'rebaseConflict') {
+              /**
+               * 冲突**不是失败**：变基已经真的开始了，只是停在冲突上。关掉对话框、把用户送到
+               * 冲突面板（既有流程：逐块解决 → Mark Resolved → 继续），快照失效会让冲突分组出现。
+               */
+              setRebaseBusy(false)
+              setRebasePlan(null)
+              setRebaseNotice(t('rebaseConflictNotice'))
+              await gitSnapshots.invalidate(workspace).catch(() => undefined)
+              await refreshRebaseStatus()
+              void reload(fresh.ref)
+              return
+            }
+            setRebaseBusy(false)
+            setRebaseError(code === '' ? String(error.detail ?? error.message) : `${t('rebaseFailed', { detail: String(error.detail ?? error.message) })}`)
+          }
+        },
+        [workspace, rebasePlan, t, reload, fresh.ref, refreshRebaseStatus],
+      )
+
+      /**
+       * 停点上的三个动作（继续 / 跳过 / 中止）与 amend。
+       *
+       * 全部走 gitbar：只有它知道现在进行中的是哪种操作、以及该用哪条 git 命令。界面的责任是
+       * **把结果说清楚**（完成了 / 又停在下一个冲突 / 跳过了谁 / 中止后回到原处）。
+       *
+       * @param route - `op/continue` / `rebase/skip` / `op/abort` / `rebase/amend`。
+       * @param body - 请求体。
+       * @param describe - 由结果算出提示文案的函数。
+       * @returns 宿主响应，或 undefined（失败）。
+       */
+      const runRebaseAction = react.useCallback(
+        async (route, body, describe) => {
+          if (workspace === undefined) return undefined
+          setRebaseBusy(true)
+          setRebaseNotice('')
+          try {
+            const result = await callGitbarRoute(route, { workspace, ...body })
+            setRebaseBusy(false)
+            await gitSnapshots.invalidate(workspace).catch(() => undefined)
+            await refreshRebaseStatus()
+            void reload(fresh.ref)
+            const notice = typeof describe === 'function' ? describe(result) : ''
+            if (notice !== '') {
+              // 变基还在跑 → 横幅；已经结束（完成 / 中止）→ 常驻提示行（横幅马上会消失）。
+              const running = result?.operation !== null && result?.operation !== undefined
+              if (running) {
+                setRebaseNotice(notice)
+                setMenuNotice('')
+              } else {
+                setRebaseNotice('')
+                setMenuNotice(notice)
+              }
+            }
+            return result
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            const code = typeof error.code === 'string' ? error.code : ''
+            setRebaseBusy(false)
+            const detail = String(error.detail ?? error.message)
+            // 失败一律挂常驻提示行：它比横幅活得久（失败后横幅很可能已经被清掉了）。
+            setRebaseNotice('')
+            if (code === 'rebaseConflict') {
+              // 继续之后又撞上冲突：仍是"去冲突面板"，不是失败。
+              setMenuNotice(t('rebaseConflictNotice'))
+            } else if (code === 'noOperation') {
+              setMenuNotice(t('rebaseAbortedNotice'))
+            } else {
+              setMenuNotice(t('rebaseFailed', { detail }))
+            }
+            await refreshRebaseStatus()
+            return undefined
+          }
+        },
+        [workspace, t, reload, fresh.ref, refreshRebaseStatus],
+      )
+
+      const onRebaseContinue = react.useCallback(() => {
+        void runRebaseAction('op/continue', {}, (result) => {
+          if (result?.stoppedAtNextConflict === true) return t('rebaseConflictNotice')
+          if (result?.operation === null || result?.operation === undefined) return t('rebaseDoneNotice', { count: 0 })
+          return t('rebaseProgressNotice')
+        })
+      }, [runRebaseAction, t])
+
+      const onRebaseSkip = react.useCallback(() => {
+        void runRebaseAction('rebase/skip', {}, (result) => {
+          const short = String(result?.rebase?.skippedSha ?? '').slice(0, 7)
+          const subject = String(result?.rebase?.skippedSubject ?? '')
+          // `dropped === false` 说明停点上的那个提交其实已经应用过（edit 停点的 `--skip` 等于继续），
+          // 不能对用户说"已跳过它"——那是**假话**。
+          return result?.rebase?.dropped === true ? t('rebaseSkippedNotice', { short, subject }) : t('rebaseSkipNoopNotice', { short })
+        })
+      }, [runRebaseAction, t])
+
+      const onRebaseAbort = react.useCallback(() => {
+        void runRebaseAction('op/abort', { kind: 'rebase' }, () => t('rebaseAbortedNotice'))
+      }, [runRebaseAction, t])
+
+      const onRebaseAmend = react.useCallback(() => {
+        void runRebaseAction('rebase/amend', { message: rebaseMessage }, (result) => {
+          const short = String(result?.operation?.stoppedSha ?? '').slice(0, 7)
+          return t('rebaseAmendedNotice', { short })
+        })
+      }, [runRebaseAction, t, rebaseMessage])
+
+      /**
+       * 状态同步：进面板时读一次；之后**由 review 的 Git 快照变化驱动**（操作类型 / 冲突数）——
+       * 冲突面板里"标记已解决 / 继续 / 中止"都会改这两个值，因此横幅会跟着更新，而这里不需要
+       * 自己起定时器。
+       */
+      react.useEffect(() => {
+        void refreshRebaseStatus()
+      }, [refreshRebaseStatus, graphOperationType, graphConflictCount])
+
+      /**
+       * 停点换了就把提交信息编辑器填成**那个提交当前的信息**。
+       *
+       * 依赖只写"停点是哪个提交"：`rebaseOp` 每次轮询都是新对象，放进依赖会让用户正在编辑的
+       * 内容每 10 秒被覆盖一次。
+       */
+      const rebaseStopSha = String(rebaseOp?.stoppedSha ?? '')
+      react.useEffect(() => {
+        setRebaseMessage(String(rebaseOp?.currentMessage ?? ''))
+      }, [rebaseStopSha])
+
+      /**
        * 提交右键菜单里的一个动作。
        *
        * 全部收敛到一处：菜单项只是把 `(action, commit)` 交上来，怎么执行、失败怎么显示、
@@ -14469,11 +15300,15 @@ window.__ModuleLoader__.load({
             case 'revert':
               void runCommitAction('revert', { revision: rev, short: String(commit.short ?? '') }, 'revertedCommitNotice')
               return
+            case 'interactive-rebase':
+              // 从**被点的这条提交之后**开始：计划由宿主读出来，用户在对话框里排动作。
+              openInteractiveRebase(commit)
+              return
             default:
               setCommitMenu(null)
           }
         },
-        [copySha, openCompare, selectedForCompare, t, runCommitAction],
+        [copySha, openCompare, selectedForCompare, t, runCommitAction, openInteractiveRebase],
       )
 
       /**
@@ -14932,6 +15767,26 @@ window.__ModuleLoader__.load({
                   '✕',
                 ),
               ),
+          /**
+           * 交互式变基的进行状态（进度 / 停点 / 冲突）。
+           *
+           * 与重置提示同一行位置：它们是同一类东西——"刚刚发生了一件改写历史的事"。
+           */
+          rebaseOp === null
+            ? null
+            : react.createElement(GraphRebaseBanner, {
+                t,
+                operation: rebaseOp,
+                conflictCount: rebaseConflictCount,
+                busy: rebaseBusy,
+                notice: rebaseNotice,
+                message: rebaseMessage,
+                onMessage: setRebaseMessage,
+                onContinue: onRebaseContinue,
+                onSkip: onRebaseSkip,
+                onAmend: onRebaseAmend,
+                onAbort: onRebaseAbort,
+              }),
           react.createElement(
             'div',
             {
@@ -15222,6 +16077,29 @@ window.__ModuleLoader__.load({
                 setResetPreviewError('')
               },
               onConfirm: () => void confirmReset(),
+            }),
+
+        // 交互式变基的计划对话框（打开时才有；计划来自 gitbar 的 `/rebase/plan`）。
+        rebasePlan === null
+          ? null
+          : react.createElement(InteractiveRebaseDialog, {
+              t,
+              /**
+               * key 让"计划取回来了 / 换了一条提交"就**重挂**它。
+               *
+               * 计划行是从 props 初始化的组件状态（用户会在上面排动作），因此不能在
+               * "loading → ready"之间复用同一个实例：那样用户看到的会是空计划，或者上一次
+               * 打开时的旧计划。
+               */
+              key: `rebase:${String(rebasePlan?.onto?.sha ?? '')}:${Array.isArray(rebasePlan?.commits) ? rebasePlan.commits.length : 0}`,
+              plan: rebasePlan,
+              busy: rebaseBusy,
+              error: rebaseError,
+              onCancel: () => {
+                setRebasePlan(null)
+                setRebaseError('')
+              },
+              onSubmit: (steps) => void submitRebasePlan(steps),
             }),
       )
     }

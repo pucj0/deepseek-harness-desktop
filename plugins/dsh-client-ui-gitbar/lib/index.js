@@ -20,7 +20,9 @@
 //   5. 不做自动 stash、不加 --force、不 --discard-changes：切换分支会改变用户工作区，
 //      必须由用户明确选择。
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 
@@ -376,11 +378,42 @@ async function readOperation(cwd, conflictsHint) {
     const onto = readMarkerLine(gitDir, `${dir}/onto`)
     const rebased = headName === undefined ? undefined : headName.replace(/^refs\/heads\//u, '')
     const ontoShort = onto === undefined ? undefined : (await git(['rev-parse', '--short', onto], cwd).catch(() => '')).trim()
+    /**
+     * 交互式变基（`rebase -i`）也走 `rebase-merge`，因此在这里把**进度与步骤**附加上去：
+     * 界面要显示"Rebasing 2/5 · 当前是谁"，并且要能区分"停在 edit 上"（等用户改）与
+     * "有冲突"（等用户在冲突面板里解决）——后者看 `conflictCount`，前者看 `pausedForEdit`。
+     * 读的都是 git 自己写的文件（见 `readInteractiveRebaseState`）。
+     */
+    const interactive = readInteractiveRebaseState(gitDir)
+    /**
+     * 外加**用户当初选的动作**（计划快照里的那一条）。todo 里 `reword` 落成了 `edit`，
+     * 只看 git 的状态分不出两者——界面要如实显示"这个停点是 reword"还是"是 edit"，
+     * 并且 reword 的信息编辑器要能回填用户在计划里写的内容。
+     */
+    const planned = interactive === null ? undefined : readInteractiveRebaseStep(cwd, interactive.step)
+    /**
+     * 停点提交的**主题**要回问 git：宿主生成的 todo 只写 `<action> <sha>`（不写主题，
+     * 见 writeInteractiveRebasePlan），因此 git 的 `done` 文件里没有主题可用——界面要显示
+     * "当前：<sha> <主题>"就只能查一次提交。只在**暂停中**才查（变基跑完时
+     * `interactive` 是 null），因此不会给轮询添负担。
+     */
+    const stopped = interactive === null || interactive.currentSha === '' ? undefined : await readCommitSummary(cwd, interactive.currentSha)
     return {
       type: 'rebase',
       currentLabel: ontoShort === undefined || ontoShort === '' ? 'onto' : `onto ${ontoShort}`,
       incomingLabel: rebased === undefined ? await oursLabel() : rebased,
       labelsSwapped: true,
+      ...(interactive === null
+        ? {}
+        : {
+            interactive: true,
+            ...interactive,
+            currentSubject: stopped?.subject ?? interactive.currentSubject,
+            /** 停点提交的完整信息：界面在 edit 停点上要把它填进"提交信息"编辑器。 */
+            currentMessage: stopped?.message ?? '',
+            plannedAction: planned?.action ?? '',
+            plannedMessage: planned?.message ?? '',
+          }),
     }
   }
 
@@ -1617,6 +1650,273 @@ async function inspectTagName(cwd, value, options) {
 }
 
 /**
+ * 交互式变基（`git rebase -i`）的**唯一**驱动方式：一个由宿主写好、git 去调用的脚本。
+ *
+ * 需求里两条硬约束同时成立才安全：
+ *   * 必须让 **git 自己**执行真正的 `git rebase -i`（不能模拟、不能自己抄一遍 rebase）；
+ *   * Electron 后台**不能**打开 vim/nano，也不能让界面直接传任意 shell/编辑器命令。
+ *
+ * 做法是把"用户的结构化计划"由宿主翻译成 todo 文件，再让 git 调用这个脚本把 todo 覆盖上去
+ * （这就是 `GIT_SEQUENCE_EDITOR` 的正当用法）。脚本只做两件**确定性**的事：
+ *
+ *   1. 被要求编辑 `git-rebase-todo` 时：把 `DSH_REBASE_TODO` 指向的文件原样拷过去；
+ *   2. 被要求编辑提交信息（`COMMIT_EDITMSG`）时：按 `<gitdir>/rebase-merge/msgnum` 查
+ *      `DSH_REBASE_MESSAGES`，**只有命中才写**——命中意味着"这一行的动作是 squash，用户
+ *      在计划里写好了合并后的信息"。没命中就什么都不做，保留 git 自己准备的信息
+ *      （冲突解决后的 `--continue` 正是这条路，实测确认它带的是 pick 那一行的行号）。
+ *
+ * 因此脚本不接受任何来自 renderer 的字符串：它读的是宿主自己写下的文件路径（环境变量里只有
+ * 路径），用户数据全部走文件。行号索引也不是猜的——todo 文件由宿主生成，行号即计划顺序。
+ *
+ * 为什么不按 `stopped-sha` 索引：squash 不是"停点"，那时 `stopped-sha` 并不可靠（实测取不到
+ * 对应的组首提交），而 `msgnum` 在每一次信息编辑时都准。
+ */
+const REBASE_EDITOR_SOURCE = [
+  "import { copyFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs'",
+  "import { basename, dirname, join } from 'node:path'",
+  'const target = process.argv[2]',
+  'if (typeof target !== "string" || target === "") process.exit(0)',
+  'if (basename(target) === "git-rebase-todo") {',
+  '  const source = process.env.DSH_REBASE_TODO',
+  '  if (typeof source === "string" && source !== "") copyFileSync(source, target)',
+  '  process.exit(0)',
+  '}',
+  'const messagesFile = process.env.DSH_REBASE_MESSAGES',
+  'if (typeof messagesFile !== "string" || messagesFile === "") process.exit(0)',
+  'const stateDir = join(dirname(target), "rebase-merge")',
+  'const counterFile = join(stateDir, "msgnum")',
+  'if (!existsSync(counterFile)) process.exit(0)',
+  'const step = readFileSync(counterFile, "utf8").trim()',
+  'let messages = {}',
+  'try { messages = JSON.parse(readFileSync(messagesFile, "utf8")) } catch { process.exit(0) }',
+  'const message = messages[step]',
+  'if (typeof message === "string") writeFileSync(target, message)',
+  '',
+].join('\n')
+
+/** 编辑器脚本的路径（每个宿主进程写一次；内容固定，因此可以复用）。 */
+let rebaseEditorPath
+
+/**
+ * 确保编辑器脚本已落盘，返回它的路径。
+ *
+ * @returns 脚本绝对路径。
+ */
+function ensureRebaseEditor() {
+  if (typeof rebaseEditorPath === 'string' && existsSync(rebaseEditorPath)) return rebaseEditorPath
+  const file = join(tmpdir(), `dsh-rebase-editor-${process.pid}.mjs`)
+  writeFileSync(file, REBASE_EDITOR_SOURCE, 'utf8')
+  rebaseEditorPath = file
+  return file
+}
+
+/**
+ * 交互式变基允许的动作（**白名单**）。语义与 git 自己的 todo 命令一一对应：
+ *   pick   重放；reword 只改信息；edit 停下来让用户改；
+ *   squash 合并进上一个提交并保留信息；fixup 合并并丢弃信息；drop 丢弃这个提交。
+ *
+ * `reword` 在 todo 里落成 `edit`：让 git 停下来等信息编辑器就等于依赖终端编辑器，而
+ * 需求要求"应用内显示提交信息编辑器"。因此 reword 的实际执行是 `edit` + 应用内
+ * `--amend -m`——结果与 git 的 reword 语义一致（提交内容不变、信息替换），只是把"问用户"
+ * 这一步搬到了界面上。
+ */
+const REBASE_ACTIONS = new Set(['pick', 'reword', 'edit', 'squash', 'fixup', 'drop'])
+
+/** todo 里真正写给 git 的动作（只有 reword 需要改写）。 */
+function todoActionFor(action) {
+  return action === 'reword' ? 'edit' : action
+}
+
+/**
+ * 读取正在进行中的交互式变基状态（进度、当前提交、动作、剩余步骤）。
+ *
+ * 读的都是 **git 自己写的文件**（`rebase-merge/` 下）：`msgnum` / `end` 是进度，
+ * `stopped-sha` 是停在哪个提交，`done` / `git-rebase-todo` 是已做与待做的步骤（每行就是
+ * 我们生成的那一行 todo）。这不是解析人类可读输出，而是读 git 的状态文件——因此重启之后
+ * 依然准确（界面上一次打开时的计划不需要留在内存里）。
+ *
+ * @param gitDir - git 目录。
+ * @returns 状态对象，或 null（没有交互式变基在进行）。
+ */
+function readInteractiveRebaseState(gitDir) {
+  if (gitDir === undefined) return null
+  const dir = join(gitDir, 'rebase-merge')
+  const has = (name) => existsSync(join(dir, name))
+  // `interactive` 是 git 为 `-i` 写的标记文件：有它才是交互式变基（普通 rebase 没有）。
+  if (!has('interactive')) return null
+  /** 读一个小状态文件的**全部**内容（`done` / `git-rebase-todo` 是多行的）。 */
+  const text = (name) => {
+    try {
+      return readFileSync(join(dir, name), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+  /** 单行数值/名字类状态文件。 */
+  const line = (name) => text(name).split('\n')[0].trim()
+  /** 把 todo 形状的文件解析成步骤（`<action> <sha> <subject>`，注释与空行跳过）。 */
+  const steps = (name) => {
+    const out = []
+    for (const record of text(name).split('\n')) {
+      const value = record.trim()
+      if (value === '' || value.startsWith('#')) continue
+      const [action, sha, ...rest] = value.split(/\s+/u)
+      if (action === undefined || sha === undefined) continue
+      out.push({ action, sha, subject: rest.join(' ').trim() })
+    }
+    return out
+  }
+  const number = (name) => {
+    const value = Number(line(name))
+    return Number.isFinite(value) && value > 0 ? value : 0
+  }
+  const done = steps('done')
+  const remaining = steps('git-rebase-todo')
+  const stoppedSha = line('stopped-sha')
+  const last = done.length > 0 ? done[done.length - 1] : undefined
+  return {
+    step: number('msgnum'),
+    total: number('end'),
+    stoppedSha,
+    /** 停在哪个动作上（`done` 的最后一行）：edit 停点与"解决后变成空提交"都靠它区分。 */
+    currentAction: last === undefined ? '' : last.action,
+    currentSubject: last === undefined ? '' : last.subject,
+    /** 当前提交的 SHA：停点是 `stopped-sha`，否则是最后一步（正常不该出现）。 */
+    currentSha: stoppedSha === '' ? (last === undefined ? '' : last.sha) : stoppedSha,
+    done,
+    remaining,
+    /** 停点是不是一个 `edit`（界面据此为 edit / reword 显示暂停面板）。 */
+    pausedForEdit: stoppedSha !== '' && last !== undefined && last.action === 'edit',
+  }
+}
+
+/**
+ * 交互式变基期间宿主写下的文件所在目录。
+ *
+ * 路径**由仓库路径决定**（而不是每次一个新的临时目录）：`git rebase -i` 因为冲突或 edit
+ * 停点返回之后，后续的「继续 / 跳过 / 中止」是**另外的 HTTP 请求**，而计划里的 squash
+ * 信息必须在那时仍然可达（冲突解决后的 `--continue` 提交 squash 时 git 会开信息编辑器，
+ * 那时正是用计划里的信息覆盖 git 自动拼出来的那一份）。因此这些文件在变基期间**必须活着**，
+ * 只有变基真正结束（完成或中止）才删。
+ *
+ * @param cwd - 仓库根。
+ * @returns 目录绝对路径。
+ */
+function interactiveRebaseDir(cwd) {
+  const key = createHash('sha1').update(String(cwd)).digest('hex').slice(0, 16)
+  return join(tmpdir(), `dsh-rebase-${key}`)
+}
+
+/**
+ * 让 git 调用宿主脚本所需的环境变量（todo 与信息表的路径也由宿主给出）。
+ *
+ * 编辑器用**当前进程的可执行文件**启动脚本：宿主在应用里跑在 Electron 的 Node 模式下
+ * （`ELECTRON_RUN_AS_NODE` 保证 `process.execPath` 被当成 node 用），在测试里就是 node
+ * 本身。两者都能直接跑 `.mjs`，因此不需要依赖 PATH 上有 node。
+ *
+ * @param cwd - 仓库根。
+ * @returns 环境变量对象（叠加到 process.env 上）。
+ */
+function interactiveRebaseEnv(cwd) {
+  const dir = interactiveRebaseDir(cwd)
+  const editor = `"${process.execPath}" "${ensureRebaseEditor()}"`
+  return {
+    ...NON_INTERACTIVE_ENV,
+    GIT_SEQUENCE_EDITOR: editor,
+    GIT_EDITOR: editor,
+    ELECTRON_RUN_AS_NODE: '1',
+    DSH_REBASE_TODO: join(dir, 'todo'),
+    DSH_REBASE_MESSAGES: join(dir, 'messages.json'),
+  }
+}
+
+/**
+ * 把已验证的结构化计划写进 todo / 信息表 / 计划快照。
+ *
+ * `plan.json` 是**给宿主自己看的**：git 的 todo 里 `reword` 落成 `edit`（理由见
+ * `todoActionFor`），因此事后无法从 git 的状态里分辨"这个停点原本是 reword"还是真正的
+ * edit——只有留下原始计划才分得清，界面也才能显示用户当初选的动作。
+ *
+ * @param cwd - 仓库根。
+ * @param steps - `{ action, sha, message }` 数组（顺序 = todo 顺序）。
+ * @returns 无。
+ */
+function writeInteractiveRebasePlan(cwd, steps) {
+  const dir = interactiveRebaseDir(cwd)
+  mkdirSync(dir, { recursive: true })
+  const messages = {}
+  steps.forEach((entry, index) => {
+    // 行号既是 todo 的行号也是 git 的 `msgnum`：squash 合并后的信息按它索引。
+    if (entry.action === 'squash' && entry.message !== '') messages[String(index + 1)] = entry.message
+  })
+  writeFileSync(join(dir, 'todo'), steps.map((entry) => `${todoActionFor(entry.action)} ${entry.sha}\n`).join(''), 'utf8')
+  writeFileSync(join(dir, 'messages.json'), JSON.stringify(messages), 'utf8')
+  writeFileSync(join(dir, 'plan.json'), JSON.stringify(steps.map(({ action, sha, message }) => ({ action, sha, message }))), 'utf8')
+}
+
+/** 读取计划快照（没有进行中的交互式变基时返回 undefined）。 */
+function readInteractiveRebasePlan(cwd) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(interactiveRebaseDir(cwd), 'plan.json'), 'utf8'))
+    return Array.isArray(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 计划里第 `step` 步（`step` 是 git 的 `msgnum`，从 1 开始）。
+ *
+ * @param cwd - 仓库根。
+ * @param step - 1 起的步骤号。
+ * @returns `{ action, sha, message }` 或 undefined。
+ */
+function readInteractiveRebaseStep(cwd, step) {
+  const plan = readInteractiveRebasePlan(cwd)
+  if (plan === undefined) return undefined
+  const index = Number(step) - 1
+  return Number.isInteger(index) && index >= 0 && index < plan.length ? plan[index] : undefined
+}
+
+/** 变基结束（完成或中止）后清掉计划文件，不在临时目录里留东西。 */
+function clearInteractiveRebasePlan(cwd) {
+  rmSync(interactiveRebaseDir(cwd), { recursive: true, force: true })
+}
+
+/**
+ * 走到下一个**需要用户动手**的地方：把 `reword` 停点自动处理掉。
+ *
+ * `reword` 在 todo 里是 `edit`（不能让 git 去开终端编辑器）。停在 edit 上之后，提交已经
+ * 按原信息创建好了，所以"只改信息"就等于 `commit --amend -m <用户写的信息>`——树的哈希
+ * 不变、父提交不变、提交数不变，正是 reword 的语义；然后自动 `--continue` 往下走。
+ *
+ * 循环而不是只做一次：`reword` 可以连着好几个，每次 `--continue` 都会停到下一个。
+ * 遇到真正的 `edit`（计划里就是 edit）、冲突或变基结束就返回，交给界面。
+ *
+ * @param cwd - 仓库根。
+ * @param gitDir - git 目录。
+ * @returns `{ conflictPaths }`（下一轮冲突的路径）或 undefined。
+ */
+async function advanceInteractiveRebase(cwd, gitDir) {
+  for (let guard = 0; guard < 100; guard += 1) {
+    const state = readInteractiveRebaseState(gitDir)
+    if (state === null || !state.pausedForEdit) return undefined
+    const planned = readInteractiveRebaseStep(cwd, state.step)
+    if (planned === undefined || planned.action !== 'reword' || planned.message === '') return undefined
+    await git(['commit', '--amend', '-m', planned.message], cwd, { env: NON_INTERACTIVE_ENV })
+    try {
+      await git(['rebase', '--continue'], cwd, { env: interactiveRebaseEnv(cwd) })
+    } catch (error) {
+      const conflicts = await listConflictEntries(cwd)
+      if (conflicts.length > 0) return { conflictPaths: conflicts.map((entry) => entry.path) }
+      throw error
+    }
+  }
+  // 走到这里说明计划里连续 100 个 reword 都没跑完——只可能是出了意料之外的状态，如实报错。
+  throw new Error('interactive rebase did not settle')
+}
+
+/**
  * 创建 git 路由的处理器。
  *
  * 路由形状：
@@ -1631,6 +1931,10 @@ async function inspectTagName(cwd, value, options) {
  *   POST /branch/merge           合并到当前分支
  *   POST /branch/rebase          变基
  *   POST /cherry-pick            摘取一个提交
+ *   GET  /rebase/plan            交互式变基的**计划**（`<onto>..HEAD`，最老的在前）
+ *   POST /rebase/interactive     按结构化计划执行真正的 `git rebase -i`
+ *   POST /rebase/amend           在 `edit` 停点上改写当前提交（`commit --amend`）
+ *   POST /rebase/skip            跳过当前提交（`git rebase --skip`）
  *   POST /remote                 fetch / pull / push
  *   POST /op/abort               中止进行中的合并/变基/摘取
  *
@@ -1816,6 +2120,61 @@ function createGitHandler() {
             upstream: published.upstream,
             targetPublished: targetPublished.published,
             branch: (await currentBranchName(cwd)) ?? '',
+          })
+          return
+        }
+        // 交互式变基的**计划**：某个提交之后待重放的那些提交（`<onto>..HEAD`，最老的先）。
+        //
+        // 只读，因此是 GET（与 `/branches`、`/reset/preview` 一致）：它不改变仓库。界面先读它
+        // 再让用户排动作，最后把结构化计划 POST 给 `/rebase/interactive`——**渲染进程从不
+        // 接触 todo 文本，也从不传任何编辑器/shell 命令**。
+        if (path === `${ROUTE_PREFIX}/rebase/plan`) {
+          const requested = url.searchParams.get('revision')
+          const onto = await resolveCommitSha(cwd, requested)
+          if (onto === undefined) {
+            sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+            return
+          }
+          const head = await readCommitSummary(cwd, 'HEAD')
+          if (head === undefined) {
+            sendJson(response, 409, { error: 'no commits', code: 'noCommits' })
+            return
+          }
+          const raw = await git(['rev-list', '--reverse', `${onto}..HEAD`], cwd).catch(() => '')
+          const shas = raw
+            .split('\n')
+            .map((value) => value.trim())
+            .filter((value) => value !== '')
+          const commits = []
+          for (const sha of shas) {
+            const summary = await readCommitSummary(cwd, sha)
+            if (summary !== undefined) commits.push(summary)
+          }
+          // "已经发布"的判定问的是**最老的那个待重放提交**在不在上游：它是这段历史的起点，
+          // 一旦它已经在远端，这次改写就动到了别人能看到的历史（见 readPublishedState）。
+          const oldest = commits.length === 0 ? head.sha : commits[0].sha
+          const published = await readPublishedState(cwd, oldest)
+          /**
+           * 上游名要问**分支**（`@{upstream}`），不能从那个提交上问：`<sha>@{upstream}` 不是
+           * 合法的 rev 表达式（`@{upstream}` 只对分支/HEAD 有意义），因此按提交查时
+           * `readPublishedState` 只会回一个空名字。判定仍以提交为准（见上）。
+           */
+          const branchUpstream =
+            published.upstream === ''
+              ? (await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], cwd).catch(() => '')).trim()
+              : published.upstream
+          sendJson(response, 200, {
+            isRepo: true,
+            ...scope,
+            onto: (await readCommitSummary(cwd, onto)) ?? null,
+            head,
+            commits,
+            count: commits.length,
+            published: published.published,
+            upstream: branchUpstream,
+            branch: (await currentBranchName(cwd)) ?? '',
+            /** 带 `fixup!`/`squash!` 前缀的提交（P1 的 autosquash 要用；本轮只如实报告）。 */
+            autosquashCandidates: commits.filter((entry) => /^(fixup|squash)!/u.test(entry.subject)).map((entry) => entry.sha),
           })
           return
         }
@@ -2439,6 +2798,236 @@ function createGitHandler() {
         return
       }
 
+      // ---- 交互式变基（`git rebase -i`）--------------------------------------
+      //
+      // 三条路由：读计划（GET，在只读区）、按计划开始、跳过当前提交。**中止与继续沿用既有的
+      // `/op/abort` 与 `/op/continue`**（它们本来就是按当前操作类型选命令的，交互式变基同样
+      // 是 rebase）。
+      //
+      // 真实执行是硬要求：这里不模拟 rebase，而是把结构化计划翻成 todo，再让 git 自己跑
+      // `git rebase -i`（驱动方式见 REBASE_EDITOR_SOURCE 的说明）。
+      if (path === `${ROUTE_PREFIX}/rebase/interactive`) {
+        const onto = await resolveCommitSha(cwd, payload?.onto)
+        if (onto === undefined) {
+          sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+          return
+        }
+        const plan = Array.isArray(payload?.plan) ? payload.plan : null
+        if (plan === null || plan.length === 0) {
+          sendJson(response, 400, { error: 'empty plan', code: 'emptyRebasePlan' })
+          return
+        }
+        /**
+         * 交互式变基是**改写历史的入口**，因此和 hard reset 一样要求一次**显式确认**：
+         * 只要计划被改动（重排 / 合并 / 改信息 / 丢弃），被重放的提交就是新的提交（SHA 变化）。
+         * （实测：全选 pick 且顺序不变时 git 走 fast-forward、SHA 不变——但那正是"这次什么都没
+         * 改"的情形，确认的成本可以忽略，而漏掉确认的代价是用户的历史被悄悄改写。）
+         * 界面在计划对话框里放一处风险说明 + 一个开始按钮，只有点它才带上这个字段；
+         * Drop 再单独标红，但**不再弹第二个对话框**（需求 9）。
+         */
+        if (payload?.acknowledgeRewrite !== true) {
+          sendJson(response, 400, { error: 'interactive rebase requires acknowledgement', code: 'rewriteNotAcknowledged' })
+          return
+        }
+        // 1) 动作白名单 + 形状。
+        const steps = []
+        for (const entry of plan) {
+          const action = typeof entry?.action === 'string' ? entry.action : ''
+          if (!REBASE_ACTIONS.has(action)) {
+            sendJson(response, 400, { error: `unknown action: ${action}`, code: 'invalidAction' })
+            return
+          }
+          const sha = await resolveCommitSha(cwd, entry?.sha)
+          if (sha === undefined) {
+            sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+            return
+          }
+          const message = normalizeCommitMessage(entry?.message)
+          if (message === undefined) {
+            sendJson(response, 400, { error: 'invalid message', code: 'invalidCommitMessage' })
+            return
+          }
+          steps.push({ action, sha, message })
+        }
+        // 2) 提交集合必须**恰好**是 `<onto>..HEAD`（不许漏、不许多、不许重复）：这是"只能编辑
+        //    这段历史"的硬保证，也挡住"把别人的提交拉进来重放"。
+        const rangeRaw = await git(['rev-list', '--reverse', `${onto}..HEAD`], cwd).catch(() => '')
+        const expected = rangeRaw.split('\n').map((value) => value.trim()).filter((value) => value !== '')
+        if (expected.length === 0) {
+          sendJson(response, 409, { error: 'nothing to rebase', code: 'nothingToDo' })
+          return
+        }
+        const planned = steps.map((entry) => entry.sha)
+        const sameSet = planned.length === expected.length && [...planned].sort().join(',') === [...expected].sort().join(',')
+        if (!sameSet) {
+          sendJson(response, 409, { error: 'plan does not match the commit range', code: 'commitSetMismatch' })
+          return
+        }
+        // 3) squash/fixup 必须跟在某个提交之后（git 自己也会拒绝，但那会留下一个卡住的
+        //    rebase 状态——提前挡住更干净）。
+        if (steps[0].action === 'squash' || steps[0].action === 'fixup') {
+          sendJson(response, 409, { error: 'cannot squash without a previous commit', code: 'squashWithoutPrevious' })
+          return
+        }
+        // 4) 生成 todo 与信息表（**行号 = 计划顺序**，编辑器脚本按 msgnum 查信息）。
+        writeInteractiveRebasePlan(cwd, steps)
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            try {
+              await git(['rebase', '-i', onto], cwd, { env: interactiveRebaseEnv(cwd) })
+            } catch (error) {
+              /**
+               * 冲突不是"启动失败"：git 已经真的开始变基、并停在冲突上等用户解决，与普通
+               * 变基的冲突**完全同一种状态**，因此也回同一个 code（`rebaseConflict`）——
+               * 既有的冲突解决面板与多轮冲突逻辑就能原样复用，不需要第二套语义。
+               * 计划文件必须留着：解决完继续时还要用它（squash 的信息就在里面）。
+               */
+              const conflicts = await listConflictEntries(cwd)
+              if (conflicts.length > 0) error.dshConflicts = true
+              // 其它非零退出仍然照实回报（git 的原文最有信息量）。
+              throw error
+            }
+            // `reword` 落成 edit 停点，这里把它自动收尾（只换信息 + 继续），能跑完就一直跑。
+            await advanceInteractiveRebase(cwd, await resolveGitDir(cwd))
+            const state = await readStatus(cwd)
+            // 跑完了就清掉计划文件；还停着（edit / 冲突）则留着——后面的「继续」要用它。
+            if (state.operation === null) clearInteractiveRebasePlan(cwd)
+            return {
+              rebase: {
+                started: true,
+                conflicted: state.conflictCount > 0,
+                conflicts: state.conflicts,
+                /** 停下来了（edit 停点或空提交停点）而不是跑完。 */
+                paused: state.operation !== null,
+                operation: state.operation,
+              },
+            }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            // 冲突：变基在跑，只是停住了——把计划留着（见上面）。
+            if (error?.dshConflicts === true) return { status: 409, code: 'rebaseConflict' }
+            clearInteractiveRebasePlan(cwd)
+            if (/invalid line|cannot 'squash'|cannot 'fixup'|invalid command/iu.test(message)) {
+              return { status: 409, code: 'invalidRebasePlan' }
+            }
+            if (/nothing to do|no commits/iu.test(message)) return { status: 409, code: 'nothingToDo' }
+            if (looksLikeLocalChanges(message)) return { status: 409, code: 'localChanges' }
+            return undefined
+          },
+        )
+        return
+      }
+
+      // 在 `edit` 停点上**改当前这个提交**（需求 8 的「Amend Commit」）。表单 `{ message }`。
+      //
+      // 走 `git commit --amend`：它把**索引里已暂存的内容**与新的提交信息一起写进那个提交，
+      // 因此"改文件 → 暂存 → 在这里点 Amend"是自然的顺序（暂存在变更面板里做）。信息留空
+      // 表示"只改内容、信息不动"（`--no-edit`），这与 IDEA 的 Amend 一致，也让"只想补一行代码"
+      // 的用户不必重新打一遍信息。
+      //
+      // 只在交互式变基的**停点**上允许：别的时刻 `--amend` 会改写一条用户没在编辑的提交。
+      if (path === `${ROUTE_PREFIX}/rebase/amend`) {
+        const operation = await readOperation(cwd)
+        if (operation === null || operation.type !== 'rebase' || operation.interactive !== true || operation.stoppedSha === '') {
+          sendJson(response, 409, { error: 'no interactive rebase stop', code: 'noOperation' })
+          return
+        }
+        const message = normalizeCommitMessage(payload?.message)
+        if (message === undefined) {
+          sendJson(response, 400, { error: 'invalid message', code: 'invalidCommitMessage' })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            await git(['commit', '--amend', ...(message === '' ? ['--no-edit'] : ['-m', message])], cwd, { env: NON_INTERACTIVE_ENV })
+            const state = await readStatus(cwd)
+            return { amended: true, operation: state.operation }
+          },
+          (error) => {
+            const message2 = String(error?.message ?? error)
+            if (/nothing to commit|no changes|nothing added/iu.test(message2)) return { status: 409, code: 'nothingToAmend' }
+            if (/no rebase in progress|not a rebase|no operation/iu.test(message2)) return { status: 409, code: 'noOperation' }
+            if (looksLikeLocalChanges(message2)) return { status: 409, code: 'localChanges' }
+            return undefined
+          },
+        )
+        return
+      }
+
+      // 跳过当前提交（`git rebase --skip`）：冲突停点上就是"丢掉这个提交、继续往下走"。
+      // 与 `/op/continue` 一样，交互式变基要带上宿主编辑器（后面的 squash 还要用计划里的信息）。
+      if (path === `${ROUTE_PREFIX}/rebase/skip`) {
+        const operation = await readOperation(cwd)
+        if (operation === null || operation.type !== 'rebase') {
+          sendJson(response, 409, { error: 'no rebase in progress', code: 'noOperation' })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            // 跳过之后 git 会继续往下走 todo，后面的 squash 仍要能拿到计划里的信息。
+            const interactive = operation.interactive === true
+            try {
+              await git(['rebase', '--skip'], cwd, { env: interactive ? interactiveRebaseEnv(cwd) : NON_INTERACTIVE_ENV })
+            } catch (error) {
+              const conflicts = await listConflictEntries(cwd)
+              if (conflicts.length > 0) error.dshConflicts = true
+              throw error
+            }
+            if (interactive) {
+              await advanceInteractiveRebase(cwd, await resolveGitDir(cwd))
+            }
+            const state = await readStatus(cwd)
+            if (state.operation === null) clearInteractiveRebasePlan(cwd)
+            /**
+             * `--skip` 在**冲突停点**上真的丢掉那个提交；但在 `edit` 停点上那个提交已经落盘，
+             * git 没有可跳过的对象，`--skip` 与 `--continue` 等价。这两件事对用户完全不同，
+             * 因此这里如实算出来：被跳过的提交**还在当前分支的祖先里**就说明它没有被丢掉。
+             * 界面据此只在冲突停点上把按钮说成"跳过（丢弃）这个提交"。
+             */
+            const skippedSha = operation.currentSha ?? ''
+            const stillReachable =
+              skippedSha === ''
+                ? true
+                : await git(['merge-base', '--is-ancestor', skippedSha, 'HEAD'], cwd)
+                    .then(() => true)
+                    .catch(() => false)
+            return {
+              rebase: {
+                skipped: true,
+                /** 被跳过的提交（界面要说出"跳过了谁"，而不是只报一句成功）。 */
+                skippedSha,
+                skippedSubject: operation.currentSubject ?? '',
+                /** 这个提交**真的被丢掉**了吗（见上）。 */
+                dropped: skippedSha !== '' && !stillReachable,
+                conflicted: state.conflictCount > 0,
+                conflicts: state.conflicts.length,
+                paused: state.operation !== null,
+                operation: state.operation,
+              },
+            }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            if (error?.dshConflicts === true) return { status: 409, code: 'rebaseConflict' }
+            clearInteractiveRebasePlan(cwd)
+            if (/No rebase in progress|no rebase/iu.test(message)) return { status: 409, code: 'noOperation' }
+            if (/nothing to skip|is empty/iu.test(message)) return { status: 409, code: 'emptyCommit' }
+            return undefined
+          },
+        )
+        return
+      }
+
       // ---- 把当前分支重置到某个提交 -----------------------------------------
       //
       // 表单 `{ revision, mode, root?, acknowledgeDestructive? }`。
@@ -2678,7 +3267,20 @@ function createGitHandler() {
                 // `--no-edit` 用 MERGE_MSG：宿主没有终端，不能让它去开编辑器。
                 await git(['commit', '--no-edit'], cwd, { env: NON_INTERACTIVE_ENV })
               } else if (operation.type === 'rebase') {
-                await git(['rebase', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+                /**
+                 * 交互式变基的「继续」必须带上宿主编辑器：冲突解决之后 git 提交 squash 时
+                 * 会开信息编辑器，那时正是用计划里用户写好的合并信息覆盖 git 自动拼的那份。
+                 */
+                const interactive = operation.interactive === true
+                await git(['rebase', '--continue'], cwd, { env: interactive ? interactiveRebaseEnv(cwd) : NON_INTERACTIVE_ENV })
+                if (interactive) {
+                  // 这一轮之后可能还有 `reword` 停点：自动改信息并继续（见 advanceInteractiveRebase）。
+                  const advanced = await advanceInteractiveRebase(cwd, await resolveGitDir(cwd))
+                  if (advanced !== undefined) {
+                    return { continued: 'rebase', stoppedAtNextConflict: true, conflicts: advanced.conflictPaths.length, paths: advanced.conflictPaths }
+                  }
+                  if ((await readOperation(cwd)) === null) clearInteractiveRebasePlan(cwd)
+                }
               } else if (operation.type === 'cherry-pick') {
                 await git(['cherry-pick', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
               } else {
@@ -2712,6 +3314,13 @@ function createGitHandler() {
           },
           (error) => {
             const message = String(error?.message ?? error)
+            /**
+             * 冲突解决之后这个提交变成**空提交**（改动与目标分支上已有的完全一样）：git 会
+             * 停下来说 "The previous cherry-pick is now empty, possibly due to conflict
+             * resolution"。这不是错误，而是"用户要做的选择是跳过它"——因此单列一个 code，
+             * 界面据此把「跳过」摆在最显眼的位置（继续只会再撞一次同样的墙）。
+             */
+            if (/is now empty/iu.test(message)) return { status: 409, code: 'emptyCommit' }
             // 还有没解决的冲突：git 会拒绝提交/继续。这是"还没做完"，不是失败。
             if (/unmerged|needs merge|you have unmerged files|Resolve all conflicts|conflict/iu.test(message)) {
               return { status: 409, code: 'conflictPending' }
@@ -2745,6 +3354,8 @@ function createGitHandler() {
         }
         await runWrite(cwd, scope, response, async () => {
           await git(args, cwd, { env: NON_INTERACTIVE_ENV })
+          // 中止交互式变基之后计划文件就没有意义了（留着会让下一次 rebase 读到旧计划）。
+          if (kind === 'rebase') clearInteractiveRebasePlan(cwd)
           return { aborted: kind }
         })
         return
@@ -2784,6 +3395,29 @@ async function countTrackedChanges(cwd) {
 async function countUntrackedFiles(cwd) {
   const raw = await git(['status', '--porcelain', '-z', '--untracked-files=normal'], cwd)
   return raw.split('\u0000').filter((record) => record.startsWith('?? ')).length
+}
+
+/**
+ * 校验并规整一条**变基计划里的提交信息**（squash 合并后的信息、reword 的新信息）。
+ *
+ * 与储藏消息（`normalizeStashMessage`）有意分开：
+ *   * 提交信息常常是"标题 + 空行 + 正文"，因此**必须保留换行**，长度上限也宽得多
+ *     （200 字对一条提交信息来说太短，而且是**截断**——静默截断用户写的信息比报错更坏）；
+ *   * 行尾统一成 LF：renderer 在 Windows 上可能给出 CRLF，混进去会让提交信息里多出 `\r`；
+ *   * 仍然拒绝 NUL 与其它控制字符（它们会被真的写进提交对象，之后每次 `git log` 都带着）。
+ *
+ * @param value - 请求给出的信息（可以是 undefined）。
+ * @returns 规整后的信息；输入形状非法（不是字符串）时返回 undefined。
+ */
+function normalizeCommitMessage(value) {
+  if (value === undefined || value === null) return ''
+  if (typeof value !== 'string') return undefined
+  const cleaned = value
+    .replace(/\r\n?/gu, '\n')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+    .trim()
+  return cleaned.slice(0, 4000)
 }
 
 /**
@@ -2861,6 +3495,10 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/branch/merge`,
     `${ROUTE_PREFIX}/branch/rebase`,
     `${ROUTE_PREFIX}/cherry-pick`,
+    `${ROUTE_PREFIX}/rebase/plan`,
+    `${ROUTE_PREFIX}/rebase/interactive`,
+    `${ROUTE_PREFIX}/rebase/amend`,
+    `${ROUTE_PREFIX}/rebase/skip`,
     `${ROUTE_PREFIX}/remote`,
     `${ROUTE_PREFIX}/op/abort`,
     `${ROUTE_PREFIX}/op/continue`,

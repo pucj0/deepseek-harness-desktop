@@ -390,6 +390,26 @@ const resetPreview = (revision) => ({
   targetPublished: false,
 })
 
+/**
+ * 交互式变基的夹具。
+ *
+ *   * `rebasePlanFixture`：`/rebase/plan`（只读）的响应——**待重放的提交由宿主给**，因此
+ *     界面这边只消费它；
+ *   * `rebaseStatusFixture`：gitbar `/status` 里的 `operation`（交互式变基的进行状态）；
+ *   * `rebaseResponses`：写路由的响应（按路由名登记）；
+ *   * `rebaseFailure`：下一次写操作的失败响应（用完即清）。
+ */
+const rebasePlanCommits = [
+  { sha: '1'.repeat(40), short: '1111111', subject: 'Add login API', message: 'Add login API', author: 'tester', date: '2026-01-02T10:00:00+08:00', parents: ['m'.repeat(40)] },
+  { sha: '2'.repeat(40), short: '2222222', subject: 'Add session store', message: 'Add session store\n\nBody of the second commit.', author: 'tester', date: '2026-01-02T11:00:00+08:00', parents: ['1'.repeat(40)] },
+  { sha: '3'.repeat(40), short: '3333333', subject: 'Add tests', message: 'Add tests', author: 'tester', date: '2026-01-02T12:00:00+08:00', parents: ['2'.repeat(40)] },
+]
+let rebasePlanFixture = null
+let rebaseStatusFixture = null
+let rebaseConflictFixture = 0
+const rebaseResponses = new Map()
+let rebaseFailure = null
+
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
@@ -398,9 +418,43 @@ globalThis.fetch = async (url, init) => {
     const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
     const revision = new URLSearchParams(target.split('?')[1] ?? '').get('revision') ?? ''
     requests.push({ url: target, route: `gitbar:${gitbarRoute}`, body })
+    // 交互式变基的**失败**夹具体：优先于成功夹具（含只读路由的失败，例如计划读不到）。
+    if (rebaseFailure !== null && rebaseFailure.route === gitbarRoute) {
+      const failure = rebaseFailure
+      rebaseFailure = null
+      return { ok: false, text: async () => JSON.stringify(failure.body) }
+    }
     if (gitbarRoute === 'reset/preview') return { ok: true, text: async () => JSON.stringify(resetPreview(revision)) }
+    // 交互式变基的**计划**（只读）与**进行状态**（`/status` 里的 `operation`）。
+    if (gitbarRoute === 'rebase/plan') {
+      const plan =
+        rebasePlanFixture ?? {
+          isRepo: true,
+          onto: { sha: 'm'.repeat(40), short: 'mmmmmmm', subject: 'merge feature into main' },
+          head: { sha: '3'.repeat(40), short: '3333333', subject: 'Add tests' },
+          commits: rebasePlanCommits,
+          count: rebasePlanCommits.length,
+          published: false,
+          upstream: '',
+          branch: 'main',
+          autosquashCandidates: [],
+        }
+      return { ok: true, text: async () => JSON.stringify(plan) }
+    }
+    if (gitbarRoute === 'status') {
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({ isRepo: true, branch: 'main', operation: rebaseStatusFixture, conflictCount: rebaseConflictFixture }),
+      }
+    }
     // 提交右键菜单里的写操作（摘取 / 还原 / 创建分支 / 创建标记）：记录请求体，回成功。
     gitbarPosts.push({ route: gitbarRoute, body })
+    // 交互式变基的写操作：按路由登记的响应优先，最后落到下面的通用成功体。
+    if (rebaseResponses.has(gitbarRoute)) {
+      const payload = rebaseResponses.get(gitbarRoute)
+      return { ok: true, text: async () => JSON.stringify(typeof payload === 'function' ? payload(body) : payload) }
+    }
     if (gitbarRoute !== 'reset') {
       return {
         ok: true,
@@ -1493,7 +1547,7 @@ console.log('=== 14. 提交右键菜单：复制 / 比较 / 建分支 / 建标�
   first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
   await settle()
   const items = findAll('data-graph-menu-item').map((node) => node.props['data-graph-menu-item'])
-  check('14) 菜单条目齐全且按"读 → 写 → 危险"排列', items.join(','), 'copy-sha,compare-current,select-compare,create-branch,create-tag,cherry-pick,revert,reset')
+  check('14) 菜单条目齐全且按"读 → 写 → 危险"排列', items.join(','), 'copy-sha,compare-current,select-compare,create-branch,create-tag,cherry-pick,revert,interactive-rebase,reset')
   check('   危险动作单独成组（有说明行）', find('data-graph-menu-danger') === null, 'false')
 
   // 「复制提交 SHA」：复制完整 SHA，并给一句回执。
@@ -1609,6 +1663,259 @@ console.log('=== 14. 提交右键菜单：复制 / 比较 / 建分支 / 建标�
   check('   桥接请求打开了比较', `${bridged?.body?.a}↔${bridged?.body?.b}`, 'feature/login↔HEAD')
   checkTrue('   并注明来自分支菜单', find('data-graph-compare-branch', 'feature/login') !== null)
   await click(find('data-graph-compare-close'))
+}
+
+console.log('')
+console.log('=== 15. 交互式变基：计划对话框 / 进度横幅 / 停点动作 ===')
+{
+  /** 受控输入（下拉框 / textarea）。 */
+  const change = async (node, value) => {
+    node?.props?.onChange?.({ target: { value }, stopPropagation() {} })
+    await settle()
+  }
+  const openMenu = async (node) => {
+    node.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+    await settle()
+  }
+  await mount()
+  const first = findAll('data-graph-row')[0]
+  const headSha = String(first.props['data-graph-row'])
+  check('15) 交互式变基默认没有横幅', find('data-graph-rebase'), null)
+
+  // ---- 计划对话框 -----------------------------------------------------------------
+  await openMenu(first)
+  checkTrue('   提交菜单里有「从此处开始交互式变基」', find('data-graph-menu-item', 'interactive-rebase') !== null)
+  // 它属于**危险段**：位置在危险说明行之后、重置之前。
+  {
+    const nodes = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey)
+    const labels = nodes.filter((n) => n.props?.['data-graph-menu-item'] !== undefined || n.props?.['data-graph-menu-danger'] !== undefined)
+    const order = labels.map((n) => n.props['data-graph-menu-item'] ?? 'danger-hint')
+    check('   与「重置」同属危险段（在说明行之后）', order.slice(-3).join(','), 'danger-hint,interactive-rebase,reset')
+  }
+  requests.length = 0
+  await click(find('data-graph-menu-item', 'interactive-rebase'))
+  const planCall = requests.filter((entry) => entry.route === 'gitbar:rebase/plan').pop()
+  checkTrue('   计划请求发到宿主', planCall !== undefined)
+  check('   问的是被点的那条提交之后', planCall?.url.includes(`revision=${headSha}`), true)
+  checkTrue('   对话框已打开', find('data-rebase-dialog') !== null)
+  // 一行一个提交，动作默认全是 pick（**不是** git 的 todo 文本）。
+  check('   计划行数 = 待重放的提交数', findAll('data-rebase-row').length, 3)
+  check('   默认动作都是 pick', findAll('data-rebase-row').map((n) => n.props['data-rebase-action']).join(','), 'pick,pick,pick')
+  check('   计划里没有 todo 文本（只有结构化控件）', findAll('data-rebase-row').every((n) => String(n.props['data-rebase-action']) !== ''), true)
+  checkTrue('   列出六种动作', findAll('data-rebase-option').length >= 18)
+  check('   计划有标题，并说明顺序靠 ↑ / ↓ 调整（不做文本编辑）', find('data-rebase-plan-label')?.props?.['data-rebase-plan-label'], '3')
+  checkTrue('   重排说明存在', find('data-rebase-reorder-hint') !== null)
+  checkTrue('   有"改写历史"的风险说明', find('data-rebase-rewrite-warning') !== null)
+  check('   未发布时没有已发布警告', find('data-rebase-published'), null)
+  check('   没有 Drop 时不显示丢弃警告', find('data-rebase-drop-warning'), null)
+
+  // ---- 动作：drop 要醒目，且计入风险说明 -------------------------------------------
+  await change(find('data-rebase-select', '2'.repeat(40)), 'drop')
+  check('   第 2 行改成 drop', find('data-rebase-row', '2'.repeat(40))?.props?.['data-rebase-action'], 'drop')
+  checkTrue('   drop 行有醒目标记', find('data-rebase-dropped', '2'.repeat(40)) !== null)
+  check('   风险说明里报出会被丢弃的提交数', find('data-rebase-drop-warning')?.props?.['data-rebase-drop-warning'], '1')
+  // 改回 pick，再用 drop 数量确认它是**实时**算的。
+  await change(find('data-rebase-select', '2'.repeat(40)), 'pick')
+  check('   改回 pick 后丢弃警告消失', find('data-rebase-drop-warning'), null)
+
+  // ---- 顺序：上移 / 下移（不做文本编辑）-------------------------------------------
+  await click(find('data-rebase-down', '1'.repeat(40)))
+  check(
+    '   下移把这一行挪到后面',
+    findAll('data-rebase-row').map((n) => n.props['data-rebase-row'].slice(0, 1)).join(','),
+    '2,1,3',
+  )
+  await click(find('data-rebase-up', '1'.repeat(40)))
+  check('   上移挪回来', findAll('data-rebase-row').map((n) => n.props['data-rebase-row'].slice(0, 1)).join(','), '1,2,3')
+
+  // ---- squash：合并后的信息可以改，默认值与 git 自己的默认一致 ----------------------
+  await change(find('data-rebase-select', '2'.repeat(40)), 'squash')
+  const squashArea = find('data-rebase-message', '2'.repeat(40)) ?? find('data-rebase-message', '1'.repeat(40))
+  checkTrue('   squash 行出现"合并后的提交信息"编辑器', squashArea !== null)
+  check(
+    '   默认信息 = 被合并的那条 + 这条（与 git 的默认一致）',
+    squashArea?.props?.value,
+    'Add login API\n\nAdd session store\n\nBody of the second commit.',
+  )
+  await change(squashArea, 'Combined login and session\n\nFor review.')
+  await change(find('data-rebase-select', '3'.repeat(40)), 'reword')
+  const rewordArea = find('data-rebase-reword', '3'.repeat(40))
+  checkTrue('   reword 行出现"新的提交信息"编辑器', rewordArea !== null)
+  check('   默认是原信息', rewordArea?.props?.value, 'Add tests')
+  await change(rewordArea, 'Add integration tests')
+
+  // ---- 开始：只有这一次确认（acknowledgeRewrite），计划是**结构化**的 ----------------
+  rebaseResponses.set('rebase/interactive', {
+    isRepo: true,
+    branch: 'main',
+    rebase: { started: true, conflicted: false, paused: false, operation: null },
+    operation: null,
+  })
+  gitbarPosts.length = 0
+  await click(find('data-graph-dialog-confirm'))
+  const startCall = gitbarPosts.filter((entry) => entry.route === 'rebase/interactive').pop()
+  checkTrue('   开始请求发到宿主', startCall !== undefined)
+  check('   这次确认就是需求要的那一次', startCall?.body?.acknowledgeRewrite, true)
+  check('   onto 来自宿主的计划', startCall?.body?.onto, 'm'.repeat(40))
+  check(
+    '   计划只有 sha / action / message（没有 shell、没有 todo 文本）',
+    startCall?.body?.plan?.map((step) => Object.keys(step).sort().join('+')).join(','),
+    'action+sha,action+message+sha,action+message+sha',
+  )
+  check(
+    '   动作按用户排的发出（含 squash 与 reword）',
+    startCall?.body?.plan?.map((step) => `${step.sha.slice(0, 1)}:${step.action}`).join(','),
+    '1:pick,2:squash,3:reword',
+  )
+  check('   squash 带上用户写的合并信息', startCall?.body?.plan?.[1]?.message, 'Combined login and session\n\nFor review.')
+  check('   reword 带上用户写的新信息', startCall?.body?.plan?.[2]?.message, 'Add integration tests')
+  check('   对话框关闭', find('data-rebase-dialog'), null)
+
+  // ---- 冲突：宿主回 409 rebaseConflict -> 提示去冲突面板，横幅出现 --------------------
+  rebaseStatusFixture = {
+    type: 'rebase',
+    interactive: true,
+    step: 2,
+    total: 3,
+    stoppedSha: '2'.repeat(40),
+    currentSha: '2'.repeat(40),
+    currentSubject: 'Add session store',
+    currentMessage: 'Add session store\n\nBody of the second commit.',
+    pausedForEdit: false,
+    plannedAction: 'squash',
+    plannedMessage: 'Combined login and session\n\nFor review.',
+  }
+  rebaseConflictFixture = 1
+  await mount()
+  await settle()
+  checkTrue('   冲突时也显示进度横幅', find('data-graph-rebase') !== null)
+  check('   进度是"第几个 / 共几个"', find('data-rebase-progress')?.props?.['data-rebase-progress'], '2')
+  check('   点名当前停在哪个提交', find('data-rebase-current')?.props?.['data-rebase-current'], '2'.repeat(40))
+  checkTrue('   冲突提示指向冲突面板', find('data-rebase-conflict-hint') !== null)
+  checkTrue('   冲突停点提供「跳过这个提交」并点名是谁', find('data-rebase-skip') !== null)
+  {
+    const call = [...tCalls].reverse().find((entry) => entry.key === 'rebaseSkip')
+    check('   跳过按钮的文案参数里带提交', `${call?.params?.short}|${call?.params?.subject}`, '2222222|Add session store')
+  }
+  check('   冲突停点不显示 edit 的信息编辑器', find('data-rebase-message'), null)
+
+  // 点「跳过」→ 走 gitbar 的 rebase/skip（真实的 `git rebase --skip`）。
+  rebaseResponses.set('rebase/skip', {
+    isRepo: true,
+    branch: 'main',
+    rebase: { skipped: true, skippedSha: '2'.repeat(40), skippedSubject: 'Add session store', dropped: true, conflicted: false, conflicts: 0, paused: false, operation: null },
+  })
+  rebaseConflictFixture = 0
+  rebaseStatusFixture = null
+  gitbarPosts.length = 0
+  await click(find('data-rebase-skip'))
+  const skipCall = gitbarPosts.filter((entry) => entry.route === 'rebase/skip').pop()
+  checkTrue('   跳过走 gitbar 的 rebase/skip', skipCall !== undefined)
+
+  // ---- edit 停点：应用内的提交信息编辑器 + Amend + 继续 + 中止 ----------------------
+  rebaseStatusFixture = {
+    type: 'rebase',
+    interactive: true,
+    step: 2,
+    total: 3,
+    stoppedSha: '2'.repeat(40),
+    currentSha: '2'.repeat(40),
+    currentSubject: 'Add session store',
+    currentMessage: 'Add session store\n\nBody of the second commit.',
+    pausedForEdit: true,
+    plannedAction: 'edit',
+    plannedMessage: '',
+  }
+  await mount()
+  await settle()
+  checkTrue('   edit 停点显示暂停状态', find('data-rebase-paused', 'edit') !== null)
+  checkTrue('   说明"改文件 / 暂存 / amend 或继续"', find('data-rebase-edit-hint') !== null)
+  check('   提交信息编辑器用那个提交当前的信息预填', find('data-rebase-message')?.props?.value, 'Add session store\n\nBody of the second commit.')
+  checkTrue('   有 Amend Commit', find('data-rebase-amend') !== null)
+  checkTrue('   有「继续变基」', find('data-rebase-continue') !== null)
+  checkTrue('   有「中止交互式变基」', find('data-rebase-abort') !== null)
+  check('   edit 停点不显示「跳过」（那个提交已经应用）', find('data-rebase-skip'), null)
+
+  // Amend：把编辑器里的信息发出去（宿主执行 `git commit --amend`）。
+  rebaseResponses.set('rebase/amend', { isRepo: true, branch: 'main', amended: true, operation: rebaseStatusFixture })
+  await change(find('data-rebase-message'), 'Add session store (edited)')
+  gitbarPosts.length = 0
+  await click(find('data-rebase-amend'))
+  const amendCall = gitbarPosts.filter((entry) => entry.route === 'rebase/amend').pop()
+  check('   Amend 走 gitbar 的 rebase/amend', amendCall?.body?.message, 'Add session store (edited)')
+
+  // 继续：`op/continue`（宿主会带编辑器环境跑 `git rebase --continue`）。
+  rebaseResponses.set('op/continue', { isRepo: true, branch: 'main', continued: 'rebase', operation: null })
+  gitbarPosts.length = 0
+  await click(find('data-rebase-continue'))
+  checkTrue('   继续走 gitbar 的 op/continue', gitbarPosts.some((entry) => entry.route === 'op/continue'))
+
+  // 中止：`op/abort { kind: 'rebase' }`（真实 `git rebase --abort`）。
+  rebaseStatusFixture = {
+    type: 'rebase',
+    interactive: true,
+    step: 2,
+    total: 3,
+    stoppedSha: '2'.repeat(40),
+    currentSha: '2'.repeat(40),
+    currentSubject: 'Add session store',
+    currentMessage: 'Add session store',
+    pausedForEdit: true,
+    plannedAction: 'edit',
+    plannedMessage: '',
+  }
+  rebaseResponses.set('op/abort', { isRepo: true, branch: 'main', aborted: 'rebase', operation: null })
+  await mount()
+  await settle()
+  gitbarPosts.length = 0
+  rebaseStatusFixture = null
+  await click(find('data-rebase-abort'))
+  const abortCall = gitbarPosts.filter((entry) => entry.route === 'op/abort').pop()
+  check('   中止走 op/abort 且 kind=rebase', abortCall?.body?.kind, 'rebase')
+  // 中止之后变基结束了——横幅随之消失，回执因此挂在**常驻提示行**上（挂在横幅上等于没提示）。
+  check('   中止后横幅消失', find('data-graph-rebase'), null)
+  checkTrue('   回执留在常驻提示行', find('data-graph-menu-notice') !== null)
+
+  // ---- 已发布历史：计划对话框里必须警告 --------------------------------------------
+  rebasePlanFixture = {
+    isRepo: true,
+    onto: { sha: 'm'.repeat(40), short: 'mmmmmmm', subject: 'merge feature into main' },
+    head: { sha: '3'.repeat(40), short: '3333333', subject: 'Add tests' },
+    commits: rebasePlanCommits,
+    count: 3,
+    published: true,
+    upstream: 'origin/main',
+    branch: 'main',
+    autosquashCandidates: [],
+  }
+  await mount()
+  await openMenu(findAll('data-graph-row')[0])
+  await click(find('data-graph-menu-item', 'interactive-rebase'))
+  check('   已发布历史给出警告并点名上游', find('data-rebase-published')?.props?.['data-rebase-published'], 'origin/main')
+  {
+    const call = [...tCalls].reverse().find((entry) => entry.key === 'rebasePublishedTitle')
+    check('   警告标题明确写着"改写已发布的历史"', call?.key, 'rebasePublishedTitle')
+  }
+  // 计划读取失败：错误留在对话框里，用户可以看到原因（而不是"点了没反应"）。
+  rebasePlanFixture = null
+  rebaseFailure = { route: 'rebase/plan', body: { error: 'no such revision', code: 'noSuchRevision', detail: 'unknown revision' } }
+  await click(find('data-graph-dialog-cancel'))
+  await openMenu(findAll('data-graph-row')[0])
+  await click(find('data-graph-menu-item', 'interactive-rebase'))
+  checkTrue('   计划读取失败时对话框里显示原因', find('data-rebase-error') !== null)
+  await click(find('data-graph-dialog-cancel'))
+  check('   取消后对话框关闭', find('data-rebase-dialog'), null)
+
+  // 开始失败（例如计划被宿主拒绝）：错误也留在对话框里，不悄悄关掉。
+  rebaseFailure = { route: 'rebase/interactive', body: { error: 'plan does not match the commit range', code: 'commitSetMismatch', detail: 'plan does not match' } }
+  await openMenu(findAll('data-graph-row')[0])
+  await click(find('data-graph-menu-item', 'interactive-rebase'))
+  await click(find('data-graph-dialog-confirm'))
+  checkTrue('   开始失败时错误留在对话框里', find('data-rebase-error') !== null)
+  checkTrue('   失败后对话框仍然打开', find('data-rebase-dialog') !== null)
+  await click(find('data-graph-dialog-cancel'))
+  rebaseStatusFixture = null
+  rebaseConflictFixture = 0
 }
 
 console.log('')
