@@ -1848,10 +1848,16 @@ function readWorktreeText(absolute) {
  * 返回空串（界面退回"不在任何操作中"），而不是去多跑一次 rev-parse——真正需要精确判定的
  * 地方（continue/abort）在 gitbar 宿主里，那边会解析真实的 git 目录。
  *
+ * 无标记冲突（`git stash apply/pop` 冲突时 git **不写** MERGE_HEAD）由调用方通过
+ * `conflictsHint` 告知：那时**读一下冲突文件里的两侧标记名**就能确定它来自 stash
+ * （`Updated upstream` / `Stashed changes` 是 git 自己写进文件的常量），这是唯一持久的
+ * 判据。没有它时返回 `unmerged`——"有冲突但没有可继续的操作"，同样是如实回答。
+ *
  * @param cwd - 仓库根。
- * @returns `'merge' | 'rebase' | 'cherry-pick' | 'revert' | ''`。
+ * @param conflictsHint - `{ path }` 数组（冲突文件）；不传时不做无标记判定。
+ * @returns `'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' | 'unmerged' | ''`。
  */
-function readOperationType(cwd) {
+function readOperationType(cwd, conflictsHint) {
   const marker = (relative) => {
     try {
       statSync(join(cwd, '.git', relative))
@@ -1864,7 +1870,152 @@ function readOperationType(cwd) {
   if (marker('rebase-merge') || marker('rebase-apply')) return 'rebase'
   if (marker('CHERRY_PICK_HEAD')) return 'cherry-pick'
   if (marker('REVERT_HEAD')) return 'revert'
-  return ''
+  const conflicts = Array.isArray(conflictsHint) ? conflictsHint : []
+  if (conflicts.length === 0) return ''
+  const path = typeof conflicts[0]?.path === 'string' ? conflicts[0].path : ''
+  try {
+    const text = readFileSync(join(cwd, path), 'utf8').slice(0, 64 * 1024)
+    const ours = /^<{7}\s?(.*)$/mu.exec(text)
+    const theirs = /^>{7}\s?(.*)$/mu.exec(text)
+    if (ours !== null && theirs !== null && ours[1].trim() === 'Updated upstream' && theirs[1].trim() === 'Stashed changes') {
+      return 'stash'
+    }
+  } catch {
+    // 读不到（文件被删、权限）：退回下面那个如实的 `unmerged`。
+  }
+  return 'unmerged'
+}
+
+/**
+ * 快速数一下这个仓库有几个储藏（**不起 git 进程**）。
+ *
+ * 走的是一条与"储藏"同寿的文件：`refs/stash` 的 reflog（`git stash` 每压一次就追加一行，
+ * `git stash drop` 会重写它）。它只在"用作刷新信号"时被读——真正的列表走 `/stash/list`，
+ * 因此这里读不到（worktree/submodule 里 `.git` 是文件）只意味着"少一个刷新触发"，不会
+ * 让界面显示错误的东西。`/workspace` 每 10 秒被轮询一次，多起一个 `git stash list`
+ * 进程是不可接受的，这就是它存在的理由。
+ *
+ * @param cwd - 仓库根。
+ * @returns 储藏条数（读不到时为 0）。
+ */
+function countStashesFast(cwd) {
+  try {
+    return readFileSync(join(cwd, '.git', 'logs', 'refs', 'stash'), 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '').length
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 解析 `git diff --name-status -z` 的输出。
+ *
+ * 记录形状：`M\0path\0`；重命名/复制是**三条**（`R100\0old\0new\0`），因此不能简单地
+ * "两两成对"地切。`-z` 下路径不做引号转义，含空格与中文的路径都能原样取到。
+ *
+ * @param raw - 原始输出。
+ * @returns `{ path, status }` 数组。
+ */
+function parseNameStatus(raw) {
+  const fields = String(raw).split('\u0000')
+  const entries = []
+  for (let index = 0; index < fields.length; index += 1) {
+    const status = fields[index]
+    if (status === '') continue
+    const letter = status[0]
+    if (letter === 'R' || letter === 'C') {
+      const from = fields[index + 1]
+      const to = fields[index + 2]
+      index += 2
+      if (to === undefined) break
+      // 重命名在**储藏里**只需要一个可点开的路径：显示新名字，差异仍按整体算。
+      entries.push({ path: normalizePath(to), status: letter, from: from === undefined ? '' : from })
+      continue
+    }
+    const path = fields[index + 1]
+    index += 1
+    if (path === undefined) break
+    entries.push({ path: normalizePath(path), status: letter })
+  }
+  return entries
+}
+
+/**
+ * 读取一个储藏的内容清单。
+ *
+ * 与 `git stash show` 分开成两条命令是有意的：`stash show -u` 的 `-u` 需要 git ≥ 2.32，
+ * 而这里用的两条命令（`diff --name-status` 与 `ls-tree`）从 git 1.6 起就存在且形状稳定。
+ * 未跟踪文件在储藏里是**第三个父提交**（`stash@{n}^3`，它没有父提交）的一棵树，
+ * 因此"哪些是未跟踪"是读 git 对象读出来的，不解析任何文本。
+ *
+ * @param cwd - 仓库根。
+ * @param sha - 储藏提交的完整 SHA。
+ * @returns `{ files, hasUntracked }`。
+ */
+async function readStashFiles(cwd, sha) {
+  const parents = (await git(['show', '--no-patch', '--pretty=format:%P', sha], cwd)).trim()
+  const tracked = parseNameStatus(await git(['diff', '--name-status', '-z', '--find-renames', `${sha}^1`, sha], cwd, undefined, GIT_MAX_BUFFER))
+  const hasUntracked = parents.split(/\s+/u).filter((value) => value !== '').length >= 3
+  let untracked = []
+  if (hasUntracked) {
+    const raw = await git(['ls-tree', '-r', '--name-only', '-z', `${sha}^3`], cwd, undefined, GIT_MAX_BUFFER).catch(() => '')
+    untracked = raw
+      .split('\u0000')
+      .filter((path) => path !== '')
+      .map((path) => ({ path: normalizePath(path), status: 'A', untracked: true }))
+  }
+  return { files: [...tracked, ...untracked], hasUntracked }
+}
+
+/**
+ * 一条储藏里单个文件的差异。
+ *
+ * 已跟踪文件复用 `readCommitFileDiff`（储藏提交与普通提交在这里没有区别：都比它的第一个
+ * 父提交）；未跟踪文件在第三个父提交里，`git show <sha^3> -- <path>` 会把它渲染成一整份
+ * 新增（该提交没有父提交，git 自己按 `--root` 处理），因此**不需要伪造一个空树**。
+ *
+ * @param cwd - 仓库根。
+ * @param sha - 储藏提交的完整 SHA。
+ * @param path - 已校验的相对路径。
+ * @returns `{ diff, truncated, binary }`。
+ */
+async function readStashFileDiff(cwd, sha, path) {
+  const target = normalizePath(path)
+  const trackedRaw = await git(['diff', '--name-only', '-z', `${sha}^1`, sha, '--', target], cwd, undefined, GIT_MAX_BUFFER).catch(() => '')
+  if (trackedRaw.split('\u0000').some((entry) => entry !== '')) return await readCommitFileDiff(cwd, sha, target)
+  const untracked = await git(['ls-tree', '-r', '--name-only', '-z', `${sha}^3`, '--', target], cwd, undefined, GIT_MAX_BUFFER).catch(() => '')
+  if (!untracked.split('\u0000').some((entry) => entry !== '')) return undefined
+  const raw = await git(['show', '--format=', '--unified=3', `${sha}^3`, '--', target], cwd, undefined, diffBufferFor(1))
+  const binary = /^Binary files |^GIT binary patch/mu.test(raw)
+  const truncated = raw.length > MAX_DIFF_BYTES
+  return { diff: truncated ? raw.slice(0, MAX_DIFF_BYTES) : raw, truncated, binary }
+}
+
+/** 储藏提交的 SHA 可以在请求里带上（列表已经算过），但**必须**自己再校验一次。 */
+const STASH_SHA_PATTERN = /^[0-9a-f]{40}$/u
+
+/**
+ * 把请求里的储藏引用解析成一个**确实是储藏**的提交 SHA。
+ *
+ * 只认 `stash@{n}`：`stash apply` 接受任意提交，而这个界面上的"储藏"是一个具体的东西。
+ * `--verify` 之后还要确认它真的是 `refs/stash` 的 reflog 条目之一，否则 `stash@{9}`
+ * （不存在）会被 git 解析成别的意思或者报一句英文 fatal。
+ *
+ * @param cwd - 仓库根。
+ * @param ref - 请求给出的引用。
+ * @returns 完整 SHA，或 undefined。
+ */
+async function resolveStashRef(cwd, ref) {
+  if (typeof ref !== 'string' || !/^stash@\{\d+\}$/u.test(ref.trim())) return undefined
+  const target = ref.trim()
+  const listed = await git(['stash', 'list', '--format=%gd%x00%H%x1e'], cwd).catch(() => '')
+  for (const record of listed.split('\u001e')) {
+    if (record.trim() === '') continue
+    const [selector, sha] = record.split('\u0000')
+    if (selector?.trim() === target && STASH_SHA_PATTERN.test(String(sha ?? '').trim())) return String(sha).trim()
+  }
+  return undefined
 }
 
 /**
@@ -2169,13 +2320,14 @@ function createReviewHandler(ctx) {
           conflicts: conflicts.map((file) => ({ path: file.path, code: file.code ?? 'UU' })),
           conflictCount: conflicts.length,
           /**
-           * 进行中的操作**类型**（`merge`/`rebase`/`cherry-pick`/`revert`，没有则为空串）。
+           * 进行中的操作**类型**（`merge`/`rebase`/`cherry-pick`/`revert`，没有则为空串；
+           * 无标记冲突是 `stash` 或 `unmerged`）。
            *
            * 这里只给类型：冲突界面上"Current / Incoming 各是谁"由冲突标记自己写着
            * （`<<<<<<< HEAD` / `>>>>>>> feature/foo`），比让宿主再猜一遍更准。类型用来决定
            * 「提交合并 / 继续变基 / 继续摘取」与「中止」的文案和动作。
            */
-          operationType: readOperationType(cwd),
+          operationType: readOperationType(cwd, conflicts),
           /**
            * 未跟踪摘要：`{ count, exact, mode, collapsed, inlineFiles }`。
            *
@@ -2190,6 +2342,14 @@ function createReviewHandler(ctx) {
           // （`untracked.exact === false`），界面上不该声称精确。
           changedFiles: files.length + untracked.count,
           changedFilesExact: untracked.exact,
+          /**
+           * 储藏条数（**不起 git 进程**，见 `countStashesFast`）。
+           *
+           * 它只是"该刷新储藏列表了"的信号：真正的列表走 gitbar 的 `/stash/list`。放进来
+           * 是因为这个响应每 10 秒轮询一次，而在终端里 `git stash push` 之后面板应当自己
+           * 更新——用一个文件的行数换掉每 10 秒一个 git 进程。
+           */
+          stashCount: countStashesFast(cwd),
         })
         return
       }
@@ -2246,7 +2406,7 @@ function createReviewHandler(ctx) {
           blocks: scan.blocks,
           blockCount: scan.blocks.length,
           hasMarkers: scan.hasMarkers,
-          operationType: readOperationType(cwd),
+          operationType: readOperationType(cwd, [{ path: target }]),
         })
         return
       }
@@ -2661,6 +2821,51 @@ function createReviewHandler(ctx) {
         return
       }
 
+      // ---- 储藏：内容清单与单个文件的差异 ------------------------------------
+      //
+      // 只读，且**只做"一个储藏里有什么"**：列表与所有写操作都在 gitbar 宿主里（那里也是
+      // `refs/stash` 的唯一所有者）。差异本身复用 `readCommitFileDiff`——储藏就是一个提交，
+      // 所以"查看储藏里的改动"与"查看一次提交里的改动"是同一件事，不另建一套差异实现。
+      if (url.pathname === `${ROUTE_PREFIX}/stash/show`) {
+        const ref = payload.ref ?? url.searchParams.get('ref')
+        const sha = await resolveStashRef(cwd, ref)
+        if (sha === undefined) {
+          sendJson(response, 404, { error: 'no such stash', code: 'noSuchStash' })
+          return
+        }
+        const { files, hasUntracked } = await readStashFiles(cwd, sha)
+        sendJson(response, 200, {
+          isRepo: true,
+          ...scopeFields(context, scope),
+          ref: String(ref).trim(),
+          sha,
+          hasUntracked,
+          files,
+          fileCount: files.length,
+        })
+        return
+      }
+      if (url.pathname === `${ROUTE_PREFIX}/stash-file`) {
+        const ref = payload.ref ?? url.searchParams.get('ref')
+        const filePath = payload.path ?? url.searchParams.get('path')
+        const sha = await resolveStashRef(cwd, ref)
+        if (sha === undefined) {
+          sendJson(response, 404, { error: 'no such stash', code: 'noSuchStash' })
+          return
+        }
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const result = await readStashFileDiff(cwd, sha, filePath)
+        if (result === undefined) {
+          sendJson(response, 404, { error: 'no such path in stash', code: 'noSuchPath' })
+          return
+        }
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), ref: String(ref).trim(), path: normalizePath(filePath), ...result })
+        return
+      }
+
       // ---- 仓库状态：已跟踪改动与未跟踪文件分开两组 --------------------------
       //
       // 与 /workspace 的区别：那个给的是"基线树 vs 工作区"的**差异内容**（用来渲染
@@ -3003,6 +3208,8 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/graph`,
     `${ROUTE_PREFIX}/commit-detail`,
     `${ROUTE_PREFIX}/commit-file`,
+    `${ROUTE_PREFIX}/stash/show`,
+    `${ROUTE_PREFIX}/stash-file`,
     `${ROUTE_PREFIX}/file-history`,
     `${ROUTE_PREFIX}/status`,
     `${ROUTE_PREFIX}/untracked`,

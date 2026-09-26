@@ -321,6 +321,14 @@ const FILE_HISTORY = {
 
 const fetchBase = async (url, init) => {
   const target = String(url)
+  // 储藏（stash）由 **gitbar** 宿主拥有，因此本插件的面板会跨插件问它一次列表。这套用例
+  // 与储藏无关，但**必须**在这里把它接住：否则下面按 `/review/` 切路由的逻辑会切出一个
+  // 乱七八糟的 route，然后把它当成"写操作"记进 `posts`——而那些按 posts 计数的断言
+  // （例如"加入 git 之后又重取了未跟踪根层"）就会失真。
+  if (target.includes('/dsh-desktop/gitbar/')) {
+    requests.push({ route: `gitbar:${target.split('/dsh-desktop/gitbar/')[1]?.split('?')[0] ?? ''}`, body: undefined, url: target })
+    return { ok: true, text: async () => JSON.stringify({ isRepo: true, stashes: [], stashCount: 0 }) }
+  }
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
   requests.push({ route, body, url: target })

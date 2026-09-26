@@ -797,7 +797,11 @@ check('   给出「暂存并切换」入口', stashButton === null, 'false')
 posts.length = 0
 stashButton.props.onClick({ stopPropagation() {}, preventDefault() {} })
 await ui.settle()
-check('   点它是 stash + checkout', JSON.stringify(posts[0]?.body), '{"branch":"develop","stash":true}')
+check('   点它是 stash + checkout', posts[0]?.body?.stash === true && posts[0]?.body?.branch === 'develop', 'true')
+// 储藏消息由**客户端**给（宿主不知道界面语言，而这条消息会出现在储藏列表里给用户看）；
+// 未跟踪文件一并储藏 —— 它们同样会让 checkout 失败（目标分支里有同名文件）。
+check('   带上本地化的储藏消息', posts[0]?.body?.message === 'stashBeforeCheckoutMessage', 'true')
+check('   包含未跟踪文件（否则可能再被拒一次）', posts[0]?.body?.includeUntracked, true)
 
 console.log('')
 console.log('=== 10. 新建分支对话框：请求体与校验 ===')
@@ -957,6 +961,72 @@ check('18) 落到通用短句', textOf(ui.find('data-desktop-sc-error')).include
 check('   仍然显示 git 原文', textOf(ui.find('data-desktop-sc-error')).includes('raw git words'), 'true')
 // 未知 code 不能在界面上留下一个"看起来已知"的分类。
 check('   错误区的 code 标记回退成 unknown', ui.find('data-desktop-sc-error', 'unknown') === null, 'false')
+
+console.log('')
+console.log('=== 19. 储藏：直接储藏 / 带选项储藏 ===')
+writeErrorAlways = null
+statusOverride = {}
+ui = await mount()
+await ui.clickBadge()
+check('19) 快捷操作里有「储藏」与「带选项储藏」两条', ui.find('data-desktop-sc-action', 'stash') === null, 'false')
+check('   带选项那条也在', ui.find('data-desktop-sc-action', 'stash-options') === null, 'false')
+posts.length = 0
+await ui.click('data-desktop-sc-action', 'stash')
+check('   直接储藏：一步发 stash/push', posts.map((p) => p.route).join(','), 'stash/push')
+// 不带消息 = 让 git 写它自己的 WIP 主题；也不动未跟踪文件（那是要用户明说的）。
+check('   不带消息', posts[0]?.body?.message, undefined)
+check('   默认不含未跟踪', posts[0]?.body?.includeUntracked, undefined)
+
+posts.length = 0
+await ui.click('data-desktop-sc-action', 'stash-options')
+check('   带选项储藏打开对话框', ui.find('data-desktop-sc-dialog', 'stash') === null, 'false')
+check('   未跟踪默认不勾选', ui.find('data-desktop-sc-check', 'stash-untracked')?.props?.checked, false)
+await ui.type('data-desktop-sc-field', 'stash-message', 'WIP: feature login')
+await ui.toggle('data-desktop-sc-check', 'stash-untracked', true)
+posts.length = 0
+await ui.click('data-desktop-sc-button', 'confirm')
+check('   确认后发 stash/push', posts.map((p) => p.route).join(','), 'stash/push')
+check('   带上消息', posts[0]?.body?.message, 'WIP: feature login')
+check('   带上包含未跟踪', posts[0]?.body?.includeUntracked, true)
+
+console.log('')
+console.log('=== 20. 储藏冲突：没有「继续 / 中止」这两个动作 ===')
+// `git stash apply` 冲突时 git 不写 MERGE_HEAD，因此宿主报的是 `stash`（无标记冲突）。
+statusOverride = {
+  operation: { type: 'stash', currentLabel: 'Updated upstream', incomingLabel: 'Stashed changes', labelsSwapped: false, markerless: true },
+  conflictCount: 1,
+  merging: false,
+  rebasing: false,
+}
+ui = await mount()
+await ui.clickBadge()
+check('20) 进度卡片标成 stash', ui.find('data-desktop-sc-progress', 'stash') === null, 'false')
+check('   文案说明"逐块解决即可，储藏不会被自动删除"', textOf(ui.find('data-desktop-sc-progress')).includes('opStashInProgress'), 'true')
+check('   不给「继续」（git 没有这个动作）', ui.find('data-desktop-sc-continue') === null, 'true')
+const progressButtons = collectHostNodes(ui.find('data-desktop-sc-progress'), 'probe').filter((node) => node.props?.type === 'button')
+check('   也不给「中止」', progressButtons.length, 0)
+statusOverride = {}
+
+console.log('')
+console.log('=== 21. 储藏并切换：切换失败时改动没丢，给恢复入口 ===')
+nextWriteError = {
+  error: 'branch not found',
+  code: 'noSuchRef',
+  detail: 'fatal: invalid reference: nope',
+  // 宿主把"那次储藏已经建好了"放在错误响应里——这是**不可丢**的信息。
+  stash: { stashed: true, ref: 'stash@{0}', message: 'auto', branch: 'main', hasUntracked: true },
+}
+ui = await mount()
+await ui.clickBadge()
+await ui.dblClickRow('develop')
+check('21) 失败仍然报错（面板保持打开）', textOf(ui.find('data-desktop-sc-error')).includes('error_noSuchRef'), 'true')
+check('   同时明确告知"改动已存入储藏"', textOf(ui.find('data-desktop-sc-notice')).includes('stashCreatedBeforeFailure'), 'true')
+check('   并给出「恢复储藏的改动」入口', ui.find('data-desktop-sc-restore', 'stash@{0}') === null, 'false')
+posts.length = 0
+await ui.click('data-desktop-sc-restore', 'stash@{0}')
+check('   点恢复走 stash/pop', posts.map((p) => p.route).join(','), 'stash/pop')
+check('   带的是那条储藏的引用', posts[0]?.body?.ref, 'stash@{0}')
+nextWriteError = null
 
 console.log('')
 console.log(failures === 0 ? '全部通过' : `${failures} 项失败`)

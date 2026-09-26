@@ -525,6 +525,15 @@ window.__ModuleLoader__.load({
     /** 路由前缀，与 host 半边一致。 */
     const API = '/dsh-desktop/review'
 
+    /**
+     * gitbar 宿主的路由前缀。
+     *
+     * 储藏（`refs/stash`）由 gitbar 拥有：列表与 push/apply/pop/drop 都在那边，因为
+     * "这次冲突是不是储藏造成的"属于操作状态那一整块知识。本插件只读/写它的路由，
+     * 不自己碰 `.git`（与冲突面板调 `/op/continue` 是同一条既有约定）。
+     */
+    const GITBAR_API = '/dsh-desktop/gitbar'
+
     /** 概览轮询间隔。
      *
      * 取 10 秒：每次轮询都要让宿主核对工作区状态，而"本轮改了几个文件"晚几秒更新无感。 */
@@ -891,8 +900,61 @@ window.__ModuleLoader__.load({
       conflictCompletedRevert: '还原已完成',
       conflictAcceptBothOrder: '顺序：当前 → 对方',
       conflictAllResolved: '冲突已全部解决，可以继续',
+      conflictStashResolved: '储藏冲突已全部解决（储藏条目仍在，需要时可在列表里删除）',
+      conflictOpStash: '储藏冲突',
+      conflictOpUnmerged: '未合并的冲突',
+      conflictStashHint: '应用储藏产生的冲突：逐块解决并把文件「标记为已解决」即可。储藏不会被自动删除（要删请在储藏列表里删）。',
+      conflictUnmergedHint: '有未解决的冲突，但当前没有可继续的操作：逐块解决并把文件「标记为已解决」即可。',
       error_markersRemain: '文件里还有冲突标记，先解决它们（或用「保存结果」写下最终内容）再标记为已解决。',
       error_writeFailed: '无法写入工作区文件。',
+      // ---- 储藏（stash）----
+      //
+      // 所有文案都跟着 Harness 语言走；分支名、储藏消息、路径、SHA 一律原样显示（它们是
+      // 用户自己的数据，翻译它们会让"我在哪个储藏里"这件事对不上）。
+      stashesTitle: '储藏',
+      stashChangesTitle: '储藏改动',
+      stashQuick: '直接储藏',
+      stashQuickHint: '直接储藏当前改动（不带消息，不含未跟踪文件）',
+      stashWithOptions: '带选项储藏…',
+      stashMessageLabel: '储藏消息（可留空）',
+      stashIncludeUntracked: '包含未跟踪文件',
+      stashIncludeUntrackedHint: '未跟踪文件默认不进储藏：搬走它们会让工作区看起来像丢过文件。',
+      stashPushConfirm: '储藏',
+      stashEmpty: '这个仓库里还没有储藏。',
+      stashLoading: '正在读取储藏…',
+      stashLoadFailed: '读取储藏失败：{detail}',
+      stashApply: '应用',
+      stashPop: '弹出',
+      stashDrop: '删除',
+      stashApplyHint: '把这份改动应用回工作区，储藏条目保留',
+      stashPopHint: '应用并删除这条储藏',
+      stashDropHint: '删除这条储藏（不可从界面撤销）',
+      stashApplyTitle: '应用储藏',
+      stashFilesTitle: '改动的文件',
+      stashUntrackedBadge: '含未跟踪',
+      stashBranch: '原分支 {branch}',
+      stashNoFiles: '这条储藏里没有文件改动。',
+      stashDiffEmpty: '从上面的列表里选一个文件查看它的差异。',
+      stashClose: '关闭储藏视图',
+      stashConfirmDropTitle: '删除储藏',
+      stashConfirmDropBody: '确定删除此储藏吗？',
+      stashConfirmDropDetail: '删除之后这份改动无法从界面恢复（git 也不会保留它）。',
+      stashConfirmDropButton: '删除',
+      stashPushed: '改动已存入储藏 {ref}',
+      stashApplied: '已应用储藏 {ref}',
+      stashPopped: '已应用并删除储藏 {ref}',
+      stashDropped: '已删除储藏 {ref}',
+      stashApplyConflicted: '储藏已应用，但有冲突：请在上面的冲突分组里逐块解决（储藏仍然保留）。',
+      stashStaleRef: '这条储藏已经不存在了，列表已刷新。',
+      stashBusy: '处理中…',
+      stashTimeJustNow: '刚刚',
+      stashTimeMinutes: '{count} 分钟前',
+      stashTimeHours: '{count} 小时前',
+      stashTimeDays: '{count} 天前',
+      error_noSuchStash: '这条储藏已经不存在了（可能已被删除）。',
+      error_unmerged: '还有未解决的冲突：先解决它们，再储藏或应用。',
+      error_nothingToStash: '工作区没有可储藏的改动。',
+      error_invalidStashMessage: '储藏消息不合法，已拒绝。',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
@@ -966,6 +1028,7 @@ window.__ModuleLoader__.load({
       panelCrashedHint: '右上角的入口仍然可用（关掉面板再打开即可重试），下面是可以直接复制的错误详情。',
       panelReload: '重新加载',
       close: '关闭',
+      cancel: '取消',
       // ---- 切换项目的瞬间 ----
       switchingProject: '正在切换项目…',
       // ---- 暂存与提交（更改区块）----
@@ -1170,8 +1233,60 @@ window.__ModuleLoader__.load({
       conflictCompletedRevert: 'Revert completed',
       conflictAcceptBothOrder: 'Order: current, then incoming',
       conflictAllResolved: 'All conflicts resolved — you can continue',
+      conflictStashResolved: 'All stash conflicts resolved (the stash entry is still there; drop it from the list if you no longer need it)',
+      conflictOpStash: 'Stash conflict',
+      conflictOpUnmerged: 'Unmerged conflict',
+      conflictStashHint: 'This conflict came from applying a stash: resolve it block by block and mark each file resolved. The stash is not deleted automatically (drop it from the Stashes list if you want to).',
+      conflictUnmergedHint: 'There are unresolved conflicts but no operation to continue: resolve them block by block and mark each file resolved.',
       error_markersRemain: 'The file still contains conflict markers. Resolve them (or save the final content) before marking it resolved.',
       error_writeFailed: 'Could not write the working tree file.',
+      // ---- Stashes ----
+      // Branch names, stash messages, paths and SHAs are always shown as-is: they are the
+      // user's own data, and translating them would make "which stash am I in" ambiguous.
+      stashesTitle: 'Stashes',
+      stashChangesTitle: 'Stash changes',
+      stashQuick: 'Stash now',
+      stashQuickHint: 'Stash the current changes immediately (no message, untracked files left alone)',
+      stashWithOptions: 'Stash with options…',
+      stashMessageLabel: 'Stash message (optional)',
+      stashIncludeUntracked: 'Include untracked files',
+      stashIncludeUntrackedHint: 'Untracked files are left alone by default: moving them away makes the working tree look like files went missing.',
+      stashPushConfirm: 'Stash',
+      stashEmpty: 'This repository has no stashes yet.',
+      stashLoading: 'Reading stashes…',
+      stashLoadFailed: 'Could not read stashes: {detail}',
+      stashApply: 'Apply',
+      stashPop: 'Pop',
+      stashDrop: 'Drop',
+      stashApplyHint: 'Apply these changes back to the working tree and keep the entry',
+      stashPopHint: 'Apply and delete this stash',
+      stashDropHint: 'Delete this stash (cannot be undone from the UI)',
+      stashApplyTitle: 'Apply stash',
+      stashFilesTitle: 'Changed files',
+      stashUntrackedBadge: 'with untracked',
+      stashBranch: 'from {branch}',
+      stashNoFiles: 'This stash has no file changes.',
+      stashDiffEmpty: 'Pick a file above to see its diff.',
+      stashClose: 'Close the stash view',
+      stashConfirmDropTitle: 'Drop stash',
+      stashConfirmDropBody: 'Drop this stash?',
+      stashConfirmDropDetail: 'After dropping, these changes cannot be restored from the UI (git keeps no copy).',
+      stashConfirmDropButton: 'Drop',
+      stashPushed: 'Changes saved to stash {ref}',
+      stashApplied: 'Applied stash {ref}',
+      stashPopped: 'Applied and dropped stash {ref}',
+      stashDropped: 'Dropped stash {ref}',
+      stashApplyConflicted: 'The stash was applied but produced conflicts: resolve them block by block in the conflict group above (the stash is kept).',
+      stashStaleRef: 'That stash no longer exists; the list has been refreshed.',
+      stashBusy: 'Working…',
+      stashTimeJustNow: 'just now',
+      stashTimeMinutes: '{count} minutes ago',
+      stashTimeHours: '{count} hours ago',
+      stashTimeDays: '{count} days ago',
+      error_noSuchStash: 'That stash no longer exists (it may have been dropped).',
+      error_unmerged: 'There are still unresolved conflicts: resolve them before stashing or applying.',
+      error_nothingToStash: 'There is nothing to stash in the working tree.',
+      error_invalidStashMessage: 'That stash message is not valid.',
       binaryDiff: 'This file is binary; no line diff is shown.',
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
@@ -1245,6 +1360,7 @@ window.__ModuleLoader__.load({
       panelCrashedHint: 'The top-right entry still works (close the panel and open it again to retry). The error detail below can be copied as-is.',
       panelReload: 'Reload',
       close: 'Close',
+      cancel: 'Cancel',
       // ---- The instant a project switch is in flight ----
       switchingProject: 'Switching project…',
       // ---- Staging and committing (the Changes section) ----
@@ -1359,6 +1475,12 @@ window.__ModuleLoader__.load({
       // 冲突解决：这两个 code 只在解决流程里出现（`stageFailed` 已经映射到通用短句）。
       markersRemain: 'error_markersRemain',
       writeFailed: 'error_writeFailed',
+      // 储藏：这四个 code 都要有专门的短句。"储藏已经不存在"与"还有未解决的冲突"都是
+      // 用户可以就地处理的，折成通用的"操作失败"他只会反复点同一个按钮。
+      noSuchStash: 'error_noSuchStash',
+      unmerged: 'error_unmerged',
+      nothingToStash: 'error_nothingToStash',
+      invalidStashMessage: 'error_invalidStashMessage',
     }
 
     /** 状态字母对应的颜色，让列表一眼能分辨增删改。 */
@@ -1611,6 +1733,73 @@ window.__ModuleLoader__.load({
       const active = projectScopes.peekActive(workspace)
       if (typeof active !== 'string' || active === '') return body
       return { ...body, repository: active }
+    }
+
+    /**
+     * 请求 **gitbar 宿主**的路径。
+     *
+     * 储藏由 gitbar 拥有（`refs/stash` 的读写都在那边：`/stash/list` 与 push/apply/pop/drop），
+     * 因为储藏冲突的判定需要"操作状态"这一整块知识，而那在 gitbar 里。这个辅助函数与 `call`
+     * 的差别只有前缀，以及**失败时把整个响应体挂在错误对象上**：储藏冲突的响应里带着
+     * `stash.kept` 与冲突文件清单，界面要靠它把用户送到冲突面板、并说明储藏没丢。
+     *
+     * @param route - `stash/list` / `stash/push` / `stash/apply` / `stash/pop` / `stash/drop`。
+     * @param body - 请求体（会被 JSON 序列化）。
+     * @returns 解析后的 JSON。
+     */
+    async function callGitbarRoute(route, body) {
+      const response = await fetch(`${GITBAR_API}/${route}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(withActiveRepository(body)),
+      })
+      const text = await response.text()
+      let payload
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        throw new Error(text.slice(0, 200))
+      }
+      if (!response.ok) {
+        const error = new Error(payload?.error ?? `HTTP ${response.status}`)
+        if (typeof payload?.code === 'string') error.code = payload.code
+        if (typeof payload?.detail === 'string') error.detail = payload.detail
+        error.payload = payload
+        throw error
+      }
+      return payload
+    }
+
+    /**
+     * 储藏列表是**只读**的，gitbar 那条路由是 GET（与 /branches 一致）——`call` 只会发 POST。
+     *
+     * @param body - `{ workspace, repository? }`。
+     * @returns `{ stashes, stashCount }` 之类的响应体。
+     */
+    async function fetchStashList(body) {
+      const params = new URLSearchParams({ cwd: String(body?.workspace ?? '') })
+      const repository = withActiveRepository(body)?.repository
+      if (typeof repository === 'string' && repository !== '') params.set('repository', repository)
+      const response = await fetch(`${GITBAR_API}/stash/list?${params.toString()}`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { accept: 'application/json' },
+      })
+      const text = await response.text()
+      let payload
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        throw new Error(text.slice(0, 200))
+      }
+      if (!response.ok) {
+        const error = new Error(payload?.error ?? `HTTP ${response.status}`)
+        if (typeof payload?.code === 'string') error.code = payload.code
+        error.payload = payload
+        throw error
+      }
+      return payload
     }
 
     /**
@@ -5272,6 +5461,351 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把储藏时间渲染成一句相对时间（"2 分钟前"）。
+     *
+     * 相对时间是为了让"这条储藏有多旧"一眼可读——储藏列表常常是"翻回几天前那批改动"的
+     * 入口，而绝对时间要用户自己做减法。**精确时刻**仍然给（放在 `title` 里），因此
+     * 需要确切时间时不会失去信息。《 1 分钟、未知形状分别退回"刚刚"与绝对时间。
+     *
+     * 时间是**按 Harness 语言**说的：`Intl` 的相对时间格式在渲染进程里可能拿不到想要的
+     * 语言（而且各语言的复数规则差异很大），因此这里只有四条粗粒度文案，全部走字典。
+     *
+     * @param t - 当前语言的翻译函数。
+     * @param value - git 给的严格 ISO-8601 时间（`%cI`）。
+     * @param now - "现在"的时间戳（测试可注入）。
+     * @returns `{ text, exact }`：相对时间与原始时刻。
+     */
+    function stashTime(t, value, now) {
+      const exact = formatCommitTime(value)
+      const parsed = Date.parse(typeof value === 'string' ? value : '')
+      if (!Number.isFinite(parsed)) return { text: exact, exact }
+      const seconds = Math.max(0, Math.floor(((typeof now === 'number' ? now : Date.now()) - parsed) / 1000))
+      if (seconds < 60) return { text: t('stashTimeJustNow'), exact }
+      const minutes = Math.floor(seconds / 60)
+      if (minutes < 60) return { text: t('stashTimeMinutes', { count: minutes }), exact }
+      const hours = Math.floor(minutes / 60)
+      if (hours < 24) return { text: t('stashTimeHours', { count: hours }), exact }
+      return { text: t('stashTimeDays', { count: Math.floor(hours / 24) }), exact }
+    }
+
+    /** 储藏列表里的一行：`stash@{n}` + 消息 + 原分支 + 时间。 */
+    function StashRow(props) {
+      const { t, entry, selected, busy, onOpen } = props
+      const time = stashTime(t, entry?.date)
+      // 没有用户消息时显示 git 自己写的主题（`WIP on main: …`）——那是"这条储藏是什么"
+      // 的唯一线索，宁可原样显示也不要留空。
+      const label = entry?.message === '' || entry?.message === undefined ? String(entry?.subject ?? '') : String(entry.message)
+      return react.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-staging-stash-row': entry?.ref,
+          'data-staging-stash-selected': selected ? 'true' : 'false',
+          disabled: busy,
+          onClick: () => onOpen(entry?.ref),
+          title: `${entry?.ref ?? ''}\n${label}\n${time.exact}`,
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '1px',
+            boxSizing: 'border-box',
+            width: '100%',
+            padding: '4px 8px 4px 26px',
+            border: 'none',
+            borderLeft: selected ? `2px solid ${ACCENT}` : '2px solid transparent',
+            background: selected ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
+            color: 'inherit',
+            fontFamily: UI_FONT,
+            textAlign: 'left',
+            cursor: busy ? 'default' : 'pointer',
+          },
+        },
+        react.createElement(
+          'span',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+          react.createElement('span', { style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, color: 'var(--dsw-alias-label-tertiary)' } }, entry?.ref),
+          react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: reviewFont.normal } }, label),
+          entry?.hasUntracked === true
+            ? react.createElement('span', { 'data-staging-stash-untracked': entry.ref, style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11) } }, t('stashUntrackedBadge'))
+            : null,
+        ),
+        react.createElement(
+          'span',
+          { style: { display: 'flex', gap: '6px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11) } },
+          entry?.branch === '' || entry?.branch === undefined ? null : react.createElement('span', null, t('stashBranch', { branch: entry.branch })),
+          react.createElement('span', null, time.text),
+        ),
+      )
+    }
+
+    /**
+     * 「储藏改动（带选项）」弹窗。
+     *
+     * 消息可留空（那样 git 写它自己的 `WIP on <branch>: …`），未跟踪文件**默认不勾选**。
+     * 与 gitbar 侧那个对话框是同一套语义：这里给的是"在项目改动面板里就地储藏"的入口，
+     * 而不是第二套规则。
+     */
+    function StashPushDialog(props) {
+      const { t, busy, onCancel, onSubmit } = props
+      const [message, setMessage] = react.useState('')
+      const [untracked, setUntracked] = react.useState(false)
+      react.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onCancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onCancel])
+      return react.createElement(
+        'div',
+        {
+          onClick: onCancel,
+          style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        },
+        react.createElement(
+          'div',
+          {
+            onClick: (event) => event.stopPropagation(),
+            role: 'dialog',
+            'aria-modal': 'true',
+            'data-staging-stash-dialog': 'push',
+            style: {
+              width: 'min(420px, calc(100vw - 48px))',
+              borderRadius: '10px',
+              border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+              background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+              color: 'var(--dsw-alias-label-primary)',
+              boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+              padding: '16px 18px',
+              fontSize: uiPx(13),
+              lineHeight: '1.6',
+            },
+          },
+          react.createElement('div', { style: { fontWeight: 600, marginBottom: '8px' } }, t('stashChangesTitle')),
+          react.createElement(
+            'label',
+            { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '10px' } },
+            react.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } }, t('stashMessageLabel')),
+            react.createElement('input', {
+              type: 'text',
+              value: message,
+              autoFocus: true,
+              spellCheck: false,
+              placeholder: 'WIP: feature login',
+              'data-staging-stash-message': '',
+              onChange: (event) => setMessage(event.target.value),
+              onKeyDown: (event) => {
+                event.stopPropagation()
+                if (event.key === 'Enter') onSubmit({ message, includeUntracked: untracked })
+              },
+              style: {
+                boxSizing: 'border-box',
+                width: '100%',
+                height: '30px',
+                padding: '0 8px',
+                borderRadius: '6px',
+                border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+                background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                color: 'inherit',
+                fontFamily: CODE_FONT,
+                fontSize: uiPx(12.5),
+              },
+            }),
+          ),
+          react.createElement(
+            'label',
+            { style: { display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer' } },
+            react.createElement('input', {
+              type: 'checkbox',
+              checked: untracked,
+              'data-staging-stash-untracked-input': '',
+              onChange: (event) => setUntracked(event.target.checked),
+            }),
+            t('stashIncludeUntracked'),
+          ),
+          react.createElement('div', { style: { marginTop: '6px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } }, t('stashIncludeUntrackedHint')),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '14px' } },
+            react.createElement(
+              'button',
+              { type: 'button', 'data-staging-stash-cancel': '', onClick: onCancel, disabled: busy, style: dialogButtonStyle(false, busy) },
+              t('cancel'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-stash-confirm': '',
+                disabled: busy,
+                onClick: () => onSubmit({ message, includeUntracked: untracked }),
+                style: dialogButtonStyle(true, busy),
+              },
+              busy ? t('stashBusy') : t('stashPushConfirm'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * 删除储藏的确认框（破坏性动作，必须确认）。
+     *
+     * 与「还原文件」的确认同一个形状：正文说清后果（**不可从界面恢复**），并把要删的
+     * 储藏原样列出来（ref + 消息 + 原分支），因为"删哪一条"必须没有歧义。
+     */
+    function ConfirmStashDropDialog(props) {
+      const { t, entry, busy, onCancel, onConfirm } = props
+      react.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onCancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onCancel])
+      const label = entry?.message === '' || entry?.message === undefined ? String(entry?.subject ?? '') : String(entry.message)
+      return react.createElement(
+        'div',
+        {
+          onClick: onCancel,
+          style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        },
+        react.createElement(
+          'div',
+          {
+            onClick: (event) => event.stopPropagation(),
+            role: 'dialog',
+            'aria-modal': 'true',
+            'data-staging-stash-drop-dialog': entry?.ref,
+            style: {
+              width: 'min(420px, calc(100vw - 48px))',
+              borderRadius: '10px',
+              border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+              background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+              color: 'var(--dsw-alias-label-primary)',
+              boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+              padding: '16px 18px',
+              fontSize: uiPx(13),
+              lineHeight: '1.6',
+            },
+          },
+          react.createElement('div', { style: { fontWeight: 600, marginBottom: '8px' } }, t('stashConfirmDropTitle')),
+          react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary)', marginBottom: '6px' } }, t('stashConfirmDropBody')),
+          react.createElement(
+            'div',
+            {
+              style: {
+                fontSize: uiPx(12),
+                fontFamily: CODE_FONT,
+                padding: '6px 8px',
+                borderRadius: '6px',
+                background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+                wordBreak: 'break-all',
+                marginBottom: '8px',
+              },
+            },
+            `${entry?.ref ?? ''}  ${label}`,
+          ),
+          react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(12), marginBottom: '14px' } }, t('stashConfirmDropDetail')),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } },
+            react.createElement(
+              'button',
+              { type: 'button', 'data-staging-stash-drop-cancel': '', onClick: onCancel, disabled: busy, style: dialogButtonStyle(false, busy) },
+              t('cancel'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-stash-drop-confirm': '',
+                disabled: busy,
+                onClick: onConfirm,
+                style: { ...dialogButtonStyle(false, busy), border: '1px solid #8b5a5a', background: '#6b3b3b', color: '#ffdede' },
+              },
+              busy ? t('stashBusy') : t('stashConfirmDropButton'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /** 弹窗底部按钮的统一样式（主/次两种）。 */
+    function dialogButtonStyle(primary, busy) {
+      return {
+        padding: '5px 14px',
+        borderRadius: '6px',
+        border: `1px solid ${primary ? 'transparent' : 'var(--dsw-alias-border-l2, #3d3d45)'}`,
+        background: primary ? ACCENT : 'var(--dsw-alias-bg-layer-2, #26262c)',
+        color: primary ? '#fff' : 'var(--dsw-alias-label-primary)',
+        font: 'inherit',
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.6 : 1,
+      }
+    }
+
+    /** 储藏查看器里小按钮的样式（`accent` 决定它是普通动作还是破坏性动作）。 */
+    function stashActionStyle(accent, busy) {
+      return {
+        flexShrink: 0,
+        height: '22px',
+        padding: '0 10px',
+        border: `1px solid color-mix(in srgb, ${accent} 40%, transparent)`,
+        borderRadius: '6px',
+        background: 'transparent',
+        color: accent,
+        fontFamily: UI_FONT,
+        fontSize: uiPx(11.5),
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.55 : 1,
+      }
+    }
+
+    /**
+     * 一条储藏里单个文件的差异。
+     *
+     * 与 `LazyFileDiff` 是**形状**相同、**数据源**不同的两个组件：这里取的是
+     * `/stash-file`（储藏提交里的那个文件），而那个取的是 `/workspace-file`（工作区里
+     * 那个文件）。差异**渲染**完全共用 `ReviewDiffViewer`（并排/统一、改动导航、折行、
+     * 二进制提示都在那里），因此这里不重复任何一条渲染规则。
+     */
+    function LazyStashFileDiff(props) {
+      const { t, workspace, stashRef, path, file } = props
+      const cacheKey = `${workspace ?? ''}\u0000stash:${stashRef ?? ''}\u0000${path ?? ''}`
+      const [state, setState] = react.useState({ key: '', phase: 'idle' })
+      const token = react.useRef(0)
+      react.useEffect(() => {
+        if (path === '' || typeof workspace !== 'string' || workspace === '' || typeof stashRef !== 'string' || stashRef === '') return undefined
+        const mine = (token.current += 1)
+        setState({ key: cacheKey, phase: 'loading' })
+        void (async () => {
+          try {
+            const result = await call('stash-file', { workspace, ref: stashRef, path })
+            if (token.current !== mine) return
+            setState({ key: cacheKey, phase: 'ready', result })
+          } catch (cause) {
+            if (token.current !== mine) return
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            setState({ key: cacheKey, phase: 'error', message: String(error.detail ?? error.message) })
+          }
+        })()
+        return undefined
+      }, [cacheKey, path, workspace, stashRef])
+      const current = state.key === cacheKey ? state : { phase: 'loading' }
+      const result = current.result
+      return react.createElement(ReviewDiffViewer, {
+        t,
+        file,
+        diff: typeof result?.diff === 'string' ? result.diff : '',
+        phase: current.phase,
+        message: current.phase === 'error' ? current.message : '',
+        ...(result?.truncated === true ? { note: t('truncated') } : {}),
+        onClose: props.onClose,
+      })
+    }
+
+    /**
      * 空态 / 状态提示块。
      *
      * 面板里"加载中""没有改动""不是仓库"这些状态此前都是一行小字，视觉上像渲染坏了。
@@ -5553,6 +6087,12 @@ window.__ModuleLoader__.load({
       const blocks = Array.isArray(data?.blocks) ? data.blocks : []
       const decided = blocks.filter((block) => choices[block.index] !== undefined).length
       const operationType = typeof props?.operationType === 'string' ? props.operationType : ''
+      /**
+       * 无标记冲突：`git stash apply/pop` 冲突时 git **不写**任何操作标记，因此没有
+       * 「继续 / 中止」这回事（储藏冲突的完成方式只有"把文件逐个标记为已解决"）。
+       * 给按钮等于让用户去点一个必然失败的入口，所以这两类操作只显示一句说明。
+       */
+      const markerless = operationType === 'stash' || operationType === 'unmerged'
       const operationKey =
         operationType === 'merge'
           ? 'conflictOpMerge'
@@ -5562,7 +6102,11 @@ window.__ModuleLoader__.load({
               ? 'conflictOpCherryPick'
               : operationType === 'revert'
                 ? 'conflictOpRevert'
-                : ''
+                : operationType === 'stash'
+                  ? 'conflictOpStash'
+                  : operationType === 'unmerged'
+                    ? 'conflictOpUnmerged'
+                    : ''
       const continueKey =
         operationType === 'merge'
           ? 'conflictCommitMerge'
@@ -6165,7 +6709,18 @@ window.__ModuleLoader__.load({
                     t('conflictMarkResolved'),
                   ),
                 ),
-                operationType === ''
+                // 无标记冲突（储藏冲突）：给一句**说清怎么收尾**的说明，而不是两个会失败的按钮。
+                markerless
+                  ? react.createElement(
+                      'div',
+                      {
+                        'data-conflict-markerless': operationType,
+                        style: { flexShrink: 0, padding: '6px 9px', borderRadius: '6px', background: `color-mix(in srgb, ${ACCENT} 8%, transparent)`, color: 'var(--dsw-alias-label-secondary)', fontFamily: UI_FONT, fontSize: reviewFont.meta, lineHeight: 1.6 },
+                      },
+                      t(operationType === 'stash' ? 'conflictStashHint' : 'conflictUnmergedHint'),
+                    )
+                  : null,
+                operationType === '' || markerless
                   ? null
                   : react.createElement(
                       'div',
@@ -6902,6 +7457,12 @@ window.__ModuleLoader__.load({
       rebase: 'conflictCompletedRebase',
       'cherry-pick': 'conflictCompletedCherryPick',
       revert: 'conflictCompletedRevert',
+      /**
+       * 无标记冲突（储藏冲突）的"完成"是另一件事：没有提交、没有 `--continue`，只是
+       * **冲突都解决完了**。因此它的句子必须说清"储藏还在"，否则用户会以为它被自动删了。
+       */
+      stash: 'conflictStashResolved',
+      unmerged: 'conflictAllResolved',
     }
 
     function StagingSection(props) {
@@ -7033,6 +7594,31 @@ window.__ModuleLoader__.load({
        * 替换 / 追加 / 取消 三选一。
        */
       const [aiSuggestion, setAiSuggestion] = react.useState(null)
+
+      // ---- 储藏（stash）------------------------------------------------------
+      //
+      // 数据源是 gitbar 宿主的 `/stash/list`（储藏属于仓库，而仓库作用域在那边统一解析）。
+      // 列表**不随 10 秒轮询刷新**：那会每 10 秒多起一个 git 进程。刷新由三件事触发：
+      //   1. 面板挂载/切项目（一次）；
+      //   2. 快照里的 `stashCount` 变了（终端里 stash 了一下也会被发现，见 countStashesFast）；
+      //   3. 这里自己做完一次储藏写操作（push/apply/pop/drop）。
+      const [stashes, setStashes] = react.useState([])
+      const [stashPhase, setStashPhase] = react.useState('idle')
+      const [stashError, setStashError] = react.useState('')
+      /** 正在查看的储藏（ref；空串 = 没在看储藏）。 */
+      const [selectedStash, setSelectedStash] = react.useState('')
+      /** 选中的储藏的内容清单（`{ files, ref }`）。 */
+      const [stashDetail, setStashDetail] = react.useState(null)
+      /** 储藏里正在预览差异的文件路径。 */
+      const [stashFile, setStashFile] = react.useState('')
+      /** 储藏弹窗：`{ kind: 'push' }` 或 `{ kind: 'drop', entry }`；null = 未打开。 */
+      const [stashDialog, setStashDialog] = react.useState(null)
+      const [stashBusy, setStashBusy] = react.useState(false)
+      /** 储藏列表的刷新令牌（写操作之后 +1）。 */
+      const [stashRevision, setStashRevision] = react.useState(0)
+      /** 储藏请求的令牌：迟到的响应必须丢掉（否则它会把新列表/新选中项覆盖掉）。 */
+      const stashToken = react.useRef(0)
+      const repositoryRoot = typeof props?.repositoryRoot === 'string' ? props.repositoryRoot : ''
       /**
        * 「AI 补充」的请求令牌。
        *
@@ -7075,6 +7661,17 @@ window.__ModuleLoader__.load({
         setTrouble(null)
         setNotice('')
         setBusy(false)
+        // 储藏同样按项目隔离：上一个项目的储藏条目、选中项与详情一律清掉（否则用户会看到
+        // 另一个仓库的储藏列表——多仓库时那是最容易出错的地方）。
+        stashToken.current += 1
+        setStashes([])
+        setStashPhase('idle')
+        setStashError('')
+        setSelectedStash('')
+        setStashDetail(null)
+        setStashFile('')
+        setStashDialog(null)
+        setStashBusy(false)
         // AI 的状态同样清掉，并且**让仍在飞的那次请求作废**（否则它回来时会把上一个项目
         // 的提交信息写进新项目的输入框）。
         aiToken.current += 1
@@ -7226,6 +7823,152 @@ window.__ModuleLoader__.load({
           }
         },
         [workspace],
+      )
+
+      /**
+       * 读一次储藏列表（gitbar 宿主的 `/stash/list`）。
+       *
+       * 失败**不**写 `trouble`（那是提交区的错误条，用于用户刚做的动作）：列表读取失败
+       * 只影响储藏分组本身，因此在分组里就地显示一句话，不打扰其它区域。
+       */
+      const loadStashes = react.useCallback(async () => {
+        const mine = workspace
+        const token = (stashToken.current += 1)
+        setStashPhase((current) => (current === 'idle' ? 'loading' : current))
+        try {
+          const result = await fetchStashList({ workspace: mine, ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }) })
+          if (stashToken.current !== token || workspaceRef.current !== mine) return undefined
+          const list = Array.isArray(result?.stashes) ? result.stashes : []
+          setStashes(list)
+          setStashPhase('ready')
+          setStashError('')
+          // 选中的那条已经不在了（在别处被删除/弹出）：关掉详情，而不是继续显示一份
+          // 已经不存在的储藏的旧内容。
+          setSelectedStash((current) => {
+            if (current === '') return current
+            if (list.some((entry) => entry.ref === current)) return current
+            setStashDetail(null)
+            setStashFile('')
+            return ''
+          })
+          return list
+        } catch (cause) {
+          if (stashToken.current !== token || workspaceRef.current !== mine) return undefined
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setStashPhase('error')
+          setStashError(String(error.detail ?? error.message))
+          return undefined
+        }
+      }, [workspace, repositoryRoot])
+
+      /**
+       * 列表刷新：挂载/切项目时一次，以及**快照里的储藏条数变了**时一次。
+       *
+       * `stashCount` 是宿主用一次文件读（`refs/stash` 的 reflog 行数）换来的，因此这里
+       * 可以放心地跟着它刷新——终端里 `git stash push` 之后面板会自己更新，而代价不是
+       * 每 10 秒一个 git 进程。
+       */
+      const stashCount = typeof snapshot?.stashCount === 'number' ? snapshot.stashCount : -1
+      /**
+       * 快速计数说"这个仓库有储藏"（列表可能还在路上）。
+       *
+       * 它决定储藏**分组**要不要先渲染出来（避免"有储藏但界面一片空白"的那几帧），
+       * 而分组里的行永远来自真正的列表。
+       */
+      const stashCountSnapshot = stashCount > 0
+      react.useEffect(() => {
+        void loadStashes()
+      }, [loadStashes, stashCount, stashRevision])
+
+      /**
+       * 看一眼某条储藏里改了什么（review 宿主的 `/stash/show`）。
+       * @param ref - `stash@{n}`。
+       */
+      const openStash = react.useCallback(
+        async (ref) => {
+          if (typeof ref !== 'string' || ref === '') return undefined
+          setSelectedStash(ref)
+          // 右侧预览是**唯一**的：看储藏时就不再同时看工作区文件的差异，反之亦然。
+          setSelectedFile('')
+          setStashFile('')
+          setStashDetail(null)
+          const mine = workspace
+          try {
+            const detail = await call('stash/show', { workspace: mine, ref })
+            if (workspaceRef.current !== mine) return undefined
+            setStashDetail({ ref, files: Array.isArray(detail?.files) ? detail.files : [] })
+            return detail
+          } catch (cause) {
+            if (workspaceRef.current !== mine) return undefined
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            setTrouble({ key: STAGING_ERROR_KEYS[error.code] ?? '', detail: String(error.detail ?? error.message), code: error.code ?? '' })
+            return undefined
+          }
+        },
+        [workspace],
+      )
+
+      /**
+       * 一次储藏写操作（push / apply / pop / drop），成功后统一刷新列表与快照。
+       *
+       * 与 `run` 分开的理由：储藏走的是 **gitbar** 宿主的路由（不是本插件的），因此不能
+       * 复用 `call`；而"冲突也算成功"这条语义也只在储藏上成立（`git stash apply` 冲突时
+       * 文件已经写进工作区了，界面要把它当成"应用了，但有冲突"来处理）。
+       *
+       * @param route - `stash/push` / `stash/apply` / `stash/pop` / `stash/drop`。
+       * @param body - 请求体。
+       * @param successKey - 成功提示的字典键（可带 `{ref}` 参数）。
+       */
+      const stashRun = react.useCallback(
+        async (route, body, successKey) => {
+          const mine = workspace
+          setStashBusy(true)
+          setTrouble(null)
+          setNotice('')
+          try {
+            const result = await callGitbarRoute(route, {
+              workspace: mine,
+              ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }),
+              ...body,
+            })
+            // 工作区被改动了（储藏、应用、弹出都会）：让共享快照失效并重取，因此
+            // 已暂存/未暂存/冲突三组会立刻反映真实状态。
+            await gitSnapshots.invalidate(mine).catch(() => undefined)
+            if (workspaceRef.current !== mine) return result
+            const ref = String(result?.stash?.ref ?? body?.ref ?? '')
+            setNotice(t(successKey, { ref }))
+            // 应用/弹出留下冲突：把用户直接送到冲突面板（第一个冲突文件），并说明
+            // **储藏仍然保留**——否则他会以为改动已经全部落地了。
+            const conflicts = Array.isArray(result?.conflicts) ? result.conflicts : []
+            if (result?.conflicted === true || conflicts.length > 0) {
+              setNotice(t('stashApplyConflicted'))
+              const first = conflicts[0]?.path
+              setSelectedStash('')
+              setStashDetail(null)
+              setStashFile('')
+              if (typeof first === 'string' && first !== '') setSelectedFile(first)
+            }
+            setStashRevision((value) => value + 1)
+            return result
+          } catch (cause) {
+            if (workspaceRef.current !== mine) return undefined
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            const code = typeof error.code === 'string' ? error.code : ''
+            setTrouble({ key: code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : '', detail: typeof error.detail === 'string' ? error.detail : '', code })
+            // 引用已经失效（在别处被删/弹出）：刷新列表，让界面与新状态一致。
+            if (code === 'noSuchStash') {
+              setNotice('')
+              setSelectedStash('')
+              setStashDetail(null)
+              setStashFile('')
+              setStashRevision((value) => value + 1)
+            }
+            return undefined
+          } finally {
+            if (workspaceRef.current === mine) setStashBusy(false)
+          }
+        },
+        [workspace, repositoryRoot, t],
       )
 
       /**
@@ -7443,6 +8186,18 @@ window.__ModuleLoader__.load({
       const untrackedCount = untrackedInfo.count
       const untrackedMode = untrackedInfo.exact === false && untrackedInfo.mode === 'pending' ? 'pending' : untrackedInfo.mode
       const clean = conflicted.length === 0 && staged.length === 0 && unstaged.length === 0 && untrackedCount === 0
+      /**
+       * 选中一个工作区文件查看差异。
+       *
+       * 与"看储藏"互斥：右侧的差异区只有一块，两者同时选中的话用户看到的是哪一个文件都
+       * 说不清。因此每次选工作区文件就关掉储藏视图（反向由 openStash 处理）。
+       */
+      const selectFile = (path) => {
+        setSelectedStash('')
+        setStashDetail(null)
+        setStashFile('')
+        setSelectedFile(path)
+      }
       // 已勾选（准备"加入 git"）的未跟踪文件。
       const chosen = chosenUntracked.filter((path) => untrackedPaths.includes(path))
       const allChosen = untrackedPaths.length > 0 && chosen.length === untrackedPaths.length
@@ -7650,7 +8405,7 @@ window.__ModuleLoader__.load({
               title: `${entry.path}\n${t(STATUS_KEYS[entry.status?.[0] ?? ''] ?? 'statusOther')}`,
               // 点同一个文件是**保持选中**（而不是取消选中）：右侧那一栏是一个常驻的预览区，
               // 不是可以反复开合的折叠面板。
-              onClick: () => setSelectedFile(entry.path),
+              onClick: () => selectFile(entry.path),
               style: {
                 flex: '1 1 auto',
                 minWidth: 0,
@@ -7826,7 +8581,7 @@ window.__ModuleLoader__.load({
               // 与已跟踪行一致：点它 = 在右侧看这个文件（不再是在行下方展开）。
               'aria-selected': selectedFile === path,
               title: path,
-              onClick: () => setSelectedFile(path),
+              onClick: () => selectFile(path),
               style: {
                 flex: '1 1 auto',
                 minWidth: 0,
@@ -7954,7 +8709,7 @@ window.__ModuleLoader__.load({
                       t,
                       entry,
                       selected: selectedFile === entry.path,
-                      onOpen: (path) => setSelectedFile(path),
+                      onOpen: (path) => selectFile(path),
                     }),
                   ),
             ),
@@ -8205,6 +8960,60 @@ window.__ModuleLoader__.load({
                         ),
                   ],
             ),
+        /**
+         * 储藏分组（**有储藏时才渲染**）。
+         *
+         * 放在最后（文件分组之后）：它是"我把改动收起来了"的地方，与"工作区现在有什么"
+         * 是两类信息。没有储藏时整组不渲染——空的分组标题只会占地方，而"储藏改动"的入口
+         * 常驻在左栏标题上（见 filePane 的头部），因此不依赖这个分组出现。
+         *
+         * 行按 `ref / 消息 / 原分支 / 时间` 展示，点一条就在右侧看它的改动文件与差异。
+         */
+        stashes.length === 0 && stashCountSnapshot !== true
+          ? null
+          : react.createElement(
+              'div',
+              { key: 'g:stashes', 'data-staging-group': 'stashes' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'stashes',
+                label: t('stashesTitle'),
+                // 数字用**列表长度**（不是快照里的快速计数）：用户看到的是列出来的行，
+                // 标题上的数字必须与行数对得上。
+                count: stashes.length,
+                collapsed: collapsed.stashes === true,
+                onToggle: () => setCollapsed((value) => ({ ...value, stashes: !value.stashes })),
+                action: null,
+              }),
+              collapsed.stashes === true
+                ? null
+                : react.createElement(
+                    'div',
+                    { 'data-staging-stash-list': '' },
+                    stashPhase === 'error'
+                      ? react.createElement(
+                          'div',
+                          { 'data-staging-stash-error': '', style: { padding: '4px 8px 4px 26px', color: REMOVED, fontSize: uiPx(11.5), lineHeight: 1.6 } },
+                          t('stashLoadFailed', { detail: stashError }),
+                        )
+                      : stashPhase !== 'ready'
+                        ? react.createElement(
+                            'div',
+                            { style: { padding: '4px 8px 4px 26px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } },
+                            t('stashLoading'),
+                          )
+                        : stashes.map((entry) =>
+                            react.createElement(StashRow, {
+                              key: `stash:${entry.ref}`,
+                              t,
+                              entry,
+                              selected: selectedStash === entry.ref,
+                              busy: busy || stashBusy,
+                              onOpen: (ref) => void openStash(ref),
+                            }),
+                          ),
+                  ),
+            ),
       ]
 
       /**
@@ -8248,6 +9057,45 @@ window.__ModuleLoader__.load({
           },
           t('changesFilesTitle'),
           react.createElement('span', { style: { flex: '1 1 auto' } }),
+          /**
+           * 「储藏改动」的两个入口常驻在这里（而不是只在"有储藏时"那个分组里）：
+           * 第一次储藏的人面对的正是"一个储藏都没有"的空列表，入口若藏在分组里就永远
+           * 发现不了。直接那条一步完成，带选项那条给消息与"包含未跟踪"。
+           */
+          react.createElement(
+            StagingIconButton,
+            {
+              t,
+              id: 'stash-quick',
+              label: t('stashQuickHint'),
+              disabled: busy || stashBusy,
+              onClick: () => void stashRun('stash/push', {}, 'stashPushed'),
+            },
+            bulkIcon,
+          ),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-staging-stash-push': '',
+              disabled: busy || stashBusy,
+              title: t('stashWithOptions'),
+              onClick: () => setStashDialog({ kind: 'push' }),
+              style: {
+                flexShrink: 0,
+                height: '20px',
+                padding: '0 8px',
+                border: `1px solid ${BORDER}`,
+                borderRadius: '5px',
+                background: 'transparent',
+                color: 'var(--dsw-alias-label-secondary)',
+                fontFamily: UI_FONT,
+                fontSize: uiPx(11.5),
+                cursor: busy || stashBusy ? 'default' : 'pointer',
+              },
+            },
+            t('stashChangesTitle'),
+          ),
         ),
         // 滚动只发生在这一层：提交区在这块面板之外（order 3），因此永远贴底不动。
         react.createElement(
@@ -8260,6 +9108,174 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      /**
+       * 右侧的储藏查看器：一条储藏的标题 + 动作（应用/弹出/删除）+ 改动文件 + 该文件的差异。
+       *
+       * 差异**复用同一个 `ReviewDiffViewer`**（并排/统一、改动导航、折行都在那里），只是数据
+       * 来自 `/stash-file`。这也是"不要第二套 Diff UI"那条要求的落点：这里没有任何一行
+       * 渲染差异的代码，只有一份文件清单与三个动作。
+       */
+      const selectedStashEntry = selectedStash === '' ? undefined : stashes.find((entry) => entry.ref === selectedStash)
+      const stashFiles = Array.isArray(stashDetail?.files) ? stashDetail.files : []
+      const stashFileEntry =
+        stashFile === '' ? undefined : stashFiles.find((file) => file.path === stashFile) ?? { path: stashFile, status: 'M' }
+      const stashViewer =
+        selectedStash === ''
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-staging-stash-view': selectedStash, style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' } },
+              react.createElement(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    flexWrap: 'wrap',
+                    flexShrink: 0,
+                    padding: '5px 8px',
+                    borderBottom: `1px solid ${BORDER}`,
+                    fontFamily: UI_FONT,
+                    fontSize: reviewFont.meta,
+                  },
+                },
+                react.createElement('span', { 'data-staging-stash-ref': selectedStash, style: { fontFamily: CODE_FONT, color: ACCENT } }, selectedStash),
+                react.createElement(
+                  'span',
+                  { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)' } },
+                  (() => {
+                    const entry = selectedStashEntry
+                    const text = entry?.message === '' || entry?.message === undefined ? String(entry?.subject ?? '') : String(entry.message)
+                    return text === '' ? t('stashApplyTitle') : text
+                  })(),
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-staging-stash-apply': selectedStash,
+                    disabled: busy || stashBusy,
+                    title: t('stashApplyHint'),
+                    onClick: () => void stashRun('stash/apply', { ref: selectedStash }, 'stashApplied'),
+                    style: stashActionStyle(ACCENT, busy || stashBusy),
+                  },
+                  t('stashApply'),
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-staging-stash-pop': selectedStash,
+                    disabled: busy || stashBusy,
+                    title: t('stashPopHint'),
+                    onClick: () => void stashRun('stash/pop', { ref: selectedStash }, 'stashPopped'),
+                    style: stashActionStyle(ACCENT, busy || stashBusy),
+                  },
+                  t('stashPop'),
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-staging-stash-drop': selectedStash,
+                    disabled: busy || stashBusy,
+                    title: t('stashDropHint'),
+                    onClick: () => setStashDialog({ kind: 'drop', entry: selectedStashEntry ?? { ref: selectedStash } }),
+                    style: stashActionStyle(REMOVED, busy || stashBusy),
+                  },
+                  t('stashDrop'),
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-staging-stash-close': '',
+                    title: t('stashClose'),
+                    'aria-label': t('stashClose'),
+                    onClick: () => {
+                      setSelectedStash('')
+                      setStashDetail(null)
+                      setStashFile('')
+                    },
+                    style: { flexShrink: 0, width: '22px', height: '22px', border: 'none', borderRadius: '5px', background: 'transparent', color: 'inherit', font: 'inherit', cursor: 'pointer' },
+                  },
+                  '✕',
+                ),
+              ),
+              // 改动文件清单：点一个文件就在下面看它的差异（与工作区文件的交互一致）。
+              react.createElement(
+                'div',
+                { 'data-staging-stash-files': String(stashFiles.length), style: { flexShrink: 0, maxHeight: '36%', overflowY: 'auto', borderBottom: `1px solid ${BORDER}`, padding: '2px 0' } },
+                stashDetail === null
+                  ? react.createElement(
+                      'div',
+                      { style: { padding: '4px 10px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: uiPx(11.5) } },
+                      t('stashLoading'),
+                    )
+                  : stashFiles.length === 0
+                    ? react.createElement(
+                        'div',
+                        { 'data-staging-stash-nofiles': '', style: { padding: '4px 10px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: uiPx(11.5) } },
+                        t('stashNoFiles'),
+                      )
+                    : stashFiles.map((file) =>
+                        react.createElement(
+                          'button',
+                          {
+                            key: `stashfile:${file.path}`,
+                            type: 'button',
+                            'data-staging-stash-file': file.path,
+                            'data-staging-stash-file-selected': stashFile === file.path ? 'true' : 'false',
+                            onClick: () => setStashFile(file.path),
+                            title: file.path,
+                            style: {
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              boxSizing: 'border-box',
+                              width: '100%',
+                              padding: '2px 10px',
+                              border: 'none',
+                              background: stashFile === file.path ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
+                              color: 'inherit',
+                              fontFamily: UI_FONT,
+                              fontSize: reviewFont.normal,
+                              textAlign: 'left',
+                              cursor: 'pointer',
+                            },
+                          },
+                          react.createElement('span', { style: { flexShrink: 0, width: '12px', fontFamily: CODE_FONT, color: STATUS_COLORS[file.status?.[0] ?? ''] ?? 'inherit' } }, String(file.status?.[0] ?? '?')),
+                          react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, file.path),
+                          file.untracked === true
+                            ? react.createElement('span', { style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11) } }, t('stashUntrackedBadge'))
+                            : null,
+                        ),
+                      ),
+              ),
+              react.createElement(
+                'div',
+                { style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' } },
+                stashFileEntry === undefined
+                  ? react.createElement(
+                      'div',
+                      { 'data-staging-stash-diff-empty': '', style: { padding: '12px', color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: reviewFont.normal } },
+                      t('stashDiffEmpty'),
+                    )
+                  : react.createElement(LazyStashFileDiff, {
+                      key: `stashdiff:${workspace}:${selectedStash}:${stashFileEntry.path}`,
+                      t,
+                      workspace,
+                      // 注意 prop 名**不能叫 `ref`**：它是 React 的保留 prop（函数组件会收不到，
+                      // `check-react-rules.mjs` 也会拦）。这里叫 `stashRef`。
+                      stashRef: selectedStash,
+                      path: stashFileEntry.path,
+                      file: stashFileEntry,
+                      onClose: () => setStashFile(''),
+                    }),
+              ),
+            )
+
       const diffPane = react.createElement(
         'div',
         {
@@ -8269,7 +9285,10 @@ window.__ModuleLoader__.load({
             ? { flex: '1 1 45%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderTop: `1px solid ${BORDER}` }
             : { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' },
         },
-        previewEntry === undefined
+        // 看储藏与看工作区文件是**同一块区域**的两种内容：储藏优先（选中储藏时工作区文件的
+        // 选中项已经被清掉，两者不会同时出现）。
+        stashViewer ??
+          (previewEntry === undefined
           ? react.createElement(
               'div',
               { style: { padding: '16px', fontFamily: UI_FONT, fontSize: reviewFont.normal, color: 'var(--dsw-alias-label-tertiary)' } },
@@ -8298,7 +9317,7 @@ window.__ModuleLoader__.load({
                   CONFLICT_TRIPANE_MIN_WIDTH,
                 // 多个冲突文件之间的导航：交给父级切选中项（面板只知道自己的文件）。
                 conflictPaths: conflicted.map((entry) => entry.path),
-                onSelectPath: (next) => setSelectedFile(next),
+                onSelectPath: (next) => selectFile(next),
                 onOperationProgress,
               })
             : react.createElement(LazyFileDiff, {
@@ -8310,7 +9329,7 @@ window.__ModuleLoader__.load({
               // HEAD：差异的基线。它变了（提交/切分支）缓存键就变，旧差异不会被复用。
               revision: props.revision ?? snapshot?.head ?? '',
               onClose: () => setSelectedFile(''),
-            }),
+            })),
       )
 
       /**
@@ -8754,6 +9773,43 @@ window.__ModuleLoader__.load({
                 const path = confirming
                 setConfirming('')
                 void run('revert', { paths: [path], scope: 'workspace' }, t('revertedNotice', { path }))
+              },
+            }),
+
+        // 「储藏改动」弹窗（消息 + 包含未跟踪）。与 gitbar 那个对话框语义完全一致：
+        // 这里只是"在项目改动面板里就地储藏"的入口，规则只有一套。
+        stashDialog === null || stashDialog.kind !== 'push'
+          ? null
+          : react.createElement(StashPushDialog, {
+              t,
+              busy: busy || stashBusy,
+              onCancel: () => setStashDialog(null),
+              onSubmit: (values) => {
+                setStashDialog(null)
+                void stashRun(
+                  'stash/push',
+                  {
+                    ...(String(values?.message ?? '').trim() === '' ? {} : { message: String(values.message).trim() }),
+                    includeUntracked: values?.includeUntracked === true,
+                  },
+                  'stashPushed',
+                )
+              },
+            }),
+
+        // 删除储藏的确认框（破坏性动作，必须确认）。文案要求"确定删除此储藏吗？"，
+        // 并且把要删的那一条原样列出来——"删哪一条"不能有歧义。
+        stashDialog === null || stashDialog.kind !== 'drop'
+          ? null
+          : react.createElement(ConfirmStashDropDialog, {
+              t,
+              entry: stashDialog.entry,
+              busy: busy || stashBusy,
+              onCancel: () => setStashDialog(null),
+              onConfirm: () => {
+                const ref = stashDialog.entry?.ref
+                setStashDialog(null)
+                if (typeof ref === 'string' && ref !== '') void stashRun('stash/drop', { ref }, 'stashDropped')
               },
             }),
 

@@ -340,9 +340,12 @@ async function describeRevision(cwd, revision) {
  * 真实名字，所以这里把两侧都解析出来，并用 `labelsSwapped` 告诉界面这一点。
  *
  * @param cwd - 仓库根。
+ * @param conflictsHint - 已经算好的冲突文件清单（`/status` 的 porcelain 解析里就有）。
+ *   传入它可以省掉一次 `status` 进程——这条路径挂在每 10 秒一次的轮询上，而**只有在有
+ *   冲突时才需要**它，因此传进来是最省的。不传时这里自己取一次。
  * @returns `{ type, currentLabel, incomingLabel, labelsSwapped }` 或 null（没有进行中的操作）。
  */
-async function readOperation(cwd) {
+async function readOperation(cwd, conflictsHint) {
   const gitDir = await resolveGitDir(cwd)
   if (gitDir === undefined) return null
   const has = (relative) => existsSync(join(gitDir, relative))
@@ -396,6 +399,30 @@ async function readOperation(cwd) {
       currentLabel: await oursLabel(),
       incomingLabel: await describeRevision(cwd, 'REVERT_HEAD'),
       labelsSwapped: false,
+    }
+  }
+
+  /**
+   * 没有任何"进行中的操作"标记，但索引里还有未合并条目。
+   *
+   * `git stash apply/pop` 冲突时就是这样：git **不写 MERGE_HEAD**（它只留下未合并的索引
+   * 条目与 `.git/AUTO_MERGE`），因此没有任何操作标记可读。这里**不伪造** merge 操作
+   * （那会让界面显示"合并进行中"并给出一个 git 根本不接受的「继续合并」），而是给一个
+   * 如实的类型：
+   *   * 两侧标记名是 stash 自己那一组（`Updated upstream` / `Stashed changes`）→ `stash`；
+   *   * 其余无标记冲突（`git apply -3`、`git checkout --merge` 等）→ `unmerged`。
+   * 两者的共同点是**都没有「继续」这个动作**：解决完冲突、把文件标记为已解决即可。
+   */
+  const conflicts = Array.isArray(conflictsHint) ? conflictsHint : await listConflictEntries(cwd)
+  if (conflicts.length > 0) {
+    const stashConflict = looksLikeStashConflict(cwd, conflicts)
+    return {
+      type: stashConflict ? 'stash' : 'unmerged',
+      currentLabel: stashConflict ? STASH_MARKER_OURS : await oursLabel(),
+      incomingLabel: stashConflict ? STASH_MARKER_THEIRS : '',
+      labelsSwapped: false,
+      /** 无标记冲突：界面据此**不**给「继续 / 中止」（git 也没有这样的命令）。 */
+      markerless: true,
     }
   }
 
@@ -546,7 +573,8 @@ async function readStatus(cwd) {
   state.changedFiles += state.untrackedFiles
 
   // 进行中的操作。`merging` / `rebasing` 保留（既有客户端在用），新代码读 `operation`。
-  state.operation = await readOperation(cwd)
+  // 把刚解析出来的冲突清单传进去：无标记冲突（stash apply 等）的判定需要它，而这里正好有。
+  state.operation = await readOperation(cwd, state.conflicts)
   state.merging = state.operation?.type === 'merge'
   state.rebasing = state.operation?.type === 'rebase'
   if (state.upstream !== '') {
@@ -925,22 +953,208 @@ async function isDirty(cwd) {
 }
 
 /**
- * 把未提交改动存进 stash（含未跟踪文件），并返回 stash 引用。
+ * 把未提交改动存进 stash，并返回列表里新生成的那一条。
  *
- * 只在用户明确点了「暂存并切换」时调用——**绝不自动执行**。stash 是可恢复的
+ * 只在用户明确要求时调用（「储藏改动」「储藏并切换」）——**绝不自动执行**。stash 是可恢复的
  * （`git stash pop`），但仍是替用户移动了他的工作区状态，必须由他决定。
  *
- * @param cwd - 工作区路径。
- * @param branch - 目标分支名，仅用于生成可辨认的 stash 消息。
- * @returns 成功时的 `{ stashed: true, ref }`；无改动可暂存时 `{ stashed: false }`。
+ * 两条与 `git stash push` 自身行为有关的实现细节：
+ *   * 没有任何可储藏的东西时 git **以 0 退出**并打印 "No local changes to save"（措辞跨版本
+ *     不同，退出码不可靠）。因此这里对比调用前后的 stash **提交 SHA**：没变就是没存进去，
+ *     否则会把上一次的储藏当成"刚刚新建的"报给用户。
+ *   * 未跟踪文件默认**不**包含（只有 `includeUntracked` 才加 `-u`）：把未跟踪文件一起搬进
+ *     储藏，用户回头看工作区时会以为文件被删了。只有用户明确勾选才这么做。
+ *
+ * @param cwd - 仓库根。
+ * @param options - `{ message?, includeUntracked? }`；message 为空时让 git 写它自己的 WIP 主题。
+ * @returns 成功时 `{ stashed: true, ref, message, ... }`；没存进去时 `{ stashed: false }`。
  */
-async function stashChanges(cwd, branch) {
+async function stashChanges(cwd, options) {
   if (!(await isDirty(cwd))) return { stashed: false }
-  // -u 把未跟踪文件一并纳入：否则它们可能在切换后被目标分支的同名文件覆盖或残留。
-  await git(['stash', 'push', '-u', '-m', `dsh-gitbar: 切换到 ${branch} 前的自动暂存`], cwd)
-  const ref = (await git(['rev-parse', '--short', 'stash'], cwd)).trim()
-  return { stashed: true, ref }
+  const message = typeof options?.message === 'string' ? options.message.trim() : ''
+  const before = await listStashes(cwd)
+  const args = ['stash', 'push']
+  if (options?.includeUntracked === true) args.push('-u')
+  if (message !== '') args.push('-m', message)
+  await git(args, cwd)
+  const after = await listStashes(cwd)
+  if (after.length === 0 || (before.length > 0 && after[0].sha === before[0].sha)) return { stashed: false }
+  return { stashed: true, ...after[0] }
 }
+
+/**
+ * stash 引用的形状：**只认 `stash@{n}`**。
+ *
+ * `git stash apply/drop` 接受任意提交（`stash apply HEAD` 会成功！），而"把任意提交的
+ * 改动糊到工作区上"不是这个界面该提供的能力——那是 cherry-pick/checkout 的事，而且
+ * 用户点的是"应用这个储藏"，参数却可以是别的提交，这种不一致迟早出事。因此白名单化：
+ * 只接受 `stash@{数字}`，并且下面还会核对它确实在当前仓库的 stash 列表里。
+ */
+const STASH_REF_PATTERN = /^stash@\{\d+\}$/u
+
+/**
+ * git 为 **stash 冲突**写进文件的两侧标记名。
+ *
+ * 这是"这次冲突来自 stash"唯一**持久**的判据：`git stash apply/pop` 冲突时 git 不写
+ * MERGE_HEAD（只留下未合并的索引条目与 `.git/AUTO_MERGE`），因此重启之后没有任何
+ * "进行中的操作"标记可读。而 git 自己给 stash 合并用的两侧名字是固定的英文常量
+ * （`Updated upstream` / `Stashed changes`，见 git 的 builtin/stash.c），它随文件一起
+ * 留在工作区里，与界面语言无关。
+ */
+const STASH_MARKER_OURS = 'Updated upstream'
+const STASH_MARKER_THEIRS = 'Stashed changes'
+
+/**
+ * 从 stash 的 reflog 主题里取出**原分支**与**用户写的消息**。
+ *
+ * git 没有"stash 的原分支"这个独立字段，它只在 reflog 主题（`%gs`）里以固定前缀写着：
+ *   * `git stash push -m X`      → `On <branch>: X`
+ *   * `git stash push`（无消息） → `WIP on <branch>: <short-sha> <subject>`
+ *
+ * 这是 git 自己的约定（十几年未变），不是"人类可读输出"——拿它当解析对象的前提是
+ * 用 `--format` 拿到稳定字段，而前缀本身必须剥掉，否则列表里每条消息都顶着 `On main:`。
+ * 分支名里不可能有 `:`（git 的 ref 名规则禁止），因此按**第一个** `: ` 切分没有歧义。
+ *
+ * @param subject - `git stash list --format=%gs` 给出的主题。
+ * @returns `{ branch, message }`；认不出形状时 branch 为空、message 为原文。
+ */
+function parseStashSubject(subject) {
+  const text = String(subject ?? '').trim()
+  const withMessage = /^On ([^:]+): ([\s\S]*)$/u.exec(text)
+  if (withMessage !== null) return { branch: withMessage[1].trim(), message: withMessage[2].trim() }
+  const wip = /^WIP on ([^:]+):/u.exec(text)
+  if (wip !== null) return { branch: wip[1].trim(), message: '' }
+  return { branch: '', message: text }
+}
+
+/**
+ * 读当前仓库的 stash 列表（严格属于**这个**仓库：cwd 已是 repositoryRoot）。
+ *
+ * 用 `--format` 而不是 `git stash list` 的默认文本：默认文本是给人看的
+ * （`stash@{0}: On main: msg`），解析它等于把"引号、空格、消息里带冒号"这些都变成坑。
+ * 这里用 `%x00` 分隔字段、`%x1e` 分隔记录，因此**消息里的换行与冒号都不影响解析**。
+ * `%cI` 是严格 ISO-8601 的提交时间（带时区偏移），客户端不会因为解释时间而猜时区。
+ *
+ * `%P` 给出 stash 提交的父提交：两个 = 普通储藏，三个 = 用了 `-u`（第三个父提交装的是
+ * 未跟踪文件）。因此"这个储藏里有没有未跟踪文件"是**从 git 对象里读出来的事实**，
+ * 不需要解析任何文本。
+ *
+ * @param cwd - 仓库根。
+ * @returns `{ ref, index, subject, message, branch, date, sha, hasUntracked }` 数组（新的在前）。
+ */
+async function listStashes(cwd) {
+  const raw = await git(['stash', 'list', '--format=%gd%x00%gs%x00%cI%x00%H%x00%P%x1e'], cwd)
+  const stashes = []
+  for (const record of raw.split('\u001e')) {
+    if (record.trim() === '') continue
+    const fields = record.split('\u0000')
+    if (fields.length < 5) continue
+    const ref = fields[0].trim()
+    const parsed = /^stash@\{(\d+)\}$/u.exec(ref)
+    if (parsed === null) continue
+    const parents = fields[4].trim() === '' ? [] : fields[4].trim().split(/\s+/u)
+    const { branch, message } = parseStashSubject(fields[1])
+    stashes.push({
+      ref,
+      index: Number(parsed[1]),
+      subject: fields[1].trim(),
+      message,
+      branch,
+      date: fields[2].trim(),
+      sha: fields[3].trim(),
+      hasUntracked: parents.length >= 3,
+    })
+  }
+  return stashes
+}
+
+/**
+ * 校验一个请求里的 stash 引用确实存在，并返回它的条目。
+ *
+ * 先按形状白名单（`stash@{n}`），再核对它出现在当前仓库的列表里——只做前者会让
+ * `stash@{7}`（不存在）走到 git 那里换来一句英文 `fatal`；只做后者则会让任意提交蒙混过关。
+ *
+ * @param cwd - 仓库根。
+ * @param value - 请求给出的引用。
+ * @returns stash 条目，或 undefined。
+ */
+async function findStash(cwd, value) {
+  if (typeof value !== 'string' || !STASH_REF_PATTERN.test(value.trim())) return undefined
+  const ref = value.trim()
+  const stashes = await listStashes(cwd)
+  return stashes.find((entry) => entry.ref === ref)
+}
+
+/**
+ * 当前未合并（冲突）的路径。
+ *
+ * `--diff-filter=U` 是"索引里仍有未解决条目"的权威判据，`git stash apply` 冲突之后
+ * 就是靠它把"这次 apply 是冲突"与"别的失败"分开的（`stash apply` 在两种情况下都以
+ * 非零退出，退出码本身说明不了任何事）。
+ *
+ * @param cwd - 仓库根。
+ * @returns 路径数组。
+ */
+async function listUnmergedPaths(cwd) {
+  const raw = await git(['diff', '--name-only', '--diff-filter=U', '-z'], cwd).catch(() => '')
+  return raw.split('\u0000').filter((path) => path !== '')
+}
+
+/**
+ * 读一个冲突文件里的两侧标记名（`<<<<<<< X` / `>>>>>>> Y`）。
+ *
+ * 只读前若干 KiB：冲突标记总在文件里，而一个几百 MB 的生成物不该为了判定"是谁引起的冲突"
+ * 被整份读进内存。
+ *
+ * @param cwd - 仓库根。
+ * @param path - 仓库相对路径。
+ * @returns `{ ours, theirs }`（读不到时都是空串）。
+ */
+function readConflictMarkerLabels(cwd, path) {
+  try {
+    const text = readFileSync(join(cwd, path), { encoding: 'utf8', flag: 'r' }).slice(0, 64 * 1024)
+    const ours = /^<{7}\s?(.*)$/mu.exec(text)
+    const theirs = /^>{7}\s?(.*)$/mu.exec(text)
+    return { ours: ours === null ? '' : ours[1].trim(), theirs: theirs === null ? '' : theirs[1].trim() }
+  } catch {
+    return { ours: '', theirs: '' }
+  }
+}
+
+/**
+ * 判断一组未合并条目是不是 **`git stash apply/pop` 留下的冲突**。
+ *
+ * 依据是 git 自己写进文件的两侧标记名（见 STASH_MARKER_OURS 的说明）：它随工作区文件
+ * 持久存在，重启、换进程都还在，而且只在 stash 冲突里出现（merge/rebase/cherry-pick
+ * 用的是分支名或提交描述，`git apply -3` 用的是 `ours`/`theirs` 之外的提交名）。
+ *
+ * 只检查**第一个**冲突文件：一次 stash 冲突里所有文件的两侧名字都由同一个调用写死，
+ * 而每个文件都读一遍在"几十个冲突文件"时是白花的 I/O。
+ *
+ * @param cwd - 仓库根。
+ * @param conflicts - `{ path }` 数组（未合并条目）。
+ * @returns 是 stash 冲突则 true。
+ */
+function looksLikeStashConflict(cwd, conflicts) {
+  if (!Array.isArray(conflicts) || conflicts.length === 0) return false
+  const labels = readConflictMarkerLabels(cwd, conflicts[0].path)
+  return labels.ours === STASH_MARKER_OURS && labels.theirs === STASH_MARKER_THEIRS
+}
+
+/**
+ * 用 porcelain 的 `u` 记录列出冲突文件（含冲突类型 `UU`/`AA`/`DU`…）。
+ *
+ * 与 `listUnmergedPaths` 的区别：那个只给路径，这个还带 git 的 XY 冲突类型，界面按它
+ * 显示冲突种类。判定"是不是 stash 冲突"只需要路径，因此那条路径上不必多花一次进程。
+ *
+ * @param cwd - 仓库根。
+ * @returns `{ path, code }` 数组。
+ */
+async function listConflictEntries(cwd) {
+  const raw = await git(['status', '--porcelain=v2', '-z'], cwd)
+  return parseConflicts(raw)
+}
+
 
 /**
  * `workspaceRoot → RepoContext` 的解析器。
@@ -1113,9 +1327,13 @@ function resolveRequestWorkspace(requestUrl, allowedRoots) {
  * @param response - HTTP 响应。
  * @param run - 实际执行 git 的函数，返回 `{ stash?, notice? }` 之类的附加信息。
  * @param onError - 把异常映射成 `{ status, code, detail }`；不返回则用通用映射。
+ * @param onErrorExtra - 失败时补充的字段（可选）。**"储藏并切换"必须用它**：checkout 失败
+ *   时那次储藏已经真实发生，而储藏列表只存在于这个进程刚写下的 git 状态里——错误响应若
+ *   不带回它，用户就只看到"切换失败"，根本不知道自己的改动已经进了 stash。这样的事故
+ *   （用户以为改动丢了）比失败本身严重得多。
  * @returns 无。
  */
-async function runWrite(cwd, scope, response, run, onError) {
+async function runWrite(cwd, scope, response, run, onError, onErrorExtra) {
   try {
     const extra = (await run()) ?? {}
     // 状态与远端列表互不依赖，并发取。
@@ -1128,12 +1346,14 @@ async function runWrite(cwd, scope, response, run, onError) {
       ...extra,
     })
   } catch (error) {
+    const extra = typeof onErrorExtra === 'function' ? ((await onErrorExtra()) ?? {}) : {}
     const mapped = onError?.(error)
     if (mapped !== undefined) {
       sendJson(response, mapped.status, {
         error: mapped.code,
         code: mapped.code,
         detail: String(error?.message ?? error),
+        ...extra,
       })
       return
     }
@@ -1143,6 +1363,7 @@ async function runWrite(cwd, scope, response, run, onError) {
       error: 'unknown',
       code: 'unknown',
       detail: String(error?.message ?? error),
+      ...extra,
     })
   }
 }
@@ -1288,6 +1509,13 @@ function createGitHandler() {
           sendJson(response, 200, { ...(await readBranchSync(cwd, names)), ...scope })
           return
         }
+        if (path === `${ROUTE_PREFIX}/stash/list`) {
+          // 储藏列表是**只读**的，因此是 GET（与 `/branches`、`/remotes` 一致：读不改变
+          // 仓库，用 POST 会让"读 / 写"这条分界线在客户端的请求记录里消失）。
+          const stashes = context === undefined ? [] : await listStashes(cwd)
+          sendJson(response, 200, { isRepo: context !== undefined, ...scope, stashes, stashCount: stashes.length })
+          return
+        }
         sendJson(response, 404, { error: 'not found' })
         return
       }
@@ -1308,7 +1536,7 @@ function createGitHandler() {
         return
       }
 
-      // 切换分支 / 签出标记或修订。表单 `{ branch, stash? }`。
+      // 切换分支 / 签出标记或修订。表单 `{ branch, stash?, message?, includeUntracked? }`。
       if (path === `${ROUTE_PREFIX}/checkout`) {
         // 这里接受"分支名或提交 SHA"：界面的「签出标记或修订…」要能切到标签。
         // 标签名会走 asRef 分支（与分支名同一字符集），提交 SHA 走十六进制分支。
@@ -1317,7 +1545,14 @@ function createGitHandler() {
           sendJson(response, 400, { error: 'invalid branch name', code: 'invalidBranch' })
           return
         }
-        // 用户明确要求先暂存：只有这种情况才动 stash，绝不自动执行。
+        // 储藏消息由**客户端**给：宿主不知道界面语言，而这条消息会出现在储藏列表里
+        // （用户看得见），因此不能在宿主里硬编码某一种语言的文案。
+        const stashMessage = normalizeStashMessage(payload?.message)
+        if (stashMessage === undefined) {
+          sendJson(response, 400, { error: 'invalid stash message', code: 'invalidStashMessage' })
+          return
+        }
+        // 用户明确要求先储藏：只有这种情况才动 stash，绝不自动执行。
         let stash = { stashed: false }
         if (payload?.stash === true) {
           try {
@@ -1325,7 +1560,7 @@ function createGitHandler() {
               sendJson(response, 400, { error: 'nothing to stash', code: 'nothingToStash' })
               return
             }
-            stash = await stashChanges(cwd, target)
+            stash = await stashChanges(cwd, { message: stashMessage, includeUntracked: payload?.includeUntracked === true })
           } catch (error) {
             sendJson(response, 409, { error: 'stash failed', code: 'stashFailed', detail: String(error.message) })
             return
@@ -1374,6 +1609,8 @@ function createGitHandler() {
             }
             return undefined
           },
+          // 失败也要把"储藏已经建好了"带回去：这是**不可丢**的信息（见 runWrite 的说明）。
+          () => (stash.stashed === true ? { stash } : {}),
         )
         return
       }
@@ -1779,6 +2016,127 @@ function createGitHandler() {
         return
       }
 
+      // ---- 储藏（stash）-----------------------------------------------------
+      //
+      // 全部走**同一个 cwd**（= 当前 repositoryRoot），因此多仓库项目里 frontend 的储藏
+      // 不可能出现在 backend 的列表里：储藏是仓库自己的 reflog（`refs/stash`），换仓库就是
+      // 换 cwd，没有任何共享状态。这一条不是靠界面过滤实现的，而是结构上就成立。
+      //
+      // 消息与 untracked 选项由客户端给：宿主不知道界面语言，而储藏消息会出现在列表里
+      // 给用户看（见 normalizeStashMessage）。
+      // 创建储藏。表单 `{ message?, includeUntracked? }`。
+      if (path === `${ROUTE_PREFIX}/stash/push`) {
+        const message = normalizeStashMessage(payload?.message)
+        if (message === undefined) {
+          sendJson(response, 400, { error: 'invalid stash message', code: 'invalidStashMessage' })
+          return
+        }
+        const includeUntracked = payload?.includeUntracked === true
+        // 未合并条目还在时 `git stash push` 会以 "needs merge / could not write index" 失败。
+        // 那句话说给用户听毫无意义（真正要做的是先解决冲突），因此提前判定并给出专门的 code。
+        const unmerged = await listUnmergedPaths(cwd)
+        if (unmerged.length > 0) {
+          sendJson(response, 409, { error: 'unmerged files', code: 'unmerged', detail: String(unmerged.length) })
+          return
+        }
+        // 先判"有没有东西可存"：只有未跟踪文件、而用户没勾选包含未跟踪时，`git stash push`
+        // 会**以 0 退出**且什么也不做（见 stashChanges 的说明），那种"点了没反应"必须避免。
+        const trackedChanges = await countTrackedChanges(cwd)
+        const untrackedChanges = await countUntrackedFiles(cwd)
+        if (trackedChanges === 0 && !(includeUntracked && untrackedChanges > 0)) {
+          sendJson(response, 400, { error: 'nothing to stash', code: 'nothingToStash' })
+          return
+        }
+        await runWrite(cwd, scope, response, async () => {
+          const stash = await stashChanges(cwd, { message, includeUntracked })
+          if (stash.stashed !== true) {
+            // 上面的预检之后仍然没存进去：git 的判定比我们的预检更细（例如改动只是
+            // "文件模式"而 `core.fileMode=false` 下 git 认为没有变化）。照实回报。
+            return { stash: { stashed: false } }
+          }
+          return { stash, stashed: true }
+        })
+        return
+      }
+
+      // 应用 / 弹出储藏。表单 `{ ref }`。
+      if (path === `${ROUTE_PREFIX}/stash/apply` || path === `${ROUTE_PREFIX}/stash/pop`) {
+        const popping = path.endsWith('/pop')
+        const entry = await findStash(cwd, payload?.ref)
+        if (entry === undefined) {
+          sendJson(response, 404, { error: 'no such stash', code: 'noSuchStash' })
+          return
+        }
+        // 索引里还有未解决的冲突时，git 会拒绝（"needs merge / could not write index"）。
+        // 这必须**提前**判定：否则下面那条"尝试之后仍有未合并条目 ⇒ 是冲突"的判定会把这
+        // 次拒绝误报成"应用成功但有冲突"，用户会以为自己刚应用的储藏已经生效了。
+        const beforeUnmerged = await listUnmergedPaths(cwd)
+        if (beforeUnmerged.length > 0) {
+          sendJson(response, 409, { error: 'unmerged files', code: 'unmerged', detail: String(beforeUnmerged.length) })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            try {
+              await git(['stash', popping ? 'pop' : 'apply', entry.ref], cwd, { env: NON_INTERACTIVE_ENV })
+            } catch (error) {
+              /**
+               * `git stash apply/pop` **以非零退出**有两个完全不同的原因：真的失败，
+               * 或者"应用了但留下冲突"。退出码分不出来，索引能分：还有未合并条目就是冲突。
+               *
+               * 冲突**不是失败**：文件已经写进工作区（带标记），接下来该进冲突面板逐块解决。
+               * 另外 `pop` 在冲突时**不会**删掉储藏（git 的行为），所以这里照实回报 `kept`。
+               */
+              const conflicts = await listConflictEntries(cwd)
+              if (conflicts.length === 0) throw error
+              return {
+                applied: true,
+                conflicted: true,
+                conflicts,
+                stash: { ...entry, kept: true, popped: false },
+              }
+            }
+            // 成功：`apply` 一定保留储藏，`pop` 一定删掉它。重读一次列表来**确认**，
+            // 而不是照抄我们期望的行为（列表是权威）。
+            const rest = await listStashes(cwd)
+            const stillThere = rest.some((candidate) => candidate.ref === entry.ref && candidate.sha === entry.sha)
+            return {
+              applied: true,
+              conflicted: false,
+              conflicts: [],
+              stash: { ...entry, kept: stillThere, popped: popping && !stillThere },
+            }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            if (looksLikeLocalChanges(message)) return { status: 409, code: 'localChanges' }
+            if (/needs merge|could not write index/iu.test(message)) return { status: 409, code: 'unmerged' }
+            return undefined
+          },
+          // 应用/弹出失败时储藏**仍然在**（`apply` 本来就不删，`pop` 失败也不删），
+          // 把这个事实带回去，界面才能说清"你的改动还在储藏里"。
+          () => ({ stash: { ...entry, kept: true } }),
+        )
+        return
+      }
+
+      // 删除储藏（破坏性动作，界面必须二次确认）。表单 `{ ref }`。
+      if (path === `${ROUTE_PREFIX}/stash/drop`) {
+        const entry = await findStash(cwd, payload?.ref)
+        if (entry === undefined) {
+          sendJson(response, 404, { error: 'no such stash', code: 'noSuchStash' })
+          return
+        }
+        await runWrite(cwd, scope, response, async () => {
+          await git(['stash', 'drop', entry.ref], cwd, { env: NON_INTERACTIVE_ENV })
+          return { dropped: entry.ref, stash: { ...entry, stashed: false } }
+        })
+        return
+      }
+
       // 结束进行中的合并/变基/摘取/还原（冲突全部解决之后）。表单 `{}`。
       //
       // 这是「冲突解决」的最后一步，必须按**当前实际进行中的操作**选命令：合并是
@@ -1881,6 +2239,56 @@ function createGitHandler() {
 }
 
 /**
+ * 已跟踪改动的条数（不含未跟踪文件）。
+ *
+ * `git stash push` 在"只有未跟踪文件、又没带 `-u`"时会以 0 退出且什么也不做，因此
+ * 「有没有东西可储藏」必须分开数：未跟踪文件要不要算进去取决于用户有没有勾选。
+ *
+ * @param cwd - 仓库根。
+ * @returns 条数。
+ */
+async function countTrackedChanges(cwd) {
+  const raw = await git(['status', '--porcelain', '-z', '--untracked-files=no'], cwd)
+  return raw.split('\u0000').filter((record) => record !== '').length
+}
+
+/**
+ * 未跟踪文件的条数。
+ *
+ * 用 `--untracked-files=normal`（而不是 `all`）：折叠目录与逐个文件在这一步没有区别——
+ * 只需要知道"有没有"，`all` 在几千个未跟踪文件的仓库里会白花时间枚举。
+ *
+ * @param cwd - 仓库根。
+ * @returns 条数。
+ */
+async function countUntrackedFiles(cwd) {
+  const raw = await git(['status', '--porcelain', '-z', '--untracked-files=normal'], cwd)
+  return raw.split('\u0000').filter((record) => record.startsWith('?? ')).length
+}
+
+/**
+ * 校验并规整一个 stash 消息。
+ *
+ * 消息会成为 stash 提交的主题、并在列表里显示给用户，因此：去掉首尾空白、去掉控制字符
+ * （它们会让 `git stash list` 的输出难以阅读，也让列表里那一行断成两截）、限制长度。
+ * NUL 是**禁用**的（它是下面 `--format` 解析的字段分隔符）。空串表示"让 git 写它自己的
+ * WIP 主题"，这是合法的，不是错误。
+ *
+ * @param value - 请求给出的消息（可以是 undefined）。
+ * @returns 规整后的消息；输入形状非法（不是字符串）时返回 undefined。
+ */
+function normalizeStashMessage(value) {
+  if (value === undefined || value === null) return ''
+  if (typeof value !== 'string') return undefined
+  const cleaned = value
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+    .trim()
+    .slice(0, 200)
+  return cleaned
+}
+
+/**
  * 校验并规整"起点"参数（新建分支的 from、签出的修订、比较用的基准）。
  *
  * 允许两种形状：一个合法的分支名，或一个十六进制提交 SHA。**不接受其它 rev 表达式**
@@ -1914,6 +2322,11 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/remotes`,
     `${ROUTE_PREFIX}/branch/sync`,
     `${ROUTE_PREFIX}/checkout`,
+    `${ROUTE_PREFIX}/stash/list`,
+    `${ROUTE_PREFIX}/stash/push`,
+    `${ROUTE_PREFIX}/stash/apply`,
+    `${ROUTE_PREFIX}/stash/pop`,
+    `${ROUTE_PREFIX}/stash/drop`,
     `${ROUTE_PREFIX}/branch/create`,
     `${ROUTE_PREFIX}/branch/rename`,
     `${ROUTE_PREFIX}/branch/delete`,

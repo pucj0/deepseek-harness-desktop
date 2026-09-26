@@ -185,10 +185,32 @@ window.__ModuleLoader__.load({
       stashing: '暂存并切换中…',
       stashAndSwitch: '暂存改动并切换到 {branch}',
       hintCommitOrStash: '提交这些改动，或用下方的「暂存并切换」。',
+      /**
+       * 储藏：两条入口（直接储藏 / 带选项储藏）。
+       *
+       * 「直接储藏」不带消息——**不要每次都逼用户写消息**（写不出消息而放弃储藏是很常见的），
+       * 那种情况下 git 自己会写 `WIP on <branch>: …`，信息量并不小。要写消息就用第二条。
+       */
+      actionStash: '储藏改动',
+      actionStashOptions: '带选项储藏…',
+      dialogStashTitle: '储藏改动',
+      dialogFieldStashMessage: '储藏消息（可留空）',
+      dialogStashIncludeUntracked: '包含未跟踪文件',
+      dialogStashUntrackedHint: '未跟踪文件默认不进储藏：搬走它们会让工作区看起来像丢过文件。',
+      dialogStashCheckoutHint: '切换 {branch} 需要先把当前改动储藏起来。',
+      stashingNow: '正在储藏…',
+      stashRestore: '恢复储藏的改动',
+      stashRestored: '已恢复储藏 {ref}（该条目已删除）',
+      stashBeforeCheckoutMessage: '切换到 {branch} 前的自动储藏',
+      // 储藏创建了、但切换失败：这句必须说，否则用户以为改动丢了。
+      stashCreatedBeforeFailure: '切换失败，但改动**已经**存入储藏 {ref}，没有丢。',
+      // 恢复（pop）失败/冲突时：储藏仍在，冲突要去项目改动里解决。
+      stashRestoreConflicted: '恢复储藏时出现冲突：请到「项目改动」里逐块解决（储藏仍然保留）。',
       noBranches: '没有可切换的分支',
       remoteBranch: '远程分支（切换时会自动创建本地跟踪分支）',
       localBranch: '本地分支',
-      stashed: '改动已存入 stash {ref}，可用 git stash pop 恢复',
+      stashed: '改动已存入储藏 {ref}，可在「项目改动」的储藏列表里恢复',
+      stashAndSwitched: '已储藏改动（{ref}）并切换到 {branch}',
       detachedNotice: '已进入游离 HEAD（签出的是标记或提交，不在任何分支上）',
       // ---- 快捷操作 ----
       actionUpdate: '更新项目…',
@@ -274,6 +296,15 @@ window.__ModuleLoader__.load({
       opTypeRebase: '变基',
       opTypeCherryPick: '摘取',
       opTypeRevert: '还原',
+      /**
+       * 无标记冲突：`git stash apply/pop` 冲突时 git **不写**任何操作标记（没有 MERGE_HEAD），
+       * 因此这里不能显示成"合并进行中"——那样界面会给出一个 git 根本不接受的「继续合并」。
+       * 这两句说的是同一件事：**冲突要解决，但没有"继续"这个动作**。
+       */
+      opTypeStash: '储藏',
+      opTypeUnmerged: '冲突',
+      opStashInProgress: '储藏冲突待解决（{count} 个文件）。逐块解决并把文件标记为已解决即可，储藏不会被自动删除。',
+      opUnmergedInProgress: '有未解决的冲突（{count} 个文件），但当前没有可继续的操作。到「项目改动」里逐块解决。',
       opContinue: '继续',
       opCommitMerge: '提交合并',
       opContinueRebase: '继续变基',
@@ -292,6 +323,9 @@ window.__ModuleLoader__.load({
       error_localChanges: '切换被 git 拒绝：有未提交改动会被覆盖。',
       error_stashFailed: '暂存失败。',
       error_nothingToStash: '工作区没有未提交改动，可直接切换。',
+      error_unmerged: '还有未解决的冲突：先把它们解决掉再做这一步。',
+      error_noSuchStash: '这条储藏已经不存在了（可能已被删除）。',
+      error_invalidStashMessage: '储藏消息不合法，已拒绝。',
       error_invalidBranch: '分支名不合法，已拒绝。',
       error_invalidRevision: '修订不合法，已拒绝（只接受分支名或提交哈希）。',
       error_invalidRemote: '远端名不合法，已拒绝。',
@@ -334,10 +368,24 @@ window.__ModuleLoader__.load({
       stashing: 'Stashing and switching…',
       stashAndSwitch: 'Stash changes and switch to {branch}',
       hintCommitOrStash: 'Commit these changes, or use "Stash changes and switch" below.',
+      actionStash: 'Stash changes',
+      actionStashOptions: 'Stash with options…',
+      dialogStashTitle: 'Stash changes',
+      dialogFieldStashMessage: 'Stash message (optional)',
+      dialogStashIncludeUntracked: 'Include untracked files',
+      dialogStashUntrackedHint: 'Untracked files are left alone by default: moving them away makes the working tree look like files went missing.',
+      dialogStashCheckoutHint: 'Switching to {branch} requires stashing the current changes first.',
+      stashingNow: 'Stashing…',
+      stashRestore: 'Restore stashed changes',
+      stashRestored: 'Restored stash {ref} (the entry is gone now)',
+      stashBeforeCheckoutMessage: 'Auto-stash before switching to {branch}',
+      stashCreatedBeforeFailure: 'The switch failed, but the changes **were** saved to stash {ref} — nothing is lost.',
+      stashRestoreConflicted: 'Restoring the stash produced conflicts: resolve them block by block in Project Changes (the stash is kept).',
       noBranches: 'No branches to switch to',
       remoteBranch: 'Remote branch (a local tracking branch is created on switch)',
       localBranch: 'Local branch',
-      stashed: 'Changes saved to {ref}; restore them with git stash pop',
+      stashed: 'Changes saved to stash {ref}; restore them from the Stashes list in Project Changes',
+      stashAndSwitched: 'Stashed the changes ({ref}) and switched to {branch}',
       detachedNotice: 'Detached HEAD (you checked out a tag or commit, not a branch)',
       actionUpdate: 'Update project…',
       actionCommit: 'Commit…',
@@ -405,6 +453,10 @@ window.__ModuleLoader__.load({
       opTypeRebase: 'Rebase',
       opTypeCherryPick: 'Cherry-pick',
       opTypeRevert: 'Revert',
+      opTypeStash: 'Stash',
+      opTypeUnmerged: 'Conflict',
+      opStashInProgress: 'Stash conflicts to resolve ({count} file(s)). Resolve them block by block and mark each file resolved; the stash is not deleted automatically.',
+      opUnmergedInProgress: 'There are unresolved conflicts ({count} file(s)) but no operation to continue. Resolve them block by block in Project Changes.',
       opContinue: 'Continue',
       opCommitMerge: 'Commit merge',
       opContinueRebase: 'Continue rebase',
@@ -422,6 +474,9 @@ window.__ModuleLoader__.load({
       error_localChanges: 'git refused the switch: you have uncommitted changes it would overwrite.',
       error_stashFailed: 'Stashing failed.',
       error_nothingToStash: 'The working tree is clean; switch directly.',
+      error_unmerged: 'There are still unresolved conflicts: resolve them before this step.',
+      error_noSuchStash: 'That stash no longer exists (it may have been dropped).',
+      error_invalidStashMessage: 'That stash message is not valid.',
       error_invalidBranch: 'That branch name was rejected.',
       error_invalidRevision: 'That revision was rejected (only a branch name or commit hash).',
       error_invalidRemote: 'That remote name was rejected.',
@@ -803,6 +858,10 @@ window.__ModuleLoader__.load({
         const error = new Error(payload?.error ?? `HTTP ${response.status}`)
         if (typeof payload?.code === 'string') error.code = payload.code
         if (typeof payload?.detail === 'string') error.detail = payload.detail
+        // **整个响应体也带上**：失败响应可能夹带"这次操作其实做了一半"的事实，最典型的
+        // 是「储藏并切换」——储藏已经建好了、只有 checkout 失败。丢掉它，界面就只能说
+        // "切换失败"，而用户会以为自己刚才的改动不见了。
+        error.payload = payload
         throw error
       }
       return payload
@@ -834,6 +893,11 @@ window.__ModuleLoader__.load({
       localChanges: 'error_localChanges',
       stashFailed: 'error_stashFailed',
       nothingToStash: 'error_nothingToStash',
+      // 无标记冲突（stash apply 等）与"储藏已经被删掉"都是**可以就地处理**的失败，
+      // 因此必须带 code 走到界面上说清，而不是折成通用的"操作失败"。
+      unmerged: 'error_unmerged',
+      noSuchStash: 'error_noSuchStash',
+      invalidStashMessage: 'error_invalidStashMessage',
       invalidBranch: 'error_invalidBranch',
       invalidRevision: 'error_invalidRevision',
       invalidRemote: 'error_invalidRemote',
@@ -863,9 +927,17 @@ window.__ModuleLoader__.load({
      * 是各自的 `--continue`，四者的命令与说法都不同。放在组件外面是因为它们是纯数据，
      * 而且三个映射必须**同源**——各写一份迟早会有一个类型漏掉。
      */
-    const OP_TYPE_KEYS = { merge: 'opTypeMerge', rebase: 'opTypeRebase', 'cherry-pick': 'opTypeCherryPick', revert: 'opTypeRevert' }
+    const OP_TYPE_KEYS = { merge: 'opTypeMerge', rebase: 'opTypeRebase', 'cherry-pick': 'opTypeCherryPick', revert: 'opTypeRevert', stash: 'opTypeStash', unmerged: 'opTypeUnmerged' }
     const OP_CONTINUE_KEYS = { merge: 'opCommitMerge', rebase: 'opContinueRebase', 'cherry-pick': 'opContinueCherryPick', revert: 'opContinueRevert' }
     const OP_ABORT_KEYS = { merge: 'opAbortMerge', rebase: 'opAbortRebase', 'cherry-pick': 'opAbortCherryPick', revert: 'opAbortRevert' }
+    /**
+     * 哪些"进行中的操作"**没有**继续/中止这回事。
+     *
+     * `stash` 与 `unmerged` 都是**无标记冲突**：git 没有为它们提供 `--continue`/`--abort`
+     * （`git stash apply` 冲突之后既没有可提交的合并，也没有可中止的操作）。给按钮等于教用户
+     * 去点一个必然失败的入口，因此这两个类型只显示状态与"去哪里解决"，不给动作按钮。
+     */
+    const MARKERLESS_OPERATIONS = new Set(['stash', 'unmerged'])
 
     /**
      * 把错误整理成"字典键 + 原始细节"。
@@ -1010,6 +1082,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 图标：一个"往下收进盒子"的箭头（储藏改动）。
+     *
+     * 与"新建分支"的加号区分开：储藏是**收起来**的意思，图标方向必须一致，否则在一列
+     * 全是线框图标的快捷操作里，用户只能靠读文字分辨。
+     *
+     * @returns React 元素。
+     */
+    function StashGlyph() {
+      return react.createElement(
+        'svg',
+        { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true', style: { display: 'block', flexShrink: 0 } },
+        react.createElement('path', { d: 'M8 2.5v6M5.5 6 8 8.5 10.5 6', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        react.createElement('path', { d: 'M2.5 10.5h11v3h-11z', strokeLinejoin: 'round' }),
+      )
+    }
+
+    /**
      * 图标：下拉的尖括号，用于"展开子菜单"。
      * @returns React 元素。
      */
@@ -1112,6 +1201,18 @@ window.__ModuleLoader__.load({
       const busy = fresh.busy === true
       const error = fresh.error ?? null
       const notice = fresh.notice ?? ''
+      /**
+       * 「恢复储藏的改动」这一条入口对应的储藏（null = 不显示）。
+       *
+       * 它住在**这一份代际状态**里（不是单独的 `useState`）：与 `notice` 同源，因此
+       * "切换失败但储藏已建好"那一条提示与它永远一起出现/一起清掉；切换项目换代时也
+       * 会随这一份状态一起作废（不会把上一个项目的恢复入口带过来）。
+       *
+       * 只在**「储藏并切换」之后**设置：那是唯一一种"用户改动被我们搬走了、而他很可能
+       * 想拿回来"的场景。普通的「储藏改动」不设它——用户是主动收藏的，随即冒出一个
+       * "恢复"按钮只会让人以为自己点错了。
+       */
+      const restore = fresh.restore ?? null
 
       /** 搜索词（面板内的分支过滤）。 */
       const [query, setQuery] = react.useState('')
@@ -1394,7 +1495,18 @@ window.__ModuleLoader__.load({
           if (!outcome.ok) {
             // 失败信息也只由**最新**那次写操作负责：两次写叠在一起时，较早那次的失败
             // 不该把更晚那次的 busy 关掉、也不该顶掉它的错误提示（那是用户正在等的结果）。
-            if (gate.accept(ticket)) patch(ticket, { busy: false, error: describeError(outcome.cause) })
+            if (gate.accept(ticket)) {
+              const stash = outcome.cause?.payload?.stash
+              patch(ticket, {
+                busy: false,
+                error: describeError(outcome.cause),
+                // "切换失败但储藏已经建好"必须说出来：这是用户此刻最需要知道的事实
+                // （否则他会以为自己未提交的改动没了）。同时给出恢复入口。
+                ...(stash?.stashed === true
+                  ? { notice: t('stashCreatedBeforeFailure', { ref: String(stash.ref ?? '') }), restore: stash }
+                  : {}),
+              })
+            }
             return undefined
           }
           const result = outcome.value
@@ -1403,6 +1515,9 @@ window.__ModuleLoader__.load({
             const changes = { busy: false }
             if (result !== null && typeof result === 'object' && 'branch' in result) changes.status = result
             if (Array.isArray(result?.remotes)) changes.remotes = result.remotes
+            // 一次普通操作成功之后，上一次「储藏并切换」留下的恢复入口就该收了：它指向的
+            // 是**过去那次**操作，留在面板上会让人以为"点了就能回到那个分支"。
+            changes.restore = null
             // 附加信息的提示文案。放在这里而不是每个操作里，是为了让"操作成功但需要
             // 额外告知"这件事只有一处实现。
             if (result?.stash?.stashed === true) changes.notice = t('stashed', { ref: result.stash.ref })
@@ -1411,8 +1526,17 @@ window.__ModuleLoader__.load({
             else if (typeof result?.aborted === 'string') changes.notice = t('aborted')
             // 调用方补的那句写在最后，因此能覆盖上面几条：那几条是"成功但需要额外告知"的
             // 通用兜底，而调用方知道的是这次操作**具体**干了什么（更新了、推送了）。
+            //
+            // 回调可以返回字符串（只补一句提示），也可以返回 `{ notice?, restore? }`：
+            // 「储藏并切换」需要在同一处同时给出提示与"恢复"入口，而它们必须**同源**
+            // （分成两个 state 就会出现"提示在、按钮不在"这种半截状态）。
             const specific = typeof onSuccess === 'function' ? onSuccess(result) : undefined
-            if (typeof specific === 'string' && specific !== '') changes.notice = specific
+            if (typeof specific === 'string' && specific !== '') {
+              changes.notice = specific
+            } else if (specific !== null && typeof specific === 'object') {
+              if (typeof specific.notice === 'string' && specific.notice !== '') changes.notice = specific.notice
+              if ('restore' in specific) changes.restore = specific.restore
+            }
             patch(ticket, changes)
           } else {
             // 已有更晚的请求接手这两份状态：只收起自己的 busy。
@@ -1498,17 +1622,79 @@ window.__ModuleLoader__.load({
         }
       }, [run, t])
 
+      /**
+       * 「储藏改动」**直连**执行（不带消息、不动未跟踪文件）。
+       *
+       * 与「更新项目」「推送」同一类：日常动作，弹一次"确定"只是多一次点击。要写消息或
+       * 把未跟踪文件一起收起来，走旁边的「带选项储藏…」对话框。
+       */
+      const stashQuick = react.useCallback(async () => {
+        setDirectAction('stash')
+        try {
+          return await run('stash/push', {}, () => undefined)
+        } finally {
+          setDirectAction('')
+        }
+      }, [run])
+
+      /**
+       * 恢复上一条由「储藏并切换」创建的储藏（`stash/pop`）。
+       *
+       * 冲突时 `git stash pop` **不会**删掉储藏，界面因此不能宣布"已恢复"：这里读响应里的
+       * `conflicted`，把用户送到冲突面板，并说明储藏还在。
+       *
+       * @param entry - 要恢复的储藏（就是提示区里那个按钮绑定的那一条）。
+       */
+      const restoreStash = react.useCallback(
+        async (entry) => {
+          if (entry === null || entry === undefined || typeof entry.ref !== 'string') return undefined
+          // 成功或冲突都不再提供这个入口：冲突那条路要去「项目改动」里解决，而储藏仍在列表里。
+          const result = await run(
+            'stash/pop',
+            { ref: entry.ref },
+            (payload) => ({
+              notice: payload?.conflicted === true ? t('stashRestoreConflicted') : t('stashRestored', { ref: entry.ref }),
+              restore: null,
+            }),
+          )
+          return result
+        },
+        [run, t],
+      )
+
       const switchTo = react.useCallback(
         async (branch, options) => {
           // 记下目标分支：失败时错误面板要靠它给出"暂存并切换到 X"的入口。
           setPendingBranch(branch)
-          const result = await run('checkout', options?.stash === true ? { branch, stash: true } : { branch })
+          const result = await run(
+            'checkout',
+            options?.stash === true
+              ? {
+                  branch,
+                  stash: true,
+                  // 消息由**客户端**给（宿主不知道界面语言，而这条消息会出现在储藏列表里）。
+                  message: t('stashBeforeCheckoutMessage', { branch }),
+                  // 未跟踪文件同样会让 checkout 失败（目标分支里有同名文件），因此这两条
+                  // 建议动作里包含它们——不包含的话用户会再撞一次墙。
+                  includeUntracked: true,
+                }
+              : { branch },
+            // 成功时：一句"已储藏并切换"的提示 + **恢复入口**（改动还躺在储藏里，用户很
+            // 可能想拿回来）。两者同源，因此不会出现"提示在、按钮不在"的半截状态。
+            (payload) =>
+              payload?.stash?.stashed === true
+                ? {
+                    notice: t('stashAndSwitched', { ref: String(payload.stash.ref ?? ''), branch }),
+                    restore: payload.stash,
+                  }
+                : undefined,
+          )
           // 只有成功才关闭面板。失败时保持打开，否则用户看不到原因、也不知道
           // 该重试哪个分支——实测中最常见的失败是有未提交改动（git 会拒绝覆盖）。
           // 关闭走 closePanel：面板、二级菜单、对话框与待弹定时器必须一起收（见它的说明）。
           if (result !== undefined) closePanel()
         },
-        [run, closePanel],
+        [run, closePanel, t],
       )
 
       // 重新打开面板时清掉上一次的错误与提示：旧信息留到新一次尝试里只会造成混淆。
@@ -2080,6 +2266,9 @@ window.__ModuleLoader__.load({
               onContinue: () => void run('op/continue', {}),
               onSwitch: (branch) => void switchTo(branch),
               onStashSwitch: () => void switchTo(pendingBranch, { stash: true }),
+              onStashQuick: () => void stashQuick(),
+              restore,
+              onRestore: () => void restoreStash(restore),
               onDialog: openDialog,
               onPick: onBranchClick,
               onActivate: onBranchDoubleClick,
@@ -2171,8 +2360,8 @@ window.__ModuleLoader__.load({
     function SourcePanel(props) {
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
-        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
-        directAction, onUpdate, onPush, onContinue,
+        selected, onRefresh, onFetch, onSwitch, onStashSwitch, onStashQuick, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
+        directAction, onUpdate, onPush, onContinue, restore, onRestore,
       } = props
 
       /**
@@ -2506,6 +2695,14 @@ window.__ModuleLoader__.load({
       const opConflicts = Number(status?.conflictCount ?? 0)
       // 类型名跟着字典走；万一来一个没见过的类型，宁可显示 host 的原样字符串也不猜。
       const opTypeLabel = OP_TYPE_KEYS[opType] === undefined ? opType : t(OP_TYPE_KEYS[opType])
+      /**
+       * 无标记冲突（stash apply / 其它无操作标记的冲突）**没有**继续与中止。
+       *
+       * 这两类操作的完成方式只有一个：把文件逐个标记为已解决。因此卡片只说明状态与去哪里做，
+       * 不给按钮——`git stash apply` 之后既没有可以 `--continue` 的东西，也没有可以 `--abort`
+       * 的操作（储藏还在那里，删不删是用户在储藏列表里的事）。
+       */
+      const markerless = MARKERLESS_OPERATIONS.has(opType)
 
       return react.createElement(
         'div',
@@ -2597,6 +2794,11 @@ window.__ModuleLoader__.load({
           { style: { display: 'flex', flexDirection: 'column', flexShrink: 0, paddingTop: '4px', paddingBottom: '4px', borderBottom: `1px solid ${BORDER}` } },
           action('new', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(PlusGlyph)), t('actionNewBranch'), () => onDialog({ kind: 'create' })),
           action('tag', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(BranchGlyph)), t('actionCheckoutRef'), () => onDialog({ kind: 'checkout-ref' })),
+          // 储藏：**直接储藏**（不带消息、不动未跟踪文件）与**带选项储藏…**（消息 +
+          // 包含未跟踪）。两条并列而不是藏进二级菜单：写不出消息就放弃储藏是最常见的
+          // 情况，直接那一条必须一眼可见（见字典里 actionStash 的说明）。
+          action('stash', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), directAction === 'stash' ? t('stashingNow') : t('actionStash'), onStashQuick),
+          action('stash-options', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), t('actionStashOptions'), () => onDialog({ kind: 'stash' })),
         ),
 
         // 进行中的合并/变基/摘取/还原：这是**必须**露出来的一条，因为它表示仓库停在一个
@@ -2619,42 +2821,55 @@ window.__ModuleLoader__.load({
                   lineHeight: 1.5,
                 },
               },
-              // 有 operation 就把两侧说清楚（谁正在进到谁上面）；没有时退回旧的那句状态说明。
-              operation === null
-                ? react.createElement('div', null, t(opType === 'rebase' ? 'rebaseInProgress' : 'mergeInProgress'))
-                : react.createElement(
+              // 无标记冲突（储藏冲突等）说的是另一件事：**没有可继续的操作**，只有待解决的
+              // 冲突。因此它有自己的句子，而且下面不给"继续/中止"两个按钮。
+              markerless
+                ? react.createElement(
                     'div',
-                    { 'data-desktop-sc-operation': operation.type },
-                    t('opInProgress', { type: opTypeLabel, current: operation.currentLabel, incoming: operation.incomingLabel }),
-                  ),
+                    { 'data-desktop-sc-operation': operation?.type ?? opType },
+                    t(opType === 'stash' ? 'opStashInProgress' : 'opUnmergedInProgress', { count: opConflicts }),
+                  )
+                : null,
+              // 有 operation 就把两侧说清楚（谁正在进到谁上面）；没有时退回旧的那句状态说明。
+              markerless
+                ? null
+                : operation === null
+                  ? react.createElement('div', null, t(opType === 'rebase' ? 'rebaseInProgress' : 'mergeInProgress'))
+                  : react.createElement(
+                      'div',
+                      { 'data-desktop-sc-operation': operation.type },
+                      t('opInProgress', { type: opTypeLabel, current: operation.currentLabel, incoming: operation.incomingLabel }),
+                    ),
               // 还有文件没解决时先报数量：用户据此决定"现在到底能不能提交"。
               opConflicts > 0
                 ? react.createElement('div', { 'data-desktop-sc-conflicts': String(opConflicts) }, t('opConflicts', { count: opConflicts }))
                 : null,
-              react.createElement(
-                'button',
-                {
-                  type: 'button',
-                  disabled: busy,
-                  // 中止按**实际类型**发：合并是 `merge --abort`，变基/摘取/还原各有各的。
-                  onClick: () => onAbort(opType),
-                  style: {
-                    marginTop: '6px',
-                    padding: '4px 8px',
-                    borderRadius: '6px',
-                    border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
-                    background: SURFACE,
-                    color: 'inherit',
-                    fontFamily: UI_FONT,
-                    fontSize: '12px',
-                    cursor: busy ? 'default' : 'pointer',
-                  },
-                },
-                t(OP_ABORT_KEYS[opType] ?? 'opAbort'),
-              ),
+              markerless
+                ? null
+                : react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      disabled: busy,
+                      // 中止按**实际类型**发：合并是 `merge --abort`，变基/摘取/还原各有各的。
+                      onClick: () => onAbort(opType),
+                      style: {
+                        marginTop: '6px',
+                        padding: '4px 8px',
+                        borderRadius: '6px',
+                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                        background: SURFACE,
+                        color: 'inherit',
+                        fontFamily: UI_FONT,
+                        fontSize: '12px',
+                        cursor: busy ? 'default' : 'pointer',
+                      },
+                    },
+                    t(OP_ABORT_KEYS[opType] ?? 'opAbort'),
+                  ),
               // 「继续」只在冲突全部解决之后才可点：还有冲突时 git 会拒绝，按钮留在那里
               // 完整可点只会让人白点一次（并收获一条看不懂的报错）。
-              operation === null
+              operation === null || markerless
                 ? null
                 : react.createElement(
                     'button',
@@ -2781,6 +2996,33 @@ window.__ModuleLoader__.load({
                 },
               },
               notice,
+              // 「储藏并切换」成功之后**就地**给一条恢复入口：用户刚刚离开的分支上还有
+              // 自己没提交的东西，而它现在在储藏列表里——一步能回来的路比"去另一个面板里找"
+              // 更符合此刻的意图（这是需求里那条可选的 Restore）。
+              restore === null || restore === undefined
+                ? null
+                : react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-desktop-sc-restore': restore.ref,
+                      disabled: busy,
+                      onClick: onRestore,
+                      style: {
+                        display: 'block',
+                        marginTop: '6px',
+                        padding: '5px 9px',
+                        borderRadius: '6px',
+                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                        background: SURFACE,
+                        color: 'inherit',
+                        fontFamily: UI_FONT,
+                        fontSize: '12px',
+                        cursor: busy ? 'default' : 'pointer',
+                      },
+                    },
+                    busy ? t('working') : t('stashRestore'),
+                  ),
             ),
 
         // 只滚动结果列表，搜索框与操作区始终留在顶部。
@@ -3088,6 +3330,14 @@ window.__ModuleLoader__.load({
       const [ref, setRef] = react.useState('')
       const [checkout, setCheckout] = react.useState(kind === 'create')
       const [noFf, setNoFf] = react.useState(false)
+      /**
+       * 「储藏改动」对话框的两个输入。
+       *
+       * 未跟踪文件**默认不勾选**（需求：默认不包含）——把未跟踪文件搬进储藏，用户回头看
+       * 工作区时会以为文件被删了。要包含必须自己勾。
+       */
+      const [stashMessage, setStashMessage] = react.useState('')
+      const [stashUntracked, setStashUntracked] = react.useState(false)
       // 强制删除的二次确认：未并入的分支第一次会被 git 拒绝，第二次才带上 force。
       const [forceConfirmed, setForceConfirmed] = react.useState(false)
 
@@ -3262,6 +3512,27 @@ window.__ModuleLoader__.load({
             forceWithLease: true,
             ...(branch ? { branch: branch.name } : {}),
           }, () => t('pushed'))
+          if (result !== undefined) onDone()
+        }
+      } else if (kind === 'stash') {
+        /**
+         * 「储藏改动（带选项）」：消息 + 是否包含未跟踪文件。
+         *
+         * 消息可以留空（那样 git 写它自己的 `WIP on <branch>: …`）——**不强制**用户填消息，
+         * 因为"想不出消息就先不储藏了"是真实存在的行为。要一键储藏、连这个弹窗都不想开，
+         * 用快捷操作里那条「储藏改动」。
+         */
+        title = t('dialogStashTitle')
+        body = [
+          field('stash-message', t('dialogFieldStashMessage'), stashMessage, setStashMessage, { autoFocus: true, placeholder: 'WIP: feature login' }),
+          checkbox('stash-untracked', t('dialogStashIncludeUntracked'), stashUntracked, setStashUntracked),
+          react.createElement('div', { key: 'hint', style: { fontSize: '11.5px', color: TERTIARY, lineHeight: 1.6 } }, t('dialogStashUntrackedHint')),
+        ]
+        submit = async () => {
+          const result = await run('stash/push', {
+            ...(stashMessage.trim() === '' ? {} : { message: stashMessage.trim() }),
+            includeUntracked: stashUntracked,
+          })
           if (result !== undefined) onDone()
         }
       } else if (kind === 'commit') {
