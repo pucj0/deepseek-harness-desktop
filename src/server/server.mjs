@@ -222,6 +222,44 @@ function ensureProfile(home, installAnchor) {
   return dir
 }
 
+/**
+ * 把工作区登记进 Harness 的工作区注册表。
+ *
+ * 为什么**必须**做，而且必须用 `ctx.workspaceRegistry`：
+ *
+ * `--workspace` 只改变这个服务端进程的 cwd（以及交给插件的 `DSH_DESKTOP_WORKSPACE`）。
+ * 那属于**进程级**状态，不是 Harness 的项目状态。官方 UI 的工作区/项目列表来自
+ * `ctx.workspaceRegistry`——一份持久化记录（`<home>/storages/workspace.json`），而它只在
+ * 首次启动时按会话历史引导一次（`initialized` 标记写死之后就不再引导），也不会自己发现
+ * 新目录。唯一会新增记录的公开入口就是 `workspaceRegistry.create()`，官方 UI 的
+ * 「添加工作区…」走的正是它。
+ *
+ * 不登记的后果是一个错位状态：git 插件（自己按 cwd 解析仓库）已经把新目录画出来了，
+ * 官方 UI 里却没有这个工作区、也进不去——"server cwd 已变化"被误当成"Harness 已经打开
+ * 了这个工作区"，这正是 1.2.0–1.5.8 的 bug。回归测试
+ * `scripts/test-workspace-registration.mjs` 同时断言这两层。
+ *
+ * `create()` 是幂等的：同一个规范路径重复调用会原样返回已有记录，且**不动**列表顺序。
+ *
+ * @param ctx - boot 之后的主机上下文。
+ * @param workspace - 本次启动的工作区绝对路径。
+ */
+async function registerWorkspace(ctx, workspace) {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined) {
+    console.error('[dsh-desktop] 警告: 工作区注册表不可用（dsh-workspace 未挂载），本次不会登记工作区')
+    return
+  }
+  try {
+    await registry.create(workspace)
+  } catch (error) {
+    // 登记失败不该让应用起不来：它只是让官方 UI 少一个项目条目，agent 依然能在 cwd 里工作。
+    console.error(
+      `[dsh-desktop] 警告: 无法登记工作区 ${workspace}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
 /** How long to wait for the web server to become addressable. */
 const READY_POLL_TIMEOUT_MS = 30_000
 
@@ -329,6 +367,10 @@ async function main() {
     })
   })
   mark('boot 插件树')
+
+  // 登记工作区**必须早于**下面那句 `[dsh-desktop] ready`：父进程一收到它就导航窗口，
+  // 而界面首次拉取工作区列表若早于记录落盘，就又会看到"没有这个工作区"。
+  await registerWorkspace(ctx, workspace)
 
   const port = ctx.get('webServer')?.port
   if (port === undefined) throw new Error(`${BIN_NAME}: web server did not start`)

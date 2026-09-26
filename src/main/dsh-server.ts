@@ -9,6 +9,13 @@
  *   - it prints one line `dsh web: <url>?token=<token>` once the web server is up
  *   - it prints `[dsh-desktop] ready` afterwards, as our readiness signal
  *   - everything else on stdout/stderr is forwarded to the app log
+ *
+ * The URL line is only where the address comes from; readiness is the later
+ * `[dsh-desktop] ready` line, because the boot script does work between the two
+ * that the window must not race — most importantly registering the workspace in
+ * Harness's workspace registry, which is what makes the new project appear in
+ * the official UI. Resolving on the URL line meant the parent could navigate the
+ * window before that registration landed.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -196,6 +203,9 @@ export class DshServer extends EventEmitter {
         if (tail.length > 40) tail = tail.slice(-40)
 
         if (stream !== 'stdout') return
+        // URL 行只用来取地址。**不能在这里 settle**：dsh-web-app 打印它的时候服务端
+        // 还没走完收尾（工作区登记就在之后），父进程若此时导航窗口，界面拉到的项目
+        // 列表里会还没有本次的工作区——正是"选了目录但界面没进入新项目"的成因之一。
         const match = READY_PATTERN.exec(line)
         if (match?.groups?.url !== undefined) {
           const authenticatedUrl = match.groups.url
@@ -206,16 +216,17 @@ export class DshServer extends EventEmitter {
             port: Number(parsed.port),
           }
           this.emit('ready', this.readyInfo)
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          resolve(this.readyInfo)
           return
         }
         if (line.trim() === DESKTOP_READY && !settled) {
           settled = true
           clearTimeout(timer)
-          resolve(this.readyInfo ?? { url: '', authenticatedUrl: '', port: 0 })
+          if (this.readyInfo === undefined) {
+            // 没有 URL 的"就绪"没法导航；报出来比让窗口去加载空地址清楚得多。
+            reject(new Error('dsh-desktop: server reported ready without announcing a web URL'))
+            return
+          }
+          resolve(this.readyInfo)
         }
       }
 

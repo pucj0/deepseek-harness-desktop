@@ -1,19 +1,25 @@
 /**
- * 工作区（项目）管理。
+ * 工作区（项目）管理：选目录、记设置、以及"待切换"标记的读写。
  *
  * "工作区"就是智能体读写文件的根目录。它在服务端启动时作为 `--workspace` 传入，
- * 因此切换工作区意味着**重启服务端子进程**——这也决定了下面这些操作的实现方式：
- * 与其原地替换，不如记下选择后整体重启应用，让启动路径保持唯一（一条路径比两条
- * 好维护，也不会出现"半个进程还在用旧工作区"的状态）。
+ * 而 Harness 侧的项目记录只在那次启动里登记，因此切换工作区意味着**重启应用**。
+ * 重启的两半协议分别是：
+ *   1. 切换时把目标写进 `<userData>/pending-workspace`（本模块的
+ *      `markPendingWorkspace`）；
+ *   2. 下次启动时把它读出来并消费掉（`takePendingWorkspace`）。
+ * 两侧都在本模块，只有一套协议；编排在 `workspace-switch.ts`。
  *
- * 本模块只负责"选"与"记"，不负责重启。
+ * 本模块只负责"选"与"记"，不负责重启，也不碰 Electron。
  */
-import { existsSync, readlinkSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 
 /** 最近打开列表的最大长度——够用即可，避免菜单过长。 */
 const MAX_RECENT = 8
+
+/** "待切换工作区"标记的文件名（位于应用数据目录）。 */
+export const PENDING_WORKSPACE_FILENAME = 'pending-workspace'
 
 /** 落盘的工作区相关设置。 */
 export interface WorkspaceSettings {
@@ -83,6 +89,77 @@ export function removeSplashFile(userDataDir: string): void {
   } catch {
     // 清理失败不影响任何功能。
   }
+}
+
+/**
+ * 记下"下次启动请把这个目录当工作区"。
+ *
+ * 为什么需要这枚标记，而不是只写 settings.json：`app.relaunch()` 会**沿用原来的
+ * 命令行**，于是重启后的 `process.argv` 里仍带着旧工作区，而 argv 的优先级高于
+ * settings 里记住的选择——只写 settings 会被旧参数盖掉（表现为"重启了但还是老目录"，
+ * 见 c968ab4a）。标记文件在启动时被读取并删除，只对紧接着的那一次生效。
+ *
+ * 用文件而不是环境变量：`app.relaunch()` 是否继承当前环境不由我们保证，文件一定跨得过
+ * 重启。
+ *
+ * @param userDataDir - 应用数据目录。
+ * @param dir - 目标工作区绝对路径。
+ */
+export function markPendingWorkspace(userDataDir: string, dir: string): void {
+  try {
+    mkdirSync(userDataDir, { recursive: true })
+    writeFileSync(join(userDataDir, PENDING_WORKSPACE_FILENAME), `${dir}\n`)
+  } catch (error) {
+    // 写不进去只意味着"这次切换可能退回旧工作区"，不该让切换流程本身崩掉。
+    console.warn(`[shell] 无法写入待切换工作区: ${String(error)}`)
+  }
+}
+
+/**
+ * 读取并**消费**"待切换工作区"标记。
+ *
+ * 读到即删：它只对紧接着的那一次启动有效，留着会影响后续每一次启动。
+ * 文件坏掉或指向不存在的目录时返回 undefined（调用方回落到常规解析），但**仍然删掉**
+ * 它——否则一个坏标记会每次启动都被读一遍。
+ *
+ * @param userDataDir - 应用数据目录。
+ * @returns 规范化后的目标工作区，或 undefined（没有标记 / 标记不可用）。
+ */
+export function takePendingWorkspace(userDataDir: string): string | undefined {
+  const pendingPath = join(userDataDir, PENDING_WORKSPACE_FILENAME)
+  if (!existsSync(pendingPath)) return undefined
+  try {
+    const requested = readFileSync(pendingPath, 'utf8').trim()
+    rmSync(pendingPath, { force: true })
+    return requested === '' ? undefined : normalizeWorkspaceArgument(requested)
+  } catch (error) {
+    // 标记文件坏掉不该阻止启动——回落到常规解析。
+    console.warn(`[shell] 无法读取待切换工作区: ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * 判断两个路径是否指向同一个目录。
+ *
+ * 存在的理由：菜单里选中的路径来自原生目录选择器，而当前工作区可能来自
+ * settings / argv / 标记文件，两者的写法不一定逐字相同（尾部分隔符、大小写、
+ * 冗余的 `..`）。用它避免"选了同一个目录却重启一次"。
+ *
+ * Windows 的路径比较不区分大小写，macOS 默认也不区分，但只有前者是确定的，
+ * 因此只在 win32 上折叠大小写——在区分大小写的平台上折叠会误判。
+ *
+ * @param left - 一个目录路径。
+ * @param right - 另一个目录路径。
+ * @returns 是否指向同一个目录。
+ */
+export function isSameWorkspace(left: string, right: string): boolean {
+  const canon = (value: string): string => {
+    const absolute = resolve(value)
+    const trimmed = absolute.length > 1 && absolute.endsWith(sep) ? absolute.slice(0, -1) : absolute
+    return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
+  }
+  return canon(left) === canon(right)
 }
 
 /**

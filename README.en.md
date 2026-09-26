@@ -34,7 +34,7 @@ The app boots the official `dsh-base` and `dsh-web-app` bundles. Harness feature
 - An Electron window, native menu, and system tray. Closing the window can leave the service running; reopen it from the tray.
 - A native folder picker, recent workspaces, a file-manager action, and a copy-workspace-path action.
 - Single-instance behavior, remembered window size and position, and external links opened in the system browser.
-- Workspace switching that restarts the Harness service and navigates the existing window. The selected workspace is remembered.
+- Workspace switching that restarts the app and navigates the existing window. The new directory is registered in Harness's own project list on the next launch, so the official sidebar really switches to it — not just the shell and the Git plugins. The selected workspace is remembered.
 - Chinese and English shell text, plus a separate UI font-size plugin.
 
 ### Git workflow
