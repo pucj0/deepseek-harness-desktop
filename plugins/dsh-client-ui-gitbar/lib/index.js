@@ -1795,15 +1795,40 @@ function createGitHandler() {
           scope,
           response,
           async () => {
-            if (operation.type === 'merge') {
-              // `--no-edit` 用 MERGE_MSG：宿主没有终端，不能让它去开编辑器。
-              await git(['commit', '--no-edit'], cwd, { env: NON_INTERACTIVE_ENV })
-            } else if (operation.type === 'rebase') {
-              await git(['rebase', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
-            } else if (operation.type === 'cherry-pick') {
-              await git(['cherry-pick', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
-            } else {
-              await git(['revert', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+            try {
+              if (operation.type === 'merge') {
+                // `--no-edit` 用 MERGE_MSG：宿主没有终端，不能让它去开编辑器。
+                await git(['commit', '--no-edit'], cwd, { env: NON_INTERACTIVE_ENV })
+              } else if (operation.type === 'rebase') {
+                await git(['rebase', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+              } else if (operation.type === 'cherry-pick') {
+                await git(['cherry-pick', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+              } else {
+                await git(['revert', '--continue'], cwd, { env: NON_INTERACTIVE_ENV })
+              }
+            } catch (error) {
+              /**
+               * 变基/摘取是**一次一个提交**地往下走的：解决完当前这个提交，`--continue`
+               * 继续处理下一个，而下一个提交再次冲突时命令仍然以非零退出。这在多轮冲突里
+               * 是**正常的前进**，不是失败——把它当失败，界面会停在一句"还有冲突没解决"上，
+               * 而磁盘其实已经进入下一轮，用户只能自己发现并手动重新读取。
+               *
+               * 判定依据是宿主自己重新读到的状态（git 是权威，不解析 git 的提示文案）：
+               * 操作仍在进行中**且**索引里确实还有未合并的路径 ⇒ 前进到了下一次冲突。
+               * 合并只有一轮，保持原有语义（索引不干净就是"还没解决完"）。
+               */
+              if (operation.type !== 'merge') {
+                const running = await readOperation(cwd)
+                const unmerged = await git(['diff', '--name-only', '--diff-filter=U'], cwd).catch(() => '')
+                const pending = unmerged
+                  .split('\n')
+                  .map((line) => line.trim())
+                  .filter((line) => line !== '')
+                if (running !== null && running.type === operation.type && pending.length > 0) {
+                  return { continued: operation.type, stoppedAtNextConflict: true, conflicts: pending.length, paths: pending }
+                }
+              }
+              throw error
             }
             return { continued: operation.type }
           },

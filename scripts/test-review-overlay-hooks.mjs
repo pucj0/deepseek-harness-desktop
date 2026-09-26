@@ -405,6 +405,10 @@ const ctx = {
 }
 loaded.apply(ctx)
 
+// 本文件里对差异的断言针对**统一差异**的四列契约与折行样式，而默认模式是并排（IDEA 的习惯）。
+// 把偏好固定成 unified：并排有自己的测试（`scripts/test-review-diff-sbs.mjs`）。
+loaded.__diffModelForTest.modeStore.set(loaded.__diffModelForTest.modes.unified)
+
 const HERO_KEY = 'shell.overlay:review-project-changes'
 const Hero = entries.get(HERO_KEY)
 const injected = injectedFaces.get(HERO_KEY)

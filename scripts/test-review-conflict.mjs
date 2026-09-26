@@ -177,6 +177,14 @@ let conflictPayload = {
   operationType: 'merge',
 }
 let writeError = null
+/** 下一次 `/conflict` 返回什么（多轮 rebase 的用例会换成"另一批冲突"）。 */
+let conflictPayloadOverride = null
+/** 让 `op/continue` 挂住，用来断言"正在继续…"这一瞬间的界面状态。 */
+let gitbarGate = null
+/** `op/continue` 的自定义回复（多轮变基：宿主说"已经前进到下一次冲突"）。 */
+let gitbarPayloadOverride = null
+/** `op/continue` 之后本文件那份 `/conflict` 载荷（"冲突跑到别的文件去了"时用）。 */
+let afterContinuePayload = null
 
 const respond = (payload, ok = true) => ({ ok, text: async () => JSON.stringify(payload) })
 
@@ -186,24 +194,36 @@ globalThis.fetch = async (url, init) => {
   requests.push({ url: target, body })
   if (target.includes('/dsh-desktop/gitbar/')) {
     writes.push({ route: 'gitbar', url: target, body })
+    if (gitbarGate !== null) await gitbarGate
     if (writeError !== null) return respond(writeError.payload, false)
-    return respond({ isRepo: true, branch: 'main' })
+    // 多轮变基：`--continue` 之后冲突可能已经跑到**别的文件**上，本文件重新读出来是干净的。
+    if (target.includes('/op/continue') && afterContinuePayload !== null) conflictPayloadOverride = afterContinuePayload
+    return respond(gitbarPayloadOverride ?? { isRepo: true, branch: 'main' })
   }
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
-  if (route === 'conflict') return respond(conflictPayload)
+  if (route === 'conflict') {
+    const payload = conflictPayloadOverride ?? conflictPayload
+    // 多轮变基：读完一次就换下一批（模拟"继续之后下一个提交又冲突"）。
+    if (conflictPayloadOverride !== null && conflictPayloadOverride === conflictPayload) conflictPayloadOverride = null
+    return respond(payload)
+  }
   if (route === 'conflict-resolve') {
     writes.push({ route, body })
     if (writeError !== null) return respond(writeError.payload, false)
     const markResolved = body?.markResolved === true
+    // 预览（只算不写）：回一份**能一眼认出来**的内容，断言 Result 面板拿到的是**宿主算的**
+    // 那一份，而不是界面自己拼的。
+    const preview = body?.preview === true
     return respond({
       isRepo: true,
       path: conflictPayload.path,
-      content: conflictPayload.worktree,
+      content: preview ? `preview:${JSON.stringify(body?.resolutions ?? {})}` : conflictPayload.worktree,
       blocks: markResolved ? [] : conflictPayload.blocks,
       blockCount: markResolved ? 0 : 1,
       unresolved: 0,
       hasMarkers: !markResolved,
       markedResolved: markResolved,
+      preview,
     })
   }
   writes.push({ route, body })
@@ -522,6 +542,210 @@ await check('残留标记被后端拒绝时，界面显示专门的提示而不�
 })
 writeError = null
 store.__resetForTest?.()
+
+// =====================================================================================
+console.log('')
+console.log('=== 7. merge editor：逐块导航 / 立即更新 Result / 不落盘 ===')
+// =====================================================================================
+const twoBlockPayload = {
+  ...conflictPayload,
+  worktree: '<<<<<<< HEAD\nA current\n=======\nA incoming\n>>>>>>> feature/x\nmid\n<<<<<<< HEAD\nB current\n=======\nB incoming\n>>>>>>> feature/x\n',
+  blocks: [
+    { index: 0, startLine: 1, endLine: 5, ours: 'A current', theirs: 'A incoming', oursLabel: 'HEAD', theirsLabel: 'feature/x' },
+    { index: 1, startLine: 7, endLine: 11, ours: 'B current', theirs: 'B incoming', oursLabel: 'HEAD', theirsLabel: 'feature/x' },
+  ],
+  blockCount: 2,
+}
+/**
+ * 打开冲突面板：挂载 Changes → 点冲突行 →（这一次 /conflict 才返回我们要的夹具）。
+ *
+ * 必须**新挂一次**：冲突面板的块来自挂载时那次 `/conflict`，而面板按路径缓存实例，
+ * 换夹具而不换实例是看不到新块的（这也是"多轮冲突要重新读"的另一面）。
+ */
+const openResolver = async (snapshot) => {
+  const mounted = await mount(snapshot)
+  click(find(mounted, 'data-staging-conflict-row', 'src/app.ts'))
+  return await rerender(snapshot)
+}
+
+conflictPayloadOverride = twoBlockPayload
+nodes = await openResolver(snapshotWith([conflictedEntry]))
+await check('7a) 两个冲突块时显示"冲突 1 / 2"，并给出导航按钮', () => {
+  assert.equal(find(nodes, 'data-conflict-counter')?.props['data-conflict-counter'], '1/2')
+  assert.ok(find(nodes, 'data-conflict-prev') !== undefined)
+  assert.ok(find(nodes, 'data-conflict-next') !== undefined)
+  assert.equal(find(nodes, 'data-conflict-prev')?.props.disabled, true, '第一块时"上一个"应当禁用')
+  assert.equal(find(nodes, 'data-conflict-resolved-count')?.props['data-conflict-resolved-count'], '0/2')
+})
+await check('7b) 默认定位到第一块（aria-current + 当前块标记）', () => {
+  const panes = find(nodes, 'data-conflict-block', '0')
+  assert.ok(panes !== undefined, '没有当前块容器')
+  assert.equal(panes.props['aria-current'], 'true')
+})
+click(find(nodes, 'data-conflict-next'))
+nodes = await rerender(snapshotWith([conflictedEntry]))
+await check('7c) 「下一个冲突」切到第二块', () => {
+  assert.equal(find(nodes, 'data-conflict-counter')?.props['data-conflict-counter'], '2/2')
+  assert.equal(find(nodes, 'data-conflict-next')?.props.disabled, true)
+  assert.equal(find(nodes, 'data-conflict-block', '1')?.props['aria-current'], 'true')
+})
+click(find(nodes, 'data-conflict-prev'))
+nodes = await rerender(snapshotWith([conflictedEntry]))
+
+writes.length = 0
+click(find(nodes, 'data-conflict-take', 'theirs'))
+nodes = await rerender(snapshotWith([conflictedEntry]))
+await check('7d) 点「用对方」立刻把决定发给宿主**只算不写**（preview）', () => {
+  const write = writes.find((entry) => entry.route === 'conflict-resolve')
+  assert.ok(write !== undefined, '没有发出 conflict-resolve')
+  assert.equal(write.body.preview, true, '必须是只算不写')
+  assert.deepEqual(write.body.resolutions, { 0: 'theirs' })
+  assert.equal(write.body.order, 'ours-first', '"两者都要"的顺序必须显式给定')
+})
+await check('7e) Result 面板立即换成宿主算出来的那份文本', () => {
+  const textarea = find(nodes, 'data-conflict-result')
+  assert.equal(textarea?.props.value, `preview:${JSON.stringify({ 0: 'theirs' })}`)
+})
+await check('7f) 决定过的块显示"已解决"，计数同步', () => {
+  assert.equal(find(nodes, 'data-conflict-block-resolved', '0') !== undefined, true)
+  assert.equal(find(nodes, 'data-conflict-resolved-count')?.props['data-conflict-resolved-count'], '1/2')
+})
+await check('7g) 「应用选择」才是真正写回（带 resolutions，不带 preview）', () => {
+  writes.length = 0
+  click(find(nodes, 'data-conflict-apply'))
+  const write = writes.find((entry) => entry.route === 'conflict-resolve')
+  assert.ok(write !== undefined)
+  assert.equal(write.body.preview, undefined)
+  assert.deepEqual(write.body.resolutions, { 0: 'theirs' })
+})
+conflictPayloadOverride = null
+
+console.log('')
+console.log('=== 8. merge editor：布局 / 文件导航 ===')
+const resolver = loaded.__conflictResolverForTest
+/** 直接挂载冲突面板（不走 Changes），用来断言布局与文件导航这类纯界面契约。 */
+const mountResolver = async (props) => await settle(resolver, props, `r${mountSeq++}`)
+const baseResolverProps = {
+  t: (key, params) => (params === undefined ? key : `${key}(${Object.values(params).join(',')})`),
+  workspace: WORKSPACE,
+  repositoryRoot: WORKSPACE,
+  path: 'src/app.ts',
+  code: 'UU',
+  operationType: 'rebase',
+  conflictCount: 2,
+  busy: false,
+  run: async () => ({}),
+  onCommitted: () => {},
+  onOperationProgress: () => {},
+}
+const triNodes = await mountResolver({ ...baseResolverProps, triPane: true, conflictPaths: ['src/app.ts', 'src/other.ts'] })
+await check('8a) 宽屏是三栏：CURRENT | RESULT | INCOMING', () => {
+  assert.equal(find(triNodes, 'data-conflict-panes')?.props['data-conflict-panes'], 'tri')
+  const panes = findAll(triNodes, 'data-conflict-pane').map((node) => node.props['data-conflict-pane'])
+  // 两侧各出现一次（CURRENT 在前、INCOMING 在后），Result 在中间。
+  assert.deepEqual(panes, ['current', 'result', 'incoming'])
+  assert.equal(find(triNodes, 'data-conflict-tri-pane')?.props['data-conflict-tri-pane'], '1')
+})
+const stackedNodes = await mountResolver({ ...baseResolverProps, conflictCount: 1, triPane: false, conflictPaths: [] })
+await check('8b) 窄屏退化成"两侧在上、Result 在下"', () => {
+  assert.equal(find(stackedNodes, 'data-conflict-panes')?.props['data-conflict-panes'], 'stacked')
+  const panes = findAll(stackedNodes, 'data-conflict-pane').map((node) => node.props['data-conflict-pane'])
+  assert.deepEqual(panes, ['current', 'incoming', 'result'])
+  assert.equal(find(stackedNodes, 'data-conflict-tri-pane')?.props['data-conflict-tri-pane'], '0')
+})
+await check('8c) 多个冲突文件时给出"文件 1 / 2"与上一个/下一个文件', () => {
+  assert.equal(find(triNodes, 'data-conflict-file-nav')?.props['data-conflict-file-nav'], '2')
+  assert.equal(find(triNodes, 'data-conflict-file-position')?.props['data-conflict-file-position'], '1')
+  assert.equal(find(triNodes, 'data-conflict-file-prev')?.props.disabled, true, '第一个文件时不能往前')
+  assert.equal(find(triNodes, 'data-conflict-file-next')?.props.disabled, false)
+})
+await check('8d) 点「下一个冲突文件」把目标路径交给父级', async () => {
+  const picked = []
+  const navNodes = await mountResolver({ ...baseResolverProps, triPane: true, conflictPaths: ['src/app.ts', 'src/other.ts'], onSelectPath: (next) => picked.push(next) })
+  click(find(navNodes, 'data-conflict-file-next'))
+  assert.deepEqual(picked, ['src/other.ts'])
+})
+await check('8e) 新文案全部走字典（不是硬编码英文）', () => {
+  const texts = JSON.stringify(triNodes.map((node) => node.props.children))
+  for (const key of ['conflictPrev', 'conflictNext', 'conflictPrevFile', 'conflictNextFile', 'conflictOfBlocks', 'conflictResolvedCount', 'conflictResult']) {
+    assert.match(texts, new RegExp(key, 'u'), `界面里没有用到 ${key}`)
+  }
+})
+
+console.log('')
+console.log('=== 9. 多轮 rebase：继续之后又冲突，面板自动进入下一批 ===')
+{
+  conflictPayloadOverride = twoBlockPayload
+  const multiNodes = await openResolver(snapshotWith([conflictedEntry]))
+  click(find(multiNodes, 'data-conflict-continue'))
+  const after = await rerender(snapshotWith([conflictedEntry]))
+  await check('9a) 继续之后如果还有冲突块，界面说"还有 N 块"而不是"操作已完成"', () => {
+    const notice = find(after, 'data-conflict-notice')
+    assert.ok(notice !== undefined, '没有提示')
+    assert.match(String(notice.props.children), /conflictNextRound/u)
+    assert.equal(find(after, 'data-conflict-counter')?.props['data-conflict-counter'], '1/2')
+  })
+  await check('9b) 操作类型仍然是 rebase（没有把"这一轮解决完"当成操作结束）', () => {
+    assert.equal(find(after, 'data-conflict-resolver') !== undefined, true)
+    assert.equal(find(after, 'data-conflict-continue') !== undefined, true)
+  })
+  conflictPayloadOverride = null
+}
+
+console.log('')
+console.log('=== 9c. 下一轮冲突落在**别的文件**上：宿主回报"前进到下一次冲突" ===')
+{
+  // 变基是一次一个提交地往前的：解决完这个文件，下一个提交的冲突完全可能在**另一个**
+  // 文件上。这时本文件重新读出来是干净的（blockCount 0），只看本文件会以为"这一轮做完
+  // 了"；宿主明确回报 `stoppedAtNextConflict`，界面必须把"还有冲突要解决"说出来。
+  const cleanPayload = { ...conflictPayload, worktree: 'A current\nmid\nB current\n', blocks: [], blockCount: 0, hasMarkers: false }
+  conflictPayloadOverride = twoBlockPayload
+  afterContinuePayload = cleanPayload
+  gitbarPayloadOverride = { continued: 'rebase', stoppedAtNextConflict: true, conflicts: 1, paths: ['src/other.ts'] }
+  const otherNodes = await openResolver(snapshotWith([conflictedEntry]))
+  click(find(otherNodes, 'data-conflict-continue'))
+  const afterOther = await rerender(snapshotWith([conflictedEntry]))
+  await check('9c) 自己的文件干净了，但别的文件又冲突：照样提示"还有 N 块"', () => {
+    const notice = find(afterOther, 'data-conflict-notice')
+    assert.ok(notice !== undefined, '没有提示：界面会以为这一轮已经做完')
+    assert.match(String(notice.props.children), /^conflictNextRound\(1\)$/u, '条数要来自宿主的 stoppedAtNextConflict（1 个文件）')
+    assert.equal(find(afterOther, 'data-conflict-state', 'clean') !== undefined, true, '本文件确实已经不冲突了')
+  })
+  await check('9d) 提示不会让用户以为操作已经结束（不显示"操作已完成"）', () => {
+    assert.equal(find(afterOther, 'data-conflict-resolver') !== undefined, true)
+  })
+  afterContinuePayload = null
+  gitbarPayloadOverride = null
+  conflictPayloadOverride = null
+}
+
+console.log('')
+console.log('=== 10. 「继续」进行中：按钮文案与防重复点击 ===')
+{
+  let release = () => {}
+  gitbarGate = new Promise((done) => {
+    release = () => {
+      gitbarGate = null
+      done()
+    }
+  })
+  const busyNodes = await openResolver(snapshotWith([conflictedEntry]))
+  writes.length = 0
+  click(find(busyNodes, 'data-conflict-continue'))
+  const during = await rerender(snapshotWith([conflictedEntry]))
+  await check('10a) 继续期间按钮显示"正在继续…"并禁用（不会重复点击）', () => {
+    const button = find(during, 'data-conflict-continue')
+    assert.equal(button?.props['data-conflict-continuing'], '1')
+    assert.equal(button?.props.disabled, true)
+    assert.match(JSON.stringify(button?.props.children), /conflictContinuing/u)
+    assert.equal(writes.filter((entry) => entry.route === 'gitbar').length, 1, '只发了一次 continue')
+  })
+  release()
+  const done = await rerender(snapshotWith([conflictedEntry]))
+  await check('10b) 结束后按钮恢复可用', () => {
+    assert.equal(find(done, 'data-conflict-continue')?.props['data-conflict-continuing'], '0')
+  })
+}
 
 console.log('')
 console.log(`${passed} 项通过${failed === 0 ? '' : `，${failed} 项失败`}`)

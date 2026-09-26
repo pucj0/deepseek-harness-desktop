@@ -2288,12 +2288,22 @@ function createReviewHandler(ctx) {
           return
         }
         const current = source ?? onDisk ?? ''
+        /**
+         * 只算不写（`preview: true`）。
+         *
+         * 冲突解决面板里点「用当前 / 用对方 / 两者都要」只应该**立刻更新 Result 面板**，
+         * 而不是顺手把工作区文件改掉——真正写回文件是「应用选择 / 保存结果 / 标记为已解决」
+         * 那几步的事。因此这里复用同一套重组实现（不新增第二份"预览用"的合并逻辑），
+         * 只是跳过落盘与 `git add`。
+         */
+        const preview = payload.preview === true
         const composed =
           source === undefined
             ? composeConflictText(current, payload.resolutions, payload.order)
             : { content: source, blocks: scanConflictSegments(source).blocks, unresolved: 0 }
         // 只有真的要改文件时才写：既没有 content 也没有 resolutions 的请求是纯读取。
-        if (source !== undefined || hasResolutions) {
+        const shouldWrite = (source !== undefined || hasResolutions) && !preview
+        if (shouldWrite) {
           try {
             writeFileSync(absolute, composed.content, 'utf8')
           } catch (error) {
@@ -2306,8 +2316,14 @@ function createReviewHandler(ctx) {
           }
         }
         // 校验以**磁盘上的内容**为准：markResolved 要挡住的正是"写进去的文件里还留着标记"。
-        const verify = scanConflictSegments(readWorktreeText(absolute) ?? composed.content)
-        if (payload.markResolved === true) {
+        // 预览没有写盘，因此校验针对刚算出来的那份内容（它就是要给用户看的东西）。
+        const verify = preview
+          ? scanConflictSegments(composed.content)
+          : scanConflictSegments(readWorktreeText(absolute) ?? composed.content)
+        // 预览是**只读**的：即使请求里带上了 markResolved，也不能给一个自己没写过的文件
+        // 做 `git add`。这条保证由宿主自己守（而不是指望客户端每次都记得别带这个字段）。
+        const markResolved = payload.markResolved === true && !preview
+        if (markResolved) {
           if (verify.hasMarkers && payload.allowMarkers !== true) {
             sendJson(response, 409, {
               error: 'conflict markers remain',
@@ -2337,7 +2353,9 @@ function createReviewHandler(ctx) {
           blockCount: verify.blocks.length,
           unresolved: composed.unresolved ?? 0,
           hasMarkers: verify.hasMarkers,
-          markedResolved: payload.markResolved === true,
+          markedResolved: markResolved,
+          /** 只算不写：界面据此知道工作区文件没被改动。 */
+          preview,
         })
         return
       }

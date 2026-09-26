@@ -875,6 +875,22 @@ window.__ModuleLoader__.load({
       conflictAbortCherryPick: '中止摘取',
       conflictAbortRevert: '中止还原',
       conflictContinueBlocked: '还有冲突文件没解决',
+      // ---- 合并编辑器：冲突导航 / 块状态 / 继续与完成的按类型文案 ----
+      conflictOfBlocks: '冲突 {current} / {total}',
+      conflictResolvedCount: '已解决 {resolved} / {total}',
+      conflictResolvedBadge: '已解决',
+      conflictPrev: '上一个冲突',
+      conflictNext: '下一个冲突',
+      conflictPrevFile: '上一个冲突文件',
+      conflictNextFile: '下一个冲突文件',
+      conflictContinuing: '正在继续…',
+      conflictNextRound: '还有 {count} 个冲突块要解决',
+      conflictCompletedMerge: '合并已完成',
+      conflictCompletedRebase: '变基已完成',
+      conflictCompletedCherryPick: '摘取已完成',
+      conflictCompletedRevert: '还原已完成',
+      conflictAcceptBothOrder: '顺序：当前 → 对方',
+      conflictAllResolved: '冲突已全部解决，可以继续',
       error_markersRemain: '文件里还有冲突标记，先解决它们（或用「保存结果」写下最终内容）再标记为已解决。',
       error_writeFailed: '无法写入工作区文件。',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
@@ -914,6 +930,17 @@ window.__ModuleLoader__.load({
       diffWrapOn: '自动换行：开（点一下改为不换行）',
       diffWrapOff: '自动换行：关（点一下改为自动换行）',
       diffClose: '关闭差异视图',
+      // ---- 差异视图模式 / 改动导航 ----
+      diffViewMode: '差异视图模式',
+      diffModeUnified: '统一',
+      diffModeSideBySide: '并排',
+      diffBefore: '修改前',
+      diffAfter: '修改后',
+      diffPrevChange: '上一个改动',
+      diffNextChange: '下一个改动',
+      diffChangeCount: '{current} / {total} 个改动',
+      diffBinaryChanged: '二进制文件已更改',
+      diffRenamedNoChanges: '文件已重命名，内容未修改',
       // ---- Changes 的双栏 ----
       changesFilesTitle: '文件',
       changesDiffTitle: '改动详情',
@@ -1127,6 +1154,22 @@ window.__ModuleLoader__.load({
       conflictAbortCherryPick: 'Abort cherry-pick',
       conflictAbortRevert: 'Abort revert',
       conflictContinueBlocked: 'Conflicted files are still unresolved',
+      // ---- Merge editor: conflict navigation, block state, continue/completed wording ----
+      conflictOfBlocks: 'Conflict {current} of {total}',
+      conflictResolvedCount: '{resolved} / {total} resolved',
+      conflictResolvedBadge: 'Resolved',
+      conflictPrev: 'Previous conflict',
+      conflictNext: 'Next conflict',
+      conflictPrevFile: 'Previous conflicted file',
+      conflictNextFile: 'Next conflicted file',
+      conflictContinuing: 'Continuing…',
+      conflictNextRound: '{count} more conflict block(s) to resolve',
+      conflictCompletedMerge: 'Merge completed',
+      conflictCompletedRebase: 'Rebase completed',
+      conflictCompletedCherryPick: 'Cherry-pick completed',
+      conflictCompletedRevert: 'Revert completed',
+      conflictAcceptBothOrder: 'Order: current, then incoming',
+      conflictAllResolved: 'All conflicts resolved — you can continue',
       error_markersRemain: 'The file still contains conflict markers. Resolve them (or save the final content) before marking it resolved.',
       error_writeFailed: 'Could not write the working tree file.',
       binaryDiff: 'This file is binary; no line diff is shown.',
@@ -1166,6 +1209,17 @@ window.__ModuleLoader__.load({
       diffWrapOn: 'Wrapping long lines: on (click to turn off)',
       diffWrapOff: 'Wrapping long lines: off (click to turn on)',
       diffClose: 'Close the diff viewer',
+      // ---- Diff view mode / change navigation ----
+      diffViewMode: 'Diff view mode',
+      diffModeUnified: 'Unified',
+      diffModeSideBySide: 'Side-by-Side',
+      diffBefore: 'Before',
+      diffAfter: 'After',
+      diffPrevChange: 'Previous change',
+      diffNextChange: 'Next change',
+      diffChangeCount: '{current} / {total} changes',
+      diffBinaryChanged: 'Binary file changed',
+      diffRenamedNoChanges: 'File renamed without content changes',
       // ---- Changes, two panes ----
       changesFilesTitle: 'Files',
       changesDiffTitle: 'Diff',
@@ -1405,6 +1459,61 @@ window.__ModuleLoader__.load({
      */
     function useDiffWrap() {
       return react.useSyncExternalStore(diffWrapStore.subscribe, diffWrapStore.get, () => true)
+    }
+
+    /** 「差异视图模式」偏好的持久化键。 */
+    const DIFF_MODE_KEY = 'dsh.review.diffMode'
+    /** 统一差异（一格一行的老视图）。 */
+    const DIFF_MODE_UNIFIED = 'unified'
+    /** 并排差异（左 Before / 右 After）。 */
+    const DIFF_MODE_SIDE_BY_SIDE = 'side-by-side'
+
+    /**
+     * 「差异视图模式」偏好：`unified` 还是 `side-by-side`。
+     *
+     * 与自动换行一样放在模块级 + localStorage：Changes 与 Log 是两处独立的视图，而这是
+     * **用户对"怎么看差异"的偏好**，两边必须一致（在一处切了并排，另一处也该是并排）。
+     *
+     * 默认 **side-by-side**：IDEA 的差异视图默认就是左右并排，而"旧行 / 新行 / 标记 / 正文"
+     * 四列的统一样式在改动一多时要靠脑内对齐才能看出"这处改动前后各是什么"。统一模式没有被
+     * 删掉——切回去随时可用（见工具条上的 Unified | Side-by-Side）。
+     *
+     * 只写 localStorage：**不进 Harness locale，也不进工作区配置**——它是外壳自己的视图偏好，
+     * 与项目、语言都无关。
+     */
+    const diffModeStore = (() => {
+      const listeners = new Set()
+      let mode = DIFF_MODE_SIDE_BY_SIDE
+      try {
+        const stored = window.localStorage.getItem(DIFF_MODE_KEY)
+        if (stored === DIFF_MODE_UNIFIED || stored === DIFF_MODE_SIDE_BY_SIDE) mode = stored
+      } catch {
+        // 读不到就用默认值（隐私模式等）。
+      }
+      return {
+        get: () => mode,
+        set: (value) => {
+          mode = value === DIFF_MODE_UNIFIED ? DIFF_MODE_UNIFIED : DIFF_MODE_SIDE_BY_SIDE
+          try {
+            window.localStorage.setItem(DIFF_MODE_KEY, mode)
+          } catch {
+            // 存不了也不影响本次会话内的行为。
+          }
+          for (const listener of listeners) listener()
+        },
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    })()
+
+    /**
+     * 订阅「差异视图模式」偏好。
+     * @returns 当前模式（`unified` | `side-by-side`）。
+     */
+    function useDiffMode() {
+      return react.useSyncExternalStore(diffModeStore.subscribe, diffModeStore.get, () => DIFF_MODE_SIDE_BY_SIDE)
     }
 
     /**
@@ -2942,6 +3051,9 @@ window.__ModuleLoader__.load({
             delMark: '#f0a0a0',
             hunk: '#8fb8ff',
             hunkBg: 'rgba(120,160,255,.10)',
+            // 当前导航到的 hunk：只比普通 hunk 头**稍微**明显一点（配合左侧一条 2px 强调线），
+            // 用来回答"上一个/下一个改动跳到哪儿了"，不做成高饱和的整块高亮。
+            hunkActiveBg: 'rgba(120,160,255,.20)',
             meta: 'var(--dsw-alias-label-tertiary)',
             metaBg: 'rgba(255,255,255,.03)',
             gutter: 'rgba(255,255,255,.04)',
@@ -2959,6 +3071,7 @@ window.__ModuleLoader__.load({
             delMark: '#c0392b',
             hunk: '#2f5aa8',
             hunkBg: 'rgba(47,90,168,.07)',
+            hunkActiveBg: 'rgba(47,90,168,.14)',
             meta: 'var(--dsw-alias-label-tertiary)',
             metaBg: 'rgba(0,0,0,.025)',
             gutter: 'rgba(0,0,0,.04)',
@@ -3107,9 +3220,199 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 渲染差异：行号栏 + 增删标记 + 代码正文。
+     * 把解析出来的行按 hunk 分组。
      *
-     * 固定的**四列**结构（这一版改成 CSS grid，契约也随之明确到"列"上）：
+     * 引入这一层是为了**只有一套解析**：统一视图与并排视图读的是同一份
+     * `parseDiffRows()` 输出，这里只是把它切成"文件头 / 元信息 / 一个 hunk（头 + 正文）"，
+     * 两个视图各自渲染同一个模型。绝不为并排再写一个 parser——那正是两份实现开始漂移的起点
+     * （第一版修过的 `File changed` 硬编码，就是"解析器各写各的"留下的）。
+     *
+     * @param rows - `parseDiffRows()` 的输出。
+     * @returns 段落数组：单行段落 `{ kind, row }`，或 hunk 段落 `{ kind: 'hunk', header, rows, index }`。
+     */
+    function groupDiffRows(rows) {
+      const segments = []
+      let open = null
+      /** 第几个 hunk（从 0 起）——「上一个/下一个改动」按它导航。 */
+      let index = 0
+      const close = () => {
+        if (open === null) return
+        segments.push(open)
+        open = null
+      }
+      for (const row of rows) {
+        if (row.kind === 'hunk') {
+          close()
+          open = { kind: 'hunk', header: row, rows: [], index }
+          index += 1
+          continue
+        }
+        if (open !== null && (row.kind === 'context' || row.kind === 'add' || row.kind === 'del')) {
+          open.rows.push(row)
+          continue
+        }
+        close()
+        segments.push({ kind: row.kind, row })
+      }
+      close()
+      return segments
+    }
+
+    /**
+     * 两个字符串的"变化区间"（公共前缀/后缀之外的中间部分）。
+     *
+     * 这是**字符级高亮**的全部实现：不引入 diff 库，只把两侧相同的前缀与后缀吃掉，剩下的
+     * 中间段就是要强调的部分。`const timeout = 1000` → `const timeout = 3000` 因此只高亮
+     * `1000`/`3000`，而不是整行。
+     *
+     * 只在"值得高亮"时返回：两侧完全相同、或一侧为空（纯新增/删除行由整行底色表达）时返回
+     * undefined，避免给整行刷一遍高亮反而更吵。
+     *
+     * @param left - 左侧文本。
+     * @param right - 右侧文本。
+     * @returns `{ left: [start, end], right: [start, end] }`，或 undefined。
+     */
+    function charDiffRange(left, right) {
+      if (typeof left !== 'string' || typeof right !== 'string') return undefined
+      if (left === '' || right === '') return undefined
+      if (left === right) return undefined
+      let start = 0
+      const max = Math.min(left.length, right.length)
+      while (start < max && left[start] === right[start]) start += 1
+      let endLeft = left.length
+      let endRight = right.length
+      while (endLeft > start && endRight > start && left[endLeft - 1] === right[endRight - 1]) {
+        endLeft -= 1
+        endRight -= 1
+      }
+      if (start === endLeft && start === endRight) return undefined
+      /**
+       * 两侧都有变化字符时，把区间扩到完整的"词"上。
+       *
+       * 理由：`const timeout = 1000` → `3000` 的公共后缀是 `000`，只圈出 `1` / `3` 会让用户
+       * 以为"只改了一位数字"，而人读代码的粒度是词。**只在两侧都真的有变化字符时扩**：
+       * 纯插入/删除（一侧区间为空）保持精确位置，否则 `abc` → `abcd` 会把整个词刷上高亮。
+       */
+      const word = /[A-Za-z0-9_$]/u
+      const expand = (text, from, to) => {
+        let startAt = from
+        let endAt = to
+        while (startAt > 0 && word.test(text[startAt - 1])) startAt -= 1
+        while (endAt < text.length && word.test(text[endAt])) endAt += 1
+        return [startAt, endAt]
+      }
+      if (start < endLeft && start < endRight) {
+        return {
+          left: expand(left, start, endLeft),
+          right: expand(right, start, endRight),
+        }
+      }
+      return { left: [start, endLeft], right: [start, endRight] }
+    }
+
+    /**
+     * 把一个 hunk 的正文对齐成左右成对的行。
+     *
+     * **不是"左边所有旧行、右边所有新行"**——那只是两个独立的列表假装并排。这里按 hunk 的
+     * 增删序列配对：
+     *   * 连续 N 行删除 + 连续 M 行新增 → 前 min(N,M) 对配成 `modified`（同一处改动的前后），
+     *     多出来的删除是 `deleted`（右侧留空），多出来的新增是 `added`（左侧留空）；
+     *   * 上下文行两侧都有，行号各自推进；
+     *   * 于是"改了一行"表现为同一行左右对照，而不是错位一行。
+     *
+     * @param rows - 一个 hunk 的正文行（context/add/del）。
+     * @returns `{ kind, left, right, charDiff }` 数组；`left`/`right` 为行对象或 null（空位）。
+     */
+    function alignHunkRows(rows) {
+      const aligned = []
+      let deleted = []
+      let added = []
+      const flush = () => {
+        const pairs = Math.min(deleted.length, added.length)
+        for (let index = 0; index < pairs; index += 1) {
+          const left = deleted[index]
+          const right = added[index]
+          aligned.push({
+            kind: 'modified',
+            left,
+            right,
+            charDiff: charDiffRange(left?.text ?? '', right?.text ?? ''),
+          })
+        }
+        for (let index = pairs; index < deleted.length; index += 1) {
+          aligned.push({ kind: 'deleted', left: deleted[index], right: null, charDiff: undefined })
+        }
+        for (let index = pairs; index < added.length; index += 1) {
+          aligned.push({ kind: 'added', left: null, right: added[index], charDiff: undefined })
+        }
+        deleted = []
+        added = []
+      }
+      for (const row of rows) {
+        if (row.kind === 'del') {
+          // 删除行先攒着：它们要和**紧跟着的**新增行配对（git 的 hunk 正是这个顺序）。
+          if (added.length > 0) flush()
+          deleted.push(row)
+          continue
+        }
+        if (row.kind === 'add') {
+          added.push(row)
+          continue
+        }
+        flush()
+        aligned.push({ kind: 'context', left: row, right: row, charDiff: undefined })
+      }
+      flush()
+      return aligned
+    }
+
+    /**
+     * 构建一个模式的差异模型（统一 / 并排共用）。
+     *
+     * @param rows - `parseDiffRows()` 的输出。
+     * @param mode - `unified` 或 `side-by-side`。
+     * @returns `{ segments, hunkCount, mode }`；并排模式下 hunk 段落多一个 `aligned` 数组。
+     */
+    function buildDiffModel(rows, mode) {
+      const segments = groupDiffRows(rows)
+      const sideBySide = mode === DIFF_MODE_SIDE_BY_SIDE
+      let hunkCount = 0
+      for (const segment of segments) {
+        if (segment.kind !== 'hunk') continue
+        hunkCount += 1
+        if (sideBySide) segment.aligned = alignHunkRows(segment.rows)
+      }
+      return { segments, hunkCount, mode: sideBySide ? DIFF_MODE_SIDE_BY_SIDE : DIFF_MODE_UNIFIED }
+    }
+
+    /**
+     * 差异渲染的共用上下文：调色板、统一视图的列宽、折行样式。
+     *
+     * 三种"折行"相关的样式都集中在这里，且**只在 wrap 时生效**：
+     *   * `whiteSpace: 'pre-wrap'` —— 保留空格 / 缩进 / tab / 换行，同时允许在空白处折行
+     *     （绝不能用 `normal`，那会把代码缩进全部吃掉）；
+     *   * `overflowWrap: 'anywhere'` + `wordBreak: 'break-word'` —— 超长单词 / URL / minified JS
+     *     没有空白可折，只靠 `pre-wrap` 仍然会撑破容器；
+     *   * `tabSize: 4` —— tab 按 4 展开，Go / 老代码的缩进才对得上。
+     *
+     * @param wrap - 是否自动换行。
+     * @returns `{ palette, columns, codeWrapStyle }`。
+     */
+    function diffRenderContext(wrap) {
+      return {
+        palette: diffPalette(isDarkTheme()),
+        columns: `${reviewMetrics.lineColWidth} ${reviewMetrics.lineColWidth} ${reviewMetrics.signColWidth} minmax(0, 1fr)`,
+        codeWrapStyle:
+          wrap === true
+            ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }
+            : { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize },
+      }
+    }
+
+    /**
+     * 统一差异视图里的一行：行号栏 + 增删标记 + 代码正文。
+     *
+     * 固定的**四列**结构（CSS grid，契约也随之明确到"列"上）：
      *
      *   `old line | new line | sign | code`
      *
@@ -3119,146 +3422,380 @@ window.__ModuleLoader__.load({
      * grid 的解法是：行号 / 标记本身就是**独立的列**，代码列是第 4 列——续行只让第 4 列变高，
      * 前三列各占一格、`align-items: start` 停在顶部，整行背景由行盒子一次覆盖。
      *
-     * 三种"折行"相关的样式都集中在这里，且**只在 wrap 时生效**：
-     *   * `whiteSpace: 'pre-wrap'` —— 保留空格 / 缩进 / tab / 换行，同时允许在空白处折行
-     *     （绝不能用 `normal`，那会把代码缩进全部吃掉）；
-     *   * `overflowWrap: 'anywhere'` + `wordBreak: 'break-word'` —— 超长单词 / URL / minified JS
-     *     没有空白可折，只靠 `pre-wrap` 仍然会撑破容器；
-     *   * `tabSize: 4` —— tab 按 4 展开，Go / 老代码的缩进才对得上。
-     *
-     * @param diff - 单个文件的统一差异文本。
-     * @param wrap - 是否自动换行。
-     * @param headers - 折叠文件头的文案（界面路径传 `diffHeaderLabels(t)`）。
-     * @returns React 元素数组。
+     * @param row - `parseDiffRows()` 的一行。
+     * @param index - React key 来源。
+     * @param palette - 调色板（见 `diffRenderContext`）。
+     * @param columns - 列宽定义。
+     * @param codeWrapStyle - 折行样式。
+     * @param hunkIndex - 该行属于第几个 hunk（导航锚点用；非 hunk 行传 undefined）。
+     * @param activeHunk - 当前导航所在的 hunk 序号。
+     * @returns React 元素。
      */
-    function renderDiff(diff, wrap, headers) {
-      const palette = diffPalette(isDarkTheme())
-      const rows = parseDiffRows(diff, headers)
-      const columns = `${reviewMetrics.lineColWidth} ${reviewMetrics.lineColWidth} ${reviewMetrics.signColWidth} minmax(0, 1fr)`
-      const codeWrapStyle =
-        wrap === true
-          ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }
-          : { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize }
-      return rows.map((row, index) => {
-        // 折叠后的 git 文件头：单独一条，退到背景里（见 parseDiffRows 的说明）。
-        if (row.kind === 'fileheader') {
-          return react.createElement(
-            'div',
-            {
-              key: index,
-              'data-review-diff-row': '',
-              'data-review-diff-fileheader': '',
-              title: row.meta,
-              style: {
-                display: 'block',
-                padding: '4px 8px',
-                background: palette.metaBg,
-                color: palette.meta,
-                fontFamily: CODE_FONT,
-                fontSize: reviewFont.codeMeta,
-                lineHeight: reviewMetrics.codeLineHeight,
-                whiteSpace: 'pre-wrap',
-                overflowWrap: 'anywhere',
-              },
-            },
-            row.text,
-          )
-        }
-        const isAdd = row.kind === 'add'
-        const isDel = row.kind === 'del'
-        const isHunk = row.kind === 'hunk'
-        const isMeta = row.kind === 'meta'
-        const background = isAdd ? palette.addBg : isDel ? palette.delBg : isHunk ? palette.hunkBg : isMeta ? palette.metaBg : 'transparent'
-        // hunk 头与 meta 行整行用不同字号/颜色，**不要和普通代码行长得一样**。
-        const codeStyle = isHunk || isMeta
-          ? { color: isHunk ? palette.hunk : palette.meta, fontSize: reviewFont.codeMeta }
-          : { color: palette.text }
-        const marker = isAdd ? '+' : isDel ? '−' : ' '
-        // hunk / meta 行没有行号与标记：让代码列横跨其余三列，避免出现"空 gutter 把正文推右"。
-        const spans = isHunk || isMeta
-        const gutterBackground = isAdd ? palette.addGutter : isDel ? palette.delGutter : palette.gutter
-        const lineCell = (value, key, bordered) =>
-          react.createElement(
-            'span',
-            {
-              key,
-              'data-review-diff-gutter': '',
-              ...(key === 'old' ? { 'data-review-diff-line-old': '' } : { 'data-review-diff-line-new': '' }),
-              style: {
-                gridColumn: key === 'old' ? '1' : '2',
-                gridRow: '1',
-                padding: '0 5px',
-                background: gutterBackground,
-                color: palette.gutterFg,
-                textAlign: 'right',
-                userSelect: 'none',
-                fontVariantNumeric: 'tabular-nums',
-                fontSize: reviewFont.codeMeta,
-                ...(bordered === true ? { borderRight: `1px solid ${palette.gutterLine}` } : {}),
-              },
-            },
-            value === undefined ? '' : String(value),
-          )
+    function unifiedRowElement(row, index, palette, columns, codeWrapStyle, hunkIndex, activeHunk) {
+      // 折叠后的 git 文件头：单独一条，退到背景里（见 parseDiffRows 的说明）。
+      if (row.kind === 'fileheader') {
         return react.createElement(
           'div',
           {
             key: index,
             'data-review-diff-row': '',
-            'data-review-diff-kind': row.kind,
+            'data-review-diff-fileheader': '',
+            title: row.meta,
             style: {
-              display: 'grid',
-              gridTemplateColumns: columns,
-              // 续行只让代码列变高；行号与标记停在第一行（不会重复、不会垂直居中）。
-              alignItems: 'start',
-              background,
-              color: palette.text,
+              display: 'block',
+              padding: '4px 8px',
+              background: palette.metaBg,
+              color: palette.meta,
               fontFamily: CODE_FONT,
-              fontSize: reviewFont.code,
+              fontSize: reviewFont.codeMeta,
               lineHeight: reviewMetrics.codeLineHeight,
-              minHeight: reviewMetrics.rowMinHeight,
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
             },
           },
-          // ---- 行号两列 + 标记列 ----
-          //
-          // 删除行只显示旧行号，新增行只显示新行号，上下文行两侧都有；增删行的行号栏带一点
-          // 饱和底色，那是"哪几行变了"的主信号。三列都是**一格**，因此一条逻辑行换行成三个
-          // 视觉行时它们只出现一次。
-          spans ? null : lineCell(row.oldLine, 'old', false),
-          spans ? null : lineCell(row.newLine, 'new', true),
-          react.createElement(
-            'span',
-            {
-              'data-review-diff-sign': '',
-              style: {
-                gridColumn: spans ? '1 / -1' : '3',
-                gridRow: '1',
-                padding: spans ? '4px 8px' : 0,
-                textAlign: spans ? 'left' : 'center',
-                color: isAdd ? palette.addMark : isDel ? palette.delMark : 'transparent',
-                fontWeight: isAdd || isDel ? 600 : 400,
-              },
-            },
-            spans ? '' : marker,
-          ),
-          react.createElement(
-            'span',
-            {
-              // 正文：第 4 列。wrap 时折行（保留缩进 / tab），不 wrap 时 `pre` 并由外层横向滚动。
-              'data-review-diff-code': '',
-              style: {
-                gridColumn: spans ? '1 / -1' : '4',
-                gridRow: spans ? '2' : '1',
-                minWidth: 0,
-                paddingRight: '12px',
-                ...(spans ? { padding: '0 8px 4px' } : {}),
-                ...codeStyle,
-                ...codeWrapStyle,
-              },
-            },
-            row.text === '' ? ' ' : row.text,
-          ),
+          row.text,
         )
+      }
+      const isAdd = row.kind === 'add'
+      const isDel = row.kind === 'del'
+      const isHunk = row.kind === 'hunk'
+      const isMeta = row.kind === 'meta'
+      const background = isAdd ? palette.addBg : isDel ? palette.delBg : isHunk ? palette.hunkBg : isMeta ? palette.metaBg : 'transparent'
+      // hunk 头与 meta 行整行用不同字号/颜色，**不要和普通代码行长得一样**。
+      const codeStyle = isHunk || isMeta
+        ? { color: isHunk ? palette.hunk : palette.meta, fontSize: reviewFont.codeMeta }
+        : { color: palette.text }
+      const marker = isAdd ? '+' : isDel ? '−' : ' '
+      // hunk / meta 行没有行号与标记：让代码列横跨其余三列，避免出现"空 gutter 把正文推右"。
+      const spans = isHunk || isMeta
+      const gutterBackground = isAdd ? palette.addGutter : isDel ? palette.delGutter : palette.gutter
+      const lineCell = (value, key, bordered) =>
+        react.createElement(
+          'span',
+          {
+            key,
+            'data-review-diff-gutter': '',
+            ...(key === 'old' ? { 'data-review-diff-line-old': '' } : { 'data-review-diff-line-new': '' }),
+            style: {
+              gridColumn: key === 'old' ? '1' : '2',
+              gridRow: '1',
+              padding: '0 5px',
+              background: gutterBackground,
+              color: palette.gutterFg,
+              textAlign: 'right',
+              userSelect: 'none',
+              fontVariantNumeric: 'tabular-nums',
+              fontSize: reviewFont.codeMeta,
+              ...(bordered === true ? { borderRight: `1px solid ${palette.gutterLine}` } : {}),
+            },
+          },
+          value === undefined ? '' : String(value),
+        )
+      return react.createElement(
+        'div',
+        {
+          key: index,
+          'data-review-diff-row': '',
+          'data-review-diff-kind': row.kind,
+          // 导航锚点：hunk 头行带着它自己在模型里的序号，于是"上一个/下一个改动"可以直接
+          // 定位并轻微强调当前 hunk（`scrollIntoView` 由 ReviewDiffViewer 的 effect 做）。
+          ...(isHunk && hunkIndex !== undefined
+            ? { 'data-review-diff-hunk-body': String(hunkIndex), 'data-review-diff-hunk-active': activeHunk === hunkIndex ? '1' : '0' }
+            : {}),
+          style: {
+            display: 'grid',
+            gridTemplateColumns: columns,
+            // 续行只让代码列变高；行号与标记停在第一行（不会重复、不会垂直居中）。
+            alignItems: 'start',
+            background,
+            color: palette.text,
+            fontFamily: CODE_FONT,
+            fontSize: reviewFont.code,
+            lineHeight: reviewMetrics.codeLineHeight,
+            minHeight: reviewMetrics.rowMinHeight,
+          },
+        },
+        // ---- 行号两列 + 标记列 ----
+        //
+        // 删除行只显示旧行号，新增行只显示新行号，上下文行两侧都有；增删行的行号栏带一点
+        // 饱和底色，那是"哪几行变了"的主信号。三列都是**一格**，因此一条逻辑行换行成三个
+        // 视觉行时它们只出现一次。
+        spans ? null : lineCell(row.oldLine, 'old', false),
+        spans ? null : lineCell(row.newLine, 'new', true),
+        react.createElement(
+          'span',
+          {
+            'data-review-diff-sign': '',
+            style: {
+              gridColumn: spans ? '1 / -1' : '3',
+              gridRow: '1',
+              padding: spans ? '4px 8px' : 0,
+              textAlign: spans ? 'left' : 'center',
+              color: isAdd ? palette.addMark : isDel ? palette.delMark : 'transparent',
+              fontWeight: isAdd || isDel ? 600 : 400,
+            },
+          },
+          spans ? '' : marker,
+        ),
+        react.createElement(
+          'span',
+          {
+            // 正文：第 4 列。wrap 时折行（保留缩进 / tab），不 wrap 时 `pre` 并由外层横向滚动。
+            'data-review-diff-code': '',
+            style: {
+              gridColumn: spans ? '1 / -1' : '4',
+              gridRow: spans ? '2' : '1',
+              minWidth: 0,
+              paddingRight: '12px',
+              ...(spans ? { padding: '0 8px 4px' } : {}),
+              ...codeStyle,
+              ...codeWrapStyle,
+            },
+          },
+          row.text === '' ? ' ' : row.text,
+        ),
+      )
+    }
+
+    /**
+     * 并排视图里的一侧单元格（行号 + 代码）。
+     *
+     * 空位（`row === null`）渲染成一块**对齐占位**：它把"对面那一侧在这里没有对应行"这件事
+     * 画出来（新增行的左边、删除行的右边、以及配对之后多出来的那几行），而不是让两边的行
+     * 各自往上顶——那正是"两个独立列表假装并排"的错位来源。
+     *
+     * @param side - `left`（Before）或 `right`（After）。
+     * @param row - 这一侧的行对象，或 null（占位）。
+     * @param kind - 对齐后的行类型：`context` / `modified` / `added` / `deleted`。
+     * @param context - `diffRenderContext()` 的结果。
+     * @param charRange - 字符级高亮区间（只对 `modified` 且这一侧有内容时给）。
+     * @param key - React key。
+     * @returns React 元素。
+     */
+    function sideBySideCell(side, row, kind, context, charRange, key) {
+      const palette = context.palette
+      const isLeft = side === 'left'
+      // 底色只表达"这一侧变了"：Before 侧的被删/被改行偏红，After 侧的新增/被改行偏绿，
+      // 上下文行不着色。饱和度沿用统一视图那一套（很浅的混色），不放大红大绿。
+      const changed = isLeft ? kind === 'deleted' || kind === 'modified' : kind === 'added' || kind === 'modified'
+      const background = row === null ? palette.metaBg : changed ? (isLeft ? palette.delBg : palette.addBg) : 'transparent'
+      const gutterBackground = row === null ? palette.metaBg : changed ? (isLeft ? palette.delGutter : palette.addGutter) : palette.gutter
+      const line = row === null ? undefined : isLeft ? row.oldLine : row.newLine
+      const text = row === null ? '' : row.text
+      const highlight = charRange === undefined || row === null ? null : charRange
+      const codeChildren =
+        highlight === null
+          ? text === ''
+            ? ' '
+            : text
+          : [
+              text.slice(0, highlight[0]),
+              react.createElement(
+                'span',
+                {
+                  key: 'char',
+                  'data-review-sbs-char': '',
+                  style: {
+                    borderRadius: '2px',
+                    background: isLeft ? palette.delGutter : palette.addGutter,
+                    color: isLeft ? palette.delMark : palette.addMark,
+                  },
+                },
+                text.slice(highlight[0], highlight[1]),
+              ),
+              text.slice(highlight[1]),
+            ]
+      return react.createElement(
+        'div',
+        {
+          key,
+          'data-review-sbs-cell': '',
+          'data-review-sbs-side': side,
+          ...(row === null ? { 'data-review-sbs-empty': '' } : {}),
+          style: {
+            display: 'grid',
+            gridTemplateColumns: `${reviewMetrics.lineColWidth} minmax(0, 1fr)`,
+            alignItems: 'start',
+            minWidth: 0,
+            background,
+            ...(isLeft ? { borderRight: `1px solid ${palette.gutterLine}` } : {}),
+          },
+        },
+        react.createElement(
+          'span',
+          {
+            'data-review-sbs-line': line === undefined ? '' : String(line),
+            style: {
+              padding: '0 5px',
+              background: gutterBackground,
+              color: palette.gutterFg,
+              textAlign: 'right',
+              userSelect: 'none',
+              fontVariantNumeric: 'tabular-nums',
+              fontSize: reviewFont.codeMeta,
+              borderRight: `1px solid ${palette.gutterLine}`,
+            },
+          },
+          line === undefined ? '' : String(line),
+        ),
+        react.createElement(
+          'span',
+          {
+            'data-review-sbs-code': '',
+            style: {
+              minWidth: 0,
+              paddingLeft: '8px',
+              paddingRight: '10px',
+              color: palette.text,
+              // 并排时每一侧各自横向滚动：两侧本来就可能一个长一个短，强行同步横向位置
+              // 反而会把短的那一侧推到看不见的地方（纵向同步由"一行两格"天然保证）。
+              overflowX: context.wrap === true ? 'hidden' : 'auto',
+              ...context.codeWrapStyle,
+            },
+          },
+          codeChildren,
+        ),
+      )
+    }
+
+    /**
+     * 并排视图里的一行：左边 Before / 右边 After，两格永远在同一行里。
+     *
+     * **这就是"纵向同步滚动"的实现方式**——两侧不是两个各自滚动的列表，而是同一个网格里的
+     * 两格，因此不存在滚动位置对不上的可能（也不需要监听 scroll 事件去对齐）。
+     *
+     * @param aligned - `alignHunkRows()` 的一行。
+     * @param context - `diffRenderContext()` 的结果。
+     * @param key - React key。
+     * @returns React 元素。
+     */
+    function sideBySideRow(aligned, context, key) {
+      const palette = context.palette
+      const leftRange = aligned.charDiff === undefined ? undefined : aligned.charDiff.left
+      const rightRange = aligned.charDiff === undefined ? undefined : aligned.charDiff.right
+      return react.createElement(
+        'div',
+        {
+          key,
+          'data-review-sbs-row': '',
+          'data-review-sbs-kind': aligned.kind,
+          style: {
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+            alignItems: 'stretch',
+            minHeight: reviewMetrics.rowMinHeight,
+            fontFamily: CODE_FONT,
+            fontSize: reviewFont.code,
+            lineHeight: reviewMetrics.codeLineHeight,
+            color: palette.text,
+          },
+        },
+        sideBySideCell('left', aligned.left, aligned.kind, context, leftRange, 'left'),
+        sideBySideCell('right', aligned.right, aligned.kind, context, rightRange, 'right'),
+      )
+    }
+
+    /**
+     * hunk 头行（两种模式共用）：`@@ -a,b +c,d @@`。
+     *
+     * 它同时是**改动导航的锚点**：属性里带着 hunk 序号，`ReviewDiffViewer` 据此
+     * `scrollIntoView` 并给当前 hunk 一点强调（`data-review-diff-hunk-active`）。
+     *
+     * 结构与统一视图的"跨列行"一致（一个占满整行的代码格 + 一个空标记格），只是这里由
+     * 独立渲染器画：它需要挂导航锚点与当前 hunk 的强调，而那是 hunk 独有的。保持同样的
+     * `data-review-diff-code` / `data-review-diff-sign` 契约，是为了让"字号必须走 uiPx 派生"
+     * 这类既有断言继续覆盖它。
+     *
+     * @param row - hunk 行。
+     * @param context - `diffRenderContext()` 的结果。
+     * @param hunkIndex - hunk 序号（从 0 起）。
+     * @param active - 是否是当前导航到的 hunk。
+     * @param key - React key。
+     * @returns React 元素。
+     */
+    function hunkHeaderRow(row, context, hunkIndex, active, key) {
+      const palette = context.palette
+      return react.createElement(
+        'div',
+        {
+          key,
+          'data-review-diff-row': '',
+          'data-review-diff-kind': 'hunk',
+          'data-review-diff-hunk-body': String(hunkIndex),
+          'data-review-diff-hunk-active': active === true ? '1' : '0',
+          style: {
+            display: 'grid',
+            gridTemplateColumns: context.columns,
+            alignItems: 'start',
+            // 当前 hunk 的强调**克制**：底色比普通 hunk 头深一档 + 左侧一条 2px 强调线，
+            // 不用高饱和色块（它每按一次"下一个改动"就换一个位置，刺眼会很吵）。
+            background: active === true ? palette.hunkActiveBg : palette.hunkBg,
+            ...(active === true ? { boxShadow: `inset 2px 0 0 0 ${ACCENT}` } : {}),
+            fontFamily: CODE_FONT,
+            fontSize: reviewFont.code,
+            lineHeight: reviewMetrics.codeLineHeight,
+            minHeight: reviewMetrics.rowMinHeight,
+          },
+        },
+        react.createElement('span', { 'data-review-diff-sign': '', style: { gridColumn: '1 / -1', gridRow: '1', padding: '3px 8px', color: 'transparent' } }, ''),
+        react.createElement(
+          'span',
+          {
+            'data-review-diff-code': '',
+            style: {
+              gridColumn: '1 / -1',
+              gridRow: '1',
+              minWidth: 0,
+              padding: '3px 8px',
+              color: palette.hunk,
+              fontSize: reviewFont.codeMeta,
+              ...context.codeWrapStyle,
+            },
+          },
+          row.text,
+        ),
+      )
+    }
+
+    /**
+     * 渲染差异模型（统一 / 并排共用同一份模型）。
+     *
+     * @param model - `buildDiffModel()` 的结果。
+     * @param wrap - 是否自动换行。
+     * @param activeHunk - 当前导航到的 hunk 序号（-1 表示还没导航过）。
+     * @returns React 元素数组。
+     */
+    function renderDiffModel(model, wrap, activeHunk) {
+      const context = diffRenderContext(wrap)
+      context.wrap = wrap
+      const palette = context.palette
+      const sideBySide = model.mode === DIFF_MODE_SIDE_BY_SIDE
+      const nodes = []
+      model.segments.forEach((segment, index) => {
+        if (segment.kind === 'fileheader') {
+          nodes.push(unifiedRowElement(segment.row, `s${index}`, palette, context.columns, context.codeWrapStyle))
+          return
+        }
+        if (segment.kind === 'meta') {
+          nodes.push(unifiedRowElement(segment.row, `s${index}`, palette, context.columns, context.codeWrapStyle))
+          return
+        }
+        if (segment.kind === 'hunk') {
+          nodes.push(hunkHeaderRow(segment.header, context, segment.index, activeHunk === segment.index, `s${index}`))
+          if (sideBySide) {
+            const aligned = Array.isArray(segment.aligned) ? segment.aligned : alignHunkRows(segment.rows)
+            aligned.forEach((row, rowIndex) => nodes.push(sideBySideRow(row, context, `h${segment.index}-${rowIndex}`)))
+          } else {
+            segment.rows.forEach((row, rowIndex) =>
+              nodes.push(unifiedRowElement(row, `h${segment.index}-${rowIndex}`, palette, context.columns, context.codeWrapStyle)),
+            )
+          }
+          return
+        }
+        // 兜底：理论上段落只有上面三种。
+        nodes.push(unifiedRowElement(segment.row, `s${index}`, palette, context.columns, context.codeWrapStyle))
       })
+      return nodes
     }
 
     /**
@@ -4974,6 +5511,17 @@ window.__ModuleLoader__.load({
       const [choices, setChoices] = react.useState({})
       const [result, setResult] = react.useState('')
       const [dirty, setDirty] = react.useState(false)
+      /**
+       * 当前正在处理的冲突块（-1 = 还没定位）。
+       *
+       * 「上一个 / 下一个冲突」按它导航，块上据此加一点点强调与 `aria-current`——用户不该
+       * 靠自己在文件里翻找 `<<<<<<<`。
+       */
+      const [activeBlock, setActiveBlock] = react.useState(-1)
+      /** 正在做"只算不写"的预览（点了用当前/用对方/两者都要之后的一瞬间）。 */
+      const [previewing, setPreviewing] = react.useState(false)
+      /** 「继续」正在进行：按钮显示"正在继续…"并禁止重复点击。 */
+      const [continuing, setContinuing] = react.useState(false)
 
       /** 取三路内容 + 冲突块。 */
       const load = react.useCallback(async () => {
@@ -4987,6 +5535,8 @@ window.__ModuleLoader__.load({
           setChoices(next)
           setResult(typeof payload?.worktree === 'string' ? payload.worktree : '')
           setDirty(false)
+          // 定位到第一块：打开面板时"正在处理哪一块"就有答案，导航按钮也有起点。
+          setActiveBlock(blocks.length > 0 ? 0 : -1)
           setState({ phase: 'ready', data: payload, error: '', message: '' })
           return payload
         } catch (error) {
@@ -5029,27 +5579,172 @@ window.__ModuleLoader__.load({
             : operationType === 'cherry-pick'
               ? 'conflictAbortCherryPick'
               : 'conflictAbortRevert'
+      /** 「完成」文案同样按操作类型分开：变基完成与提交合并完成不是同一句话。 */
+      const completedKey =
+        operationType === 'merge'
+          ? 'conflictCompletedMerge'
+          : operationType === 'rebase'
+            ? 'conflictCompletedRebase'
+            : operationType === 'cherry-pick'
+              ? 'conflictCompletedCherryPick'
+              : 'conflictCompletedRevert'
       const conflictCount = typeof props?.conflictCount === 'number' ? props.conflictCount : 0
+      /** 宽屏三栏（CURRENT | RESULT | INCOMING）；窄屏退化成"两侧在上、Result 在下"。 */
+      const triPane = props?.triPane === true
+      /** 上一个 / 下一个**冲突文件**（同一次合并里通常有好几个）。 */
+      const conflictPaths = Array.isArray(props?.conflictPaths) ? props.conflictPaths.filter((item) => typeof item === 'string') : []
+      const filePosition = conflictPaths.indexOf(path)
+      const stepFile = (delta) => {
+        if (conflictPaths.length < 2 || filePosition < 0) return
+        const next = conflictPaths[filePosition + delta]
+        if (next === undefined) return
+        props?.onSelectPath?.(next)
+      }
+      /**
+       * 上一个 / 下一个冲突块。
+       * @param delta - `-1` 上一个，`1` 下一个。
+       */
+      const stepBlock = (delta) => {
+        if (blocks.length === 0) return
+        setActiveBlock((current) => {
+          const from = current < 0 ? (delta > 0 ? -1 : 0) : current
+          return Math.min(blocks.length - 1, Math.max(0, from + delta))
+        })
+      }
+      // 导航到某一块之后把它滚进视野（真实 DOM 才有；测试的假 document 下是 no-op）。
+      react.useEffect(() => {
+        if (activeBlock < 0 || typeof document?.querySelector !== 'function') return
+        const node = document.querySelector(`[data-conflict-block="${activeBlock}"]`)
+        if (node !== null && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'nearest' })
+      }, [activeBlock])
+
+      /**
+       * 只算不写：把逐块选择交给宿主重组成 Result 文本（**不落盘**）。
+       *
+       * 复用宿主的重组实现（`/conflict-resolve` 的 `preview: true`）而不是在界面里再写一份，
+       * 于是"预览出来的文本"与"真正写进文件的文本"永远是同一份逻辑。真正写回文件仍然是
+       * 「应用选择 / 保存结果 / 标记为已解决」那几步的事。
+       *
+       * @param nextChoices - 逐块决定（`{ 块序号: 'ours' | 'theirs' | 'both' }`）。
+       * @returns 无。
+       */
+      const preview = async (nextChoices) => {
+        setPreviewing(true)
+        try {
+          const outcome = await call('conflict-resolve', {
+            workspace,
+            path,
+            resolutions: nextChoices,
+            // 顺序显式写死："两者都要"永远是 **当前 → 对方**，不依赖宿主的默认值。
+            order: 'ours-first',
+            preview: true,
+          })
+          setResult(typeof outcome?.content === 'string' ? outcome.content : '')
+          setDirty(false)
+          // **不替换块列表**：预览只是"按当前选择算一遍给我看"，用户还没提交这些决定，块序号
+          // 必须保持稳定（`choices` 是按序号存的）。宿主的预览响应里那份块列表是"重组之后的
+          // 残留标记"，与界面正在处理的这一批不是同一个编号空间。
+          setState((current) => ({ ...current, error: '', data: { ...(current.data ?? {}), hasMarkers: outcome?.hasMarkers === true } }))
+        } catch (error) {
+          // 预览失败不该把 Result 清空：保留用户眼前那份，只说明这次没能算出来。
+          setState((current) => ({ ...current, error: String(error?.message ?? error) }))
+        } finally {
+          setPreviewing(false)
+        }
+      }
+
+      /**
+       * 选中某一侧：**立刻**把决定记下来并刷新 Result（不弹二次确认）。
+       *
+       * 这是低风险编辑——真正的写回与 `git add` 都还在后面（见 `preview` 的说明）。
+       *
+       * @param block - 冲突块。
+       * @param choice - `ours` | `theirs` | `both`。
+       * @returns 无。
+       */
+      const take = (block, choice) => {
+        const nextChoices = { ...choices, [block.index]: choice }
+        setChoices(nextChoices)
+        setActiveBlock(block.index)
+        void preview(nextChoices)
+      }
+
+      /**
+       * 结果文本里是否还有未解决的冲突标记。
+       * @param text - 结果文本。
+       * @returns 有则 true。
+       */
+      const hasMarkersIn = (text) => /^(<{7}|={7}|>{7})/mu.test(typeof text === 'string' ? text : '')
+
+      /** 把 Result 里第一处残留标记选中并定位（用户不必自己找）。 */
+      const jumpToFirstMarker = () => {
+        const text = typeof result === 'string' ? result : ''
+        const match = /^<{7}.*$/mu.exec(text)
+        if (match === null || match.index === undefined) return
+        const start = match.index
+        const end = start + match[0].length
+        try {
+          const node = typeof document?.querySelector === 'function' ? document.querySelector('[data-conflict-result]') : null
+          if (node !== null && node !== undefined) {
+            if (typeof node.focus === 'function') node.focus()
+            if (typeof node.setSelectionRange === 'function') node.setSelectionRange(start, end)
+            if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'nearest' })
+          }
+        } catch {
+          // 定位只是便利；拿不到 DOM 就只留下文字提示。
+        }
+        // 同时把"当前处理中的块"切到第一个还没决定的块——那多半就是残留标记所在的那一块。
+        const pending = blocks.find((block) => choices[block.index] === undefined)
+        if (pending !== undefined) setActiveBlock(pending.index)
+      }
 
       /**
        * 写回文件（可选同时标记为已解决）。
        * @param options - `{ resolutions?, content?, markResolved?, allowMarkers? }`。
        * @param successKey - 成功后的提示文案键。
-       * @returns 无。
+       * @returns `run` 的结果，或 undefined（失败）。
        */
       const apply = async (options, successKey) => {
-        if (typeof run !== 'function') return
+        if (typeof run !== 'function') return undefined
         const result = await run('conflict-resolve', { workspace, path, ...options }, successKey)
-        if (result === undefined) return
+        if (result === undefined) return undefined
         if (result.markedResolved === true) {
           // 解决完通常还有"继续/中止"要按，但文件列表必须先刷新（冲突计数要减一）。
           if (typeof onCommitted === 'function') onCommitted()
           await load()
-          return
+          return result
         }
         setResult(typeof result.content === 'string' ? result.content : result)
         setDirty(false)
-        setState((current) => ({ ...current, data: { ...(current.data ?? {}), blocks: result.blocks ?? [], hasMarkers: result.hasMarkers === true } }))
+        // 写回之后以**宿主重新扫出来的**状态为准：写回会消掉已解决的标记，剩下的块序号因此
+        // 会变（3 块里解决 1 块 → 剩 2 块，序号从 0 重排）。界面拿着旧序号配新列表必然错位。
+        await load()
+        return result
+      }
+
+      /**
+       * 「标记为已解决」。
+       *
+       * 写回/入索引之前**先在本地看一眼**：Result 里还有 `<<<<<<<` 之类标记时直接拒绝并定位到
+       * 第一处残留标记（宿主侧同样会拒绝，那一层是权威——两道都在，用户既得到即时反馈，
+       * 也不可能把带标记的内容加进索引）。
+       *
+       * @returns 无。
+       */
+      const markResolved = async () => {
+        // **拒绝由宿主判定**（它会重新扫一遍磁盘上的内容），这里不抢先拦截：marker 扫描是
+        // "别把带标记的内容加进索引"的守卫，权威只有一份（在宿主侧）。本地这一眼只用来在
+        // 失败后**定位**——用户不必自己在文件里找 `<<<<<<<`。
+        const outcome = await apply({ resolutions: choices, content: result, markResolved: true }, 'conflictMarked')
+        if (outcome === undefined) {
+          jumpToFirstMarker()
+          return
+        }
+        // 这个文件进索引了：请父级把选中项挪到下一个还没解决的冲突文件（连续解决，不必手动点
+        // 列表），并在冲突清空/操作结束时给出对应的提示。
+        if (typeof props?.onOperationProgress === 'function') {
+          props.onOperationProgress({ type: operationType, phase: 'mark' })
+        }
       }
 
       /**
@@ -5092,68 +5787,179 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const blockRow = (block) =>
+      /** 冲突块一侧的标题（Current / Incoming + git 写在标记里的名字）。 */
+      const sideLabel = (block, side) => {
+        const isCurrent = side === 'current'
+        const marker = isCurrent ? String(block?.oursLabel ?? '') : String(block?.theirsLabel ?? '')
+        const base = t(isCurrent ? 'conflictCurrent' : 'conflictIncoming')
+        return marker === '' ? base : `${base} · ${marker}`
+      }
+
+      /** 一块冲突的两侧预览框（带 `data-conflict-side`，沿用既有契约）。 */
+      const blockPane = (block, side) =>
         react.createElement(
           'div',
           {
-            key: `block:${block.index}`,
-            'data-conflict-block': String(block.index),
-            style: {
-              border: `1px solid ${BORDER}`,
-              borderRadius: '6px',
-              padding: '6px 8px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-              fontFamily: UI_FONT,
-              fontSize: reviewFont.meta,
-            },
+            'data-conflict-pane': side,
+            style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flex: '1 1 0' },
+          },
+          conflictSide(t, side, side === 'current' ? block?.ours : block?.theirs, side === 'current' ? String(block?.oursLabel ?? '') : String(block?.theirsLabel ?? '')),
+        )
+
+      /** 当前处理中的冲突块的紧凑头部：`冲突 N / M` + 已解决标记 + 三个选择按钮。 */
+      const blockHeader = (block) =>
+        react.createElement(
+          'div',
+          {
+            'data-conflict-block-head': String(block.index),
+            style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', fontFamily: UI_FONT, fontSize: reviewFont.meta },
+          },
+          react.createElement(
+            'span',
+            { 'data-conflict-block-label': String(block.index), style: { color: 'var(--dsw-alias-label-secondary)' } },
+            t('conflictOfBlocks', { current: block.index + 1, total: blocks.length }),
+          ),
+          react.createElement(
+            'span',
+            { style: { color: 'var(--dsw-alias-label-tertiary)' } },
+            t('conflictBlock', { index: block.index + 1, line: block.startLine }),
+          ),
+          choices[block.index] === undefined
+            ? null
+            : react.createElement(
+                'span',
+                { 'data-conflict-block-resolved': String(block.index), style: { color: ADDED } },
+                `✓ ${t('conflictResolvedBadge')}`,
+              ),
+          react.createElement('span', { style: { flex: '1 1 auto' } }),
+          ...[
+            ['ours', 'conflictAcceptOurs'],
+            ['theirs', 'conflictAcceptTheirs'],
+            ['both', 'conflictAcceptBoth'],
+          ].map(([choice, key]) =>
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                key: choice,
+                'data-conflict-take': choice,
+                'data-conflict-take-block': String(block.index),
+                disabled: props?.busy === true || previewing,
+                title: choice === 'both' ? t('conflictAcceptBothOrder') : t(key),
+                onClick: () => take(block, choice),
+                style: conflictChoiceStyle(choices[block.index] === choice),
+              },
+              t(key),
+            ),
+          ),
+        )
+
+      /**
+       * Result 编辑器（真正可编辑，不是只读预览）。
+       *
+       * 用 textarea 而不是引入编辑器依赖：它天然支持 Ctrl+A/C/V、撤销重做、Unicode、大文件；
+       * Tab 在这里手动插入两个空格（否则按 Tab 会把焦点移走，写代码时很别扭），插入走
+       * `document.execCommand('insertText')` 以便**保留浏览器原生的撤销栈**。
+       */
+      const resultEditor = () =>
+        react.createElement('textarea', {
+          'data-conflict-result': '',
+          value: result,
+          spellCheck: false,
+          'aria-label': t('conflictResult'),
+          onKeyDown: (event) => {
+            if (event.key !== 'Tab') return
+            event.preventDefault()
+            const target = event.target ?? {}
+            const value = typeof target.value === 'string' ? target.value : result
+            const start = typeof target.selectionStart === 'number' ? target.selectionStart : value.length
+            const end = typeof target.selectionEnd === 'number' ? target.selectionEnd : start
+            const insert = '  '
+            let next = value
+            if (event.shiftKey === true) {
+              // Shift+Tab：把当前行行首最多两个空格去掉（缩进退格）。
+              const lineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1
+              const leading = /^ {1,2}/u.exec(value.slice(lineStart))
+              if (leading !== null) {
+                next = value.slice(0, lineStart) + value.slice(lineStart + leading[0].length)
+                if (typeof target.setSelectionRange === 'function') {
+                  const caret = Math.max(lineStart, start - leading[0].length)
+                  target.setSelectionRange(caret, Math.max(lineStart, end - leading[0].length))
+                }
+              }
+            } else {
+              next = `${value.slice(0, start)}${insert}${value.slice(end)}`
+              if (typeof target.setSelectionRange === 'function') target.setSelectionRange(start + insert.length, start + insert.length)
+            }
+            if (next !== value) {
+              setResult(next)
+              setDirty(true)
+              try {
+                if (typeof document?.execCommand === 'function') document.execCommand('insertText', false, '')
+              } catch {
+                // 撤销栈是加分项：拿不到也不影响编辑本身。
+              }
+            }
+          },
+          onChange: (event) => {
+            setResult(event.target.value)
+            setDirty(true)
+          },
+          style: {
+            flex: '1 1 auto',
+            minHeight: triPane ? '160px' : '120px',
+            resize: 'vertical',
+            fontFamily: CODE_FONT,
+            fontSize: reviewFont.code,
+            lineHeight: reviewMetrics.codeLineHeight,
+            tabSize: reviewMetrics.tabSize,
+            whiteSpace: 'pre',
+            overflow: 'auto',
+            background: 'var(--dsw-alias-bg-base, transparent)',
+            color: 'inherit',
+            border: `1px solid ${BORDER}`,
+            borderRadius: '6px',
+            padding: '6px',
+          },
+        })
+
+      /** Result 面板：标题 + 编辑器 + 次要动作（保存 / 重新读取）。 */
+      const resultPane = () =>
+        react.createElement(
+          'div',
+          {
+            'data-conflict-pane': 'result',
+            style: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, minHeight: 0, flex: triPane ? '1.2 1 0' : '1 1 auto' },
           },
           react.createElement(
             'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--dsw-alias-label-tertiary)' } },
-            react.createElement('span', { 'data-conflict-block-label': String(block.index) }, t('conflictBlock', { index: block.index + 1, line: block.startLine })),
+            { style: { display: 'flex', alignItems: 'center', gap: '6px', fontFamily: UI_FONT, fontSize: reviewFont.meta, color: 'var(--dsw-alias-label-tertiary)' } },
+            react.createElement('span', { 'data-conflict-pane-label': 'result' }, t('conflictResult')),
             react.createElement('span', { style: { flex: '1 1 auto' } }),
             react.createElement(
               'button',
               {
                 type: 'button',
-                'data-conflict-take': 'ours',
-                disabled: props?.busy === true,
-                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'ours' })),
-                style: conflictChoiceStyle(choices[block.index] === 'ours'),
+                'data-conflict-save': '',
+                disabled: props?.busy === true || dirty !== true,
+                onClick: () => void apply({ content: result }, 'conflictSaved'),
+                style: conflictButtonStyle(false, props?.busy === true || dirty !== true),
               },
-              t('conflictAcceptOurs'),
+              t('conflictSaveResult'),
             ),
             react.createElement(
               'button',
               {
                 type: 'button',
-                'data-conflict-take': 'theirs',
+                'data-conflict-reload': '',
                 disabled: props?.busy === true,
-                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'theirs' })),
-                style: conflictChoiceStyle(choices[block.index] === 'theirs'),
+                onClick: () => void load(),
+                style: conflictButtonStyle(false, props?.busy === true),
               },
-              t('conflictAcceptTheirs'),
-            ),
-            react.createElement(
-              'button',
-              {
-                type: 'button',
-                'data-conflict-take': 'both',
-                disabled: props?.busy === true,
-                onClick: () => setChoices((current) => ({ ...current, [block.index]: 'both' })),
-                style: conflictChoiceStyle(choices[block.index] === 'both'),
-              },
-              t('conflictAcceptBoth'),
+              t('conflictReload'),
             ),
           ),
-          react.createElement(
-            'div',
-            { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' } },
-            conflictSide(t, 'current', block.ours, String(block.oursLabel ?? '')),
-            conflictSide(t, 'incoming', block.theirs, String(block.theirsLabel ?? '')),
-          ),
+          resultEditor(),
         )
 
       const body =
@@ -5163,10 +5969,11 @@ window.__ModuleLoader__.load({
             ? react.createElement('div', { 'data-conflict-state': 'error', style: { padding: '12px', color: STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.normal } }, state.error)
             : react.createElement(
                 'div',
-                { style: { display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0, flex: '1 1 auto', overflowY: 'auto', padding: '8px' } },
+                { style: { display: 'flex', flexDirection: 'column', gap: '6px', minHeight: 0, flex: '1 1 auto', padding: '6px 8px' } },
+                // ---- 标题行：文件、操作类型、**冲突文件**导航、关闭 ----
                 react.createElement(
                   'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', flexShrink: 0 } },
                   react.createElement(StatusBadge, { letter: 'U', conflict: true }),
                   react.createElement('span', { 'data-conflict-path': path, style: { fontFamily: UI_FONT, fontSize: reviewFont.normal, wordBreak: 'break-all' } }, path),
                   operationKey === ''
@@ -5177,6 +5984,44 @@ window.__ModuleLoader__.load({
                         t(operationKey),
                       ),
                   react.createElement('span', { style: { flex: '1 1 auto' } }),
+                  // 多个冲突文件时提供"上一个/下一个冲突文件"，用户可以连续解决。
+                  conflictPaths.length > 1
+                    ? react.createElement(
+                        'span',
+                        { 'data-conflict-file-nav': String(conflictPaths.length), style: { display: 'inline-flex', alignItems: 'center', gap: '2px' } },
+                        react.createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            'data-conflict-file-prev': '',
+                            title: t('conflictPrevFile'),
+                            'aria-label': t('conflictPrevFile'),
+                            disabled: filePosition <= 0,
+                            onClick: () => stepFile(-1),
+                            style: conflictButtonStyle(false, filePosition <= 0),
+                          },
+                          '‹',
+                        ),
+                        react.createElement(
+                          'span',
+                          { 'data-conflict-file-position': String(filePosition + 1), style: { fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, color: 'var(--dsw-alias-label-tertiary)' } },
+                          `${filePosition + 1} / ${conflictPaths.length}`,
+                        ),
+                        react.createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            'data-conflict-file-next': '',
+                            title: t('conflictNextFile'),
+                            'aria-label': t('conflictNextFile'),
+                            disabled: filePosition < 0 || filePosition >= conflictPaths.length - 1,
+                            onClick: () => stepFile(1),
+                            style: conflictButtonStyle(false, filePosition < 0 || filePosition >= conflictPaths.length - 1),
+                          },
+                          '›',
+                        ),
+                      )
+                    : null,
                   react.createElement(
                     'button',
                     { type: 'button', 'data-conflict-close': '', onClick: () => props?.onClose?.(), title: t('close'), style: conflictButtonStyle() },
@@ -5191,127 +6036,204 @@ window.__ModuleLoader__.load({
                     )
                   : react.createElement(
                       'div',
-                      { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-                      ...blocks.map(blockRow),
+                      { style: { display: 'flex', flexDirection: 'column', gap: '6px', minHeight: 0, flex: '1 1 auto' } },
+                      // ---- 冲突导航 + 当前块的两个选择 ----
+                      react.createElement(
+                        'div',
+                        { 'data-conflict-nav': String(blocks.length), style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap', flexShrink: 0 } },
+                        react.createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            'data-conflict-prev': '',
+                            title: t('conflictPrev'),
+                            'aria-label': t('conflictPrev'),
+                            disabled: activeBlock <= 0,
+                            onClick: () => stepBlock(-1),
+                            style: conflictButtonStyle(false, activeBlock <= 0),
+                          },
+                          '↑',
+                        ),
+                        react.createElement(
+                          'span',
+                          {
+                            'data-conflict-counter': `${activeBlock < 0 ? 0 : activeBlock + 1}/${blocks.length}`,
+                            style: { fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, color: 'var(--dsw-alias-label-secondary)', minWidth: '46px', textAlign: 'center' },
+                          },
+                          t('conflictOfBlocks', { current: activeBlock < 0 ? 0 : activeBlock + 1, total: blocks.length }),
+                        ),
+                        react.createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            'data-conflict-next': '',
+                            title: t('conflictNext'),
+                            'aria-label': t('conflictNext'),
+                            disabled: blocks.length === 0 || activeBlock >= blocks.length - 1,
+                            onClick: () => stepBlock(1),
+                            style: conflictButtonStyle(false, blocks.length === 0 || activeBlock >= blocks.length - 1),
+                          },
+                          '↓',
+                        ),
+                        react.createElement(
+                          'span',
+                          {
+                            'data-conflict-resolved-count': `${decided}/${blocks.length}`,
+                            style: { fontFamily: UI_FONT, fontSize: reviewFont.meta, color: decided === blocks.length ? ADDED : 'var(--dsw-alias-label-tertiary)' },
+                          },
+                          t('conflictResolvedCount', { resolved: decided, total: blocks.length }),
+                        ),
+                        react.createElement('span', { style: { flex: '1 1 auto' } }),
+                        activeBlock < 0 || blocks[activeBlock] === undefined ? null : blockHeader(blocks[activeBlock]),
+                      ),
+                      // ---- 主体：当前块的两侧 + 可编辑 Result ----
+                      //
+                      // 宽屏是三栏（CURRENT | RESULT | INCOMING），窄屏退化成"两侧在上、Result 在下"：
+                      // 三栏挤到每栏 200px 还不如两行。
+                      react.createElement(
+                        'div',
+                        {
+                          'data-conflict-panes': triPane ? 'tri' : 'stacked',
+                          // 当前冲突块的身份与状态：`aria-current` 让辅助技术知道"正在处理哪一块"，
+                          // `data-conflict-block` 同时是滚动定位的锚点（见上面的 effect）。
+                          ...(activeBlock < 0 || blocks[activeBlock] === undefined
+                            ? {}
+                            : { 'data-conflict-block': String(activeBlock), 'data-conflict-block-active': '1', 'aria-current': 'true' }),
+                          style: {
+                            display: 'flex',
+                            flexDirection: triPane ? 'row' : 'column',
+                            gap: '6px',
+                            minHeight: 0,
+                            flex: '1 1 auto',
+                            // 当前块的一点点强调：只加一条左侧细线，不刷整块底色（大色块很吵）。
+                            ...(triPane
+                              ? {}
+                              : { borderLeft: `2px solid color-mix(in srgb, ${ACCENT} 40%, transparent)`, paddingLeft: '6px' }),
+                          },
+                        },
+                        triPane || activeBlock < 0 || blocks[activeBlock] === undefined
+                          ? null
+                          : react.createElement(
+                              'div',
+                              { style: { display: 'flex', gap: '6px', minHeight: 0 } },
+                              blockPane(blocks[activeBlock], 'current'),
+                              blockPane(blocks[activeBlock], 'incoming'),
+                            ),
+                        react.createElement(
+                          'div',
+                          { style: { display: 'flex', flexDirection: 'row', gap: '6px', minHeight: 0, ...(triPane ? { flex: '3 1 0' } : {}) } },
+                          triPane && activeBlock >= 0 && blocks[activeBlock] !== undefined ? blockPane(blocks[activeBlock], 'current') : null,
+                          resultPane(),
+                          triPane && activeBlock >= 0 && blocks[activeBlock] !== undefined ? blockPane(blocks[activeBlock], 'incoming') : null,
+                        ),
+                      ),
                     ),
+                // ---- 底部动作：写回 / 标记已解决 / 继续 / 中止 ----
                 react.createElement(
                   'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', flexShrink: 0, borderTop: `1px solid ${BORDER}`, paddingTop: '6px' } },
                   react.createElement(
                     'span',
                     { 'data-conflict-unresolved': String(blocks.length - decided), style: { color: blocks.length - decided === 0 ? ADDED : STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.meta } },
                     t('conflictDecided', { decided, total: blocks.length }),
                   ),
                   react.createElement('span', { style: { flex: '1 1 auto' } }),
-                  react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      'data-conflict-apply': '',
-                      disabled: props?.busy === true || decided === 0,
-                      onClick: () => void apply({ resolutions: choices }, 'conflictApplied'),
-                      style: conflictButtonStyle(false, props?.busy === true || decided === 0),
-                    },
-                    t('conflictApply'),
-                  ),
+                  blocks.length === 0
+                    ? null
+                    : react.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-conflict-apply': '',
+                          disabled: props?.busy === true || decided === 0,
+                          title: t('conflictApply'),
+                          onClick: () => void apply({ resolutions: choices, order: 'ours-first' }, 'conflictApplied'),
+                          style: conflictButtonStyle(false, props?.busy === true || decided === 0),
+                        },
+                        t('conflictApply'),
+                      ),
                   react.createElement(
                     'button',
                     {
                       type: 'button',
                       'data-conflict-mark': '',
                       disabled: props?.busy === true,
-                      onClick: () => void apply({ resolutions: choices, markResolved: true }, 'conflictMarked'),
+                      title: t('conflictMarkResolved'),
+                      onClick: () => void markResolved(),
                       style: conflictButtonStyle(true, props?.busy === true),
                     },
                     t('conflictMarkResolved'),
-                  ),
-                ),
-                react.createElement(
-                  'div',
-                  { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-                  react.createElement('label', { style: { color: 'var(--dsw-alias-label-tertiary)', fontFamily: UI_FONT, fontSize: reviewFont.meta } }, t('conflictResult')),
-                  react.createElement('textarea', {
-                    'data-conflict-result': '',
-                    value: result,
-                    spellCheck: false,
-                    onChange: (event) => {
-                      setResult(event.target.value)
-                      setDirty(true)
-                    },
-                    style: {
-                      minHeight: '120px',
-                      resize: 'vertical',
-                      fontFamily: CODE_FONT,
-                      fontSize: reviewFont.code,
-                      background: 'var(--dsw-alias-bg-base, transparent)',
-                      color: 'inherit',
-                      border: `1px solid ${BORDER}`,
-                      borderRadius: '6px',
-                      padding: '6px',
-                    },
-                  }),
-                  react.createElement(
-                    'div',
-                    { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-                    react.createElement(
-                      'button',
-                      {
-                        type: 'button',
-                        'data-conflict-save': '',
-                        disabled: props?.busy === true || dirty !== true,
-                        onClick: () => void apply({ content: result }, 'conflictSaved'),
-                        style: conflictButtonStyle(false, props?.busy === true || dirty !== true),
-                      },
-                      t('conflictSaveResult'),
-                    ),
-                    react.createElement(
-                      'button',
-                      {
-                        type: 'button',
-                        'data-conflict-reload': '',
-                        disabled: props?.busy === true,
-                        onClick: () => void load(),
-                        style: conflictButtonStyle(false, props?.busy === true),
-                      },
-                      t('conflictReload'),
-                    ),
                   ),
                 ),
                 operationType === ''
                   ? null
                   : react.createElement(
                       'div',
-                      { 'data-conflict-op-actions': operationType, style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', borderTop: `1px solid ${BORDER}`, paddingTop: '6px' } },
+                      { 'data-conflict-op-actions': operationType, style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', flexShrink: 0 } },
                       react.createElement(
                         'button',
                         {
                           type: 'button',
                           'data-conflict-continue': '',
-                          disabled: props?.busy === true || conflictCount > 0,
+                          'data-conflict-continuing': continuing ? '1' : '0',
+                          disabled: props?.busy === true || continuing || conflictCount > 0,
                           title: conflictCount > 0 ? t('conflictContinueBlocked') : '',
                           onClick: async () => {
-                            const payload = await callGitbar('op/continue', {})
-                            if (payload === undefined) return
-                            setState((current) => ({ ...current, error: '', message: t('conflictContinued') }))
-                            if (typeof onCommitted === 'function') onCommitted()
+                            setContinuing(true)
+                            try {
+                              const payload = await callGitbar('op/continue', {})
+                              if (payload === undefined) return
+                              if (typeof onCommitted === 'function') onCommitted()
+                              // **必须重新读一次冲突状态**：变基可能"解决完这个提交，下一个提交
+                              // 又冲突"，界面不能在这时候宣布操作已经结束。
+                              const next = await load()
+                              const remaining = Array.isArray(next?.blocks) ? next.blocks.length : 0
+                              /**
+                               * "还有冲突"有两个来源：本文件剩下的块，以及宿主明确告诉我们这次
+                               * `--continue` 只是**前进到了下一次冲突**（冲突可能落在别的文件上）。
+                               * 后者若被当成失败，用户看到的是"还有冲突没解决"，而磁盘上其实已经
+                               * 进入下一轮——两者必须说同一件事。
+                               */
+                              const pendingNext =
+                                payload.stoppedAtNextConflict === true ? Number(payload.conflicts) || 0 : 0
+                              const total = Math.max(remaining, pendingNext)
+                              // 本文件还有冲突 → 就地提示"还有 N 块"（同一轮继续处理）；否则把
+                              // 判断交给父级：它刚重取了快照，知道**还有没有别的冲突文件**、
+                              // 以及操作是否真的结束了。
+                              setState((current) => ({
+                                ...current,
+                                error: '',
+                                message: total > 0 ? t('conflictNextRound', { count: total }) : '',
+                              }))
+                              if (typeof props?.onOperationProgress === 'function') {
+                                props.onOperationProgress({ type: operationType, phase: 'continue' })
+                              }
+                            } finally {
+                              setContinuing(false)
+                            }
                           },
-                          style: conflictButtonStyle(true, props?.busy === true || conflictCount > 0),
+                          style: conflictButtonStyle(true, props?.busy === true || continuing || conflictCount > 0),
                         },
-                        t(continueKey),
+                        continuing ? t('conflictContinuing') : t(continueKey),
                       ),
                       react.createElement(
                         'button',
                         {
                           type: 'button',
                           'data-conflict-abort': '',
-                          disabled: props?.busy === true,
+                          disabled: props?.busy === true || continuing,
+                          title: t(abortKey),
                           onClick: async () => {
                             const payload = await callGitbar('op/abort', { kind: operationType })
                             if (payload === undefined) return
-                            setState((current) => ({ ...current, error: '', message: t('conflictAborted') }))
                             if (typeof onCommitted === 'function') onCommitted()
+                            // 中止之后这个文件不再冲突，面板多半会被换成普通差异视图；因此
+                            // "已中止"的提示交给父级去说（它不会随面板卸载而消失）。
+                            if (typeof props?.onOperationProgress === 'function') {
+                              props.onOperationProgress({ type: operationType, phase: 'abort' })
+                            }
                           },
-                          style: conflictButtonStyle(false, props?.busy === true),
+                          style: conflictButtonStyle(false, props?.busy === true || continuing),
                         },
                         t(abortKey),
                       ),
@@ -5325,12 +6247,19 @@ window.__ModuleLoader__.load({
                     ),
                 state.message === ''
                   ? null
-                  : react.createElement('div', { 'data-conflict-notice': '', style: { color: ADDED, fontFamily: UI_FONT, fontSize: reviewFont.meta } }, state.message),
+                  : react.createElement('div', { 'data-conflict-notice': '', style: { color: ADDED, fontFamily: UI_FONT, fontSize: reviewFont.meta, flexShrink: 0 } }, state.message),
+                state.error !== '' && blocks.length > 0
+                  ? react.createElement('div', { 'data-conflict-error': '', style: { color: STATUS_COLORS.U, fontFamily: UI_FONT, fontSize: reviewFont.meta, flexShrink: 0 } }, state.error)
+                  : null,
               )
 
       return react.createElement(
         'div',
-        { 'data-conflict-resolver': path, style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' } },
+        {
+          'data-conflict-resolver': path,
+          'data-conflict-tri-pane': triPane ? '1' : '0',
+          style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' },
+        },
         body,
       )
     }
@@ -5962,6 +6891,19 @@ window.__ModuleLoader__.load({
      * @param props - `{ t, workspace, snapshot, onCommitted }`。
      * @returns React 元素。
      */
+    /**
+     * 进行中的操作类型 → "已完成"文案键。
+     *
+     * 继续/中止的文案按操作类型分开（见冲突面板），完成提示同样如此：变基完成与合并完成
+     * 不是一回事，写成一个笼统的"操作已完成"等于没说。
+     */
+    const OPERATION_COMPLETED_KEYS = {
+      merge: 'conflictCompletedMerge',
+      rebase: 'conflictCompletedRebase',
+      'cherry-pick': 'conflictCompletedCherryPick',
+      revert: 'conflictCompletedRevert',
+    }
+
     function StagingSection(props) {
       const { t, workspace, snapshot } = props
       /**
@@ -6048,6 +6990,16 @@ window.__ModuleLoader__.load({
        * 这也是这一版删掉"点击即在行下方展开 diff"之后的新语义。
        */
       const [selectedFile, setSelectedFile] = react.useState('')
+      /**
+       * 上一次看到的操作类型与冲突数。
+       *
+       * 它们的**变化**才是提示的依据："操作从有到无" = 完成，"冲突从有到无但操作还在" =
+       * 冲突都解决了、等用户按「继续」。两个值都来自快照（宿主判定），界面不猜。
+       */
+      const [lastOperation, setLastOperation] = react.useState('')
+      const [lastConflictCount, setLastConflictCount] = react.useState(0)
+      /** 最近一次「中止」的操作类型：用来把"操作消失"解释成中止而不是完成。 */
+      const [abortedOperation, setAbortedOperation] = react.useState('')
       /** 左栏宽度（px）；`undefined` 表示用户没拖过，此时用百分比默认值。 */
       const [fileWidth, setFileWidth] = react.useState(() => changesFileWidthStore.get())
       /**
@@ -6275,6 +7227,58 @@ window.__ModuleLoader__.load({
         },
         [workspace],
       )
+
+      /**
+       * 冲突面板里的「继续 / 中止 / 标记已解决」之后，父级要做的两件事。
+       *
+       * 为什么放在父级而不是冲突面板里：面板只知道自己的文件，而"这次操作结束了没有""还有没有
+       * 别的冲突文件"是**快照级**的事实——必须等宿主那边重取完才说得准。
+       *
+       * 这里只在"中止"时立刻给一句话（那一刻的事实是确定的：操作被撤回了）；其余提示交给下面
+       * 那个观察快照变化的 effect，它按**操作类型与冲突数的真实变化**说话，绝不猜。
+       *
+       * @param event - `{ type, phase }`：操作类型与来源（continue / abort / mark）。
+       * @returns 无。
+       */
+      const onOperationProgress = react.useCallback((event) => {
+        const type = typeof event?.type === 'string' ? event.type : ''
+        if (event?.phase !== 'abort') return
+        // 中止只说一句话：**不动用户的文件选择**——中止之后那个文件会退回操作前的状态，
+        // 仍然值得看（而不是把右边整块清空）。
+        setNotice(t('conflictAborted'))
+        setAbortedOperation(type)
+      }, [t])
+
+      /**
+       * 操作状态与冲突数的变化 → 面板级提示。
+       *
+       * 三个转变各自有明确含义（都来自快照，不是本地推测）：
+       *   * 有操作 → 没操作：操作完成（中止那条路已在 `onOperationProgress` 里报过，跳过）；
+       *   * 有冲突 → 没冲突，但操作还在：冲突解决完了，等用户按「继续」（rebase 多轮时特别重要）；
+       *   * 新操作出现：清掉上一条提示。
+       */
+      react.useEffect(() => {
+        const operation = snapshot?.operationType ?? ''
+        const conflicts = typeof snapshot?.conflictCount === 'number' ? snapshot.conflictCount : 0
+        if (operation !== lastOperation) {
+          if (lastOperation !== '' && operation === '') {
+            if (abortedOperation === lastOperation) {
+              setAbortedOperation('')
+            } else {
+              const key = OPERATION_COMPLETED_KEYS[lastOperation] ?? ''
+              if (key !== '') setNotice(t(key))
+            }
+          } else if (operation !== '') {
+            // 新的一轮操作开始：上一条提示（多半是"已完成"）不该继续挂着。
+            setNotice('')
+          }
+          setLastOperation(operation)
+        }
+        if (operation !== '' && lastConflictCount > 0 && conflicts === 0) {
+          setNotice(t('conflictAllResolved'))
+        }
+        if (conflicts !== lastConflictCount) setLastConflictCount(conflicts)
+      }, [snapshot?.operationType, snapshot?.conflictCount, lastOperation, lastConflictCount, abortedOperation, t])
 
       /**
        * 提交。
@@ -7287,6 +8291,15 @@ window.__ModuleLoader__.load({
                 run,
                 onCommitted: props?.onCommitted,
                 onClose: () => setSelectedFile(''),
+                // 宽屏三栏（CURRENT | RESULT | INCOMING），窄屏退化成两侧在上、Result 在下。
+                // 可用宽度按"Changes 内容宽度减去左栏"估算：左栏默认 34%（拖动过就用拖出来的值）。
+                triPane:
+                  (narrow ? contentWidth : Math.max(0, contentWidth - (fileWidth ?? Math.round(contentWidth * CHANGES_FILE_DEFAULT_RATIO)))) >=
+                  CONFLICT_TRIPANE_MIN_WIDTH,
+                // 多个冲突文件之间的导航：交给父级切选中项（面板只知道自己的文件）。
+                conflictPaths: conflicted.map((entry) => entry.path),
+                onSelectPath: (next) => setSelectedFile(next),
+                onOperationProgress,
               })
             : react.createElement(LazyFileDiff, {
               // key 带 workspace + HEAD + 路径：切项目 / 提交之后换实例，旧差异不会被复用。
@@ -7969,6 +8982,9 @@ window.__ModuleLoader__.load({
       const wrap = typeof props?.wrap === 'boolean' ? props.wrap : storeWrap
       const onToggleWrap =
         typeof props?.onToggleWrap === 'function' ? props.onToggleWrap : () => diffWrapStore.set(!storeWrap)
+      const storeMode = useDiffMode()
+      const mode = typeof props?.mode === 'string' ? props.mode : storeMode
+      const onToggleMode = typeof props?.onToggleMode === 'function' ? props.onToggleMode : (next) => diffModeStore.set(next)
       const onClose = typeof props?.onClose === 'function' ? props.onClose : undefined
       const phase = typeof props?.phase === 'string' ? props.phase : 'ready'
       const binary = props?.binary === true || isBinaryDiff(diff)
@@ -7977,6 +8993,39 @@ window.__ModuleLoader__.load({
       const status = file?.status?.[0] ?? '?'
       const color = STATUS_COLORS[status] ?? 'var(--dsw-alias-label-secondary)'
       const { dir, base } = splitPath(typeof file?.path === 'string' ? file.path : '')
+      /** 当前导航到的 hunk（-1 = 还没导航）。 */
+      const [activeHunk, setActiveHunk] = react.useState(-1)
+      /**
+       * 差异模型：解析一次，两种视图共用（`mode` 变了才重新构建）。
+       *
+       * 这里用 `useMemo` 而不是每次渲染都解析：一份 5000 行的差异解析出来的模型有上万行，
+       * 而用户在同一个文件里切换 wrap、点导航、开关自动换行都会触发重渲染——不该每次都把
+       * 整个差异重解析一遍。
+       */
+      const model = react.useMemo(
+        () => buildDiffModel(parseDiffRows(diff, diffHeaderLabels(t)), mode),
+        [diff, mode, t],
+      )
+      const hunkCount = model.hunkCount
+      /** 上一个/下一个改动：按 hunk 导航（不是按每一行 +/−）。 */
+      const stepHunk = (delta) => {
+        if (hunkCount === 0) return
+        setActiveHunk((current) => {
+          const from = current < 0 ? (delta > 0 ? -1 : 0) : current
+          const next = Math.min(hunkCount - 1, Math.max(0, from + delta))
+          return next
+        })
+      }
+      // 导航到某个 hunk 之后把它滚进视野（真实 DOM 才有；测试的假 document 下是 no-op）。
+      react.useEffect(() => {
+        if (activeHunk < 0 || typeof document?.querySelector !== 'function') return
+        const node = document.querySelector(`[data-review-diff-hunk-body="${activeHunk}"]`)
+        if (node !== null && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center' })
+      }, [activeHunk, mode])
+      // 换文件 / 换模式时复位导航位置，否则会停在上一个文件的第 N 个 hunk 上。
+      react.useEffect(() => {
+        setActiveHunk(-1)
+      }, [file?.path, mode])
       const iconButton = (key, label, onClick, pressed, glyph) =>
         react.createElement(
           'button',
@@ -7988,6 +9037,7 @@ window.__ModuleLoader__.load({
             title: label,
             'aria-label': label,
             'aria-pressed': pressed,
+            disabled: key === 'prev-change' || key === 'next-change' ? (key === 'prev-change' ? hunkCount === 0 || activeHunk <= 0 : hunkCount === 0 || activeHunk >= hunkCount - 1) : undefined,
             onClick,
             style: {
               flexShrink: 0,
@@ -8004,6 +9054,49 @@ window.__ModuleLoader__.load({
             },
           },
           glyph,
+        )
+      /**
+       * 模式切换：两个扁平按钮组成的分段控件（Codex 风格：无边框、选中态只用一层浅色底）。
+       * @returns React 元素。
+       */
+      const modeSwitch = () =>
+        react.createElement(
+          'span',
+          {
+            'data-review-diff-modeswitch': '',
+            role: 'group',
+            'aria-label': t('diffViewMode'),
+            style: { display: 'inline-flex', flexShrink: 0, alignItems: 'center', gap: '2px' },
+          },
+          ...[
+            [DIFF_MODE_UNIFIED, 'diffModeUnified'],
+            [DIFF_MODE_SIDE_BY_SIDE, 'diffModeSideBySide'],
+          ].map(([value, key]) =>
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                key: value,
+                'data-review-diff-mode-option': value,
+                'aria-pressed': mode === value,
+                disabled: hunkCount === 0,
+                onClick: () => onToggleMode(value),
+                style: {
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '1px 7px',
+                  background: mode === value ? `color-mix(in srgb, ${ACCENT} 14%, transparent)` : 'transparent',
+                  color: mode === value ? ACCENT : 'var(--dsw-alias-label-tertiary)',
+                  fontFamily: UI_FONT,
+                  fontSize: reviewFont.meta,
+                  lineHeight: '18px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                },
+              },
+              t(key),
+            ),
+          ),
         )
       return react.createElement(
         'div',
@@ -8050,6 +9143,27 @@ window.__ModuleLoader__.load({
             ' ',
             react.createElement('span', { style: { color: REMOVED } }, `−${file?.removed ?? '·'}`),
           ),
+          // 改动导航：按 hunk 走，并显示"第几个 / 共几个"。用户不必自己滚动去找改动。
+          hunkCount === 0
+            ? null
+            : react.createElement(
+                'span',
+                {
+                  'data-review-diff-changenav': '',
+                  style: { display: 'inline-flex', flexShrink: 0, alignItems: 'center', gap: '2px' },
+                },
+                iconButton('prev-change', t('diffPrevChange'), () => stepHunk(-1), undefined, '↑'),
+                react.createElement(
+                  'span',
+                  {
+                    'data-review-diff-change-count': `${(activeHunk < 0 ? 0 : activeHunk + 1)}/${hunkCount}`,
+                    style: { minWidth: '34px', textAlign: 'center', fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, fontVariantNumeric: 'tabular-nums', color: 'var(--dsw-alias-label-tertiary)' },
+                  },
+                  t('diffChangeCount', { current: activeHunk < 0 ? 0 : activeHunk + 1, total: hunkCount }),
+                ),
+                iconButton('next-change', t('diffNextChange'), () => stepHunk(1), undefined, '↓'),
+              ),
+          modeSwitch(),
           // 自动换行开关：默认开启，关掉后回到 `pre` + 横向滚动（看原始横向结构时用）。
           iconButton('wrap', wrap ? t('diffWrapOn') : t('diffWrapOff'), onToggleWrap, wrap, wrap ? '↵' : '→'),
           onClose === undefined ? null : iconButton('close', t('diffClose'), onClose, undefined, '✕'),
@@ -8080,13 +9194,28 @@ window.__ModuleLoader__.load({
               ? react.createElement(
                   'div',
                   { 'data-review-diff-body': '', 'data-review-diff-state': 'binary', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                  // 二进制不做文本 diff：一句主提示 + 一句说明（工具条上仍然可以切模式，
+                  // 但这里不尝试把二进制内容塞进任何一侧）。
+                  statusBlock(t('diffBinaryChanged')),
                   statusBlock(t('binaryDiff')),
                 )
-              : react.createElement(
-                  'div',
-                  { 'data-review-diff-body-wrap': '', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
-                  react.createElement(DiffBody, { diff, wrap, t }),
-                ),
+              : hunkCount === 0 && status === 'R'
+                ? react.createElement(
+                    'div',
+                    { 'data-review-diff-body': '', 'data-review-diff-state': 'renamed', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                    // 只有重命名、内容一字未改：明说一句，否则用户面对的是"打开差异却什么都没有"。
+                    statusBlock(t('diffRenamedNoChanges')),
+                  )
+                : react.createElement(
+                    'div',
+                    { 'data-review-diff-body-wrap': '', style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' } },
+                    react.createElement(DiffBody, {
+                      model,
+                      wrap,
+                      activeHunk,
+                      labels: { before: t('diffBefore'), after: t('diffAfter') },
+                    }),
+                  ),
       )
     }
 
@@ -8120,15 +9249,21 @@ window.__ModuleLoader__.load({
      *
      * 纵向不在这里滚：由外层（Changes 的文件滚动区 / Diff Preview 的 body）负责，避免嵌套滚动。
      *
-     * @param props - `{ diff, wrap, t }`；`t` 用于折叠文件头的文案（缺失时退回英文）。
+     * @param props - `{ model, wrap, activeHunk, labels }`；模型由 `ReviewDiffViewer` 构好
+     *   （`parseDiffRows` + `buildDiffModel`），这里只负责画——于是"解析"只有一份，两种视图
+     *   读的是同一个模型。
      * @returns React 元素。
      */
     function DiffBody(props) {
       const wrap = props?.wrap !== false
+      const model = props?.model
+      const sideBySide = model?.mode === DIFF_MODE_SIDE_BY_SIDE
+      const labels = props?.labels ?? {}
       return react.createElement(
         'div',
         {
           'data-review-diff-body': '',
+          'data-review-diff-mode': model?.mode ?? DIFF_MODE_UNIFIED,
           'data-review-diff-wrap': wrap ? 'on' : 'off',
           style: {
             // 等宽字体是差异视图可读的基础：比例字体下增删对齐会全乱。
@@ -8136,11 +9271,37 @@ window.__ModuleLoader__.load({
             fontSize: reviewFont.code,
             lineHeight: reviewMetrics.codeLineHeight,
             fontVariantLigatures: 'none',
-            overflowX: wrap ? 'hidden' : 'auto',
+            // 并排模式下横向滚动落在每一侧的代码格里（`sideBySideCell`），容器本身不横滚，
+            // 否则一横滚就把两侧的行号栏一起推出视野。
+            overflowX: sideBySide || wrap ? 'hidden' : 'auto',
             overflowY: 'hidden',
           },
         },
-        renderDiff(props?.diff, wrap, diffHeaderLabels(props?.t)),
+        // 并排模式的表头：左右各写清"这是哪一边"。粘在滚动容器顶部，滚到文件中间也知道
+        // 哪一栏是 Before、哪一栏是 After。
+        sideBySide
+          ? react.createElement(
+              'div',
+              {
+                'data-review-sbs-head': '',
+                style: {
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 1,
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                  background: 'var(--dsw-alias-bg-module-platform, #eceef2)',
+                  borderBottom: `1px solid ${BORDER}`,
+                  fontFamily: UI_FONT,
+                  fontSize: reviewFont.meta,
+                  color: 'var(--dsw-alias-label-tertiary)',
+                },
+              },
+              react.createElement('span', { style: { padding: '2px 8px' } }, String(labels.before ?? '')),
+              react.createElement('span', { style: { padding: '2px 8px', borderLeft: `1px solid ${BORDER}` } }, String(labels.after ?? '')),
+            )
+          : null,
+        renderDiffModel(model, wrap, props?.activeHunk ?? -1),
       )
     }
 
@@ -9693,6 +10854,18 @@ window.__ModuleLoader__.load({
      * 某一个文件行下面"**——那种 inline 展开正是这一轮要删掉的 UI。
      */
     const CHANGES_NARROW_WIDTH = 900
+
+    /**
+     * 冲突合并编辑器进三栏布局（CURRENT | RESULT | INCOMING）所需的最小可用宽度。
+     *
+     * 三栏各自要能读代码，大约每栏 320px 起，加上分隔与内边距因此取 960：低于它就**不硬挤**，
+     * 而是"两侧在上、Result 在下"。宁可两行，也不要三栏各 200px——那时每行代码都在折行，
+     * 反而看不清改动。
+     */
+    const CONFLICT_TRIPANE_MIN_WIDTH = 960
+
+    /** 左栏（文件列表）的默认宽度占比：与 `CHANGES_FILE_DEFAULT_BASIS` 保持一致。 */
+    const CHANGES_FILE_DEFAULT_RATIO = 0.34
 
     // =========================================================================
     // 提交区（Changes 底部 footer）的高度
@@ -11640,6 +12813,19 @@ window.__ModuleLoader__.load({
     // 直接断言比隔着界面点更可靠。
     exports.__stagingClassifyForTest = classifyEntry
     exports.__stagingSectionForTest = StagingSection
+    // 差异视图的模型与视图：并排对齐是纯函数，直接对着它断言（context / added / deleted /
+    // modified / 多个 hunk 五种情况）比隔着界面数 DOM 可靠得多；`ReviewDiffViewer` 则用来
+    // 验证工具条（模式切换、改动导航）与并排 DOM 契约。
+    exports.__diffModelForTest = {
+      parse: parseDiffRows,
+      group: groupDiffRows,
+      align: alignHunkRows,
+      charDiff: charDiffRange,
+      build: buildDiffModel,
+      modeStore: diffModeStore,
+      modes: { unified: DIFF_MODE_UNIFIED, sideBySide: DIFF_MODE_SIDE_BY_SIDE },
+    }
+    exports.__diffViewerForTest = ReviewDiffViewer
     // 冲突解决面板也单独导出：它的数据来自 `/conflict`（三路内容 + 冲突块），逐块选择与
     // 「标记为已解决」是两个不同的请求，直接挂载断言比隔着抽屉点更可靠。
     exports.__conflictResolverForTest = ConflictResolver

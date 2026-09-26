@@ -427,6 +427,11 @@ const ctx = {
 }
 loaded.apply(ctx)
 
+// 本文件断言的是**统一差异**的四列契约（行号两列 + 标记 + 正文）与折行样式；而差异视图的
+// 默认模式是并排（IDEA 的习惯）。因此这里把偏好固定成 unified —— 并排的对齐与 DOM 契约由
+// `scripts/test-review-diff-sbs.mjs` 专门覆盖，两边都是显式的，不靠默认值撞运气。
+loaded.__diffModelForTest.modeStore.set(loaded.__diffModelForTest.modes.unified)
+
 let failures = 0
 const check = (label, actual, expected) => {
   const ok = String(actual) === String(expected)

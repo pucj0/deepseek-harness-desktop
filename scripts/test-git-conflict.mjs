@@ -228,6 +228,31 @@ try {
      */
     const restoreConflict = () => git(repo, ['checkout', '--merge', '--', 'shared.txt'])
 
+    // ---- 只算不写（`preview`）：界面点「用当前 / 用对方」时用它立即刷新 Result ----
+    const preview = await review('conflict-resolve', { path: 'shared.txt', resolutions: { 0: 'theirs' }, preview: true })
+    await check('preview: true 返回重组结果但**不落盘**（工作区仍带标记、索引仍未合并）', () => {
+      assert.equal(preview.status, 200, JSON.stringify(preview.body).slice(0, 200))
+      assert.equal(preview.body.preview, true)
+      assert.equal(normalized(preview.body.content), 'feature side\n')
+      assert.equal(preview.body.markedResolved, false)
+      assert.match(readRepoFile(repo, 'shared.txt'), /^<{7}/mu, '预览不该改动工作区文件')
+      assert.match(git(repo, ['status', '--porcelain=v2', '--', 'shared.txt']), /^u /mu)
+    })
+    await check('preview 不会把未决定的块算掉（未决定的块保留标记）', async () => {
+      const outcome = await review('conflict-resolve', { path: 'shared.txt', resolutions: {}, preview: true })
+      assert.equal(outcome.body.hasMarkers, true)
+      assert.match(normalized(outcome.body.content), /^<{7}/mu)
+    })
+    await check('preview 即使带上 markResolved 也不会 git add（只读这件事由宿主自己守）', async () => {
+      // 客户端在预览时不会带 markResolved；但"只算不写"不能靠客户端的自觉——一个自己都没
+      // 写过的文件被 `git add` 进去，索引里就会留下与工作区不一致的状态。
+      const outcome = await review('conflict-resolve', { path: 'shared.txt', resolutions: { 0: 'theirs' }, markResolved: true, preview: true })
+      assert.equal(outcome.status, 200, JSON.stringify(outcome.body).slice(0, 200))
+      assert.equal(outcome.body.markedResolved, false)
+      assert.match(git(repo, ['status', '--porcelain=v2', '--', 'shared.txt']), /^u /mu, '索引里必须仍是冲突')
+      assert.match(readRepoFile(repo, 'shared.txt'), /^<{7}/mu, '工作区文件不能被改动')
+    })
+
     const takeTheirs = await review('conflict-resolve', { path: 'shared.txt', resolutions: { 0: 'theirs' } })
     await check('接受对方一侧会写回文件且不再有标记', () => {
       assert.equal(takeTheirs.status, 200, JSON.stringify(takeTheirs.body).slice(0, 200))

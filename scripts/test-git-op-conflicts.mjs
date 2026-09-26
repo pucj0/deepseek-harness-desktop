@@ -474,6 +474,96 @@ try {
   })
 
   // =========================================================================
+  // 2b. 多轮变基：解决完一个提交，下一个提交**又**冲突。
+  //
+  // 这是「继续」最容易做错的地方：`rebase --continue` 成功并不等于变基结束——git 会接着
+  // 重放下一个提交，可能再次停下。界面必须据新的冲突状态继续进入下一批，而不是宣布完成。
+  // =========================================================================
+  console.log('')
+  console.log('=== 2b. 多轮变基冲突（继续之后再次冲突） ===')
+  const multiRepo = createRepo('rebase-multi-repo')
+  // 两个文件改动点：main 各改 L1 / L2 一次；feature 也各改一次 —— 于是 feature 的两个提交
+  // 各自都会与 main 冲突（一次一轮）。
+  writeRepoFile(multiRepo, 'shared.txt', 'one\ntwo\n')
+  commitAll(multiRepo, 'two lines')
+  git(multiRepo, ['switch', '-c', 'feature/long'])
+  writeRepoFile(multiRepo, 'shared.txt', 'one-feature\ntwo\n')
+  commitAll(multiRepo, 'feature L1')
+  writeRepoFile(multiRepo, 'shared.txt', 'one-feature\ntwo-feature\n')
+  commitAll(multiRepo, 'feature L2')
+  const multiSource = revParse(multiRepo, 'HEAD')
+  git(multiRepo, ['switch', 'main'])
+  writeRepoFile(multiRepo, 'shared.txt', 'one-main\ntwo\n')
+  commitAll(multiRepo, 'main L1')
+  writeRepoFile(multiRepo, 'shared.txt', 'one-main\ntwo-main\n')
+  commitAll(multiRepo, 'main L2')
+  const multiOnto = revParse(multiRepo, 'HEAD')
+  git(multiRepo, ['switch', 'feature/long'])
+  registerWorkspace(multiRepo)
+
+  await withServer(multiRepo, async ({ gitbar, review }) => {
+    const start = await gitbar('branch/rebase', { onto: 'main' })
+    await check('2b.1) 第一轮冲突：第一个提交与 main 冲突', async () => {
+      assert.equal(start.status, 409, JSON.stringify(start.body).slice(0, 200))
+      assert.equal(start.body.code, 'rebaseConflict')
+      const status = await gitbar('status', {})
+      assert.equal(status.body.operation?.type, 'rebase')
+      assert.equal(status.body.conflictCount, 1)
+    })
+    const firstConflict = await review('conflict', { path: 'shared.txt' })
+    await check('2b.2) 第一轮冲突块来自第一个提交的改动（ours 是 main 的尖端）', () => {
+      assert.equal(firstConflict.body.blockCount, 1)
+      assert.equal(stage(multiRepo, 2, 'shared.txt'), 'one-main\ntwo-main\n')
+      assert.equal(stage(multiRepo, 3, 'shared.txt'), 'one-feature\ntwo\n')
+    })
+
+    // 第一轮手工解决成"取第一个提交的 L1、保留 main 的 L2"——这正是用户会做的事，也保证
+    // 第二个提交（改 L2）在下一轮**仍然**冲突。
+    await review('conflict-resolve', { path: 'shared.txt', content: 'one-feature\ntwo-main\n', markResolved: true })
+    const firstContinue = await gitbar('op/continue', {})
+    await check('2b.3) 继续之后**仍然**是变基中，并且再次报出冲突（不是"操作已完成"）', async () => {
+      assert.equal(firstContinue.status, 200, JSON.stringify(firstContinue.body).slice(0, 200))
+      // 宿主必须把"继续之后又停在下一次冲突"当成**前进**而不是失败：`rebase --continue`
+      // 在这里是以非零退出的（第二个提交又冲突），但磁盘上已经完成第一个提交的重放。
+      assert.equal(firstContinue.body.stoppedAtNextConflict, true, '宿主要说明这是下一轮冲突而不是失败')
+      assert.equal(firstContinue.body.conflicts, 1)
+      const status = await gitbar('status', {})
+      assert.equal(status.body.operation?.type, 'rebase')
+      assert.equal(status.body.conflictCount, 1, '第二个提交应当再次冲突')
+      assert.deepEqual(status.body.conflicts.map((entry) => entry.path), ['shared.txt'])
+    })
+    const secondConflict = await review('conflict', { path: 'shared.txt' })
+    await check('2b.4) 第二轮冲突块来自第二个提交的改动，且第一轮的结果已经生效', () => {
+      assert.equal(secondConflict.body.blockCount, 1)
+      // 第二轮：ours = 刚重放完的第一个提交（含手工解决的结果），theirs = 第二个提交。
+      assert.equal(stage(multiRepo, 2, 'shared.txt'), 'one-feature\ntwo-main\n')
+      assert.equal(stage(multiRepo, 3, 'shared.txt'), 'one-feature\ntwo-feature\n')
+    })
+
+    await review('conflict-resolve', { path: 'shared.txt', resolutions: { 0: 'theirs' }, markResolved: true })
+    const secondContinue = await gitbar('op/continue', {})
+    await check('2b.5) 第二轮继续之后变基真正结束', async () => {
+      assert.equal(secondContinue.status, 200, JSON.stringify(secondContinue.body).slice(0, 200))
+      const status = await gitbar('status', {})
+      assert.equal(status.body.operation, null)
+      assert.equal(status.body.conflictCount, 0)
+      assert.equal(porcelain(multiRepo), '')
+    })
+    await check('2b.6) 两个提交都被重放：历史线性、内容正确、无合并提交', () => {
+      // initial + "two lines" + main×2 + feature×2：两个 feature 提交都落在 main 之上，
+      // 而且**一个合并提交都没有**（变基不是合并）。
+      assert.equal(git(multiRepo, ['rev-list', '--count', 'HEAD']).trim(), '6', 'initial + two lines + main×2 + feature×2')
+      assert.equal(git(multiRepo, ['rev-list', '--merges', 'HEAD']).trim(), '')
+      assert.equal(git(multiRepo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'feature/long')
+      assert.equal(subject(multiRepo), 'feature L2')
+      assert.equal(subject(multiRepo, 'HEAD^'), 'feature L1')
+      assert.equal(git(multiRepo, ['rev-parse', 'HEAD^^']).trim(), multiOnto, '两个提交都落在 main 之上')
+      assert.notEqual(revParse(multiRepo, 'HEAD'), multiSource)
+      assert.equal(readRepoFile(multiRepo, 'shared.txt'), 'one-feature\ntwo-feature\n')
+    })
+  })
+
+  // =========================================================================
   // 3. Cherry-pick conflict.
   // =========================================================================
   console.log('')
