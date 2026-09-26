@@ -27,7 +27,13 @@ const han = (text.match(/[\u4e00-\u9fff]/gu) ?? []).length
 console.log(`  行数 ${lines.length}，中文字符 ${han}`)
 // 中文占比只对中文版有意义——英文版里出现中文是正常的（命令输出、引用等）。
 if (language === 'zh') report(han > 2000, '中文内容充足')
-report(lines.length > 300, '篇幅足够')
+// 行数下限是"这份文档不是个占位符"的下界，不是"越详细越好"的目标。
+//
+// 这里曾经是 300 行，对应的是 1.5.8 之前那份 800+ 行的长文档。1.5.9 起两份 README 被
+// 有意精简为 180 行左右（统一项目名、重组章节、去掉与实现细节重复的部分），继续拿 300
+// 行去卡只会让"通过"变成一件与文档质量无关的事。真正要挡的是把 README 删成一张空壳，
+// 因此下限收到 150 行；章节完整性与链接有效性仍然逐条校验。
+report(lines.length > 150, '篇幅足够')
 
 // ---- 2. 章节结构 ------------------------------------------------------------
 const headings = lines.filter((line) => /^#{2,3} /u.test(line)).map((line) => line.replace(/^#+\s*/u, '').trim())
@@ -36,8 +42,8 @@ console.log(`  章节（二级/三级）${headings.length} 个`)
 // 一份介绍性 README 应当覆盖这些方面。中英两版各自的章节名不同，因此按语言分组。
 // 用法：`node scripts/check-readme.mjs README.en.md` 会自动按文件名选英文那组。
 const REQUIRED = {
-  zh: ['这是什么', '下载安装', '架构', '二次开发', '打包与发布', '项目结构', '已知限制', '故障排查', '许可证'],
-  en: ['features', 'download', 'architecture', 'building', 'versioning', 'layout', 'limitations', 'troubleshooting', 'license'],
+  zh: ['为什么需要桌面版', '下载安装', '架构', '开发与测试', '发布', '项目结构', '已知限制', '许可证'],
+  en: ['why a desktop client', 'download', 'architecture', 'development and testing', 'releases', 'project structure', 'known limitations', 'license'],
 }
 for (const topic of REQUIRED[language]) {
   report(
