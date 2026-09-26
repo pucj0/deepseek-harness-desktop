@@ -10,7 +10,7 @@ It packages the official `@deepseek-ai/dsh` runtime, a portable Node.js runtime,
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-Repository version: **1.5.9**. See [release notes](RELEASE_NOTES.md) for the version history.
+Repository version: **1.6.0**. See [release notes](RELEASE_NOTES.md) for the version history.
 
 ## Why a desktop client?
 

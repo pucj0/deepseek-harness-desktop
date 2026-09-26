@@ -10,7 +10,7 @@ DeepSeek Harness Desktop 是 [DeepSeek Harness (`dsh`)](https://github.com/deeps
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-当前仓库版本：**1.5.9**。详细变更见 [发布记录](RELEASE_NOTES.md)。
+当前仓库版本：**1.6.0**。详细变更见 [发布记录](RELEASE_NOTES.md)。
 
 ## 为什么需要桌面版
 
