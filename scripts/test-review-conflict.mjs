@@ -467,6 +467,45 @@ await check('还有冲突文件时「继续」被禁用（先解决再继续）'
   assert.equal(button.props.disabled, true)
 })
 
+// 摘取与还原也必须各自给出正确的按钮文案：它们的继续命令都不是 merge 的"提交合并"。
+// （宿主侧的四种操作语义由 `test-git-op-conflicts.mjs` 用真实仓库钉住，这里只钉界面文案
+// 与发给宿主的 kind —— 两者必须一致，否则界面会调错命令。）
+const cherryPickSnapshot = { ...snapshotWith([conflictedEntry]), operationType: 'cherry-pick' }
+nodes = await rerender(cherryPickSnapshot)
+await check('摘取时按钮文案换成"继续摘取/中止摘取"', () => {
+  const labels = JSON.stringify(findAll(nodes, 'data-conflict-op-actions').map((node) => node.props.children))
+  assert.match(labels, /conflictContinueCherryPick/u)
+  assert.match(labels, /conflictAbortCherryPick/u)
+})
+await check('摘取的操作类型也显示在面板上', () => {
+  assert.equal(find(nodes, 'data-conflict-operation')?.props['data-conflict-operation'], 'cherry-pick')
+})
+writes.length = 0
+click(find(nodes, 'data-conflict-abort'))
+await rerender(cherryPickSnapshot)
+await check('摘取的中止带 kind=cherry-pick', () => {
+  const write = writes.find((entry) => entry.route === 'gitbar')
+  assert.ok(write !== undefined, 'no gitbar request')
+  assert.match(write.url, /\/dsh-desktop\/gitbar\/op\/abort/u)
+  assert.deepEqual(write.body, { kind: 'cherry-pick' })
+})
+
+const revertSnapshot = { ...snapshotWith([conflictedEntry]), operationType: 'revert' }
+nodes = await rerender(revertSnapshot)
+await check('还原时按钮文案换成"继续还原/中止还原"', () => {
+  const labels = JSON.stringify(findAll(nodes, 'data-conflict-op-actions').map((node) => node.props.children))
+  assert.match(labels, /conflictContinueRevert/u)
+  assert.match(labels, /conflictAbortRevert/u)
+})
+writes.length = 0
+click(find(nodes, 'data-conflict-abort'))
+await rerender(revertSnapshot)
+await check('还原的中止带 kind=revert', () => {
+  const write = writes.find((entry) => entry.route === 'gitbar')
+  assert.ok(write !== undefined, 'no gitbar request')
+  assert.deepEqual(write.body, { kind: 'revert' })
+})
+
 console.log('')
 console.log('=== 6. leftover markers are surfaced as a translated code ===')
 writeError = { payload: { error: 'conflict markers remain', code: 'markersRemain', detail: '1' } }

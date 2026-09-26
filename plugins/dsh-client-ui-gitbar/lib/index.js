@@ -72,6 +72,14 @@ const REVISION_PATTERN = /^[0-9a-f]{4,40}$/u
 const GIT_TIMEOUT_MS = 8000
 
 /**
+ * `for-each-ref --format` 里两列之间的分隔符（见 `describeRevision`）。
+ *
+ * 用制表符是安全的：`git check-ref-format` 禁止 refname 里出现任何 ASCII 控制字符
+ * （制表符在其中），因此它不可能与 refname 本身冲突。
+ */
+const REF_FIELD_SEPARATOR = '\t'
+
+/**
  * 仓库探测（一次 `rev-parse`，同时取工作树顶层与 git 目录）的超时。
  *
  * 它只回答"这个目录属于哪个仓库"，正常在毫秒级返回；给 5 秒是为了让异常快速失败，
@@ -270,20 +278,47 @@ function readMarkerLine(gitDir, relative) {
  * 正是被合并分支的尖端）；查不到（合并一个已被移动的分支、或直接合并某个提交）就退回
  * 短 SHA + 提交标题，仍然比裸 SHA 清楚。
  *
+ * **类型只按 ref namespace 判断，绝不用"名字里有没有 `/`"。** 那个判断两个方向都会错：
+ *   * `feature/login`、`bugfix/foo` 都是**合法且常见**的本地分支名，含 `/` 却被当成远端；
+ *   * `refs/remotes/origin/HEAD` 的短名恰好是 `origin`（**不含** `/`），于是"取第一个不含
+ *     `/` 的名字"会选中远端符号引用。
+ * 实测（本仓库的回归测试钉住）：本地 `feature/foo` 与远端 `origin/HEAD` 同时指向一个提交
+ * 时，旧写法返回的是 `origin`。
+ *
+ * 因此这里拿**完整 refname** 分类（`refs/heads/*` = 本地分支，`refs/remotes/*` = 远端
+ * 跟踪分支），显示名仍用 git 自己的 `%(refname:short)`（`origin/feature/login`，而不是
+ * 带 namespace 的完整名字）。
+ *
  * @param cwd - 仓库根。
- * @param revision - 版本号（如 `MERGE_HEAD`、`HEAD`）。
+ * @param revision - 版本号（如 `MERGE_HEAD`、`CHERRY_PICK_HEAD`、`REVERT_HEAD`、`HEAD`）。
  * @returns 展示用标签。
  */
 async function describeRevision(cwd, revision) {
   try {
-    const names = (await git(['for-each-ref', '--format=%(refname:short)', `--points-at=${revision}`, 'refs/heads', 'refs/remotes'], cwd))
+    const rows = (await git(
+      ['for-each-ref', `--format=%(refname)${REF_FIELD_SEPARATOR}%(refname:short)`, `--points-at=${revision}`, 'refs/heads', 'refs/remotes'],
+      cwd,
+    ))
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '')
-    // 本地分支优先于远端跟踪分支：用户认的是 `feature/foo`，不是 `origin/feature/foo`。
-    const local = names.find((name) => !name.includes('/'))
-    if (local !== undefined) return local
-    if (names.length > 0) return names[0]
+      .map((line) => {
+        const cut = line.indexOf(REF_FIELD_SEPARATOR)
+        return cut === -1
+          ? { full: line, short: line }
+          : { full: line.slice(0, cut), short: line.slice(cut + 1).trim() }
+      })
+    // 本地分支优先于远端跟踪分支：用户认的是 `feature/login`，不是 `origin/feature/login`。
+    // 多个候选时取 `for-each-ref` 的顺序（按 refname 排序），因此结果是确定的。
+    const locals = rows.filter((row) => row.full.startsWith('refs/heads/'))
+    if (locals.length > 0) return locals[0].short
+    const remotes = rows.filter((row) => row.full.startsWith('refs/remotes/'))
+    if (remotes.length > 0) {
+      // `refs/remotes/origin/HEAD` 是**符号引用**，短名是 `origin`：只有当它是唯一指向这个
+      // 提交的远端引用时才用它，否则优先更具体的 `origin/<branch>`。
+      const concrete = remotes.find((row) => !row.full.endsWith('/HEAD'))
+      return (concrete ?? remotes[0]).short
+    }
   } catch {
     // 继续用短 SHA。
   }

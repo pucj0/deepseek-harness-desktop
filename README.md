@@ -155,12 +155,13 @@ npm run dev
 npm run typecheck
 npm run test:i18n
 npm run test:startup
+npm run test:git
 npm run dist:win
 npm run dist:linux
 npm run dist:mac
 ```
 
-打包需在对应平台执行。`scripts/` 还包含 Git 分支、仓库发现、改动审查、暂存与提交、插件同步、运行时准备及 Electron/CDP 冒烟测试；涉及真实窗口的测试需要图形环境。
+打包需在对应平台执行。`npm run test:git` 依次跑 Git 工作流的全部回归测试：冲突（合并 / 变基 / 摘取 / 还原，真实临时仓库）、端到端发布流程、分支条交互与源面板、改动审查的冲突界面与暂存区。`scripts/` 还包含 Git 分支、仓库发现、改动审查、暂存与提交、插件同步、运行时准备及 Electron/CDP 冒烟测试；涉及真实窗口的测试需要图形环境。
 
 ## 发布
 

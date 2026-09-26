@@ -155,12 +155,13 @@ npm run dev
 npm run typecheck
 npm run test:i18n
 npm run test:startup
+npm run test:git
 npm run dist:win
 npm run dist:linux
 npm run dist:mac
 ```
 
-Build each package on its target platform. `scripts/` also contains tests for Git branches, repository discovery, change review, staging and commits, plugin sync, runtime staging, and Electron/CDP smoke runs. Tests that drive a real window need a graphical session.
+Build each package on its target platform. `npm run test:git` runs the whole Git workflow regression chain: conflicts (merge, rebase, cherry-pick and revert, all on real temporary repositories), the end-to-end publish flow, the branch toolbar and its source panel, and the review drawer's conflict UI and staging area. `scripts/` also contains tests for Git branches, repository discovery, change review, staging and commits, plugin sync, runtime staging, and Electron/CDP smoke runs. Tests that drive a real window need a graphical session.
 
 ## Releases
 
