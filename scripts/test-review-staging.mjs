@@ -319,15 +319,42 @@ const FILE_HISTORY = {
   ],
 }
 
+/**
+ * gitbar 侧两个跨插件读写的夹具。
+ *
+ * 储藏列表由 gitbar 拥有，本插件的面板会跨插件问它一次——这套用例与储藏无关，但**必须**
+ * 在这里接住：否则下面按 `/review/` 切路由的逻辑会切出一个乱七八糟的 route，然后把它当成
+ * "写操作"记进 `posts`，而那些按 posts 计数的断言（例如"加入 git 之后又重取了未跟踪根层"）
+ * 就会失真。`head-commit` 则是 amend / 撤销提交要读的 HEAD 信息（含"是否已发布"）。
+ */
+let headCommit = {
+  isRepo: true,
+  hasCommits: true,
+  branch: 'main',
+  upstream: '',
+  published: false,
+  head: {
+    sha: 'a'.repeat(40),
+    short: 'aaaaaaa',
+    subject: 'Fix login bug',
+    message: 'Fix login bug',
+    author: 'tester',
+    email: 't@example.com',
+    date: '2026-01-01T10:00:00+08:00',
+    parents: ['b'.repeat(40)],
+  },
+}
+
 const fetchBase = async (url, init) => {
   const target = String(url)
-  // 储藏（stash）由 **gitbar** 宿主拥有，因此本插件的面板会跨插件问它一次列表。这套用例
-  // 与储藏无关，但**必须**在这里把它接住：否则下面按 `/review/` 切路由的逻辑会切出一个
-  // 乱七八糟的 route，然后把它当成"写操作"记进 `posts`——而那些按 posts 计数的断言
-  // （例如"加入 git 之后又重取了未跟踪根层"）就会失真。
   if (target.includes('/dsh-desktop/gitbar/')) {
-    requests.push({ route: `gitbar:${target.split('/dsh-desktop/gitbar/')[1]?.split('?')[0] ?? ''}`, body: undefined, url: target })
-    return { ok: true, text: async () => JSON.stringify({ isRepo: true, stashes: [], stashCount: 0 }) }
+    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
+    // gitbar 的写路由（reset）也要**留下请求体**：撤销提交/重置的断言看的就是它发了什么。
+    requests.push({ route: `gitbar:${gitbarRoute}`, body: init?.body === undefined ? undefined : JSON.parse(init.body), url: target })
+    if (gitbarRoute === 'stash/list') return { ok: true, text: async () => JSON.stringify({ isRepo: true, stashes: [], stashCount: 0 }) }
+    // 「修改最后一次提交」与「撤销最后一次提交」都要先读 HEAD 的完整信息（信息 + 是否已发布）。
+    if (gitbarRoute === 'head-commit') return { ok: true, text: async () => JSON.stringify(headCommit) }
+    return { ok: true, text: async () => JSON.stringify({ isRepo: true, reset: { mode: 'soft', previousHead: { sha: 'a'.repeat(40), short: 'aaaaaaa' } } }) }
   }
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
@@ -1617,6 +1644,121 @@ console.log('=== 17. 提交区：默认 8 行 + 顶部可拖 + 持久化（实�
 
   window.localStorage = realLocalStorage
   window.PointerEvent = realPointerEvent
+}
+
+console.log('')
+console.log('=== 19. 修改最后一次提交（amend）与撤销最后一次提交 ===')
+{
+  /**
+   * 这两条都是**历史操作**，因此断言的重点是"信息从哪来、请求发什么"：
+   *   * amend 开启时去宿主读 HEAD 的完整信息并填进输入框，同时拿到"是否已发布"；
+   *   * 已发布的提交要**确认一次**（需求允许，但只一次）；未发布的直接执行；
+   *   * 撤销提交 = `reset --soft <父提交>`，并且把提交信息填回输入框。
+   */
+  const messageBox = () => find('data-staging-message')
+  /** 触发受控输入框的 onChange。 */
+  const typeMessage = async (value) => {
+    messageBox()?.props?.onChange({ target: { value } })
+    await settle()
+  }
+  /** 切换「修改最后一次提交」（受控 checkbox 的 onChange）。 */
+  const toggleAmend = async (next) => {
+    find('data-staging-amend')?.props?.onChange({ target: { checked: next } })
+    await settle()
+  }
+
+  await mount()
+  const amendBox = find('data-staging-amend')
+  checkTrue('19) 提交区有「修改最后一次提交」开关', amendBox !== null)
+  check('   默认关闭', amendBox?.props?.['data-staging-amend-state'], 'off')
+  checkTrue('   也有「撤销最后一次提交」', find('data-staging-undo-commit') !== null)
+
+  // ---- A. 打开 amend：自动读取 HEAD 的信息 ----
+  requests.length = 0
+  headCommit = { ...headCommit, published: false, upstream: '', head: { ...headCommit.head, message: 'Fix login bug\n\n详细说明' } }
+  await toggleAmend(true)
+  check('   去宿主读了 HEAD', requests.filter((entry) => entry.route === 'gitbar:head-commit').length, 1)
+  check('   提交信息被自动填入', messageBox()?.props?.value, 'Fix login bug\n\n详细说明')
+  check('   开关状态是开', find('data-staging-amend')?.props?.['data-staging-amend-state'], 'on')
+  check('   横幅说明在改哪一条', String(find('data-staging-amend-banner')?.props?.['data-staging-amend-banner']), 'a'.repeat(40))
+  checkTrue('   横幅带标题（文案键，本文件的 t 不做插值）', textOf(find('data-staging-amend-banner')).includes('amendBanner'))
+  check('   未发布时不出现警告', find('data-staging-amend-published'), null)
+
+  // ---- B. 未发布：点提交就是 amend（不再多问一次） ----
+  posts.length = 0
+  await click(find('data-staging-commit'))
+  const amendCall = posts.filter((entry) => entry.route === 'commit').pop()
+  check('   发到 review 的 commit', amendCall !== undefined, true)
+  check('   带 amend 标记', amendCall?.body?.amend, true)
+  check('   带当前输入框里的信息', amendCall?.body?.message, 'Fix login bug\n\n详细说明')
+  checkTrue('   未发布时没有确认框', find('data-staging-amend-dialog') === null)
+  checkTrue('   成功后提示"已修改"', textOf(find('data-staging-notice')).includes('amendedNotice'))
+  check('   成功后开关复位', find('data-staging-amend')?.props?.['data-staging-amend-state'], 'off')
+
+  // ---- C. 关掉开关要把用户原来的草稿还回来 ----
+  await typeMessage('我的草稿')
+  await toggleAmend(true)
+  check('   开启后被 HEAD 的信息替换', messageBox()?.props?.value, 'Fix login bug\n\n详细说明')
+  await toggleAmend(false)
+  check('   关闭后草稿回来了', messageBox()?.props?.value, '我的草稿')
+
+  // ---- D. 已发布：必须确认一次（而且只有一次） ----
+  headCommit = { ...headCommit, published: true, upstream: 'origin/main' }
+  await toggleAmend(true)
+  check('   已发布时横幅给出警告', String(find('data-staging-amend-published')?.props?.['data-staging-amend-published']), 'origin/main')
+  posts.length = 0
+  await click(find('data-staging-commit'))
+  check('   未确认前不发 amend', posts.filter((entry) => entry.route === 'commit').length, 0)
+  const dialog = find('data-staging-amend-dialog', 'origin/main')
+  checkTrue('   弹出确认框', dialog !== null)
+  checkTrue('   正文说明会改写已发布历史', textOf(dialog).includes('amendConfirmBody'))
+  checkTrue('   并说明之后只能 force-with-lease', textOf(dialog).includes('amendConfirmForceHint'))
+  posts.length = 0
+  await click(find('data-staging-amend-confirm'))
+  const confirmed = posts.filter((entry) => entry.route === 'commit').pop()
+  check('   确认后才发 amend', confirmed?.body?.amend, true)
+  checkTrue('   提示变成"已修改"', textOf(find('data-staging-notice')).includes('amendedNotice'))
+
+  // ---- E. 取消：什么都不发 ----
+  await toggleAmend(true)
+  posts.length = 0
+  await click(find('data-staging-commit'))
+  await click(find('data-staging-amend-cancel'))
+  check('   取消后不发任何提交', posts.filter((entry) => entry.route === 'commit').length, 0)
+  checkTrue('   确认框已关闭', find('data-staging-amend-dialog') === null)
+  await toggleAmend(false)
+
+  // ---- F. 宿主说"没什么可改的"：错误短句要落在提交区 ----
+  // 先回到"未发布"：已发布的提交点提交会先弹确认框（上一节刚验证过），这里的重点是错误映射。
+  headCommit = { ...headCommit, published: false, upstream: '' }
+  writeError = { error: 'nothing to amend', code: 'nothingToAmend', detail: 'nothing changed' }
+  await toggleAmend(true)
+  await click(find('data-staging-commit'))
+  check('   显示专门短句', find('data-staging-error')?.props?.['data-staging-error'], 'nothingToAmend')
+  checkTrue('   提示是可读的键名', textOf(find('data-staging-error')).includes('error_nothingToAmend'))
+  writeError = null
+  await toggleAmend(false)
+
+  // ---- G. 撤销最后一次提交：soft reset 到父提交，信息填回输入框 ----
+  requests.length = 0
+  headCommit = { ...headCommit, head: { ...headCommit.head, subject: '刚提交的东西', message: '刚提交的东西' } }
+  await click(find('data-staging-undo-commit'))
+  const resetCall = requests.filter((entry) => entry.route === 'gitbar:reset').pop()
+  check('   走 gitbar 的 reset', resetCall !== undefined, true)
+  check('   模式是 soft（绝不是 hard）', resetCall?.body?.mode, 'soft')
+  check('   目标是 HEAD 的父提交', resetCall?.body?.revision, 'b'.repeat(40))
+  check('   不带破坏性确认', resetCall?.body?.acknowledgeDestructive, undefined)
+  check('   提交信息被填回输入框', messageBox()?.props?.value, '刚提交的东西')
+  checkTrue('   提示说明改动仍在暂存区', textOf(find('data-staging-notice')).includes('undoneNotice'))
+
+  // ---- H. 第一个提交（没有父提交）：走 root 那条路 ----
+  headCommit = { ...headCommit, head: { ...headCommit.head, parents: [], subject: 'initial', message: 'initial' } }
+  requests.length = 0
+  await click(find('data-staging-undo-commit'))
+  const rootCall = requests.filter((entry) => entry.route === 'gitbar:reset').pop()
+  check('   root 撤销带 root 标记', rootCall?.body?.root, true)
+  check('   而且仍然带 mode=soft', rootCall?.body?.mode, 'soft')
+  check('   不带 revision（没有父提交可指向）', rootCall?.body?.revision, undefined)
 }
 
 console.log('')

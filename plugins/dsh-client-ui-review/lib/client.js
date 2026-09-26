@@ -955,6 +955,66 @@ window.__ModuleLoader__.load({
       error_unmerged: '还有未解决的冲突：先解决它们，再储藏或应用。',
       error_nothingToStash: '工作区没有可储藏的改动。',
       error_invalidStashMessage: '储藏消息不合法，已拒绝。',
+      // ---- 修改最后一次提交（amend）与重置（reset）----
+      //
+      // 这两件事都在**改写当前分支的位置**，因此文案必须把"改动会去哪"说清楚；分支名、
+      // 提交标题、SHA 一律原样显示（它们是用户自己的数据）。
+      amendToggle: '修改最后一次提交',
+      amendToggleHint: '用当前的提交信息与已暂存内容替换 HEAD（更早的历史不动）',
+      amendLoading: '正在读取最后一次提交…',
+      amendBanner: '将修改 {short} · {subject}',
+      amendWillInclude: '已暂存的改动会一并进入这次修改',
+      amendHelp: '「修改」只替换最后一次提交：可以只改信息、只加入已暂存的内容，或两者一起。',
+      amendPublished: '这个提交已经推送到 {upstream}：修改会**改写已发布的历史**。',
+      amendPublishedShort: '已发布历史将被改写',
+      amendCommit: '修改提交',
+      amendAndPush: '修改并推送',
+      amendConfirmTitle: '修改已发布的提交',
+      amendConfirmBody: '这个提交已经在上游（{upstream}）上，修改它等于改写已发布的历史。不会阻止你这么做，但之后推送需要强制推送。',
+      amendConfirmForceHint: '之后的推送仍由「强制推送」负责，并且只使用 --force-with-lease（不会用裸 --force 覆盖别人的提交）。',
+      amendConfirmButton: '修改提交',
+      amendedNotice: '已修改最后一次提交：{subject}',
+      amendedPushedNotice: '已修改并推送：{subject}',
+      undoCommit: '撤销最后一次提交',
+      undoCommitHint: '把 HEAD 退回上一个提交，改动保留在暂存区（reset --soft HEAD~1）',
+      undoCommitRootHint: '这是第一个提交：撤销后它从历史里去掉，文件仍留在暂存区',
+      undoBusy: '正在撤销…',
+      undoneNotice: '已撤销提交「{subject}」，它的改动仍在暂存区，提交信息已填回输入框',
+      commitPushRejectedNotice: '已提交，但推送被拒绝（远端有你没有的提交）。改写过的提交需要强制推送：在 Git 面板里用「强制推送」--force-with-lease。（{detail}）',
+      error_noCommitToAmend: '这个仓库还没有任何提交可以修改。',
+      error_nothingToAmend: '提交信息与已暂存内容都没有变化，没有什么可修改的。',
+      error_noSuchRevision: '这个提交在当前仓库里不存在（可能已经被改写或删除）。',
+      error_invalidResetMode: '重置方式不合法，已拒绝。',
+      error_destructiveNotAcknowledged: '这是一次破坏性重置，需要先确认。',
+      error_unsupportedReset: '不支持"硬重置到空仓库"（git 自己也没有这条命令）。',
+      error_resetFailed: '重置失败。',
+      // ---- 重置（提交图里的「把当前分支重置到这里」）----
+      resetMenuTitle: '当前分支重置到这里…',
+      resetTitle: '把当前分支重置到 {short}',
+      resetPreviewCurrent: '当前 HEAD',
+      resetPreviewTarget: '目标提交',
+      resetPreviewAffected: '影响 {count} 个提交',
+      resetPreviewForward: '目标比 HEAD 新 {count} 个提交（重置会向前移动）',
+      resetPreviewRoot: '第一个提交之前（历史清空）',
+      resetModeSoft: 'Soft',
+      resetModeMixed: 'Mixed',
+      resetModeHard: 'Hard',
+      resetEffectSoft: '移动 HEAD，保留修改，改动保持**已暂存**（reset --soft）',
+      resetEffectMixed: '移动 HEAD，保留工作区修改，取消暂存（reset --mixed）',
+      resetEffectHard: '移动 HEAD，**丢弃**已跟踪文件的本地修改，取消暂存（reset --hard）。未跟踪文件会保留。',
+      resetHardWarning: '这会丢弃当前本地修改，且可能无法恢复。',
+      resetPublishedWarning: 'HEAD 已经推送到 {upstream}：重置会让本地分支与远端分叉，之后推送需要强制推送。',
+      resetConfirm: '重置',
+      resetConfirmHard: 'Reset Hard',
+      resetBusy: '正在重置…',
+      resetDoneSoft: '已 soft 重置到 {short}（改动保持已暂存）',
+      resetDoneMixed: '已 mixed 重置到 {short}（改动保留在工作区，未暂存）',
+      resetDoneHard: '已 hard 重置到 {short}（本地修改已丢弃）',
+      resetDoneRootSoft: '已撤销第一个提交（文件仍在暂存区）',
+      resetDoneRootMixed: '已撤销第一个提交（文件保留在工作区，未暂存）',
+      resetUndo: '撤销这次重置（回到 {short}）',
+      resetUndoHint: '把分支移回重置之前的位置。hard 重置丢弃的工作区修改无法由 git 找回。',
+      resetUndone: '已回到 {short}',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
@@ -1287,6 +1347,63 @@ window.__ModuleLoader__.load({
       error_unmerged: 'There are still unresolved conflicts: resolve them before stashing or applying.',
       error_nothingToStash: 'There is nothing to stash in the working tree.',
       error_invalidStashMessage: 'That stash message is not valid.',
+      // ---- Amend + reset ----
+      amendToggle: 'Amend last commit',
+      amendToggleHint: 'Replace HEAD using the current message and staged content (older history is untouched)',
+      amendLoading: 'Reading the last commit…',
+      amendBanner: 'Amending {short} · {subject}',
+      amendWillInclude: 'Staged changes will be included in this amend',
+      amendHelp: '"Amend" replaces the last commit only: the message, the staged content, or both.',
+      amendPublished: 'This commit is already on {upstream}: amending **rewrites published history**.',
+      amendPublishedShort: 'published history will be rewritten',
+      amendCommit: 'Amend commit',
+      amendAndPush: 'Amend and push',
+      amendConfirmTitle: 'Amend a published commit',
+      amendConfirmBody: 'This commit is already on the upstream ({upstream}), so amending it rewrites published history. This is allowed, but pushing afterwards will need a force push.',
+      amendConfirmForceHint: 'Pushing stays with "Force push", which only ever uses --force-with-lease (never a bare --force that would overwrite someone else\'s work).',
+      amendConfirmButton: 'Amend commit',
+      amendedNotice: 'Amended the last commit: {subject}',
+      amendedPushedNotice: 'Amended and pushed: {subject}',
+      undoCommit: 'Undo last commit',
+      undoCommitHint: 'Move HEAD back one commit and keep the changes staged (reset --soft HEAD~1)',
+      undoCommitRootHint: 'This is the first commit: undoing it removes it from history and keeps the files staged',
+      undoBusy: 'Undoing…',
+      undoneNotice: 'Undid commit "{subject}"; its changes are still staged and the message is back in the box',
+      commitPushRejectedNotice: 'Committed, but the push was rejected (the remote has commits you do not have). A rewritten commit needs a force push: use "Force push" in the Git panel (--force-with-lease). ({detail})',
+      error_noCommitToAmend: 'This repository has no commit to amend yet.',
+      error_nothingToAmend: 'Neither the message nor the staged content changed, so there is nothing to amend.',
+      error_noSuchRevision: 'That commit does not exist in this repository (it may have been rewritten or removed).',
+      error_invalidResetMode: 'That reset mode is not valid.',
+      error_destructiveNotAcknowledged: 'This is a destructive reset and needs to be confirmed first.',
+      error_unsupportedReset: 'A hard reset to an empty history is not supported (git has no such command either).',
+      error_resetFailed: 'Reset failed.',
+      // ---- Reset (from the commit graph) ----
+      resetMenuTitle: 'Reset Current Branch to Here…',
+      resetTitle: 'Reset the current branch to {short}',
+      resetPreviewCurrent: 'Current HEAD',
+      resetPreviewTarget: 'Target',
+      resetPreviewAffected: 'Commits affected: {count}',
+      resetPreviewForward: 'The target is {count} commit(s) ahead of HEAD (this reset moves forward)',
+      resetPreviewRoot: 'Before the first commit (history becomes empty)',
+      resetModeSoft: 'Soft',
+      resetModeMixed: 'Mixed',
+      resetModeHard: 'Hard',
+      resetEffectSoft: 'Move HEAD, keep the changes, and keep them **staged** (reset --soft)',
+      resetEffectMixed: 'Move HEAD, keep the working tree, and unstage the changes (reset --mixed)',
+      resetEffectHard: 'Move HEAD, **discard** local changes to tracked files, and unstage (reset --hard). Untracked files are kept.',
+      resetHardWarning: 'This will discard local changes and they may not be recoverable.',
+      resetPublishedWarning: 'HEAD is already on {upstream}: resetting diverges the local branch from the remote, so pushing afterwards will need a force push.',
+      resetConfirm: 'Reset',
+      resetConfirmHard: 'Reset Hard',
+      resetBusy: 'Resetting…',
+      resetDoneSoft: 'Soft-reset to {short} (changes stay staged)',
+      resetDoneMixed: 'Mixed-reset to {short} (changes stay in the working tree, unstaged)',
+      resetDoneHard: 'Hard-reset to {short} (local changes were discarded)',
+      resetDoneRootSoft: 'Removed the first commit (the files are still staged)',
+      resetDoneRootMixed: 'Removed the first commit (the files stay in the working tree, unstaged)',
+      resetUndo: 'Undo this reset (back to {short})',
+      resetUndoHint: 'Move the branch back to where it was. Working-tree changes discarded by a hard reset cannot be recovered by git.',
+      resetUndone: 'Back at {short}',
       binaryDiff: 'This file is binary; no line diff is shown.',
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
@@ -1481,6 +1598,15 @@ window.__ModuleLoader__.load({
       unmerged: 'error_unmerged',
       nothingToStash: 'error_nothingToStash',
       invalidStashMessage: 'error_invalidStashMessage',
+      // 修改提交与重置：这四个 code 都要有专门短句——"没有可修改的内容""这个提交不存在"
+      // "需要先确认破坏性操作"都是用户能就地理解的结论，折成"操作失败"只会让他反复点。
+      noCommitToAmend: 'error_noCommitToAmend',
+      nothingToAmend: 'error_nothingToAmend',
+      noSuchRevision: 'error_noSuchRevision',
+      invalidResetMode: 'error_invalidResetMode',
+      destructiveNotAcknowledged: 'error_destructiveNotAcknowledged',
+      unsupportedReset: 'error_unsupportedReset',
+      resetFailed: 'error_resetFailed',
     }
 
     /** 状态字母对应的颜色，让列表一眼能分辨增删改。 */
@@ -1772,16 +1898,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 储藏列表是**只读**的，gitbar 那条路由是 GET（与 /branches 一致）——`call` 只会发 POST。
+     * 读一次 gitbar 宿主的**只读**路由（那些是 GET）。
      *
-     * @param body - `{ workspace, repository? }`。
-     * @returns `{ stashes, stashCount }` 之类的响应体。
+     * 与 `callGitbarRoute` 分开是因为 gitbar 的读接口是 GET（与 `/branches` 一致），
+     * 而 `call` 只会发 POST——用 POST 打一条 GET 路由会拿到 404，排查起来像"路由不存在"。
+     *
+     * @param route - `head-commit` 之类的路由名。
+     * @param query - `{ workspace, repository? }` 之类的查询参数。
+     * @returns 解析后的 JSON。
      */
-    async function fetchStashList(body) {
-      const params = new URLSearchParams({ cwd: String(body?.workspace ?? '') })
-      const repository = withActiveRepository(body)?.repository
+    async function callGitbarGet(route, query) {
+      const params = new URLSearchParams({ cwd: String(query?.workspace ?? '') })
+      const repository = withActiveRepository(query)?.repository
       if (typeof repository === 'string' && repository !== '') params.set('repository', repository)
-      const response = await fetch(`${GITBAR_API}/stash/list?${params.toString()}`, {
+      for (const [key, value] of Object.entries(query ?? {})) {
+        if (key === 'workspace' || key === 'repository') continue
+        params.set(key, String(value))
+      }
+      const response = await fetch(`${GITBAR_API}/${route}?${params.toString()}`, {
         method: 'GET',
         credentials: 'same-origin',
         headers: { accept: 'application/json' },
@@ -1796,10 +1930,21 @@ window.__ModuleLoader__.load({
       if (!response.ok) {
         const error = new Error(payload?.error ?? `HTTP ${response.status}`)
         if (typeof payload?.code === 'string') error.code = payload.code
+        if (typeof payload?.detail === 'string') error.detail = payload.detail
         error.payload = payload
         throw error
       }
       return payload
+    }
+
+    /**
+     * 储藏列表是**只读**的，gitbar 那条路由是 GET（与 /branches 一致）——`call` 只会发 POST。
+     *
+     * @param body - `{ workspace, repository? }`。
+     * @returns `{ stashes, stashCount }` 之类的响应体。
+     */
+    async function fetchStashList(body) {
+      return await callGitbarGet('stash/list', body)
     }
 
     /**
@@ -5731,7 +5876,298 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 弹窗底部按钮的统一样式（主/次两种）。 */
+    /**
+     * 「修改已发布的提交」的确认框。
+     *
+     * 只在**提交已经在上游**时出现：那一刻 amend 的后果从"改本地"变成了"改写别人已经看到
+     * 的历史"。需求明确说"不要禁止，但属于风险操作，确认一次即可"——因此这里就是那一次：
+     * 讲清后果（以及之后的推送仍然只走 `--force-with-lease`），确定按钮写"修改提交"而不是
+     * "确定"。
+     */
+    function AmendPublishDialog(props) {
+      const { t, upstream, busy, onCancel, onConfirm } = props
+      react.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onCancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onCancel])
+      return react.createElement(
+        'div',
+        {
+          onClick: onCancel,
+          style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        },
+        react.createElement(
+          'div',
+          {
+            onClick: (event) => event.stopPropagation(),
+            role: 'dialog',
+            'aria-modal': 'true',
+            'data-staging-amend-dialog': String(upstream ?? ''),
+            style: {
+              width: 'min(440px, calc(100vw - 48px))',
+              borderRadius: '10px',
+              border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+              background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+              color: 'var(--dsw-alias-label-primary)',
+              boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+              padding: '16px 18px',
+              fontSize: uiPx(13),
+              lineHeight: '1.6',
+            },
+          },
+          react.createElement('div', { style: { fontWeight: 600, marginBottom: '8px' } }, t('amendConfirmTitle')),
+          react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary)', marginBottom: '8px' } }, t('amendConfirmBody', { upstream: String(upstream ?? '') })),
+          react.createElement('div', { 'data-staging-amend-force-hint': '', style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(12), marginBottom: '14px' } }, t('amendConfirmForceHint')),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } },
+            react.createElement(
+              'button',
+              { type: 'button', 'data-staging-amend-cancel': '', onClick: onCancel, disabled: busy, style: dialogButtonStyle(false, busy) },
+              t('cancel'),
+            ),
+            react.createElement(
+              'button',
+              { type: 'button', 'data-staging-amend-confirm': '', disabled: busy, onClick: onConfirm, style: dialogButtonStyle(true, busy) },
+              busy ? t('committing') : t('amendConfirmButton'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * 「把当前分支重置到这里」对话框。
+     *
+     * 三件事必须在**动手之前**就看清（需求里的 Reset Preview）：
+     *   * HEAD 现在在哪、要移到哪（都带标题，光有 SHA 用户认不出）；
+     *   * 会影响几个提交；
+     *   * 选中的模式到底会怎么处理索引与工作区。
+     *
+     * `hard` 是破坏性动作：这里给一句明确的后果说明，确定按钮写 **Reset Hard** 而不是
+     * "确定"，并且请求里会带上 `acknowledgeDestructive`（宿主也会拒绝不带它的 hard）。
+     */
+    function ResetCommitDialog(props) {
+      const { t, preview, mode, busy, isUndo, error, onMode, onCancel, onConfirm } = props
+      react.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onCancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onCancel])
+      const current = preview?.current
+      const target = preview?.target
+      const root = preview?.root === true
+      const affected = Number(preview?.affected ?? 0)
+      const ahead = Number(preview?.ahead ?? 0)
+      const modeKey = mode === 'soft' ? 'resetEffectSoft' : mode === 'mixed' ? 'resetEffectMixed' : 'resetEffectHard'
+      const rowStyle = { fontFamily: CODE_FONT, fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-secondary)', wordBreak: 'break-all' }
+      const modeButton = (key) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            'data-reset-mode': key,
+            'aria-pressed': mode === key,
+            disabled: busy,
+            onClick: () => onMode(key),
+            style: {
+              flex: '1 1 0',
+              padding: '5px 8px',
+              borderRadius: '6px',
+              border: `1px solid ${mode === key ? 'transparent' : 'var(--dsw-alias-border-l2, #3d3d45)'}`,
+              background: mode === key ? ACCENT : 'transparent',
+              color: mode === key ? '#fff' : 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: uiPx(12),
+              cursor: busy ? 'default' : 'pointer',
+            },
+          },
+          t(key === 'soft' ? 'resetModeSoft' : key === 'mixed' ? 'resetModeMixed' : 'resetModeHard'),
+        )
+      return react.createElement(
+        'div',
+        {
+          onClick: onCancel,
+          style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        },
+        react.createElement(
+          'div',
+          {
+            onClick: (event) => event.stopPropagation(),
+            role: 'dialog',
+            'aria-modal': 'true',
+            'data-reset-dialog': root ? 'ROOT' : String(target?.sha ?? ''),
+            style: {
+              width: 'min(480px, calc(100vw - 48px))',
+              borderRadius: '10px',
+              border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+              background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+              color: 'var(--dsw-alias-label-primary)',
+              boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+              padding: '16px 18px',
+              fontSize: uiPx(13),
+              lineHeight: '1.6',
+            },
+          },
+          react.createElement('div', { style: { fontWeight: 600, marginBottom: '10px' } }, t('resetTitle', { short: String(target?.short ?? '') })),
+          preview === null
+            ? react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, t('loading'))
+            : react.createElement(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px' } },
+                react.createElement(
+                  'div',
+                  { 'data-reset-current': String(current?.sha ?? ''), style: rowStyle },
+                  `${t('resetPreviewCurrent')}: ${String(current?.short ?? '')} ${String(current?.subject ?? '')}`,
+                ),
+                react.createElement(
+                  'div',
+                  { 'data-reset-target': root ? 'ROOT' : String(target?.sha ?? ''), style: rowStyle },
+                  root ? t('resetPreviewRoot') : `${t('resetPreviewTarget')}: ${String(target?.short ?? '')} ${String(target?.subject ?? '')}`,
+                ),
+                react.createElement(
+                  'div',
+                  { 'data-reset-affected': String(affected), style: { ...rowStyle, color: ACCENT } },
+                  t('resetPreviewAffected', { count: affected }),
+                ),
+                ahead > 0
+                  ? react.createElement('div', { 'data-reset-ahead': String(ahead), style: rowStyle }, t('resetPreviewForward', { count: ahead }))
+                  : null,
+                preview?.published === true
+                  ? react.createElement(
+                      'div',
+                      { 'data-reset-published': String(preview?.upstream ?? ''), style: { ...rowStyle, color: REMOVED } },
+                      t('resetPublishedWarning', { upstream: String(preview?.upstream ?? '') }),
+                    )
+                  : null,
+              ),
+          react.createElement(
+            'div',
+            { 'data-reset-modes': '', style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
+            modeButton('soft'),
+            modeButton('mixed'),
+            modeButton('hard'),
+          ),
+          react.createElement('div', { 'data-reset-effect': mode, style: { color: 'var(--dsw-alias-label-secondary)', marginBottom: '8px' } }, t(modeKey)),
+          mode === 'hard'
+            ? react.createElement(
+                'div',
+                { 'data-reset-hard-warning': '', style: { color: REMOVED, fontWeight: 600, marginBottom: '10px' } },
+                t('resetHardWarning'),
+              )
+            : null,
+          error === undefined || error === ''
+            ? null
+            : react.createElement('div', { 'data-reset-error': '', style: { color: REMOVED, marginBottom: '10px', fontFamily: CODE_FONT, fontSize: uiPx(11.5) } }, error),
+          react.createElement(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } },
+            react.createElement(
+              'button',
+              { type: 'button', 'data-reset-cancel': '', onClick: onCancel, disabled: busy, style: dialogButtonStyle(false, busy) },
+              t('cancel'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-reset-confirm': mode,
+                disabled: busy || preview === null,
+                onClick: onConfirm,
+                style: mode === 'hard'
+                  ? { ...dialogButtonStyle(false, busy), border: '1px solid #8b5a5a', background: '#6b3b3b', color: '#ffdede' }
+                  : dialogButtonStyle(true, busy),
+              },
+              busy ? t('resetBusy') : t(mode === 'hard' ? 'resetConfirmHard' : 'resetConfirm'),
+            ),
+          ),
+          isUndo === true
+            ? react.createElement('div', { style: { marginTop: '8px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } }, t('resetUndoHint'))
+            : null,
+        ),
+      )
+    }
+
+    /**
+     * 提交行的小右键菜单（目前只有「把当前分支重置到这里」）。
+     *
+     * 需求要求"在 Commit Graph / Log 右键 commit"。菜单只有一项，但仍然做成菜单而不是
+     * 直接执行：右键是"我想对这个提交做点什么"的入口，将来加项时形状不变（详情栏里也有
+     * 一个等价的按钮，因此这条能力不依赖右键被发现）。
+     */
+    function GraphCommitMenu(props) {
+      const { t, menu, onClose, onReset } = props
+      react.useEffect(() => {
+        const onPointerDown = () => onClose()
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onClose()
+        }
+        document.addEventListener('mousedown', onPointerDown)
+        document.addEventListener('keydown', onKeyDown)
+        return () => {
+          document.removeEventListener('mousedown', onPointerDown)
+          document.removeEventListener('keydown', onKeyDown)
+        }
+      }, [onClose])
+      const item = (key, label, onClick, danger) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            'data-graph-menu-item': key,
+            onClick: (event) => {
+              event.stopPropagation()
+              onClick()
+            },
+            style: {
+              display: 'block',
+              width: '100%',
+              padding: '6px 10px',
+              border: 'none',
+              borderRadius: '6px',
+              background: 'transparent',
+              color: danger === true ? REMOVED : 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: uiPx(12.5),
+              textAlign: 'left',
+              cursor: 'pointer',
+            },
+          },
+          label,
+        )
+      return react.createElement(
+        'div',
+        {
+          role: 'menu',
+          'data-graph-commit-menu': String(menu?.commit?.hash ?? ''),
+          onClick: (event) => event.stopPropagation(),
+          style: {
+            position: 'fixed',
+            zIndex: 10002,
+            left: `${Number(menu?.x ?? 0)}px`,
+            top: `${Number(menu?.y ?? 0)}px`,
+            minWidth: '220px',
+            padding: '4px',
+            borderRadius: '10px',
+            border: `1px solid ${BORDER}`,
+            background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+            color: 'var(--dsw-alias-label-primary)',
+            boxShadow: '0 10px 30px rgba(0,0,0,.2)',
+          },
+        },
+        item('reset', t('resetMenuTitle'), () => onReset(menu?.commit), false),
+      )
+    }
+
+    /**
+     * 弹窗底部按钮的统一样式（主/次两种）。 */
     function dialogButtonStyle(primary, busy) {
       return {
         padding: '5px 14px',
@@ -7616,6 +8052,21 @@ window.__ModuleLoader__.load({
       const [stashBusy, setStashBusy] = react.useState(false)
       /** 储藏列表的刷新令牌（写操作之后 +1）。 */
       const [stashRevision, setStashRevision] = react.useState(0)
+
+      // ---- 修改最后一次提交（amend）与撤销提交 -------------------------------
+      //
+      // `amendInfo` 是 gitbar 的 `/head-commit` 响应：它同时回答两件事——"最后一次提交的
+      // 完整信息"（要填回输入框）与"这个提交是否已经发布"（决定要不要给出改写历史的警告）。
+      // 后者只有宿主知道（upstream 与远端跟踪引用都在它手里），因此不能由界面猜。
+      const [amend, setAmend] = react.useState(false)
+      const [amendInfo, setAmendInfo] = react.useState(null)
+      const [amendPhase, setAmendPhase] = react.useState('idle')
+      const [amendError, setAmendError] = react.useState('')
+      /** 打开中的 amend 确认框（只在**已发布**的提交上出现）。 */
+      const [amendDialog, setAmendDialog] = react.useState(null)
+      /** 打开 amend 之前输入框里的草稿：关掉 amend 时原样还回去。 */
+      const [draftBeforeAmend, setDraftBeforeAmend] = react.useState('')
+      const [undoBusy, setUndoBusy] = react.useState(false)
       /** 储藏请求的令牌：迟到的响应必须丢掉（否则它会把新列表/新选中项覆盖掉）。 */
       const stashToken = react.useRef(0)
       const repositoryRoot = typeof props?.repositoryRoot === 'string' ? props.repositoryRoot : ''
@@ -8031,41 +8482,153 @@ window.__ModuleLoader__.load({
        *
        * `paths` 非空时只提交那些文件（host 先 add 再 commit）；为空时提交索引里现有的
        * 全部内容。`push` 为真则提交成功后继续推送到上游（IDEA 的 Commit and Push）。
+       * `amend` 为真时替换**最后一次提交**（信息与已暂存内容一起），更早的历史不动。
        */
       const submitCommit = react.useCallback(
-        async (paths, push) => {
+        async (paths, push, amendFlag) => {
           const text = message.trim()
           if (text === '') return
           // 记下这次提交属于哪个工作区：提交是异步的，期间用户可能切到另一个项目。
           const mine = workspace
           const selected = Array.isArray(paths) ? paths : []
+          const amending = amendFlag === true
           const ok = await run('commit', {
             message: text,
             ...(selected.length > 0 ? { paths: selected } : {}),
             ...(push === true ? { push: true } : {}),
+            ...(amending ? { amend: true } : {}),
           })
           if (ok === undefined) return
           // 已经换了项目：提交确实成功了（在旧项目里），但这几个 setState 属于**新项目**的
           // 草稿与勾选，不能拿旧项目的结果去清空它们（用户会发现自己刚打了一半的信息没了）。
           if (workspaceRef.current !== mine) return
-          setMessage('')
+          // 修改提交之后**不改动输入框**：那条信息刚被用来改写提交，把它留在框里是合理的
+          // （用户可能还要继续调整）。普通提交才清空——它已经是一条完成的历史了。
+          if (amending) {
+            setAmend(false)
+            setAmendInfo(null)
+            setAmendPhase('idle')
+          } else {
+            setMessage('')
+          }
           // 提交成功后清掉"排除"记录：被排除的文件已经提交过了（或已不在列表里），
           // 留着会让下一次提交莫名其妙地漏掉同名的新改动。
           setDeselectedFiles([])
           setChosenUntracked([])
           // 提交成功、推送失败**不算失败**：提交已经落到本地历史里了。把两种结果分开说，
           // 否则用户会以为什么都没发生、于是再提交一次。
+          const rejected = ok.pushed === false && /rejected|non-fast-forward|fetch first|stale info/iu.test(String(ok.pushError ?? ''))
           if (ok.pushed === true) {
-            setNotice(t('pushedNotice', { subject: text }))
+            setNotice(t(amending ? 'amendedPushedNotice' : 'pushedNotice', { subject: text }))
           } else if (ok.pushed === false) {
-            setNotice(t('pushFailedNotice', { detail: String(ok.pushError ?? '').slice(0, 200) }))
+            // 推送被拒的**最常见原因**现在多了一个：刚刚改写了提交（amend）。这时"再点一次
+            // 推送"永远不会成功，必须走强制推送（而且仍然是 --force-with-lease），因此这里
+            // 直接说清下一步，而不是只把 git 的英文原文丢给用户。
+            setNotice(
+              rejected
+                ? t('commitPushRejectedNotice', { detail: String(ok.pushError ?? '').slice(0, 160) })
+                : t('pushFailedNotice', { detail: String(ok.pushError ?? '').slice(0, 200) }),
+            )
           } else {
-            setNotice(t('committedNotice', { subject: text }))
+            setNotice(t(amending ? 'amendedNotice' : 'committedNotice', { subject: text }))
           }
           onCommitted()
         },
         [message, run, t, onCommitted],
       )
+
+      /**
+       * 打开/关闭「修改最后一次提交」。
+       *
+       * 打开时**去宿主读一次 HEAD 的完整信息**并填进输入框（这正是需求的"自动读取"），
+       * 同时拿到"是否已发布"——已发布的提交要给改写历史的警告，而那只有宿主知道。
+       * 关掉时把用户原来的草稿还回去：他可能是误点了这个开关，辛辛苦苦打的字不能被吃掉。
+       */
+      const toggleAmend = react.useCallback(
+        async (next) => {
+          if (next !== true) {
+            setAmend(false)
+            setAmendInfo(null)
+            setAmendPhase('idle')
+            setAmendError('')
+            if (draftBeforeAmend !== '') setMessage(draftBeforeAmend)
+            return
+          }
+          setDraftBeforeAmend(message)
+          setAmendPhase('loading')
+          setAmendError('')
+          try {
+            const info = await callGitbarGet('head-commit', { workspace })
+            if (workspaceRef.current !== workspace) return
+            if (info?.head === null || info?.head === undefined) {
+              setAmendPhase('error')
+              setAmendError(t('error_noCommitToAmend'))
+              return
+            }
+            setAmendInfo(info)
+            setAmendPhase('ready')
+            setAmend(true)
+            // 自动读取最后一次提交的信息（多行正文原样填进去）。
+            setMessage(String(info.head.message ?? ''))
+          } catch (cause) {
+            if (workspaceRef.current !== workspace) return
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            setAmendPhase('error')
+            setAmendError(String(error.detail ?? error.message))
+          }
+        },
+        [message, draftBeforeAmend, workspace, t],
+      )
+
+      /**
+       * 「撤销最后一次提交」：把 HEAD 退回上一个提交，改动留在暂存区（`reset --soft`）。
+       *
+       * 提交信息会**填回输入框**：撤销之后紧接着往往是"改一改再提交"，让人重新打一遍是最
+       * 没有道理的。第一个提交（没有父提交）走 `root: true` —— 那次撤销会把 HEAD 从引用里
+       * 去掉，文件同样留在暂存区。
+       */
+      const undoLastCommit = react.useCallback(async () => {
+        const mine = workspace
+        setUndoBusy(true)
+        setTrouble(null)
+        setNotice('')
+        try {
+          const info = amendInfo ?? (await callGitbarGet('head-commit', { workspace: mine }))
+          if (workspaceRef.current !== mine) return undefined
+          const head = info?.head
+          if (head === null || head === undefined) {
+            setTrouble({ key: STAGING_ERROR_KEYS.noCommitToAmend, detail: '', code: 'noCommitToAmend' })
+            return undefined
+          }
+          const parent = Array.isArray(head.parents) ? head.parents[0] : undefined
+          const result = await callGitbarRoute('reset', {
+            workspace: mine,
+            ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }),
+            ...(typeof parent === 'string' && parent !== '' ? { revision: parent } : { root: true }),
+            mode: 'soft',
+          })
+          if (workspaceRef.current !== mine) return undefined
+          await gitSnapshots.invalidate(mine).catch(() => undefined)
+          setMessage(String(head.message ?? head.subject ?? ''))
+          setAmend(false)
+          setAmendInfo(null)
+          setAmendPhase('idle')
+          setNotice(t('undoneNotice', { subject: String(head.subject ?? '') }))
+          return result
+        } catch (cause) {
+          if (workspaceRef.current !== mine) return undefined
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          const code = typeof error.code === 'string' ? error.code : ''
+          setTrouble({
+            key: code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : '',
+            detail: typeof error.detail === 'string' ? error.detail : String(error.message ?? ''),
+            code,
+          })
+          return undefined
+        } finally {
+          if (workspaceRef.current === mine) setUndoBusy(false)
+        }
+      }, [amendInfo, workspace, repositoryRoot, t])
 
       // 已跟踪改动默认全部算作已勾选，"提交"因此一步到位、不需要先暂存（详见下面
       // commitPaths 处的说明）。这里把"不再存在的路径"从取消集合里清掉，避免它无限增长。
@@ -9441,6 +10004,73 @@ window.__ModuleLoader__.load({
               borderTop: `1px solid ${BORDER}`,
             },
           },
+          /**
+           * 「修改最后一次提交」与「撤销最后一次提交」。
+           *
+           * 两条都是**历史操作**，因此放在提交按钮**上方**（先看清要动哪条提交，再点提交）：
+           * 勾上 amend 之后会立刻读出 HEAD 的信息填进输入框，并显示"正在修改哪一条"。
+           * 撤销是 IDEA 里最常用的一条："刚提交完发现漏了文件"——它等价于
+           * `reset --soft HEAD~1`，改动留在暂存区，绝不是 hard。
+           */
+          react.createElement(
+            'div',
+            {
+              'data-staging-history-actions': '',
+              style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', flexShrink: 0, fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-secondary)' },
+            },
+            react.createElement(
+              'label',
+              { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: busy || amendPhase === 'loading' ? 'default' : 'pointer' }, title: t('amendToggleHint') },
+              react.createElement('input', {
+                type: 'checkbox',
+                'data-staging-amend': '',
+                'data-staging-amend-state': amend ? 'on' : 'off',
+                checked: amend,
+                disabled: busy || amendPhase === 'loading',
+                onChange: (event) => void toggleAmend(event.target.checked),
+                style: { margin: 0, cursor: busy ? 'default' : 'pointer' },
+              }),
+              t(amendPhase === 'loading' ? 'amendLoading' : 'amendToggle'),
+            ),
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-staging-undo-commit': '',
+                disabled: busy || undoBusy || amendPhase === 'loading',
+                title: amendInfo?.head?.parents?.length === 0 ? t('undoCommitRootHint') : t('undoCommitHint'),
+                onClick: () => void undoLastCommit(),
+                style: {
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'transparent',
+                  color: 'inherit',
+                  fontFamily: UI_FONT,
+                  fontSize: uiPx(11.5),
+                  cursor: busy || undoBusy ? 'default' : 'pointer',
+                },
+              },
+              undoBusy ? t('undoBusy') : t('undoCommit'),
+            ),
+            amendError === ''
+              ? null
+              : react.createElement('span', { 'data-staging-amend-error': '', style: { color: REMOVED } }, amendError),
+            amend
+              ? react.createElement(
+                  'span',
+                  { 'data-staging-amend-banner': amendInfo?.head?.sha ?? '', style: { flex: '1 1 100%', color: ACCENT, lineHeight: 1.6 } },
+                  t('amendBanner', { short: String(amendInfo?.head?.short ?? ''), subject: String(amendInfo?.head?.subject ?? '') }),
+                  amendInfo?.published === true
+                    ? react.createElement(
+                        'span',
+                        { 'data-staging-amend-published': String(amendInfo?.upstream ?? ''), style: { marginLeft: '8px', color: REMOVED } },
+                        `· ${t('amendPublishedShort')}`,
+                      )
+                    : null,
+                )
+              : null,
+          ),
           react.createElement('textarea', {
             'data-staging-message': '',
             'data-review-input': '',
@@ -9463,7 +10093,10 @@ window.__ModuleLoader__.load({
               event.stopPropagation()
               if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault()
-                if (commitDisabled !== true) void submitCommit(commitPaths)
+                if (commitDisabled !== true) {
+                  if (amend && amendInfo?.published === true) setAmendDialog({ paths: commitPaths, push: false })
+                  else void submitCommit(commitPaths, false, amend)
+                }
               }
             },
             style: {
@@ -9501,9 +10134,17 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 'data-staging-commit': '',
+                ...(amend ? { 'data-staging-amend-commit': '' } : {}),
                 'data-review-primary': '',
-                disabled: commitDisabled,
-                onClick: () => void submitCommit(commitPaths),
+                disabled: commitDisabled || amendPhase === 'loading',
+                onClick: () => {
+                  // 已发布的提交改写的是**别人的历史**：这里确认一次（需求允许，且只一次）。
+                  if (amend && amendInfo?.published === true) {
+                    setAmendDialog({ paths: commitPaths, push: false })
+                    return
+                  }
+                  void submitCommit(commitPaths, false, amend)
+                },
                 style: {
                   border: 'none',
                   background: commitDisabled ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
@@ -9512,9 +10153,11 @@ window.__ModuleLoader__.load({
               },
               busy
                 ? t('committing')
-                : commitPaths.length > 0
-                  ? t('commitSelected', { count: commitPaths.length })
-                  : t('commit'),
+                : amend
+                  ? t('amendCommit')
+                  : commitPaths.length > 0
+                    ? t('commitSelected', { count: commitPaths.length })
+                    : t('commit'),
             ),
             // 「提交并推送」——对应 IDEA 的 Commit and Push。
             react.createElement(
@@ -9523,15 +10166,21 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 'data-staging-commit-push': '',
                 'data-review-secondary': '',
-                disabled: commitDisabled,
+                disabled: commitDisabled || amendPhase === 'loading',
                 title: t('commitAndPushHint'),
-                onClick: () => void submitCommit(commitPaths, true),
+                onClick: () => {
+                  if (amend && amendInfo?.published === true) {
+                    setAmendDialog({ paths: commitPaths, push: true })
+                    return
+                  }
+                  void submitCommit(commitPaths, true, amend)
+                },
                 style: {
                   borderColor: commitDisabled ? BORDER : `color-mix(in srgb, ${ACCENT} 45%, transparent)`,
                   color: commitDisabled ? 'var(--dsw-alias-label-tertiary)' : ACCENT,
                 },
               },
-              t('commitAndPush'),
+              amend ? t('amendAndPush') : t('commitAndPush'),
             ),
             // 「AI 补充」：按**已勾选的文件**生成一条提交信息。
             //
@@ -9773,6 +10422,21 @@ window.__ModuleLoader__.load({
                 const path = confirming
                 setConfirming('')
                 void run('revert', { paths: [path], scope: 'workspace' }, t('revertedNotice', { path }))
+              },
+            }),
+
+        // 「修改已发布的提交」确认框（只在 HEAD 已经推送到上游时出现）。
+        amendDialog === null
+          ? null
+          : react.createElement(AmendPublishDialog, {
+              t,
+              upstream: amendInfo?.upstream ?? '',
+              busy,
+              onCancel: () => setAmendDialog(null),
+              onConfirm: () => {
+                const request = amendDialog
+                setAmendDialog(null)
+                void submitCommit(request.paths, request.push === true, true)
               },
             }),
 
@@ -11183,6 +11847,8 @@ window.__ModuleLoader__.load({
      */
     function GraphCommitList(props) {
       const { t, commits, layout, selected, onSelect, scrollTop, viewportHeight } = props
+      const onCommitMenu = typeof props?.onCommitMenu === 'function' ? props.onCommitMenu : () => undefined
+      const onResetCommit = typeof props?.onResetCommit === 'function' ? props.onResetCommit : () => undefined
       const palette = lanePalette()
       const first = Math.max(0, Math.floor(scrollTop / GRAPH_ROW_HEIGHT) - 5)
       const count = Math.ceil(viewportHeight / GRAPH_ROW_HEIGHT) + 10
@@ -11229,6 +11895,15 @@ window.__ModuleLoader__.load({
               'data-graph-row': commit.hash,
               'aria-selected': isSelected ? 'true' : undefined,
               onClick: () => onSelect(commit.hash),
+              // 右键 = 「把当前分支重置到这里…」的入口（需求要求右键提交）。右键同时**选中**
+              // 这一条：菜单要作用在一个明确的对象上，而详情栏也会跟着切过去。
+              onContextMenu: (event) => {
+                event.preventDefault()
+                onSelect(commit.hash)
+                onCommitMenu(commit, event)
+              },
+              // 双击也直接打开重置对话框：右键在小触控板上不好按，而这是同一个意图。
+              onDoubleClick: () => onResetCommit(commit),
               style: {
                 position: 'absolute',
                 top: `${i * GRAPH_ROW_HEIGHT}px`,
@@ -11499,6 +12174,38 @@ window.__ModuleLoader__.load({
           'div',
           { style: { padding: '10px 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 } },
           react.createElement(CommitSummary, { t, commit, containingBranches }),
+          /**
+           * 「把当前分支重置到这里…」。
+           *
+           * 与右键菜单里的那一项是**同一个动作**：右键不容易被发现（也不容易在小触控板上
+           * 按），而这个能力需要被看见。选定分支/对象之后才可能误操作，因此按钮上写明
+           * "当前分支"，确认对话框里还会再给出完整预览。
+           */
+          react.createElement(
+            'div',
+            { style: { display: 'flex', gap: '6px', marginTop: '8px' } },
+            react.createElement(
+              'button',
+              {
+                type: 'button',
+                'data-graph-reset': commit.hash ?? '',
+                disabled: props?.busy === true,
+                title: t('resetMenuTitle'),
+                onClick: () => (typeof props?.onReset === 'function' ? props.onReset(commit) : undefined),
+                style: {
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  border: `1px solid ${BORDER}`,
+                  background: 'transparent',
+                  color: 'inherit',
+                  fontFamily: UI_FONT,
+                  fontSize: uiPx(11.5),
+                  cursor: props?.busy === true ? 'default' : 'pointer',
+                },
+              },
+              t('resetMenuTitle'),
+            ),
+          ),
         ),
         react.createElement(
           'div',
@@ -12761,6 +13468,21 @@ window.__ModuleLoader__.load({
         setDiffVisible(true)
       }, [])
 
+      // ---- 「把当前分支重置到这里」（以及它的撤销）----------------------------
+      //
+      // 重置是**改写分支位置**的操作，因此全部走 gitbar 宿主（HEAD 与分支都归它管，
+      // 而且那里的 reset 路由带 hard 的显式确认与提交白名单校验）。这里只负责：
+      // 打开前拿到预览、把用户选的模式发出去、以及成功之后给一条**可撤销**的提示。
+      const [resetRequest, setResetRequest] = react.useState(null)
+      const [resetPreview, setResetPreview] = react.useState(null)
+      const [resetPreviewError, setResetPreviewError] = react.useState('')
+      const [resetMode, setResetMode] = react.useState('mixed')
+      const [resetBusy, setResetBusy] = react.useState(false)
+      /** 最近一次重置的结果（提示 + 撤销入口）。 */
+      const [resetResult, setResetResult] = react.useState(null)
+      /** 提交行右键菜单：`{ commit, x, y }`。 */
+      const [commitMenu, setCommitMenu] = react.useState(null)
+
       /** 关掉 Preview：只收起，保留 `selectedDiffFile`（再点同一文件即原样恢复）。 */
       const closeDiff = react.useCallback(() => setDiffVisible(false), [])
 
@@ -12933,6 +13655,97 @@ window.__ModuleLoader__.load({
         void reload(fresh.ref)
         // `fresh.ref` 与 `refreshToken` 一起构成"什么时候该重拉"。
       }, [reload, fresh.ref, refreshToken])
+
+      /**
+       * 打开重置对话框（右键菜单、双击、详情栏按钮三个入口共用）。
+       *
+       * 先取预览：**HEAD 会移到哪里、影响几个提交**必须在用户决定之前看到，而"影响几个
+       * 提交"只有宿主算得出来（要跑 `rev-list`）。
+       *
+       * 这几个 handler 刻意放在 `reload` **之后**：它们在成功时要重拉提交图，而 `const`
+       * 在声明前求值会抛 "Cannot access before initialization"（依赖数组在 render 期就求值）。
+       */
+      const openReset = react.useCallback(
+        (commit, options) => {
+          if (workspace === undefined || commit === null || commit === undefined) return
+          /**
+           * 目标提交的**规范化**。
+           *
+           * 两个来源的字段名不同：提交图的提交对象用 `hash`，而宿主 reset 响应里的
+           * `previousHead` 用 `sha`（那是 git 自己的叫法）。撤销那次重置要把它作为目标传回来，
+           * 因此这里统一成 `hash`——否则撤销会带着 `revision=undefined` 去请求预览，
+           * 对话框上显示的就是一句 "undefined"（实测踩到过）。
+           */
+          const sha = typeof commit.hash === 'string' && commit.hash !== '' ? commit.hash : String(commit.sha ?? '')
+          if (sha === '') return
+          const target = { ...commit, hash: sha }
+          setCommitMenu(null)
+          setResetRequest({ commit: target, isUndo: options?.isUndo === true })
+          setResetPreview(null)
+          setResetPreviewError('')
+          setResetMode(options?.mode ?? 'mixed')
+          void (async () => {
+            try {
+              const preview = await callGitbarGet('reset/preview', { workspace, revision: sha })
+              setResetPreview(preview)
+            } catch (cause) {
+              const error = cause instanceof Error ? cause : new Error(String(cause))
+              setResetPreviewError(String(error.detail ?? error.message))
+            }
+          })()
+        },
+        [workspace],
+      )
+
+      /**
+       * 执行重置。
+       *
+       * `mode === 'hard'` 时带上 `acknowledgeDestructive`：宿主会拒绝不带它的 hard 请求，
+       * 因此"误发一次硬重置"在协议层就不可能发生（界面这边是那个写着 Reset Hard 的确认）。
+       */
+      const confirmReset = react.useCallback(async () => {
+        const request = resetRequest
+        if (request === null || workspace === undefined) return undefined
+        const revision = request.commit?.hash
+        setResetBusy(true)
+        setResetPreviewError('')
+        try {
+          const result = await callGitbarRoute('reset', {
+            workspace,
+            revision,
+            mode: resetMode,
+            ...(resetMode === 'hard' ? { acknowledgeDestructive: true } : {}),
+          })
+          setResetBusy(false)
+          setResetRequest(null)
+          // 分支位置变了：提交图与变更面板都要重取。
+          await gitSnapshots.invalidate(workspace).catch(() => undefined)
+          setResetResult({ ...result?.reset, subject: String(request.commit?.subject ?? '') })
+          void reload(fresh.ref)
+          return result
+        } catch (cause) {
+          setResetBusy(false)
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setResetPreviewError(String(error.detail ?? error.message))
+          return undefined
+        }
+      }, [resetRequest, workspace, resetMode, reload, fresh.ref])
+
+      /**
+       * 撤销这次重置：把分支移回重置之前的位置。
+       *
+       * 用哪个模式是**按上次的模式**决定的，而不是一律 hard：
+       *   * soft / mixed 重置没有丢任何东西，回去用 `--soft` 就够（内容一个字都没少）；
+       *   * hard 重置丢掉了工作区的本地修改，回去必须也是 `--hard`（而且要再确认一次），
+       *     而且要说清"被丢弃的修改 git 找不回来"——那句提示在对话框里。
+       */
+      const undoReset = react.useCallback(() => {
+        const previous = resetResult?.previousHead
+        if (previous === null || previous === undefined || workspace === undefined) return
+        const mode = resetResult?.mode === 'hard' ? 'hard' : 'soft'
+        setResetResult(null)
+        openReset(previous, { isUndo: true, mode })
+      }, [resetResult, workspace, openReset])
 
       /**
        * 追加下一页。
@@ -13315,6 +14128,81 @@ window.__ModuleLoader__.load({
             ),
             iconButton('refresh', t('refresh'), () => void reload(fresh.ref), refreshGlyph),
           ),
+          /**
+           * 重置结果 + **撤销入口**（安全的历史恢复）。
+           *
+           * 提示里说明"用哪种模式重置到了哪"，并给出一次点击的回到原处——`soft/mixed` 重置
+           * 什么都没丢，`hard` 重置丢掉的工作区修改 git 找不回来（那句警告在确认框里已经说过
+           * 一次，撤销按钮的提示里再说一次）。
+           */
+          resetResult === null
+            ? null
+            : react.createElement(
+                'div',
+                {
+                  'data-graph-notice': String(resetResult.mode ?? ''),
+                  role: 'status',
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    flexShrink: 0,
+                    padding: '6px 8px',
+                    borderBottom: `1px solid ${BORDER}`,
+                    background: `color-mix(in srgb, ${ADDED} 7%, transparent)`,
+                    color: ADDED,
+                    fontFamily: UI_FONT,
+                    fontSize: uiPx(11.5),
+                  },
+                },
+                react.createElement(
+                  'span',
+                  { style: { flex: '1 1 auto', minWidth: 0 } },
+                  resetResult.mode === 'soft'
+                    ? resetResult.root === true
+                      ? t('resetDoneRootSoft')
+                      : t('resetDoneSoft', { short: String(resetResult.target?.short ?? '') })
+                    : resetResult.mode === 'mixed'
+                      ? resetResult.root === true
+                        ? t('resetDoneRootMixed')
+                        : t('resetDoneMixed', { short: String(resetResult.target?.short ?? '') })
+                      : t('resetDoneHard', { short: String(resetResult.target?.short ?? '') }),
+                ),
+                resetResult.previousHead === null || resetResult.previousHead === undefined
+                  ? null
+                  : react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-graph-undo-reset': String(resetResult.previousHead.sha ?? ''),
+                        title: t('resetUndoHint'),
+                        onClick: () => undoReset(),
+                        style: {
+                          flexShrink: 0,
+                          padding: '3px 9px',
+                          borderRadius: '6px',
+                          border: `1px solid color-mix(in srgb, currentColor 35%, transparent)`,
+                          background: 'transparent',
+                          color: 'inherit',
+                          fontFamily: UI_FONT,
+                          fontSize: uiPx(11.5),
+                          cursor: 'pointer',
+                        },
+                      },
+                      t('resetUndo', { short: String(resetResult.previousHead.short ?? '') }),
+                    ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-graph-notice-close': '',
+                    'aria-label': t('close'),
+                    onClick: () => setResetResult(null),
+                    style: { flexShrink: 0, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' },
+                  },
+                  '✕',
+                ),
+              ),
           react.createElement(
             'div',
             {
@@ -13343,6 +14231,9 @@ window.__ModuleLoader__.load({
                   onSelect: (hash) => update({ selected: hash }),
                   scrollTop,
                   viewportHeight: viewport,
+                  // 右键 = 「把当前分支重置到这里…」；双击同一个动作（右键在小触控板上不好按）。
+                  onCommitMenu: (commit, event) => setCommitMenu({ commit, x: event.clientX, y: event.clientY }),
+                  onResetCommit: (commit) => openReset(commit),
                 }),
             // ---- 列表底部：分页状态 ----
             //
@@ -13427,6 +14318,9 @@ window.__ModuleLoader__.load({
                 // 选中态也用过滤后的那一份：切提交时右栏的高亮必须同帧清掉。
                 selectedPath: previewFile?.path ?? '',
                 onSelectFile: selectDiffFile,
+                /** 详情栏里的「把当前分支重置到这里…」（与右键菜单同一个动作）。 */
+                onReset: (commit) => openReset(commit),
+                busy: resetBusy,
               }),
             ),
           ),
@@ -13476,6 +14370,35 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
+
+        // 提交行右键菜单（fixed 定位，挂在整棵树的末尾）。
+        commitMenu === null
+          ? null
+          : react.createElement(GraphCommitMenu, {
+              t,
+              menu: commitMenu,
+              onClose: () => setCommitMenu(null),
+              onReset: (commit) => openReset(commit),
+            }),
+
+        // 重置对话框（打开时才有；预览来自 gitbar 的 `/reset/preview`）。
+        resetRequest === null
+          ? null
+          : react.createElement(ResetCommitDialog, {
+              t,
+              preview: resetPreview,
+              mode: resetMode,
+              busy: resetBusy,
+              isUndo: resetRequest.isUndo === true,
+              error: resetPreviewError,
+              onMode: (next) => setResetMode(next),
+              onCancel: () => {
+                setResetRequest(null)
+                setResetPreview(null)
+                setResetPreviewError('')
+              },
+              onConfirm: () => void confirmReset(),
+            }),
       )
     }
 

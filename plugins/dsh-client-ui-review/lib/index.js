@@ -3068,7 +3068,31 @@ function createReviewHandler(ctx) {
         const statusRaw = await git(['status', '--porcelain'], cwd)
         const { tracked } = parsePorcelain(statusRaw)
         const staged = tracked.filter((entry) => entry.index !== ' ' && entry.index !== '?')
-        if (staged.length === 0) {
+        /**
+         * 修改最后一次提交（`git commit --amend`）。
+         *
+         * 三件事必须分开看，它们决定了这里与普通提交的三处不同：
+         *   1. **不要求暂存区非空**：只改提交信息是完全正常的用法（"标题写错了"），而
+         *      `--amend` 在没有暂存内容时照样工作；
+         *   2. **两者都没变就要拒绝**：信息与 HEAD 一样、暂存区又是空的，那么 `--amend`
+         *      只会改写 committer 时间、换一个 SHA（如果这个提交已经推送过，那就白白造成了
+         *      "历史被改写"），对用户没有任何价值。因此提前回 `nothingToAmend`；
+         *   3. **只动 HEAD**：`--amend` 的语义就是替换最后一次提交，更早的历史一个字都不碰
+         *      （这是它和 rebase 的分界线，也是这个功能敢放在提交框旁边的理由）。
+         */
+        const amend = payload.amend === true
+        if (amend) {
+          const headExists = await git(['rev-parse', '--verify', '--quiet', 'HEAD'], cwd).then(() => true).catch(() => false)
+          if (!headExists) {
+            sendJson(response, 409, { error: 'no commit to amend', code: 'noCommitToAmend' })
+            return
+          }
+          const headMessage = String(await git(['log', '-1', '--format=%B'], cwd).catch(() => '')).replace(/\n$/u, '')
+          if (staged.length === 0 && headMessage.trim() === message) {
+            sendJson(response, 409, { error: 'nothing to amend', code: 'nothingToAmend' })
+            return
+          }
+        } else if (staged.length === 0) {
           sendJson(response, 409, {
             error: 'nothing staged',
             code: tracked.length > 0 ? 'nothingStaged' : 'nothingToCommit',
@@ -3078,7 +3102,7 @@ function createReviewHandler(ctx) {
         try {
           // `-F -` 从标准输入读提交信息太绕；这里用 `-m`，它是参数数组里的一个元素，
           // 不会被 shell 解释。多行信息由 `-m` 重复传递，但界面只给单行，因此不需要。
-          await git(['commit', '-m', message], cwd)
+          await git(amend ? ['commit', '--amend', '-m', message] : ['commit', '-m', message], cwd)
         } catch (error) {
           sendJson(response, 409, {
             error: 'commit failed',
@@ -3115,6 +3139,8 @@ function createReviewHandler(ctx) {
           isRepo: true,
           ...scopeFields(context, scope),
           committed: true,
+          // 让界面知道这是一次 amend（提示语要说"已修改最后一次提交"，而不是"已提交"）。
+          amended: amend,
           head,
           ...(pushed === undefined ? {} : { pushed }),
           ...(pushError === undefined ? {} : { pushError }),

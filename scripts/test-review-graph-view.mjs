@@ -371,11 +371,61 @@ const commitFileDiffFor = (path, revision) => ({
   truncated: false,
   binary: false,
 })
+/**
+ * gitbar 宿主的 `/reset/preview` 夹具（提交图的「把当前分支重置到这里」用它）。
+ *
+ * 只读路由：客户端把目标提交放在查询串的 `revision` 里，因此这里按它回不同的数字，
+ * 断言就能同时钉住"预览来自宿主"与"客户端问的是哪一条提交"。
+ */
+const resetPreview = (revision) => ({
+  isRepo: true,
+  branch: 'main',
+  current: { sha: 'm'.repeat(40), short: 'mmmmmmm', subject: 'merge feature into main' },
+  target: { sha: revision, short: String(revision).slice(0, 7), subject: 'main side work' },
+  root: false,
+  affected: revision === 'q'.repeat(40) ? 3 : 1,
+  ahead: 0,
+  published: true,
+  upstream: 'origin/main',
+  targetPublished: false,
+})
+
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
-  requests.push({ url: target, body })
+  // ---- gitbar（跨插件的只读/写路由：重置）----
+  if (target.includes('/dsh-desktop/gitbar/')) {
+    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
+    const revision = new URLSearchParams(target.split('?')[1] ?? '').get('revision') ?? ''
+    requests.push({ url: target, route: `gitbar:${gitbarRoute}`, body })
+    if (gitbarRoute === 'reset/preview') return { ok: true, text: async () => JSON.stringify(resetPreview(revision)) }
+    if (gitbarRoute === 'reset') {
+      if (resetError !== null) {
+        const failure = resetError
+        resetError = null
+        return { ok: false, text: async () => JSON.stringify(failure) }
+      }
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            isRepo: true,
+            branch: 'main',
+            reset: {
+              mode: body?.mode ?? 'mixed',
+              root: body?.root === true,
+              affected: 1,
+              target: { sha: body?.revision ?? '', short: String(body?.revision ?? '').slice(0, 7), subject: 'main side work' },
+              previousHead: { sha: 'm'.repeat(40), short: 'mmmmmmm', subject: 'merge feature into main' },
+              published: true,
+            },
+          }),
+      }
+    }
+    return { ok: true, text: async () => JSON.stringify({ isRepo: true }) }
+  }
   const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
+  requests.push({ url: target, route, body })
   if (route === 'graph' && graphHoldMore !== null && (body?.skip ?? 0) > 0) {
     await new Promise((resolve) => {
       graphHoldMore = () => resolve()
@@ -398,6 +448,8 @@ globalThis.fetch = async (url, init) => {
             : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
+/** 下一次 gitbar `/reset` 的错误响应（用完即清）。 */
+let resetError = null
 globalThis.setTimeout = globalThis.setTimeout
 
 // ---- 加载并挂载插件 --------------------------------------------------------------
@@ -1271,6 +1323,95 @@ console.log('=== 10. formatCommitTime：精确到秒、畸形输入不抛错（i
   check('   NaN', fmt(Number.NaN), '')
   check('   本地化文本原样返回', fmt('3 天前'), '3 天前')
   check('   前后空白被去掉', fmt('  2026-09-21T15:42:18  '), '2026-09-21 15:42:18')
+}
+
+console.log('')
+console.log('=== 13. 把当前分支重置到这里（右键 / 详情栏 / 预览 / 硬重置确认 / 撤销）===')
+{
+  await mount()
+  // 详情栏里那个按钮：不依赖右键也能发现（右键在小触控板上不好按）。详情栏只在**选中了
+  // 一条提交**时才渲染，因此先点一行。
+  const firstRow = findAll('data-graph-row')[0]
+  await click(firstRow)
+  const detailReset = find('data-graph-reset')
+  checkTrue('13) 详情栏有「把当前分支重置到这里…」按钮', detailReset !== null)
+  // 右键提交行 → 菜单出现（菜单项就是同一个动作）。
+  const row = findAll('data-graph-row').find((node) => node.props?.['data-graph-row'] === 'q'.repeat(40))
+  checkTrue('   拿到一条提交行', row !== undefined && row !== null)
+  requests.length = 0
+  row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 120, clientY: 40 })
+  await settle()
+  checkTrue('   右键弹出菜单', find('data-graph-commit-menu', 'q'.repeat(40)) !== null)
+  check('   菜单项是「重置到这里」', textOf(find('data-graph-menu-item', 'reset')), 'resetMenuTitle')
+
+  // 菜单里的那一项 → 打开对话框，并去宿主取预览。
+  await click(find('data-graph-menu-item', 'reset'))
+  const previewCalls = requests.filter((entry) => entry.route === 'gitbar:reset/preview')
+  check('   打开对话框时问宿主取预览', previewCalls.length >= 1, 'true')
+  checkTrue('   预览问的是那条提交', String(previewCalls[0]?.url ?? '').includes(encodeURIComponent('q'.repeat(40))) || String(previewCalls[0]?.url ?? '').includes('q'.repeat(40)))
+  const dialog = find('data-reset-dialog', 'q'.repeat(40))
+  checkTrue('   对话框已打开', dialog !== null)
+  const dialogText = textOf(dialog)
+  // 预览必须给出"HEAD 在哪、要移到哪、影响几个提交"。
+  checkTrue('   预览里有当前 HEAD', dialogText.includes('resetPreviewCurrent') && dialogText.includes('mmmmmmm'))
+  checkTrue('   预览里有目标提交', dialogText.includes('resetPreviewTarget'))
+  check('   影响提交数来自宿主', find('data-reset-affected')?.props?.['data-reset-affected'], '3')
+  checkTrue('   已发布的 HEAD 给出改写警告', dialogText.includes('resetPublishedWarning'))
+  check('   默认模式是 mixed', find('data-reset-mode', 'mixed')?.props?.['aria-pressed'], true)
+
+  // 切到 hard：必须出现明确的后果说明，确定按钮写 Reset Hard。
+  await click(find('data-reset-mode', 'hard'))
+  checkTrue('   hard 给出"会丢弃本地修改"的警告', find('data-reset-hard-warning') !== null)
+  check('   hard 的确定按钮不是"确定"', textOf(find('data-reset-confirm')), 'resetConfirmHard')
+
+  // 取消：一个请求都不能发。
+  requests.length = 0
+  await click(find('data-reset-cancel'))
+  check('   取消不发任何重置请求', requests.filter((entry) => entry.route === 'gitbar:reset').length, 0)
+  checkTrue('   取消后对话框关闭', find('data-reset-dialog') === null)
+
+  // 重新打开，用 soft 执行：请求体要如实反映模式，且**不带**破坏性确认。
+  await click(find('data-graph-reset'))
+  await click(find('data-reset-mode', 'soft'))
+  requests.length = 0
+  await click(find('data-reset-confirm'))
+  const softCall = requests.filter((entry) => entry.route === 'gitbar:reset').pop()
+  check('   soft 重置发到 gitbar', softCall !== undefined, 'true')
+  check('   模式如实发出', softCall?.body?.mode, 'soft')
+  check('   soft 不带破坏性确认', softCall?.body?.acknowledgeDestructive, undefined)
+  check('   目标是那条提交', softCall?.body?.revision, 'm'.repeat(40))
+  // 成功后给出"用哪种模式重置到了哪" + 一次点击的撤销入口。
+  check('   成功提示带上模式', find('data-graph-notice')?.props?.['data-graph-notice'], 'soft')
+  checkTrue('   提示里带撤销入口', find('data-graph-undo-reset', 'm'.repeat(40)) !== null)
+
+  // 撤销这次重置：soft 的撤销还是 soft（什么都没丢），而且目标是 reset 之前的 HEAD。
+  await click(find('data-graph-undo-reset'))
+  checkTrue('   撤销会重新打开对话框（仍要看清预览）', find('data-reset-dialog', 'm'.repeat(40)) !== null)
+  check('   撤销默认用 soft', find('data-reset-mode', 'soft')?.props?.['aria-pressed'], true)
+  requests.length = 0
+  await click(find('data-reset-confirm'))
+  const undoCall = requests.filter((entry) => entry.route === 'gitbar:reset').pop()
+  check('   撤销重置回到原来的 HEAD', undoCall?.body?.revision, 'm'.repeat(40))
+  check('   撤销也是 soft', undoCall?.body?.mode, 'soft')
+
+  // hard：请求必须带 acknowledgeDestructive（宿主也会拒绝不带它的）。
+  await click(find('data-graph-reset'))
+  await click(find('data-reset-mode', 'hard'))
+  requests.length = 0
+  await click(find('data-reset-confirm'))
+  const hardCall = requests.filter((entry) => entry.route === 'gitbar:reset').pop()
+  check('   hard 请求带破坏性确认', hardCall?.body?.acknowledgeDestructive, true)
+  check('   hard 模式如实发出', hardCall?.body?.mode, 'hard')
+  check('   这次没有撤销入口时提示仍在', find('data-graph-notice')?.props?.['data-graph-notice'], 'hard')
+
+  // 失败：宿主回一个稳定 code，对话框里就地显示（不关掉对话框，用户可以改目标重试）。
+  resetError = { error: 'no such revision', code: 'noSuchRevision', detail: 'unknown revision' }
+  requests.length = 0
+  await click(find('data-graph-undo-reset'))
+  await click(find('data-reset-confirm'))
+  checkTrue('   失败信息留在对话框里', find('data-reset-error') !== null)
+  checkTrue('   失败后对话框仍然打开', find('data-reset-dialog') !== null)
+  await click(find('data-reset-cancel'))
 }
 
 console.log('')

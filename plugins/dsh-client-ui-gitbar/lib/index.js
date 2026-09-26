@@ -1394,6 +1394,98 @@ function asRef(value) {
 }
 
 /**
+ * 读一个提交的概要（HEAD 或任意修订）。
+ *
+ * `%B` 是**完整**提交信息（含正文），amend 要靠它把原信息填回输入框；`%P` 是父提交，
+ * 「撤销最后一次提交」要用第一个父提交当作 reset 的目标（根提交没有父，那种情况走
+ * `root: true` 那条路）。
+ *
+ * @param cwd - 仓库根。
+ * @param revision - 已校验的修订（默认 HEAD）。
+ * @returns `{ sha, short, subject, message, author, email, date, parents }`，或 undefined。
+ */
+async function readCommitSummary(cwd, revision = 'HEAD') {
+  const raw = await git(
+    ['show', '--no-patch', '--no-abbrev', '--format=%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%cI%x1f%P', revision],
+    cwd,
+  ).catch(() => undefined)
+  if (raw === undefined) return undefined
+  const fields = String(raw).replace(/\n$/u, '').split('\u001f')
+  if (fields.length < 8) return undefined
+  const parents = fields[7].trim() === '' ? [] : fields[7].trim().split(/\s+/u)
+  return {
+    sha: fields[0].trim(),
+    short: fields[1].trim(),
+    subject: fields[2].trim(),
+    // 结尾的换行是 git 的格式（`%B` 后面跟一个换行），去掉它，界面上再把正文原样显示。
+    message: fields[3].replace(/\n$/u, ''),
+    author: fields[4].trim(),
+    email: fields[5].trim(),
+    date: fields[6].trim(),
+    parents,
+  }
+}
+
+/**
+ * 这个提交是否**已经发布**（存在于某个远端跟踪引用里）。
+ *
+ * 判定的两条路，都必须走 git 自己：
+ *   1. 有上游（当前分支配了 `branch.<name>.remote`/`merge`）→ `merge-base --is-ancestor`
+ *      问"HEAD 是不是上游的祖先"。是 ⇒ 远端已经有它了；
+ *   2. 没有上游 → 用 `for-each-ref --contains` 问"有没有任何远端跟踪引用包含它"。这一条
+ *      覆盖了"刚 fetch 下来的别人的分支里有同一个提交"这种没有上游配置的情形。
+ *
+ * 两种都不是时才算"尚未发布"。**不能**用 `ahead === 0` 代替：那说的是"本地没有未推送的
+ * 提交"，与"这一个提交在不在远端"是两件事（rebase/amend 之后 ahead 会变，而远端那份
+ * 老提交仍然在）。
+ *
+ * @param cwd - 仓库根。
+ * @param revision - 已校验的修订。
+ * @returns `{ published, upstream }`。
+ */
+async function readPublishedState(cwd, revision) {
+  const upstream = (await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', `${revision}@{upstream}`], cwd).catch(() => '')).trim()
+  if (upstream !== '') {
+    try {
+      await git(['merge-base', '--is-ancestor', revision, upstream], cwd)
+      return { published: true, upstream }
+    } catch {
+      return { published: false, upstream }
+    }
+  }
+  const containing = await git(['for-each-ref', '--contains', revision, '--format=%(refname:short)', 'refs/remotes'], cwd).catch(() => '')
+  return { published: containing.trim() !== '', upstream: '' }
+}
+
+/**
+ * 把请求里的修订解析成一个**当前仓库里确实存在**的提交 SHA。
+ *
+ * 只接受 40 位十六进制（界面的修订来自提交图，本来就是完整 SHA）：这样"reset 到别的
+ * 仓库的提交"在**结构上**不可能发生——那个 SHA 在 `cwd` 这个仓库里根本解析不出来。
+ * 比接受 `HEAD~3` 之类的 rev 表达式更安全：后者能把任意 rev 语法带进来，而这个入口
+ * 只需要"图上那一条提交"。
+ *
+ * @param cwd - 仓库根。
+ * @param value - 请求给出的修订。
+ * @returns 完整 SHA，或 undefined。
+ */
+async function resolveCommitSha(cwd, value) {
+  if (typeof value !== 'string' || !/^[0-9a-f]{40}$/u.test(value.trim())) return undefined
+  const sha = (await git(['rev-parse', '--verify', '--quiet', `${value.trim()}^{commit}`], cwd).catch(() => '')).trim()
+  return sha === '' ? undefined : sha
+}
+
+/**
+ * reset 的三种模式（与 git 的三个开关一一对应）。
+ *
+ * 语义差别是这个界面的核心信息，因此集中在这里并写明：
+ *   * `soft`  —— 只移动 HEAD，索引与工作区都不动（改动保持 staged）；
+ *   * `mixed` —— 移动 HEAD 并重置索引，工作区不动（改动变成未暂存）；
+ *   * `hard`  —— 三者一起重置（**已跟踪文件的本地修改会被丢弃**，未跟踪文件保留）。
+ */
+const RESET_MODES = new Set(['soft', 'mixed', 'hard'])
+
+/**
  * 创建 git 路由的处理器。
  *
  * 路由形状：
@@ -1514,6 +1606,75 @@ function createGitHandler() {
           // 仓库，用 POST 会让"读 / 写"这条分界线在客户端的请求记录里消失）。
           const stashes = context === undefined ? [] : await listStashes(cwd)
           sendJson(response, 200, { isRepo: context !== undefined, ...scope, stashes, stashCount: stashes.length })
+          return
+        }
+        // 当前 HEAD 的完整信息（amend 要把原信息填回输入框；撤销提交要知道它的父提交）。
+        // 顺带算出"这个提交是否已经发布"，因为那决定了 amend 要不要给出改写历史的警告——
+        // 而这只有宿主知道（upstream 与远端跟踪引用都在它手里）。
+        if (path === `${ROUTE_PREFIX}/head-commit`) {
+          if (context === undefined) {
+            sendJson(response, 200, { isRepo: false, ...scope })
+            return
+          }
+          const head = await readCommitSummary(cwd, 'HEAD')
+          if (head === undefined) {
+            // 尚无提交的仓库：这不是错误，界面据此禁用 amend / 撤销。
+            sendJson(response, 200, { isRepo: true, ...scope, head: null, published: false, upstream: '', branch: '', hasCommits: false })
+            return
+          }
+          const { published, upstream } = await readPublishedState(cwd, 'HEAD')
+          sendJson(response, 200, {
+            isRepo: true,
+            ...scope,
+            head,
+            published,
+            upstream,
+            branch: (await currentBranchName(cwd)) ?? '',
+            hasCommits: true,
+          })
+          return
+        }
+        // reset 之前的预览：HEAD 现在在哪、要移到哪、会影响几个提交。
+        //
+        // 与 `/reset` 分开成一条读路由是有意的：预览必须在用户**决定之前**就能看到
+        // （他可能看到"会影响 30 个提交"就取消），而写路由只在真的执行时才被调用。
+        if (path === `${ROUTE_PREFIX}/reset/preview`) {
+          const requested = url.searchParams.get('revision')
+          if (context === undefined) {
+            sendJson(response, 200, { isRepo: false, ...scope })
+            return
+          }
+          const target = requested === 'ROOT' ? undefined : await resolveCommitSha(cwd, requested)
+          const root = requested === 'ROOT'
+          if (!root && target === undefined) {
+            sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+            return
+          }
+          const current = await readCommitSummary(cwd, 'HEAD')
+          const targetSummary = root ? null : await readCommitSummary(cwd, target)
+          // `affected` = 这次 reset 会把多少个提交移出当前分支（还原目标在 HEAD 之前时，
+          // 就是"将被丢弃的提交数"）；`ahead` = 目标上比 HEAD 多的提交（reset 会**前进**）。
+          const affected = root
+            ? Number((await git(['rev-list', '--count', 'HEAD'], cwd).catch(() => '0')).trim()) || 0
+            : Number((await git(['rev-list', '--count', `${target}..HEAD`], cwd).catch(() => '0')).trim()) || 0
+          const ahead = root || target === undefined
+            ? 0
+            : Number((await git(['rev-list', '--count', `HEAD..${target}`], cwd).catch(() => '0')).trim()) || 0
+          const published = current === undefined ? { published: false, upstream: '' } : await readPublishedState(cwd, 'HEAD')
+          const targetPublished = target === undefined ? { published: false, upstream: '' } : await readPublishedState(cwd, target)
+          sendJson(response, 200, {
+            isRepo: true,
+            ...scope,
+            current: current ?? null,
+            target: targetSummary ?? null,
+            root,
+            affected,
+            ahead,
+            published: published.published,
+            upstream: published.upstream,
+            targetPublished: targetPublished.published,
+            branch: (await currentBranchName(cwd)) ?? '',
+          })
           return
         }
         sendJson(response, 404, { error: 'not found' })
@@ -2016,6 +2177,103 @@ function createGitHandler() {
         return
       }
 
+      // ---- 把当前分支重置到某个提交 -----------------------------------------
+      //
+      // 表单 `{ revision, mode, root?, acknowledgeDestructive? }`。
+      //   revision  提交 SHA（来自提交图；必须是**这个**仓库里的提交）
+      //   root      true 表示"重置到第一个提交之前"（撤销根提交；只有 soft/mixed 支持）
+      //   mode      soft | mixed | hard
+      //   acknowledgeDestructive  hard 必须显式带上：界面的强确认按钮才会加它
+      //
+      // 这是**改写当前分支位置**的操作，因此校验比只读路由严格得多：模式白名单、修订必须
+      // 能在这个仓库里解析成提交、hard 必须显式确认。绝不接受 `HEAD~3` 这类 rev 表达式——
+      // 那个入口只需要"图上那一条提交"。
+      if (path === `${ROUTE_PREFIX}/reset`) {
+        const mode = typeof payload?.mode === 'string' ? payload.mode : ''
+        if (!RESET_MODES.has(mode)) {
+          sendJson(response, 400, { error: 'unknown reset mode', code: 'invalidResetMode' })
+          return
+        }
+        const root = payload?.root === true
+        if (root && mode === 'hard') {
+          // git 没有"重置到没有提交的状态并丢弃工作区"这条命令；硬要做到它只能靠
+          // `read-tree --empty` 加删文件，那已经超出"安全的历史恢复"的范畴。
+          sendJson(response, 400, { error: 'hard reset to the root is not supported', code: 'unsupportedReset' })
+          return
+        }
+        // 破坏性动作的显式确认：hard 会丢弃已跟踪文件的本地修改，因此**必须**由请求自己
+        // 声明"用户已经确认过"。界面在强确认弹窗的确定按钮里才带上它，于是"误发一次
+        // hard reset"在协议层就不可能发生。
+        if (mode === 'hard' && payload?.acknowledgeDestructive !== true) {
+          sendJson(response, 400, { error: 'destructive reset requires acknowledgement', code: 'destructiveNotAcknowledged' })
+          return
+        }
+        let target
+        if (root) {
+          const head = await readCommitSummary(cwd, 'HEAD')
+          if (head === undefined) {
+            sendJson(response, 409, { error: 'no commits', code: 'noCommits' })
+            return
+          }
+          target = undefined
+        } else {
+          target = await resolveCommitSha(cwd, payload?.revision)
+          if (target === undefined) {
+            sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+            return
+          }
+        }
+        const previous = await readCommitSummary(cwd, 'HEAD')
+        /**
+         * 这次 reset 会移出当前分支的提交数——**必须在动手之前算**。
+         *
+         * 动手之后 HEAD 已经指向目标（root 那条路更是连 HEAD 都没有了），再问"从目标到
+         * HEAD 有多少个提交"只会得到 0 或一句报错。因此这里的顺序是有意的。
+         */
+        const affected =
+          previous === undefined
+            ? 0
+            : Number(
+                (await git(['rev-list', '--count', target === undefined ? previous.sha : `${target}..${previous.sha}`], cwd).catch(() => '0')).trim(),
+              ) || 0
+        const published = previous === undefined ? false : (await readPublishedState(cwd, previous.sha)).published
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            if (target === undefined) {
+              // 撤销"第一个提交"：`update-ref -d HEAD` 把 HEAD 从引用里去掉，索引与工作区
+              // 都不动 —— 这正是 `reset --soft` 在没有父提交时的等价物。`mixed` 再多一步
+              // `read-tree --empty`（索引清空、工作区保留）。
+              if (mode === 'mixed') await git(['read-tree', '--empty'], cwd)
+              await git(['update-ref', '-d', 'HEAD'], cwd)
+            } else {
+              await git(['reset', `--${mode}`, target], cwd)
+            }
+            return {
+              reset: {
+                mode,
+                root,
+                affected,
+                target: target === undefined ? null : (await readCommitSummary(cwd, target)) ?? null,
+                // 撤销入口要用它：reset 之前 HEAD 在哪。`ORIG_HEAD` 也是 git 自己留下的一份，
+                // 但那是给命令行用的，界面上的"撤销这次 reset"必须拿得到确切的值。
+                previousHead: previous ?? null,
+                published,
+              },
+            }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            if (/not a valid object|unknown revision|bad revision/iu.test(message)) return { status: 404, code: 'noSuchRevision' }
+            if (/uncommitted changes|would be overwritten/iu.test(message)) return { status: 409, code: 'localChanges' }
+            return undefined
+          },
+        )
+        return
+      }
+
       // ---- 储藏（stash）-----------------------------------------------------
       //
       // 全部走**同一个 cwd**（= 当前 repositoryRoot），因此多仓库项目里 frontend 的储藏
@@ -2322,6 +2580,9 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/remotes`,
     `${ROUTE_PREFIX}/branch/sync`,
     `${ROUTE_PREFIX}/checkout`,
+    `${ROUTE_PREFIX}/head-commit`,
+    `${ROUTE_PREFIX}/reset`,
+    `${ROUTE_PREFIX}/reset/preview`,
     `${ROUTE_PREFIX}/stash/list`,
     `${ROUTE_PREFIX}/stash/push`,
     `${ROUTE_PREFIX}/stash/apply`,
