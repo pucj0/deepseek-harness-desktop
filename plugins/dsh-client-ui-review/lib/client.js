@@ -1015,6 +1015,61 @@ window.__ModuleLoader__.load({
       resetUndo: '撤销这次重置（回到 {short}）',
       resetUndoHint: '把分支移回重置之前的位置。hard 重置丢弃的工作区修改无法由 git 找回。',
       resetUndone: '已回到 {short}',
+      // ---- 提交右键菜单（复制 / 比较 / 建分支 / 建标记 / 摘取 / 还原）----
+      copyCommitSha: '复制提交 SHA',
+      copiedSha: '已复制 {sha}',
+      compareWithCurrent: '与当前比较',
+      selectForCompare: '选择用于比较',
+      compareWithSelected: '与所选提交比较',
+      compareSelectedBadge: '已选 {short}',
+      compareClear: '清除所选',
+      createBranchHere: '在此创建分支…',
+      createTagHere: '在此创建标记…',
+      cherryPickHere: '摘取这个提交（Cherry-pick）',
+      revertHere: '还原这个提交（Revert）',
+      graphMenuDanger: '以下操作会改写当前分支',
+      // ---- 比较视图 ----
+      compareTitle: '比较',
+      compareFromLabel: '起点',
+      compareToLabel: '终点',
+      compareOnlyA: '只在起点：{count} 个提交',
+      compareOnlyB: '只在终点：{count} 个提交',
+      compareSame: '两个修订相同，没有差异',
+      compareFilesTitle: '改动的文件',
+      compareNoFiles: '两个修订之间没有文件改动',
+      compareDiffEmpty: '从上面的列表里选一个文件查看差异',
+      compareClose: '关闭比较',
+      compareBusy: '正在比较…',
+      compareFromBranchHint: '（来自分支菜单：{name}）',
+      // ---- 在此创建分支 / 标记 ----
+      dialogBranchHereTitle: '在此创建分支',
+      dialogBranchHereFrom: '起点：{short} {subject}',
+      dialogFieldBranchName: '分支名',
+      dialogBranchCheckout: '创建后立即切换过去',
+      createdBranchNotice: '已创建分支 {name}',
+      dialogTagHereTitle: '在此创建标记',
+      dialogFieldTagName: '标记名',
+      dialogFieldTagMessage: '标记信息（填写即为附注标记）',
+      dialogTagAnnotated: '附注标记（带信息与作者时间）',
+      dialogTagTypeHint: '轻量标记只是一个指向提交的名字；附注标记会额外记录信息、作者与时间。',
+      dialogTagHereTarget: '目标：{short} {subject}',
+      createdTagNotice: '已创建标记 {name}',
+      cherryPickedNotice: '已摘取 {short}',
+      revertedCommitNotice: '已还原 {short}',
+      cherryPickConflictNotice: '摘取有冲突：请在冲突面板里逐块解决，然后「继续摘取」或「中止」。',
+      revertConflictNotice: '还原有冲突：请在冲突面板里逐块解决，然后「继续还原」或「中止」。',
+      // ---- 文件历史 ----
+      showFileHistory: '查看文件历史',
+      fileHistoryCommitDiff: '这个提交里对该文件的改动',
+      fileHistoryBack: '返回文件差异',
+      fileHistoryRenamed: '（含改名前的历史）',
+      error_noSuchRevision: '这个修订在当前仓库里不存在（可能已经被改写或删除）。',
+      error_tagExists: '同名标记已存在，换个名字。',
+      error_invalidTagName: '标记名不合法，已拒绝。',
+      error_branchExists: '同名分支已存在，换个名字。',
+      error_cherryPickConflict: '摘取有冲突，需要在冲突面板里解决。',
+      error_revertConflict: '还原有冲突，需要在冲突面板里解决。',
+      error_emptyRevert: '这个提交没有可还原的改动（已经是空操作）。',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
@@ -1404,6 +1459,61 @@ window.__ModuleLoader__.load({
       resetUndo: 'Undo this reset (back to {short})',
       resetUndoHint: 'Move the branch back to where it was. Working-tree changes discarded by a hard reset cannot be recovered by git.',
       resetUndone: 'Back at {short}',
+      // ---- Commit context menu (copy / compare / branch / tag / cherry-pick / revert) ----
+      copyCommitSha: 'Copy Commit SHA',
+      copiedSha: 'Copied {sha}',
+      compareWithCurrent: 'Compare with Current',
+      selectForCompare: 'Select for Compare',
+      compareWithSelected: 'Compare with Selected',
+      compareSelectedBadge: 'selected {short}',
+      compareClear: 'Clear selection',
+      createBranchHere: 'Create Branch Here…',
+      createTagHere: 'Create Tag Here…',
+      cherryPickHere: 'Cherry-pick this commit',
+      revertHere: 'Revert this commit',
+      graphMenuDanger: 'The following rewrites the current branch',
+      // ---- Comparison view ----
+      compareTitle: 'Compare',
+      compareFromLabel: 'From',
+      compareToLabel: 'To',
+      compareOnlyA: 'Only in "from": {count} commit(s)',
+      compareOnlyB: 'Only in "to": {count} commit(s)',
+      compareSame: 'Both revisions are the same — nothing to compare',
+      compareFilesTitle: 'Changed files',
+      compareNoFiles: 'No file changes between these revisions',
+      compareDiffEmpty: 'Pick a file above to see its diff',
+      compareClose: 'Close comparison',
+      compareBusy: 'Comparing…',
+      compareFromBranchHint: '(from the branch menu: {name})',
+      // ---- Create branch / tag here ----
+      dialogBranchHereTitle: 'Create branch here',
+      dialogBranchHereFrom: 'Starting point: {short} {subject}',
+      dialogFieldBranchName: 'Branch name',
+      dialogBranchCheckout: 'Switch to it right after creating',
+      createdBranchNotice: 'Created branch {name}',
+      dialogTagHereTitle: 'Create tag here',
+      dialogFieldTagName: 'Tag name',
+      dialogFieldTagMessage: 'Tag message (fills in = annotated tag)',
+      dialogTagAnnotated: 'Annotated tag (records message, tagger and time)',
+      dialogTagTypeHint: 'A lightweight tag is just a name pointing at a commit; an annotated tag also records a message, a tagger and a time.',
+      dialogTagHereTarget: 'Target: {short} {subject}',
+      createdTagNotice: 'Created tag {name}',
+      cherryPickedNotice: 'Cherry-picked {short}',
+      revertedCommitNotice: 'Reverted {short}',
+      cherryPickConflictNotice: 'The cherry-pick has conflicts: resolve them block by block in the conflict panel, then "Continue cherry-pick" or "Abort".',
+      revertConflictNotice: 'The revert has conflicts: resolve them block by block in the conflict panel, then "Continue revert" or "Abort".',
+      // ---- File history ----
+      showFileHistory: 'Show File History',
+      fileHistoryCommitDiff: "This commit's change to the file",
+      fileHistoryBack: 'Back to the file diff',
+      fileHistoryRenamed: '(history before the rename included)',
+      error_noSuchRevision: 'That revision does not exist in this repository (it may have been rewritten or removed).',
+      error_tagExists: 'A tag with that name already exists — pick another name.',
+      error_invalidTagName: 'That tag name is not valid.',
+      error_branchExists: 'A branch with that name already exists — pick another name.',
+      error_cherryPickConflict: 'The cherry-pick has conflicts; resolve them in the conflict panel.',
+      error_revertConflict: 'The revert has conflicts; resolve them in the conflict panel.',
+      error_emptyRevert: 'That commit has no changes to revert (it would be an empty operation).',
       binaryDiff: 'This file is binary; no line diff is shown.',
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
@@ -1607,6 +1717,14 @@ window.__ModuleLoader__.load({
       destructiveNotAcknowledged: 'error_destructiveNotAcknowledged',
       unsupportedReset: 'error_unsupportedReset',
       resetFailed: 'error_resetFailed',
+      // 提交右键菜单那批动作的失败（都来自 gitbar）：每一个都要有专门短句，
+      // 尤其是两种冲突——它们不是"失败"，而是"要去冲突面板继续"。
+      tagExists: 'error_tagExists',
+      invalidTagName: 'error_invalidTagName',
+      branchExists: 'error_branchExists',
+      cherryPickConflict: 'error_cherryPickConflict',
+      revertConflict: 'error_revertConflict',
+      emptyRevert: 'error_emptyRevert',
     }
 
     /** 状态字母对应的颜色，让列表一眼能分辨增删改。 */
@@ -6095,6 +6213,267 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 两个修订之间的比较视图（提交 ↔ 当前、A ↔ B、分支 ↔ 当前）。
+     *
+     * 只做**三件事**：说清两端是谁、各自有几个提交是对方没有的、改动了哪些文件。点一个文件
+     * 就在下面的 Diff Preview 里看它（那里是**唯一**的差异渲染器）。因此这里没有一行渲染
+     * 差异的代码——需求里"不要创建新的 Diff 引擎"说的就是这个。
+     */
+    function CommitCompareView(props) {
+      const { t, compare, result, error, busy, onClose, onSelectFile, selectedPath } = props
+      const files = Array.isArray(result?.files) ? result.files : []
+      const rowStyle = { fontFamily: CODE_FONT, fontSize: uiPx(11.5), color: GRAPH_DIM, wordBreak: 'break-all' }
+      const side = (label, commit, ref) =>
+        react.createElement(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
+          react.createElement('span', { style: { fontSize: uiPx(11), color: GRAPH_DIM } }, label),
+          react.createElement(
+            'span',
+            { style: { display: 'flex', gap: '6px', alignItems: 'baseline', minWidth: 0 } },
+            react.createElement('span', { style: { flexShrink: 0, fontFamily: CODE_FONT, color: ACCENT } }, String(commit?.short ?? '')),
+            react.createElement('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, String(commit?.subject ?? '')),
+            ref === undefined || ref === '' ? null : react.createElement('span', { style: { flexShrink: 0, color: GRAPH_DIM, fontSize: uiPx(11) } }, `(${ref})`),
+          ),
+        )
+      return react.createElement(
+        'div',
+        { 'data-graph-compare': `${String(compare?.a ?? '')}\u0000${String(compare?.b ?? '')}`, style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' } },
+        react.createElement(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 } },
+          react.createElement('span', { style: { fontWeight: 600, fontSize: reviewFont.meta } }, t('compareTitle')),
+          compare?.fromBranch === '' || compare?.fromBranch === undefined
+            ? null
+            : react.createElement('span', { 'data-graph-compare-branch': String(compare.fromBranch), style: { color: GRAPH_DIM, fontSize: uiPx(11) } }, t('compareFromBranchHint', { name: String(compare.fromBranch) })),
+          react.createElement('span', { style: { flex: '1 1 auto' } }),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-graph-compare-close': '',
+              title: t('compareClose'),
+              'aria-label': t('compareClose'),
+              onClick: onClose,
+              style: { border: 'none', borderRadius: '5px', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' },
+            },
+            '✕',
+          ),
+        ),
+        react.createElement(
+          'div',
+          { style: { display: 'flex', gap: '14px', padding: '8px 10px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 } },
+          side(t('compareFromLabel'), result?.a, compare?.a),
+          side(t('compareToLabel'), result?.b, compare?.b),
+        ),
+        error !== ''
+          ? react.createElement('div', { 'data-graph-compare-error': '', style: { padding: '10px', color: REMOVED, fontFamily: UI_FONT, fontSize: reviewFont.normal } }, error)
+          : busy
+            ? react.createElement('div', { style: { padding: '10px', color: GRAPH_DIM, fontFamily: UI_FONT, fontSize: reviewFont.normal } }, t('compareBusy'))
+            : result?.same === true
+              ? react.createElement('div', { 'data-graph-compare-same': '', style: { padding: '10px', color: GRAPH_DIM, fontFamily: UI_FONT, fontSize: reviewFont.normal } }, t('compareSame'))
+              : react.createElement(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', minHeight: 0, flex: '1 1 auto' } },
+                  react.createElement(
+                    'div',
+                    { style: { display: 'flex', gap: '10px', padding: '6px 10px 2px', flexShrink: 0, fontFamily: UI_FONT, fontSize: uiPx(11.5), color: GRAPH_DIM } },
+                    react.createElement('span', { 'data-graph-compare-only-a': String(result?.onlyA ?? 0) }, t('compareOnlyA', { count: Number(result?.onlyA ?? 0) })),
+                    react.createElement('span', { 'data-graph-compare-only-b': String(result?.onlyB ?? 0) }, t('compareOnlyB', { count: Number(result?.onlyB ?? 0) })),
+                  ),
+                  react.createElement(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px 2px', flexShrink: 0 } },
+                    react.createElement('span', { style: { fontSize: reviewFont.meta, fontWeight: 600, color: GRAPH_DIM } }, t('compareFilesTitle')),
+                    react.createElement('span', { 'data-graph-compare-count': String(files.length), style: { fontSize: reviewFont.meta, color: GRAPH_DIM } }, t('graphFiles', { count: files.length })),
+                  ),
+                  react.createElement(
+                    'div',
+                    { 'data-graph-compare-files': String(files.length), style: { minHeight: 0, overflowY: 'auto', padding: '0 6px 10px' } },
+                    files.length === 0
+                      ? react.createElement('div', { 'data-graph-compare-nofiles': '', style: { padding: '8px 6px', fontSize: reviewFont.normal, color: GRAPH_DIM } }, t('compareNoFiles'))
+                      : files.map((file) =>
+                          react.createElement(CommitFileRow, {
+                            key: `cmp:${file.path}`,
+                            t,
+                            file,
+                            revision: String(result?.b?.sha ?? compare?.b ?? ''),
+                            selected: selectedPath === file.path,
+                            // **关键**：把两端一起交给差异区。行组件自己上报的 payload 只有
+                            // `{revision, path, status}`，因此这里显式补一个 `compare`（它会
+                            // 原样带到 `DiffPreview`，让取数打 `/compare-file` 而不是
+                            // `/commit-file`——否则点开看到的是"那次提交相对它父提交"的差异，
+                            // 而不是这两个修订之间的差异）。
+                            compare: { a: String(result?.a?.sha ?? compare?.a ?? ''), b: String(result?.b?.sha ?? compare?.b ?? '') },
+                            onSelect: (payload) =>
+                              onSelectFile({
+                                ...payload,
+                                compare: { a: String(result?.a?.sha ?? compare?.a ?? ''), b: String(result?.b?.sha ?? compare?.b ?? '') },
+                              }),
+                          }),
+                        ),
+                  ),
+                ),
+      )
+    }
+
+    /** 「在此创建分支」对话框（提交右键菜单，与 gitbar 的建分支是同一个后端）。 */
+    function CreateBranchHereDialog(props) {
+      const { t, commit, busy, onCancel, onSubmit } = props
+      const [name, setName] = react.useState('')
+      const [checkout, setCheckout] = react.useState(true)
+      // 提交对象的字段名有两个来源（图的提交用 `hash`，宿主响应里的 `previousHead` 用
+      // `sha`），因此这里两者都认——否则对话框标记会是空的（实测踩到过）。
+      const sha = String(commit?.hash ?? commit?.sha ?? '')
+      const short = String(commit?.short ?? sha.slice(0, 7))
+      useEscapeToClose(onCancel)
+      return dialogShell(
+        { marker: 'data-graph-branch-dialog', value: sha, t, title: t('dialogBranchHereTitle'), busy, onCancel, onSubmit: () => {
+          if (name.trim() === '') return
+          onSubmit({ name: name.trim(), checkout })
+        }, confirmKey: 'dialogConfirm' },
+        react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12), marginBottom: '8px', wordBreak: 'break-all' } }, t('dialogBranchHereFrom', { short, subject: String(commit?.subject ?? '') })),
+        textField({ marker: 'data-graph-branch-name', label: t('dialogFieldBranchName'), value: name, onChange: setName, placeholder: 'feature/my-branch', autoFocus: true }),
+        checkboxField({ marker: 'data-graph-branch-checkout', label: t('dialogBranchCheckout'), checked: checkout, onChange: setCheckout }),
+      )
+    }
+
+    /** 「在此创建标记」对话框（轻量 / 附注由"有没有信息"决定，与 gitbar 的规则一致）。 */
+    function CreateTagHereDialog(props) {
+      const { t, commit, busy, defaultAnnotated, onCancel, onSubmit } = props
+      const [name, setName] = react.useState('')
+      const [message, setMessage] = react.useState('')
+      const [annotated, setAnnotated] = react.useState(defaultAnnotated === true)
+      // 同 CreateBranchHereDialog：`hash` / `sha` 两个来源都认。
+      const sha = String(commit?.hash ?? commit?.sha ?? '')
+      const short = String(commit?.short ?? sha.slice(0, 7))
+      useEscapeToClose(onCancel)
+      return dialogShell(
+        { marker: 'data-graph-tag-dialog', value: sha, t, title: t('dialogTagHereTitle'), busy, onCancel, onSubmit: () => {
+          if (name.trim() === '') return
+          onSubmit({ name: name.trim(), message: annotated ? message : '' })
+        }, confirmKey: 'dialogConfirm' },
+        react.createElement('div', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12), marginBottom: '8px', wordBreak: 'break-all' } }, t('dialogTagHereTarget', { short, subject: String(commit?.subject ?? '') })),
+        textField({ marker: 'data-graph-tag-name', label: t('dialogFieldTagName'), value: name, onChange: setName, placeholder: 'v1.7.0', autoFocus: true }),
+        checkboxField({ marker: 'data-graph-tag-annotated', label: t('dialogTagAnnotated'), checked: annotated, onChange: setAnnotated }),
+        annotated
+          ? textField({ marker: 'data-graph-tag-message', label: t('dialogFieldTagMessage'), value: message, onChange: setMessage, placeholder: 'Release 1.7.0' })
+          : react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5), lineHeight: 1.6 } }, t('dialogTagTypeHint')),
+      )
+    }
+
+    /** Escape 关闭弹窗（与其它弹窗一致）。 */
+    function useEscapeToClose(onCancel) {
+      react.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onCancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [onCancel])
+    }
+
+    /** 弹窗外壳（标题 + 正文 + 取消/确定）。 */
+    function dialogShell(options, ...children) {
+      const { t, title, busy, onCancel, onSubmit, marker, value, confirmKey } = options
+      return react.createElement(
+        'div',
+        {
+          onClick: onCancel,
+          style: { position: 'fixed', inset: 0, zIndex: 10001, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        },
+        react.createElement(
+          'div',
+          {
+            onClick: (event) => event.stopPropagation(),
+            role: 'dialog',
+            'aria-modal': 'true',
+            [marker]: value,
+            style: {
+              width: 'min(440px, calc(100vw - 48px))',
+              borderRadius: '10px',
+              border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+              background: 'var(--dsw-alias-bg-overlay, #1f1f24)',
+              color: 'var(--dsw-alias-label-primary)',
+              boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+              padding: '16px 18px',
+              fontSize: uiPx(13),
+              lineHeight: '1.6',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+            },
+          },
+          react.createElement('div', { style: { fontWeight: 600 } }, title),
+          ...children,
+          react.createElement(
+            'div',
+            { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '4px' } },
+            react.createElement(
+              'button',
+              { type: 'button', 'data-graph-dialog-cancel': '', onClick: onCancel, disabled: busy, style: dialogButtonStyle(false, busy) },
+              t('cancel'),
+            ),
+            react.createElement(
+              'button',
+              { type: 'button', 'data-graph-dialog-confirm': '', disabled: busy, onClick: onSubmit, style: dialogButtonStyle(true, busy) },
+              busy ? t('stashBusy') : t(confirmKey ?? 'dialogConfirm'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /** 弹窗里的一个文本框。 */
+    function textField(options) {
+      return react.createElement(
+        'label',
+        { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        react.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } }, options.label),
+        react.createElement('input', {
+          type: 'text',
+          value: options.value,
+          autoFocus: options.autoFocus === true,
+          spellCheck: false,
+          placeholder: options.placeholder ?? '',
+          [options.marker]: '',
+          onChange: (event) => options.onChange(event.target.value),
+          onKeyDown: (event) => {
+            event.stopPropagation()
+            if (event.key === 'Enter' && typeof options.onEnter === 'function') options.onEnter()
+          },
+          style: {
+            boxSizing: 'border-box',
+            width: '100%',
+            height: '30px',
+            padding: '0 8px',
+            borderRadius: '6px',
+            border: '1px solid var(--dsw-alias-border-l2, #3d3d45)',
+            background: 'var(--dsw-alias-bg-layer-2, #26262c)',
+            color: 'inherit',
+            fontFamily: CODE_FONT,
+            fontSize: uiPx(12.5),
+          },
+        }),
+      )
+    }
+
+    /** 弹窗里的一个勾选框。 */
+    function checkboxField(options) {
+      return react.createElement(
+        'label',
+        { style: { display: 'flex', alignItems: 'center', gap: '7px', cursor: 'pointer' } },
+        react.createElement('input', {
+          type: 'checkbox',
+          checked: options.checked === true,
+          [options.marker]: '',
+          onChange: (event) => options.onChange(event.target.checked),
+        }),
+        options.label,
+      )
+    }
+
+    /**
      * 提交行的小右键菜单（目前只有「把当前分支重置到这里」）。
      *
      * 需求要求"在 Commit Graph / Log 右键 commit"。菜单只有一项，但仍然做成菜单而不是
@@ -6103,27 +6482,26 @@ window.__ModuleLoader__.load({
      */
     function GraphCommitMenu(props) {
       const { t, menu, onClose, onReset } = props
+      const onAction = typeof props?.onAction === 'function' ? props.onAction : () => undefined
+      const selectedForCompare = props?.selectedForCompare ?? null
+      useEscapeToClose(onClose)
       react.useEffect(() => {
         const onPointerDown = () => onClose()
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') onClose()
-        }
         document.addEventListener('mousedown', onPointerDown)
-        document.addEventListener('keydown', onKeyDown)
-        return () => {
-          document.removeEventListener('mousedown', onPointerDown)
-          document.removeEventListener('keydown', onKeyDown)
-        }
+        return () => document.removeEventListener('mousedown', onPointerDown)
       }, [onClose])
-      const item = (key, label, onClick, danger) =>
+      const item = (key, label, onClick, options) =>
         react.createElement(
           'button',
           {
             type: 'button',
             key,
             'data-graph-menu-item': key,
+            disabled: options?.disabled === true,
+            title: options?.title,
             onClick: (event) => {
               event.stopPropagation()
+              if (options?.disabled === true) return
               onClick()
             },
             style: {
@@ -6133,27 +6511,40 @@ window.__ModuleLoader__.load({
               border: 'none',
               borderRadius: '6px',
               background: 'transparent',
-              color: danger === true ? REMOVED : 'inherit',
+              color: options?.danger === true ? REMOVED : 'inherit',
               fontFamily: UI_FONT,
               fontSize: uiPx(12.5),
               textAlign: 'left',
-              cursor: 'pointer',
+              whiteSpace: 'normal',
+              cursor: options?.disabled === true ? 'default' : 'pointer',
+              opacity: options?.disabled === true ? 0.45 : 1,
             },
           },
           label,
         )
+      const separator = (key) => react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
+      const commit = menu?.commit
+      const short = String(commit?.short ?? '')
+      /**
+       * 条目顺序（需求里点名的那一串），并按"会不会改写当前分支"分组：
+       *
+       *   只读/复制  →  比较  →  创建（分支 / 标记）  →  摘取 / 还原  →  **[危险] 重置**
+       *
+       * 危险动作放在**最后**并与其它条目之间加一条分隔线 + 一句说明：它就在右键菜单里，
+       * 与"复制 SHA"只隔几像素，靠位置与颜色一起区分才够。
+       */
       return react.createElement(
         'div',
         {
           role: 'menu',
-          'data-graph-commit-menu': String(menu?.commit?.hash ?? ''),
+          'data-graph-commit-menu': String(commit?.hash ?? ''),
           onClick: (event) => event.stopPropagation(),
           style: {
             position: 'fixed',
             zIndex: 10002,
             left: `${Number(menu?.x ?? 0)}px`,
             top: `${Number(menu?.y ?? 0)}px`,
-            minWidth: '220px',
+            minWidth: '240px',
             padding: '4px',
             borderRadius: '10px',
             border: `1px solid ${BORDER}`,
@@ -6162,7 +6553,34 @@ window.__ModuleLoader__.load({
             boxShadow: '0 10px 30px rgba(0,0,0,.2)',
           },
         },
-        item('reset', t('resetMenuTitle'), () => onReset(menu?.commit), false),
+        item('copy-sha', t('copyCommitSha'), () => onAction('copy-sha', commit)),
+        separator('sep1'),
+        item('compare-current', t('compareWithCurrent'), () => onAction('compare-current', commit)),
+        item(
+          selectedForCompare === null ? 'select-compare' : 'compare-selected',
+          selectedForCompare === null ? t('selectForCompare') : t('compareWithSelected'),
+          () => onAction(selectedForCompare === null ? 'select-compare' : 'compare-selected', commit),
+          selectedForCompare === null
+            ? undefined
+            : { title: t('compareSelectedBadge', { short: String(selectedForCompare.short ?? '') }) },
+        ),
+        selectedForCompare === null
+          ? null
+          : item('clear-compare', t('compareClear'), () => onAction('clear-compare', commit)),
+        separator('sep2'),
+        item('create-branch', t('createBranchHere'), () => onAction('create-branch', commit)),
+        item('create-tag', t('createTagHere'), () => onAction('create-tag', commit)),
+        separator('sep3'),
+        item('cherry-pick', t('cherryPickHere'), () => onAction('cherry-pick', commit)),
+        item('revert', t('revertHere'), () => onAction('revert', commit)),
+        // 危险动作：单独一段 + 一句说明（`data-graph-menu-danger` 让"分组"这件事可断言）。
+        separator('sep4'),
+        react.createElement(
+          'div',
+          { 'data-graph-menu-danger': '', style: { padding: '2px 10px 4px', color: GRAPH_DIM, fontSize: uiPx(11) } },
+          t('graphMenuDanger'),
+        ),
+        item('reset', t('resetMenuTitle'), () => onReset(commit), { danger: true }),
       )
     }
 
@@ -6350,12 +6768,33 @@ window.__ModuleLoader__.load({
           ? react.createElement('div', { style: { fontSize: uiPx(11.5), color: 'var(--dsw-alias-label-tertiary)' } }, t('fileHistoryEmpty'))
           : commits.map((commit) =>
               react.createElement(
-                'div',
+                'button',
                 {
                   key: commit.hash,
+                  type: 'button',
                   'data-staging-history-row': commit.hash,
+                  // 点一条历史 = 看**这个提交里对这个文件的改动**（需求 §11）。差异由下面
+                  // 那块共享的区域渲染（`/commit-file` + 同一个 ReviewDiffViewer），
+                  // 因此这里不新建任何"文件历史的差异视图"。
+                  onClick: () => (typeof props?.onOpenCommit === 'function' ? props.onOpenCommit({ revision: commit.hash, path, subject: commit.subject }) : undefined),
                   title: `${commit.hash}\n${commit.author} · ${commit.date}`,
-                  style: { display: 'flex', gap: '8px', alignItems: 'baseline', padding: '2px 0', fontSize: uiPx(11.5), lineHeight: 1.5 },
+                  style: {
+                    display: 'flex',
+                    gap: '8px',
+                    alignItems: 'baseline',
+                    boxSizing: 'border-box',
+                    width: '100%',
+                    padding: '2px 4px',
+                    border: 'none',
+                    borderRadius: '4px',
+                    background: 'transparent',
+                    color: 'inherit',
+                    textAlign: 'left',
+                    fontFamily: UI_FONT,
+                    fontSize: uiPx(11.5),
+                    lineHeight: 1.5,
+                    cursor: 'pointer',
+                  },
                 },
                 // 短哈希用等宽 + 色块，扫读时能与提交标题分开。
                 react.createElement(
@@ -6364,6 +6803,8 @@ window.__ModuleLoader__.load({
                   commit.short,
                 ),
                 react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, commit.subject),
+                // 作者也要显示（需求列的四项：日期 / 作者 / 提交信息 / SHA）。
+                react.createElement('span', { style: { flexShrink: 0, maxWidth: '10em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)' } }, commit.author),
                 react.createElement('span', { style: { flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' } }, commit.date),
               ),
             ),
@@ -7980,6 +8421,13 @@ window.__ModuleLoader__.load({
       /** 正在查看变更记录的文件路径（空串表示没有）。 */
       const [history, setHistory] = react.useState('')
       /**
+       * 正在看的"某个提交里这个文件的改动"：`{ revision, path, subject }`（null = 没有）。
+       *
+       * 与 `selectedFile` 是两回事：`selectedFile` 是"工作区里这个文件的差异"，而这是
+       * "历史上某一步对这个文件做了什么"。点文件历史里的一行就切到它，关掉再回到前者。
+       */
+      const [historyDiff, setHistoryDiff] = react.useState(null)
+      /**
        * **正在右侧预览差异的文件路径**（空串表示没有）。
        *
        * 与"要不要提交这个文件"（`deselectedFiles` / `chosenUntracked`）是**两个独立概念**：
@@ -8712,6 +9160,9 @@ window.__ModuleLoader__.load({
               t,
               workspace,
               path: entry.path,
+              // 点一条历史提交 → 在右侧看**那个提交里**对这个文件的改动（复用 `/commit-file`
+              // 与同一个差异渲染器）。
+              onOpenCommit: (request) => openHistoryDiff(request),
             }))
           }
         }
@@ -8759,6 +9210,25 @@ window.__ModuleLoader__.load({
         setSelectedStash('')
         setStashDetail(null)
         setStashFile('')
+        setHistoryDiff(null)
+        setSelectedFile(path)
+      }
+
+      /**
+       * 打开"某个提交里这个文件的改动"（文件历史里点一行）。
+       *
+       * 差异区共用：`DiffPreview` + `/commit-file` + `ReviewDiffViewer`，与提交图里点文件
+       * 走的是同一条路。这里只负责把"现在看的是哪一步历史"记下来。
+       */
+      const openHistoryDiff = (request) => {
+        if (request === null || request === undefined) return
+        const revision = typeof request.revision === 'string' ? request.revision : ''
+        const path = typeof request.path === 'string' ? request.path : ''
+        if (revision === '' || path === '') return
+        setSelectedStash('')
+        setStashDetail(null)
+        setStashFile('')
+        setHistoryDiff({ revision, path, subject: String(request.subject ?? '') })
         setSelectedFile(path)
       }
       // 已勾选（准备"加入 git"）的未跟踪文件。
@@ -9420,6 +9890,7 @@ window.__ModuleLoader__.load({
                                 t,
                                 workspace,
                                 path,
+                                onOpenCommit: (request) => openHistoryDiff(request),
                               }))
                             }
                             return nodes
@@ -9849,9 +10320,18 @@ window.__ModuleLoader__.load({
             : { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' },
         },
         // 看储藏与看工作区文件是**同一块区域**的两种内容：储藏优先（选中储藏时工作区文件的
-        // 选中项已经被清掉，两者不会同时出现）。
+        // 选中项已经被清掉，两者不会同时出现）。历史里某一步的改动同理（它就是一个"提交里
+        // 的这个文件"，用同一个 `DiffPreview` + `/commit-file`）。
         stashViewer ??
-          (previewEntry === undefined
+          (historyDiff !== null
+            ? react.createElement(DiffPreview, {
+                key: `historydiff:${workspace}:${historyDiff.revision}:${historyDiff.path}`,
+                t,
+                workspace,
+                file: { revision: historyDiff.revision, path: historyDiff.path, status: 'M' },
+                onClose: () => setHistoryDiff(null),
+              })
+            : previewEntry === undefined
           ? react.createElement(
               'div',
               { style: { padding: '16px', fontFamily: UI_FONT, fontSize: reviewFont.normal, color: 'var(--dsw-alias-label-tertiary)' } },
@@ -11463,6 +11943,27 @@ window.__ModuleLoader__.load({
     /** 提交图面板在 `sidebar.panellist` 与 `main` 两个槽位共用的 id。 */
     const GRAPH_ID = 'git-graph'
 
+    /**
+     * 跨插件的「打开比较」请求（一次性的）。
+     *
+     * 为什么需要它：分支列表在 **gitbar** 那个插件里，而比较视图（文件清单 + 差异）必须在
+     * 提交图面板里——那里才有主区域的宽度与现成的 `ReviewDiffViewer`。两个插件是各自独立的
+     * bundle，因此用 window 上一个带插件前缀的键对接（与 `__dshDesktopGitSnapshot` 同一个做法），
+     * 而"这次请求要比较哪两端"放在这个模块级的极小 store 里，由提交图面板消费。
+     *
+     * 只保留**最后一次**请求：比较视图同时只能显示一组（用户点第二次就是换了对象）。
+     */
+    const compareRequest = { current: null, listeners: new Set() }
+    function requestCompare(request) {
+      compareRequest.current = request
+      for (const listener of compareRequest.listeners) listener()
+    }
+    function subscribeCompare(listener) {
+      compareRequest.listeners.add(listener)
+      return () => compareRequest.listeners.delete(listener)
+    }
+    const readCompareRequest = () => compareRequest.current
+
     /** 泳道列宽与行高。两者都是常量，因为虚拟滚动要靠它们算偏移。 */
     const GRAPH_LANE_WIDTH = 14
     const GRAPH_ROW_HEIGHT = 24
@@ -12244,6 +12745,9 @@ window.__ModuleLoader__.load({
       const { t, file, revision } = props
       const selected = props?.selected === true
       const onSelect = typeof props?.onSelect === 'function' ? props.onSelect : () => undefined
+      // 比较视图里点文件时要把**两端**一起带上去（见 CommitCompareView 的说明）：行组件
+      // 自己只知道"这次提交 + 这个文件"，`compare` 是调用方给的上下文。
+      const compare = props?.compare
       const status = file.status?.[0] ?? '?'
       const color = STATUS_COLORS[status] ?? GRAPH_DIM
       const { dir, base } = splitPath(file.path)
@@ -12266,6 +12770,7 @@ window.__ModuleLoader__.load({
                 revision,
                 path: file.path,
                 status,
+                ...(compare === undefined ? {} : { compare }),
                 ...(Number.isFinite(file?.added) ? { added: file.added } : {}),
                 ...(Number.isFinite(file?.removed) ? { removed: file.removed } : {}),
               }),
@@ -12331,7 +12836,17 @@ window.__ModuleLoader__.load({
       const { t, workspace, file, onClose } = props
       const revision = typeof file?.revision === 'string' ? file.revision : ''
       const path = typeof file?.path === 'string' ? file.path : ''
-      const cacheKey = `${workspace ?? ''}\u0000${revision}\u0000${path}`
+      /**
+       * 比较模式：`file.compare = { a, b }` 时这份差异是"两个修订之间"的（比较视图里点文件），
+       * 否则是"这个提交里的"（提交图里点文件）。
+       *
+       * 两条来路共用一个组件、一个渲染器、一套缓存键——**不新建第二个差异视图**（这正是
+       * 需求反复强调的那条）。区别只有"取数打哪条路由"。
+       */
+      const compareA = typeof file?.compare?.a === 'string' ? file.compare.a : ''
+      const compareB = typeof file?.compare?.b === 'string' ? file.compare.b : ''
+      const comparing = compareA !== '' && compareB !== ''
+      const cacheKey = `${workspace ?? ''}\u0000${comparing ? `cmp:${compareA}:${compareB}` : revision}\u0000${path}`
       const [state, setState] = react.useState({ key: '', phase: 'loading' })
       const token = react.useRef(0)
       /**
@@ -12345,7 +12860,8 @@ window.__ModuleLoader__.load({
       const asked = react.useRef(new Set())
 
       react.useEffect(() => {
-        if (path === '' || revision === '' || typeof workspace !== 'string' || workspace === '') return undefined
+        const ready = path !== '' && (comparing || revision !== '') && typeof workspace === 'string' && workspace !== ''
+        if (!ready) return undefined
         const cached = readCommitDiffCache(cacheKey)
         if (cached !== undefined) {
           setState({ key: cacheKey, phase: 'ready', result: cached })
@@ -12357,7 +12873,11 @@ window.__ModuleLoader__.load({
         setState({ key: cacheKey, phase: 'loading' })
         void (async () => {
           try {
-            const result = await call('commit-file', { workspace, revision, path })
+            // 比较模式打 `/compare-file`（两端由调用方给出），否则 `/commit-file`（这个提交
+            // 相对它父提交的改动）。两条路由回同一形状，因此下面的渲染完全共用。
+            const result = comparing
+              ? await call('compare-file', { workspace, a: compareA, b: compareB, path })
+              : await call('commit-file', { workspace, revision, path })
             // 迟到的响应：令牌变了（又点了别的文件）、或键已经不是当前请求的键（用户切走了）。
             if (token.current !== mine) return
             writeCommitDiffCache(cacheKey, result)
@@ -12369,7 +12889,7 @@ window.__ModuleLoader__.load({
           }
         })()
         return undefined
-      }, [cacheKey, path, revision, workspace])
+      }, [cacheKey, path, revision, workspace, comparing, compareA, compareB])
 
       // 键对不上的那一份当它不存在：绝不用上一个文件的差异画这一个（与 LazyFileDiff 同一套）。
       const current = state.key === cacheKey ? state : { phase: 'loading' }
@@ -13482,6 +14002,22 @@ window.__ModuleLoader__.load({
       const [resetResult, setResetResult] = react.useState(null)
       /** 提交行右键菜单：`{ commit, x, y }`。 */
       const [commitMenu, setCommitMenu] = react.useState(null)
+      /**
+       * 比较视图：`{ a, b }`（两端都可以是 SHA 或引用名），null = 没在比较。
+       *
+       * `selectedForCompare` 是"选择用于比较"那一步选中的提交（IDEA 的 Select for Compare /
+       * Compare with Selected）：它只记一个提交，等用户再选另一个。
+       */
+      const [compare, setCompare] = react.useState(null)
+      const [compareResult, setCompareResult] = react.useState(null)
+      const [compareError, setCompareError] = react.useState('')
+      const [compareBusy, setCompareBusy] = react.useState(false)
+      const [selectedForCompare, setSelectedForCompare] = react.useState(null)
+      /** 提交菜单里的"在此创建分支 / 标记"对话框：`{ kind, commit }`。 */
+      const [hereDialog, setHereDialog] = react.useState(null)
+      /** 提交菜单触发的写操作结果提示（已复制 SHA / 已摘取 / 已还原…）。 */
+      const [menuNotice, setMenuNotice] = react.useState('')
+      const [menuBusy, setMenuBusy] = react.useState(false)
 
       /** 关掉 Preview：只收起，保留 `selectedDiffFile`（再点同一文件即原样恢复）。 */
       const closeDiff = react.useCallback(() => setDiffVisible(false), [])
@@ -13539,7 +14075,13 @@ window.__ModuleLoader__.load({
        * 提交"的那一帧会画出上一条提交的预览（同一路径时几乎看不出来，最难发现）。
        */
       const previewFile =
-        selectedDiffFile !== null && selectedDiffFile.revision === selectedCommit ? selectedDiffFile : null
+        selectedDiffFile !== null &&
+        // 比较视图里的文件**不属于某一条提交**：它的身份是"这两个修订之间的这个文件"
+        // （payload 带着 `compare`），因此不能拿 `revision === selectedCommit` 去卡它——
+        // 卡了的话点开比较里的文件什么都不会显示（实测踩到过）。
+        (selectedDiffFile.compare !== undefined || selectedDiffFile.revision === selectedCommit)
+          ? selectedDiffFile
+          : null
 
       // 视口变化时把宽度收进允许区间（否则窗口缩小后分栏会占满整屏，而手柄已经贴边）。
       react.useEffect(() => {
@@ -13657,6 +14199,111 @@ window.__ModuleLoader__.load({
       }, [reload, fresh.ref, refreshToken])
 
       /**
+       * 打开/刷新比较视图。
+       *
+       * 两端交给宿主解析（可以是 SHA，也可以是分支/标签名），文件清单与提交数都由它算——
+       * 界面不自己数、也不自己 diff（那是"第二套差异引擎"的开端）。
+       *
+       * @param a - 起点（SHA 或引用名）。
+       * @param b - 终点（SHA 或引用名）。
+       * @param options - `{ fromBranch }`：来自分支菜单时只用于在标题上注明。
+       */
+      const openCompare = react.useCallback(
+        (a, b, options) => {
+          if (workspace === undefined || typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return
+          setCompare({ a, b, fromBranch: options?.fromBranch ?? '' })
+          setCompareResult(null)
+          setCompareError('')
+          setCompareBusy(true)
+          // 比较时右侧不再显示单条提交的详情：两块内容会互相矛盾（详情说"这条提交"，比较说
+          // "这两个修订之间"）。差异区仍然共用（点文件就在下面看）。
+          setDiffVisible(true)
+          void (async () => {
+            try {
+              const result = await call('compare', { workspace, a, b })
+              setCompareResult(result)
+            } catch (cause) {
+              const error = cause instanceof Error ? cause : new Error(String(cause))
+              setCompareError(String(error.detail ?? error.message))
+            } finally {
+              setCompareBusy(false)
+            }
+          })()
+        },
+        [workspace],
+      )
+
+      const closeCompare = react.useCallback(() => {
+        setCompare(null)
+        setCompareResult(null)
+        setCompareError('')
+        setSelectedDiffFile(null)
+      }, [])
+
+      /**
+       * 提交菜单里的写操作（摘取 / 还原 / 创建分支 / 创建标记）。
+       *
+       * 全部走 **gitbar** 宿主（分支、标签、操作状态都归它管），这里只负责把结果说清楚：
+       * 冲突**不是失败**——宿主会写下 CHERRY_PICK_HEAD/REVERT_HEAD，界面把它当成"去冲突面板
+       * 继续"，并把快照失效（冲突分组随即出现）。
+       */
+      const runCommitAction = react.useCallback(
+        async (route, body, successKey) => {
+          if (workspace === undefined) return undefined
+          setMenuBusy(true)
+          setMenuNotice('')
+          setCommitMenu(null)
+          try {
+            // 不带 `repository`：`callGitbarRoute` 会通过 `withActiveRepository` 从项目作用域
+            // 里补上"当前在看哪一个仓库"（提交图是主区域面板，拿不到 Changes 抽屉那份
+            // `repositoryRoot` prop；而项目作用域是全局共享的，多仓库时它才是权威）。
+            const result = await callGitbarRoute(route, { workspace, ...body })
+            await gitSnapshots.invalidate(workspace).catch(() => undefined)
+            void reload(fresh.ref)
+            const short = String(body?.short ?? body?.revision ?? '').slice(0, 7)
+            // 冲突：说清"去哪儿继续"，而不是报一个"失败"。
+            if (result?.conflicted === true) {
+              setMenuNotice(t(route === 'cherry-pick' ? 'cherryPickConflictNotice' : 'revertConflictNotice'))
+            } else if (typeof successKey === 'string' && successKey !== '') {
+              setMenuNotice(t(successKey, { short, name: String(body?.name ?? '') }))
+            }
+            return result
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause))
+            const code = typeof error.code === 'string' ? error.code : ''
+            setTrouble({
+              key: code !== '' && Object.hasOwn(STAGING_ERROR_KEYS, code) ? STAGING_ERROR_KEYS[code] : '',
+              detail: typeof error.detail === 'string' ? error.detail : String(error.message ?? ''),
+              code,
+            })
+            // 冲突类错误也要给"去哪儿继续"的提示（它们不是失败）。
+            if (code === 'cherryPickConflict' || code === 'revertConflict') {
+              setMenuNotice(t(code === 'cherryPickConflict' ? 'cherryPickConflictNotice' : 'revertConflictNotice'))
+            }
+            return undefined
+          } finally {
+            setMenuBusy(false)
+          }
+        },
+        [workspace, t, reload, fresh.ref],
+      )
+
+      /**
+       * 消费"跨插件的比较请求"（gitbar 的分支菜单发来的）。
+       *
+       * 请求里带 workspace：只有当前这个面板正在看的项目才响应，别的项目的请求留给别的实例
+       * （或者干脆过期——用户切了项目，那条比较就不该再弹出来）。
+       */
+      const pendingCompare = react.useSyncExternalStore(subscribeCompare, readCompareRequest, readCompareRequest)
+      react.useEffect(() => {
+        if (pendingCompare === null || workspace === undefined) return
+        if (typeof pendingCompare.workspace === 'string' && pendingCompare.workspace !== '' && pendingCompare.workspace !== workspace) return
+        openCompare(String(pendingCompare.a ?? ''), String(pendingCompare.b ?? ''), { fromBranch: pendingCompare.fromBranch })
+        // 消费掉：同一条请求不该在每次渲染里反复打开（用户的"关闭"必须生效）。
+        requestCompare(null)
+      }, [pendingCompare, workspace, openCompare])
+
+      /**
        * 打开重置对话框（右键菜单、双击、详情栏按钮三个入口共用）。
        *
        * 先取预览：**HEAD 会移到哪里、影响几个提交**必须在用户决定之前看到，而"影响几个
@@ -13746,6 +14393,88 @@ window.__ModuleLoader__.load({
         setResetResult(null)
         openReset(previous, { isUndo: true, mode })
       }, [resetResult, workspace, openReset])
+
+      /** 复制完整 SHA（长按/无剪贴板时安静失败，绝不抛）。 */
+      const copySha = react.useCallback(
+        async (commit) => {
+          const sha = String(commit?.hash ?? '')
+          if (sha === '') return
+          try {
+            if (navigator?.clipboard?.writeText !== undefined) await navigator.clipboard.writeText(sha)
+            else if (typeof document?.execCommand === 'function') {
+              const area = document.createElement('textarea')
+              area.value = sha
+              document.body.appendChild(area)
+              area.select()
+              document.execCommand('copy')
+              area.remove?.()
+            }
+          } catch {
+            // 剪贴板不可用：不打断用户，只把 SHA 显示在提示里（他能手抄）。
+          }
+          setMenuNotice(t('copiedSha', { sha }))
+        },
+        [t],
+      )
+
+      /**
+       * 提交右键菜单里的一个动作。
+       *
+       * 全部收敛到一处：菜单项只是把 `(action, commit)` 交上来，怎么执行、失败怎么显示、
+       * 冲突怎么引导都在这里决定——否则八个菜单项会各写一遍错误处理。
+       */
+      const onCommitAction = react.useCallback(
+        (action, commit) => {
+          if (commit === null || commit === undefined) return
+          const rev = String(commit.hash ?? '')
+          switch (action) {
+            case 'copy-sha':
+              setCommitMenu(null)
+              void copySha(commit)
+              return
+            case 'compare-current':
+              setCommitMenu(null)
+              // 起点 = 被点的提交，终点 = 当前工作分支（比较"从这条提交到现在"）。
+              openCompare(rev, 'HEAD')
+              return
+            case 'select-compare':
+              setCommitMenu(null)
+              setSelectedForCompare({ sha: rev, short: String(commit.short ?? rev.slice(0, 7)) })
+              setMenuNotice(t('compareSelectedBadge', { short: String(commit.short ?? rev.slice(0, 7)) }))
+              return
+            case 'compare-selected': {
+              const first = selectedForCompare?.sha
+              setCommitMenu(null)
+              if (typeof first !== 'string' || first === '') return
+              setSelectedForCompare(null)
+              openCompare(first, rev)
+              return
+            }
+            case 'clear-compare':
+              setCommitMenu(null)
+              setSelectedForCompare(null)
+              setMenuNotice('')
+              return
+            case 'create-branch':
+              setCommitMenu(null)
+              setHereDialog({ kind: 'branch', commit })
+              return
+            case 'create-tag':
+              setCommitMenu(null)
+              setHereDialog({ kind: 'tag', commit })
+              return
+            case 'cherry-pick':
+              void runCommitAction('cherry-pick', { revision: rev, short: String(commit.short ?? '') }, 'cherryPickedNotice')
+              return
+            case 'revert':
+              void runCommitAction('revert', { revision: rev, short: String(commit.short ?? '') }, 'revertedCommitNotice')
+              return
+            default:
+              setCommitMenu(null)
+          }
+        },
+        [copySha, openCompare, selectedForCompare, t, runCommitAction],
+      )
 
       /**
        * 追加下一页。
@@ -14311,17 +15040,30 @@ window.__ModuleLoader__.load({
           : react.createElement(
               'div',
               { 'data-graph-pane': 'detail', style: { flex: `0 0 ${detailWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${BORDER}` } },
-              react.createElement(GraphCommitDetail, {
-                t,
-                workspace,
-                revision: fresh.selected,
-                // 选中态也用过滤后的那一份：切提交时右栏的高亮必须同帧清掉。
-                selectedPath: previewFile?.path ?? '',
-                onSelectFile: selectDiffFile,
-                /** 详情栏里的「把当前分支重置到这里…」（与右键菜单同一个动作）。 */
-                onReset: (commit) => openReset(commit),
-                busy: resetBusy,
-              }),
+              // 比较视图优先于单条提交详情：两者说的不是同一件事（"这两个修订之间" vs
+              // "这一条提交"），同时显示只会互相矛盾。底部那块差异区仍然共用。
+              compare !== null
+                ? react.createElement(CommitCompareView, {
+                    t,
+                    compare,
+                    result: compareResult,
+                    error: compareError,
+                    busy: compareBusy,
+                    selectedPath: previewFile?.path ?? '',
+                    onSelectFile: selectDiffFile,
+                    onClose: closeCompare,
+                  })
+                : react.createElement(GraphCommitDetail, {
+                    t,
+                    workspace,
+                    revision: fresh.selected,
+                    // 选中态也用过滤后的那一份：切提交时右栏的高亮必须同帧清掉。
+                    selectedPath: previewFile?.path ?? '',
+                    onSelectFile: selectDiffFile,
+                    /** 详情栏里的「把当前分支重置到这里…」（与右键菜单同一个动作）。 */
+                    onReset: (commit) => openReset(commit),
+                    busy: resetBusy,
+                  }),
             ),
           ),
           // ---- 下：Diff Preview（横跨提交图 + 详情）----
@@ -14371,15 +15113,97 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
+        // 提交右键菜单触发的动作结果（已复制 SHA / 已摘取 / 已创建分支…）。
+        // 与重置提示共用同一条位置（工具栏下方），但各自独立显示。
+        menuNotice === '' && selectedForCompare === null
+          ? null
+          : react.createElement(
+              'div',
+              {
+                'data-graph-menu-notice': '',
+                role: 'status',
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexShrink: 0,
+                  padding: '5px 8px',
+                  borderBottom: `1px solid ${BORDER}`,
+                  color: ACCENT,
+                  fontFamily: UI_FONT,
+                  fontSize: uiPx(11.5),
+                },
+              },
+              react.createElement(
+                'span',
+                { style: { flex: '1 1 auto', minWidth: 0 } },
+                selectedForCompare === null ? menuNotice : t('compareSelectedBadge', { short: String(selectedForCompare.short ?? '') }),
+              ),
+              selectedForCompare === null
+                ? null
+                : react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-graph-compare-clear': '',
+                      onClick: () => {
+                        setSelectedForCompare(null)
+                        setMenuNotice('')
+                      },
+                      style: { border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' },
+                    },
+                    t('compareClear'),
+                  ),
+            ),
+
         // 提交行右键菜单（fixed 定位，挂在整棵树的末尾）。
         commitMenu === null
           ? null
           : react.createElement(GraphCommitMenu, {
               t,
               menu: commitMenu,
+              selectedForCompare,
               onClose: () => setCommitMenu(null),
               onReset: (commit) => openReset(commit),
+              onAction: onCommitAction,
             }),
+
+        // 「在此创建分支 / 标记」对话框（同一个提交右键菜单里的两条）。
+        hereDialog === null
+          ? null
+          : hereDialog.kind === 'branch'
+            ? react.createElement(CreateBranchHereDialog, {
+                t,
+                commit: hereDialog.commit,
+                busy: menuBusy,
+                onCancel: () => setHereDialog(null),
+                onSubmit: (values) => {
+                  const commit = hereDialog.commit
+                  setHereDialog(null)
+                  void runCommitAction(
+                    'branch/create',
+                    { name: values.name, from: String(commit?.hash ?? ''), checkout: values.checkout === true },
+                    'createdBranchNotice',
+                  )
+                },
+              })
+            : react.createElement(CreateTagHereDialog, {
+                t,
+                commit: hereDialog.commit,
+                busy: menuBusy,
+                // 默认类型跟仓库现状走：已经有附注标签的仓库默认附注，否则默认轻量。
+                defaultAnnotated: fresh.commits.some((entry) => (entry.refs ?? []).some((ref) => ref.kind === 'tag')) === true,
+                onCancel: () => setHereDialog(null),
+                onSubmit: (values) => {
+                  const commit = hereDialog.commit
+                  setHereDialog(null)
+                  void runCommitAction(
+                    'tag/create',
+                    { name: values.name, message: values.message, revision: String(commit?.hash ?? '') },
+                    'createdTagNotice',
+                  )
+                },
+              }),
 
         // 重置对话框（打开时才有；预览来自 gitbar 的 `/reset/preview`）。
         resetRequest === null
@@ -14613,6 +15437,45 @@ window.__ModuleLoader__.load({
           if (window.__dshDesktopGitSnapshot !== undefined && previous === undefined) delete window.__dshDesktopGitSnapshot
           else if (previous !== undefined) window.__dshDesktopGitSnapshot = previous
         }, 'review: git snapshot bridge')
+      }
+
+      /**
+       * 跨插件的「打开比较」入口。
+       *
+       * gitbar 的分支列表有自己的右键菜单（需求里的"Branch Context Menu: Compare with
+       * Current"），而比较视图（文件清单 + 点文件看差异）必须在**提交图**面板里——那里有
+       * 主区域的宽度和现成的差异渲染器。两个插件各自独立打包，因此用 window 上一个带插件
+       * 前缀的键对接，与上面的快照桥同一个做法：**只有一个方法**，契约最小。
+       *
+       * 调用方（gitbar）用可选链，本插件没加载时它什么也不会发生。
+       * `ctx.layout.selectPanel(GRAPH_ID)` 把主区域切到提交图——这正是侧栏图标点击时走的
+       * 那条路（见下面注册处的说明），因此不额外发明导航机制。
+       */
+      if (typeof window !== 'undefined') {
+        const previousCompare = window.__dshDesktopReviewCompare
+        window.__dshDesktopReviewCompare = {
+          open: (request) => {
+            if (request === null || typeof request !== 'object') return
+            const a = typeof request.a === 'string' ? request.a : ''
+            const b = typeof request.b === 'string' ? request.b : 'HEAD'
+            if (a === '') return
+            requestCompare({
+              workspace: typeof request.workspace === 'string' ? request.workspace : '',
+              a,
+              b,
+              fromBranch: typeof request.fromBranch === 'string' ? request.fromBranch : '',
+            })
+            try {
+              ctx.layout?.selectPanel?.(GRAPH_ID)
+            } catch {
+              // 布局服务不可用（例如面板已被收起）：请求仍然留着，用户切到提交图时会消费它。
+            }
+          },
+        }
+        ctx.effect(() => () => {
+          if (window.__dshDesktopReviewCompare !== undefined && previousCompare === undefined) delete window.__dshDesktopReviewCompare
+          else if (previousCompare !== undefined) window.__dshDesktopReviewCompare = previousCompare
+        }, 'review: compare bridge')
       }
 
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'review: dictionaries')

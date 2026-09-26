@@ -354,11 +354,59 @@ async function readCommitFileDiff(cwd, revision, path) {
   ]
   // 单个文件的差异也可能很大（一份生成物、一个巨大的 JSON），因此同样放宽缓冲：
   // "32 MB 对单文件够用"只是通常成立，而它不成立时的表现是整条路由 500。
-  const raw = await git(args, cwd, undefined, diffBufferFor(1))
+  let raw = await git(args, cwd, undefined, diffBufferFor(1))
+  /**
+   * 改名提交要特殊处理：**带了 pathspec 就看不到改名**。
+   *
+   * `git diff <rev>^ <rev> -- <新路径>` 只在两端都受限的那一个路径上比较，于是 git 根本
+   * 看不到"它原来叫别的名字"，结果是一份空的（或整份新增的）差异，而不是一次改名。而
+   * "这个文件在这一步被改名了"恰恰是文件历史里最需要看清的一步。
+   *
+   * 因此只有在"这份差异里没有改名信息"时才多花一次 `--name-status`（一次进程），把它配对
+   * 出来的**两个路径一起**放进 pathspec，git 就能正常识别改名了。
+   */
+  if (!/^rename (from|to) /mu.test(raw) && !/^similarity index /mu.test(raw)) {
+    const pair = await readRenamePair(cwd, base, revision, normalizePath(path))
+    if (pair !== undefined) {
+      raw = await git(
+        ['diff', '--unified=3', '--find-renames', base === undefined ? '--root' : base, revision, '--', pair.from, pair.to],
+        cwd,
+        undefined,
+        diffBufferFor(2),
+      )
+    }
+  }
   // `Binary files … differ` 之类没有可展示的行，界面上要区别对待。
   const binary = /^Binary files |^GIT binary patch/mu.test(raw)
   const truncated = raw.length > MAX_DIFF_BYTES
   return { diff: truncated ? raw.slice(0, MAX_DIFF_BYTES) : raw, truncated, binary }
+}
+
+/**
+ * 找一次提交里与某个路径相关的改名配对。
+ *
+ * 只看**这一次提交**的 name-status（`--no-renames` 之外还要 `--find-renames`），因此代价
+ * 与提交大小成正比、与历史长度无关。返回的 `{ from, to }` 会一起作为 pathspec 传给
+ * `git diff`，让改名检测在两端都可见。
+ *
+ * @param cwd - 仓库根。
+ * @param base - 父提交（根提交时 undefined）。
+ * @param revision - 该提交。
+ * @param path - 请求的路径（可能是改名后的新名字，也可能是旧名字）。
+ * @returns `{ from, to }`，或 undefined。
+ */
+async function readRenamePair(cwd, base, revision, path) {
+  const raw = await git(
+    ['diff', '--name-status', '-z', '--find-renames', base === undefined ? '--root' : base, revision],
+    cwd,
+    undefined,
+    GIT_MAX_BUFFER,
+  ).catch(() => '')
+  for (const entry of parseNameStatus(raw)) {
+    if (entry.status !== 'R' || typeof entry.from !== 'string' || entry.from === '') continue
+    if (entry.from === path || entry.path === path) return { from: entry.from, to: entry.path }
+  }
+  return undefined
 }
 
 /** 图形路由允许的 ref 形状：分支名/标签名，不含 rev 表达式。 */
@@ -2019,6 +2067,91 @@ async function resolveStashRef(cwd, ref) {
 }
 
 /**
+ * 把比较用的修订解析成一个提交 SHA。
+ *
+ * 与 `/commit-file` 只接受 40 位 SHA 不同：比较的**两端可以是引用**（"main 与当前分支比"、
+ * "v1.0 与 HEAD 比"），因此这里放宽到"完整 SHA，或图里合法形状的 ref 名"。安全性由两点
+ * 保证：形状先过白名单（`REF_PATTERN_GRAPH` 与 `REVISION_PATTERN`），再由 git 自己用
+ * `rev-parse --verify <rev>^{commit}` 确认它在这个仓库里真的能解析成提交——**rev 表达式
+ * （`HEAD~3`、`main@{2}`）进不来**，因为它们不在任何一个白名单里。
+ *
+ * @param cwd - 仓库根。
+ * @param value - 请求给出的修订。
+ * @returns 完整 SHA，或 undefined。
+ */
+async function resolveCompareRevision(cwd, value) {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (text === '') return undefined
+  if (!REVISION_PATTERN.test(text) && !REF_PATTERN_GRAPH.test(text)) return undefined
+  const sha = (await git(['rev-parse', '--verify', '--quiet', `${text}^{commit}`], cwd).catch(() => '')).trim()
+  return REVISION_PATTERN.test(sha) ? sha : undefined
+}
+
+/**
+ * 一次比较里某一端的提交概要（`%H%x1f%h%x1f%s%x1f%an%x1f%cI`）。
+ * @param cwd - 仓库根。
+ * @param sha - 提交 SHA。
+ * @returns `{ sha, short, subject, author, date }`。
+ */
+async function readCommitHeader(cwd, sha) {
+  const raw = await git(['show', '--no-patch', '--format=%H%x1f%h%x1f%s%x1f%an%x1f%cI', sha], cwd)
+  const fields = String(raw).replace(/\n$/u, '').split('\u001f')
+  return {
+    sha: String(fields[0] ?? '').trim(),
+    short: String(fields[1] ?? '').trim(),
+    subject: String(fields[2] ?? '').trim(),
+    author: String(fields[3] ?? '').trim(),
+    date: String(fields[4] ?? '').trim(),
+  }
+}
+
+/**
+ * 两个修订之间的差异：提交数（各自独有）与改动文件清单。
+ *
+ * `git rev-list --left-right --count a...b` 给的是**两侧各自独有**的提交数（三点表示
+ * "相对合并基点"），这正是 IDEA 说的 ahead/behind。文件清单用 `--name-status -z`
+ * （路径不做引号转义）并带 `--find-renames`：改名在比较视图里应当显示成一次改名，
+ * 而不是"删一个 + 加一个"。
+ *
+ * @param cwd - 仓库根。
+ * @param a - 一端的 SHA。
+ * @param b - 另一端的 SHA。
+ * @returns `{ onlyA, onlyB, files }`。
+ */
+async function readComparison(cwd, a, b) {
+  const counts = (await git(['rev-list', '--left-right', '--count', `${a}...${b}`], cwd)).trim().split(/\s+/u)
+  const files = parseNameStatus(
+    await git(['diff', '--name-status', '-z', '--find-renames', a, b], cwd, undefined, GIT_MAX_BUFFER),
+  )
+  return {
+    // 名字用 `onlyA` / `onlyB`（而不是 ahead/behind）：谁比谁领先取决于你把哪一端当"当前"，
+    // 含糊的 ahead/behind 在"提交 ↔ 当前"与"分支 ↔ 分支"两种用法里会互相矛盾。
+    onlyA: Number(counts[0] ?? 0) || 0,
+    onlyB: Number(counts[1] ?? 0) || 0,
+    files,
+  }
+}
+
+/**
+ * 两个修订之间某个文件的差异（比较视图里点开一个文件时用）。
+ *
+ * 与 `readCommitFileDiff` 同一套截断与二进制判定，只是两端都是调用方给的（不是 `rev^`）。
+ *
+ * @param cwd - 仓库根。
+ * @param a - 一端的 SHA。
+ * @param b - 另一端的 SHA。
+ * @param path - 已校验的相对路径。
+ * @returns `{ diff, truncated, binary }`。
+ */
+async function readCompareFileDiff(cwd, a, b, path) {
+  const raw = await git(['diff', '--unified=3', a, b, '--', normalizePath(path)], cwd, undefined, diffBufferFor(1))
+  const binary = /^Binary files |^GIT binary patch/mu.test(raw)
+  const truncated = raw.length > MAX_DIFF_BYTES
+  return { diff: truncated ? raw.slice(0, MAX_DIFF_BYTES) : raw, truncated, binary }
+}
+
+/**
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
@@ -2821,6 +2954,48 @@ function createReviewHandler(ctx) {
         return
       }
 
+      // ---- 两个修订之间的比较（提交 ↔ 当前、提交 A ↔ B、分支 ↔ 当前）----------
+      //
+      // 比较**不引入第二套差异实现**：文件清单是 `git diff --name-status`，单文件差异走
+      // `/compare-file`（与 `/commit-file` 同一个渲染器，只是两端由调用方给出）。
+      if (url.pathname === `${ROUTE_PREFIX}/compare`) {
+        const a = await resolveCompareRevision(cwd, payload.a ?? url.searchParams.get('a'))
+        const b = await resolveCompareRevision(cwd, payload.b ?? url.searchParams.get('b'))
+        if (a === undefined || b === undefined) {
+          sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+          return
+        }
+        const [headerA, headerB, comparison] = await Promise.all([readCommitHeader(cwd, a), readCommitHeader(cwd, b), readComparison(cwd, a, b)])
+        sendJson(response, 200, {
+          isRepo: true,
+          ...scopeFields(context, scope),
+          a: headerA,
+          b: headerB,
+          same: a === b,
+          onlyA: comparison.onlyA,
+          onlyB: comparison.onlyB,
+          files: comparison.files,
+          fileCount: comparison.files.length,
+        })
+        return
+      }
+      if (url.pathname === `${ROUTE_PREFIX}/compare-file`) {
+        const a = await resolveCompareRevision(cwd, payload.a ?? url.searchParams.get('a'))
+        const b = await resolveCompareRevision(cwd, payload.b ?? url.searchParams.get('b'))
+        const filePath = payload.path ?? url.searchParams.get('path')
+        if (a === undefined || b === undefined) {
+          sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+          return
+        }
+        if (typeof filePath !== 'string' || !SAFE_PATH_PATTERN_GRAPH.test(filePath)) {
+          sendJson(response, 400, { error: 'unsafe path', code: 'unsafePath' })
+          return
+        }
+        const result = await readCompareFileDiff(cwd, a, b, filePath)
+        sendJson(response, 200, { isRepo: true, ...scopeFields(context, scope), path: normalizePath(filePath), a, b, ...result })
+        return
+      }
+
       // ---- 储藏：内容清单与单个文件的差异 ------------------------------------
       //
       // 只读，且**只做"一个储藏里有什么"**：列表与所有写操作都在 gitbar 宿主里（那里也是
@@ -3234,6 +3409,8 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/graph`,
     `${ROUTE_PREFIX}/commit-detail`,
     `${ROUTE_PREFIX}/commit-file`,
+    `${ROUTE_PREFIX}/compare`,
+    `${ROUTE_PREFIX}/compare-file`,
     `${ROUTE_PREFIX}/stash/show`,
     `${ROUTE_PREFIX}/stash-file`,
     `${ROUTE_PREFIX}/file-history`,

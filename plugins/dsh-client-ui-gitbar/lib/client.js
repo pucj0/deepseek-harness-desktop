@@ -199,6 +199,35 @@ window.__ModuleLoader__.load({
       dialogStashUntrackedHint: '未跟踪文件默认不进储藏：搬走它们会让工作区看起来像丢过文件。',
       dialogStashCheckoutHint: '切换 {branch} 需要先把当前改动储藏起来。',
       stashingNow: '正在储藏…',
+      // ---- 标签 ----
+      sectionTags: '标签',
+      tagsLoading: '正在读取标签…',
+      tagsEmpty: '这个仓库还没有标签',
+      tagAnnotated: '附注',
+      tagLightweight: '轻量',
+      tagPointsAtHead: '当前版本',
+      actionCreateTag: '新建标记…',
+      menuTagCheckout: '签出标记（进入游离 HEAD）',
+      menuTagCreateBranch: '从这里新建分支…',
+      menuTagPush: '推送标记到远端',
+      menuTagCopy: '复制标记名',
+      menuTagCompare: '与当前比较',
+      menuTagDelete: '删除本地标记',
+      dialogTagTitle: '新建标记',
+      dialogFieldTagName: '标记名',
+      dialogFieldTagMessage: '标记信息（填写即为附注标记）',
+      dialogTagAnnotated: '附注标记（记录信息、作者与时间）',
+      dialogTagTypeHint: '轻量标记只是一个指向提交的名字；附注标记会额外记录信息、作者与时间。',
+      confirmDeleteTagTitle: '删除本地标记',
+      confirmDeleteTagBody: '即将删除本地标记「{name}」。',
+      confirmDeleteTagRemote: '远端上的同名标记**不会**被删除（本轮不做远端标记管理）。',
+      confirmDeleteTagButton: '删除',
+      tagCreated: '已创建标记 {name}',
+      tagDeleted: '已删除标记 {name}',
+      tagPushed: '已推送标记 {name} 到 {remote}',
+      tagCheckoutNotice: '当前停留在标记 {name} 上（游离 HEAD）',
+      createBranchFromTag: '从这里新建分支…',
+      detachedHint: '游离 HEAD 上的提交不属于任何分支：要在这里继续工作，请先新建一个分支。',
       stashRestore: '恢复储藏的改动',
       stashRestored: '已恢复储藏 {ref}（该条目已删除）',
       stashBeforeCheckoutMessage: '切换到 {branch} 前的自动储藏',
@@ -326,6 +355,11 @@ window.__ModuleLoader__.load({
       error_unmerged: '还有未解决的冲突：先把它们解决掉再做这一步。',
       error_noSuchStash: '这条储藏已经不存在了（可能已被删除）。',
       error_invalidStashMessage: '储藏消息不合法，已拒绝。',
+      error_tagExists: '同名标记已存在，换个名字。',
+      error_noSuchTag: '找不到这个标记。',
+      error_invalidTagName: '标记名不合法，已拒绝。',
+      error_invalidTagMessage: '标记信息不合法，已拒绝。',
+      error_emptyRevert: '这个提交没有可还原的改动（已经是空操作）。',
       error_invalidBranch: '分支名不合法，已拒绝。',
       error_invalidRevision: '修订不合法，已拒绝（只接受分支名或提交哈希）。',
       error_invalidRemote: '远端名不合法，已拒绝。',
@@ -376,6 +410,35 @@ window.__ModuleLoader__.load({
       dialogStashUntrackedHint: 'Untracked files are left alone by default: moving them away makes the working tree look like files went missing.',
       dialogStashCheckoutHint: 'Switching to {branch} requires stashing the current changes first.',
       stashingNow: 'Stashing…',
+      // ---- Tags ----
+      sectionTags: 'Tags',
+      tagsLoading: 'Reading tags…',
+      tagsEmpty: 'This repository has no tags yet',
+      tagAnnotated: 'annotated',
+      tagLightweight: 'lightweight',
+      tagPointsAtHead: 'current version',
+      actionCreateTag: 'New tag…',
+      menuTagCheckout: 'Checkout tag (detached HEAD)',
+      menuTagCreateBranch: 'New branch from here…',
+      menuTagPush: 'Push tag to remote',
+      menuTagCopy: 'Copy tag name',
+      menuTagCompare: 'Compare with Current',
+      menuTagDelete: 'Delete local tag',
+      dialogTagTitle: 'New tag',
+      dialogFieldTagName: 'Tag name',
+      dialogFieldTagMessage: 'Tag message (fills in = annotated tag)',
+      dialogTagAnnotated: 'Annotated tag (records message, tagger and time)',
+      dialogTagTypeHint: 'A lightweight tag is just a name pointing at a commit; an annotated tag also records a message, a tagger and a time.',
+      confirmDeleteTagTitle: 'Delete local tag',
+      confirmDeleteTagBody: 'About to delete the local tag "{name}".',
+      confirmDeleteTagRemote: 'The same tag on the remote is **not** deleted (remote tag management is out of scope for now).',
+      confirmDeleteTagButton: 'Delete',
+      tagCreated: 'Created tag {name}',
+      tagDeleted: 'Deleted tag {name}',
+      tagPushed: 'Pushed tag {name} to {remote}',
+      tagCheckoutNotice: 'You are on tag {name} (detached HEAD)',
+      createBranchFromTag: 'New branch from here…',
+      detachedHint: 'Commits on a detached HEAD belong to no branch: create a branch here before you keep working.',
       stashRestore: 'Restore stashed changes',
       stashRestored: 'Restored stash {ref} (the entry is gone now)',
       stashBeforeCheckoutMessage: 'Auto-stash before switching to {branch}',
@@ -477,6 +540,11 @@ window.__ModuleLoader__.load({
       error_unmerged: 'There are still unresolved conflicts: resolve them before this step.',
       error_noSuchStash: 'That stash no longer exists (it may have been dropped).',
       error_invalidStashMessage: 'That stash message is not valid.',
+      error_tagExists: 'A tag with that name already exists — pick another name.',
+      error_noSuchTag: 'No such tag.',
+      error_invalidTagName: 'That tag name is not valid.',
+      error_invalidTagMessage: 'That tag message is not valid.',
+      error_emptyRevert: 'That commit has no changes to revert (it would be an empty operation).',
       error_invalidBranch: 'That branch name was rejected.',
       error_invalidRevision: 'That revision was rejected (only a branch name or commit hash).',
       error_invalidRemote: 'That remote name was rejected.',
@@ -898,6 +966,12 @@ window.__ModuleLoader__.load({
       unmerged: 'error_unmerged',
       noSuchStash: 'error_noSuchStash',
       invalidStashMessage: 'error_invalidStashMessage',
+      // 标签：重名与"找不到"都是用户可以就地处理的结论。
+      tagExists: 'error_tagExists',
+      noSuchTag: 'error_noSuchTag',
+      invalidTagName: 'error_invalidTagName',
+      invalidTagMessage: 'error_invalidTagMessage',
+      emptyRevert: 'error_emptyRevert',
       invalidBranch: 'error_invalidBranch',
       invalidRevision: 'error_invalidRevision',
       invalidRemote: 'error_invalidRemote',
@@ -1078,6 +1152,23 @@ window.__ModuleLoader__.load({
         'svg',
         { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true', style: { display: 'block', flexShrink: 0 } },
         react.createElement('path', { d: 'M8 3v10M3 8h10', strokeLinecap: 'round' }),
+      )
+    }
+
+    /**
+     * 图标：一个"标签牌"（Tag）。
+     *
+     * 与分支图标（折线 + 圆点）形状完全不同：标签行必须一眼能认出来——需求里那条
+     * "不要让用户误以为 tag 是 branch"首先靠图标区分。
+     *
+     * @returns React 元素。
+     */
+    function TagGlyph() {
+      return react.createElement(
+        'svg',
+        { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, 'aria-hidden': 'true', style: { display: 'block', flexShrink: 0 } },
+        react.createElement('path', { d: 'M2.6 2.6h5.1l5.7 5.7-5.1 5.1L2.6 7.7z', strokeLinejoin: 'round' }),
+        react.createElement('circle', { cx: 5.4, cy: 5.4, r: 1.1, fill: 'currentColor', stroke: 'none' }),
       )
     }
 
@@ -1279,6 +1370,25 @@ window.__ModuleLoader__.load({
       /** 对话框：`{ kind, branch? }`；null 表示未打开。 */
       const [dialog, setDialog] = react.useState(null)
       /**
+       * 标签行右键/单击打开的菜单：`{ tag, rowAnchor, panelAnchor }`；null 表示未打开。
+       *
+       * 与分支菜单**分开一份 state**（不是同一个 `menu` 里加个 kind）：分支菜单那一套状态机
+       * 带着"单击延迟弹出 / 再点一次关掉"的守卫（见 onBranchClick），而标签没有"双击切换"
+       * 这层语义——共用一份 state 会让那套守卫莫名其妙地作用在标签上。共用的部分是几何
+       * （`cascadeMenuPosition`）与样式，那两样是纯函数/常量。
+       */
+      const [tagMenu, setTagMenu] = react.useState(null)
+      /** 标签列表（与分支列表分开取：`/tags` 是独立的一条只读路由）。 */
+      const [tags, setTags] = react.useState([])
+      const [tagsLoading, setTagsLoading] = react.useState(false)
+      /**
+       * 最近一次"从标签切出去"留下的标签名（游离 HEAD 的提示里给「从这里新建分支」用）。
+       *
+       * 与储藏那边同一个做法：提示里那条动作必须绑定在**刚才那次操作**的对象上，否则
+       * 用户过一会儿再点，指的可能是别的标签。
+       */
+      const [detachedFrom, setDetachedFrom] = react.useState('')
+      /**
        * 对话框的实例序号。
        *
        * 每次打开对话框 +1，并作为 `ActionDialog` 的 `key`。**这一条是必需的**：同一个
@@ -1338,6 +1448,9 @@ window.__ModuleLoader__.load({
         clearMenuTimer()
         justClosedForRef.current = ''
         setMenu(null)
+        // 标签菜单也是"二级菜单"：面板收起、列表滚动、点别处都必须跟着收（否则它会
+        // 悬在一个已经不在那儿的位置上）。
+        setTagMenu(null)
       }, [clearMenuTimer])
 
       /**
@@ -1440,6 +1553,23 @@ window.__ModuleLoader__.load({
         if (outcome.ok) patch(ticket, { remotes: Array.isArray(outcome.value?.remotes) ? outcome.value.remotes : [] })
       }, [gate, workspace, generation, patch])
 
+      /**
+       * 拉一次标签列表。
+       *
+       * 与分支列表分开成一条路由 `/tags`：标签数量可能很多（几十上百），而分支列表在首屏是
+       * 一次 `for-each-ref` 就够了的——把标签塞进同一个响应会让每次刷分支都多带一份数据，
+       * 而绝大多数时候用户并不在看标签。
+       */
+      const loadTags = react.useCallback(async () => {
+        const { ticket, promise } = gate.run('tags', () => call('tags', { cwd: workspace }), { coalesce: true })
+        if (!gate.isCurrent(ticket)) return
+        setTagsLoading(true)
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        setTagsLoading(false)
+        if (outcome.ok) setTags(Array.isArray(outcome.value?.tags) ? outcome.value.tags : [])
+      }, [gate, workspace])
+
       // 首次拉取 + 定时对齐。
       //
       // 依赖 refresh（它随 generation 变化），因此**切换工作区会立刻重建这个 effect**：
@@ -1460,9 +1590,11 @@ window.__ModuleLoader__.load({
         closeBranchMenu()
         void loadBranches()
         void loadRemotes()
+        // 标签与分支同一个时机取（打开面板、换项目）：它们都只在面板里用。
+        void loadTags()
         return undefined
         // 依赖 generation：会话换项目后，菜单里列出的必须是新仓库的分支。
-      }, [open, generation, loadBranches, loadRemotes, closeBranchMenu])
+      }, [open, generation, loadBranches, loadRemotes, loadTags, closeBranchMenu])
 
       /**
        * 执行一次写操作并整体替换状态。
@@ -1544,6 +1676,9 @@ window.__ModuleLoader__.load({
           }
           // 分支列表过期：**异步**刷新，不阻塞这次写操作的返回。
           if (result?.branchesStale === true) void loadBranches()
+          // 标签也会被写操作改变（新建 / 删除 / 推送 / 签出标签之后"当前版本"标记会变），
+          // 而且它便宜（一次 for-each-ref）。
+          if (result?.branchesStale === true) void loadTags()
           // 跨插件：checkout/merge/rebase 也会改变工作区，因此让 review 那份共享快照失效。
           // 用可选链调用，因为两个插件各自独立加载——review 不在时这里什么也不做。
           // （`window.__dshDesktopGitSnapshot` 由 dsh-client-ui-review 在 apply 时挂上。）
@@ -1553,7 +1688,7 @@ window.__ModuleLoader__.load({
           }
           return result
         },
-        [gate, workspace, generation, patch, loadBranches, t],
+        [gate, workspace, generation, patch, loadBranches, loadTags, t],
       )
 
       /**
@@ -1662,6 +1797,59 @@ window.__ModuleLoader__.load({
         [run, t],
       )
 
+      /** 为某个标签打开菜单（贴着那一行、开在面板外侧）。 */
+      const openTagMenuFor = react.useCallback((tag, rowAnchor, panelAnchor) => {
+        setSelectedBranch('')
+        setTagMenu({ tag, rowAnchor, panelAnchor })
+      }, [])
+
+      const closeTagMenu = react.useCallback(() => setTagMenu(null), [])
+
+      /**
+       * 打开「新建标记」对话框。
+       *
+       * 附注的**默认值跟仓库现状走**：仓库里已经有附注标签（`annotatedCount > 0`）时默认
+       * 附注，否则默认轻量。需求说"默认可以使用项目当前最合理类型"，而"这个项目习惯哪种"
+       * 唯一的客观依据就是它已有的标签——猜一个全局默认只会在别人的仓库里显得格格不入。
+       */
+      const createTag = react.useCallback(() => {
+        openDialog({ kind: 'create-tag', defaultAnnotated: tags.some((entry) => entry.annotated === true) })
+      }, [openDialog, tags])
+
+      /**
+       * 推送**单个**标签（绝不 `--tags`）。
+       *
+       * 结果里的 remote 会被说出来（"已推送标记 v1.0.0 到 origin"），因为多远端时
+       * "推到哪儿了"是用户第一个会问的问题。
+       */
+      const pushTag = react.useCallback(
+        async (entry) => {
+          if (entry === null || entry === undefined) return undefined
+          return await run('tag/push', { name: entry.name }, (payload) =>
+            t('tagPushed', { name: String(payload?.pushedTag ?? entry.name), remote: String(payload?.remote ?? '') }),
+          )
+        },
+        [run, t],
+      )
+
+      /**
+       * 「与当前比较」：把两端交给 review 插件的比较视图。
+       *
+       * 比较视图在提交图面板里（那里有宽度与现成的差异渲染器），因此这里只发一个跨插件的
+       * 请求（见 review 侧的 `__dshDesktopReviewCompare`）；那个插件不在时什么也不会发生，
+       * 但面板照常工作——两个插件的加载顺序无关紧要。
+       */
+      const compareWithCurrent = react.useCallback(
+        (name) => {
+          if (typeof name !== 'string' || name === '') return
+          const bridge = typeof window === 'undefined' ? undefined : window.__dshDesktopReviewCompare
+          if (typeof bridge?.open !== 'function') return
+          bridge.open({ workspace, a: name, b: 'HEAD', fromBranch: name })
+          closePanel()
+        },
+        [workspace, closePanel],
+      )
+
       const switchTo = react.useCallback(
         async (branch, options) => {
           // 记下目标分支：失败时错误面板要靠它给出"暂存并切换到 X"的入口。
@@ -1692,9 +1880,26 @@ window.__ModuleLoader__.load({
           // 只有成功才关闭面板。失败时保持打开，否则用户看不到原因、也不知道
           // 该重试哪个分支——实测中最常见的失败是有未提交改动（git 会拒绝覆盖）。
           // 关闭走 closePanel：面板、二级菜单、对话框与待弹定时器必须一起收（见它的说明）。
-          if (result !== undefined) closePanel()
+          if (result !== undefined) {
+            // 签出标签会进入**游离 HEAD**：把"刚从哪个标签出来"记下来，提示区据此给出
+            // 「从这里新建分支…」——这是把游离 HEAD 变回可提交状态的唯一正路，用户不该
+            // 自己想办法。
+            if (options?.tag === true && result.detached === true) setDetachedFrom(branch)
+            else setDetachedFrom('')
+            closePanel()
+          }
         },
         [run, closePanel, t],
+      )
+
+      /** 双击一行标签：签出它（进入游离 HEAD）。 */
+      const onTagDoubleClick = react.useCallback(
+        (entry) => {
+          setTagMenu(null)
+          if (busy) return
+          void switchTo(entry.name, { tag: true })
+        },
+        [busy, switchTo],
       )
 
       // 重新打开面板时清掉上一次的错误与提示：旧信息留到新一次尝试里只会造成混淆。
@@ -1807,6 +2012,8 @@ window.__ModuleLoader__.load({
             justClosedForRef.current = menu.branch.name
           }
           setMenu(null)
+          // 标签菜单同样要收（它贴着某一行的位置，滚走/点别处之后不该继续浮着）。
+          setTagMenu(null)
         }
         const onKeyDown = (event) => {
           if (event.key !== 'Escape') return
@@ -1878,6 +2085,33 @@ window.__ModuleLoader__.load({
       const openMenuFor = react.useCallback((branch, rowAnchor, panelAnchor) => {
         setMenu({ branch, rowAnchor, panelAnchor })
       }, [])
+
+      /**
+       * 单击一行标签：**直接**打开菜单（不做分支那套延迟）。
+       *
+       * 标签只有一个主要动作（签出，进入游离 HEAD），把它做成"单击等 200ms 再弹菜单"没有
+       * 收益；而分支那样做是为了区分"选中/切换"两种意图，标签这边没有这个歧义。
+       *
+       * 这两个 handler 刻意声明在 `rowAnchorOf` / `panelAnchorOf` **之后**：它们要用那两个
+       * 量矩形的回调，而 `const` 在声明前求值（依赖数组在 render 期就求值）会抛
+       * "Cannot access before initialization"。
+       */
+      const onTagClick = react.useCallback(
+        (event, entry) => {
+          openTagMenuFor(entry, rowAnchorOf(event), panelAnchorOf())
+        },
+        [openTagMenuFor, rowAnchorOf, panelAnchorOf],
+      )
+
+      /** 标签行的右键（与单击同一个菜单，位置贴着那一行）。 */
+      const onTagContextMenu = react.useCallback(
+        (event, entry) => {
+          event.preventDefault()
+          event.stopPropagation()
+          openTagMenuFor(entry, rowAnchorOf(event), panelAnchorOf())
+        },
+        [openTagMenuFor, rowAnchorOf, panelAnchorOf],
+      )
 
       /**
        * 单击一行分支。
@@ -2269,6 +2503,15 @@ window.__ModuleLoader__.load({
               onStashQuick: () => void stashQuick(),
               restore,
               onRestore: () => void restoreStash(restore),
+              /** 标签分组与它的动作。 */
+              tags,
+              tagsLoading,
+              onTagPick: onTagClick,
+              onTagActivate: onTagDoubleClick,
+              onTagContextMenu: onTagContextMenu,
+              onCreateTag: createTag,
+              detachedFrom,
+              onCreateBranchFromTag: () => openDialog({ kind: 'create', branch: { name: detachedFrom } }),
               onDialog: openDialog,
               onPick: onBranchClick,
               onActivate: onBranchDoubleClick,
@@ -2310,7 +2553,21 @@ window.__ModuleLoader__.load({
                 /** 行菜单里的「推送」也直连，对象是被点的那一行（见 pushBranch）。 */
                 onPush: (entry) => void pushBranch(entry),
               })
-            : null,
+            : open === true && tagMenu !== null
+              ? react.createElement(TagContextMenu, {
+                  t,
+                  menu: tagMenu,
+                  // 与分支菜单**共用 menuRef**：同时只会有一个菜单在屏幕上，而文档级的
+                  // "点菜单内部不算点别处"那条判定就是按这个 ref 做的（见 onPointerDown）。
+                  menuRef,
+                  busy,
+                  onClose: closeTagMenu,
+                  onCheckout: (entry) => void switchTo(entry.name, { tag: true }),
+                  onDialog: openDialog,
+                  onPushTag: (entry) => void pushTag(entry),
+                  onCompare: (entry) => compareWithCurrent(entry.name),
+                })
+              : null,
         ),
 
         react.createElement(
@@ -2362,6 +2619,7 @@ window.__ModuleLoader__.load({
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
         selected, onRefresh, onFetch, onSwitch, onStashSwitch, onStashQuick, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
         directAction, onUpdate, onPush, onContinue, restore, onRestore,
+        tags, tagsLoading, onTagPick, onTagActivate, onTagContextMenu, onCreateTag, detachedFrom, onCreateBranchFromTag,
       } = props
 
       /**
@@ -2677,11 +2935,87 @@ window.__ModuleLoader__.load({
         react.createElement('path', { d: 'M4.6 12.5a3.1 3.1 0 0 1-.3-6.2 4 4 0 0 1 7.6 1 2.6 2.6 0 0 1-.5 5.2z', strokeLinecap: 'round', strokeLinejoin: 'round' }),
         react.createElement('path', { d: 'M8 7.2v3.4M6.6 9.2 8 10.6l1.4-1.4', strokeLinecap: 'round', strokeLinejoin: 'round' }),
       )
-
+      /** 标签图标（与分支图标形状不同：标签行必须一眼认出来）。 */
+      const tagGlyph = react.createElement(TagGlyph)
       // 分组
       const recent = visible.filter((entry) => !entry.isRemote).slice(0, RECENT_LIMIT)
       const local = visible.filter((entry) => !entry.isRemote)
       const remote = visible.filter((entry) => entry.isRemote)
+      /** 标签也过同一个搜索词（见渲染处的说明）。 */
+      const visibleTags = Array.isArray(tags) ? tags.filter((entry) => String(entry.name).toLowerCase().includes(search)) : []
+      /**
+       * 标签分组。
+       *
+       * 与分支同一套行样式，但**一眼能分出这是标签**：名字前缀一个 tag 图标、名字本身用
+       * 等宽、右侧标出 `附注` / `轻量`，指向 HEAD 的那一个再标「当前版本」。需求里
+       * "不要让用户误以为 tag 是 branch"就落在这些细节上（签出它会进入游离 HEAD，而那一行
+       * 文案里写明了）。
+       *
+       * **它是列表里的独立一段，不在"分支都过滤掉了"的空态里**：用户在搜索框里打一个标签名
+       * 时，分支那边必然一个都不匹配，而他要找的标签必须还在（否则搜索框按分支的空态把标签
+       * 一起藏了——第一版就是这样，标签搜索等于失效）。
+       */
+      const tagsSection =
+        tagsLoading !== true && visibleTags.length === 0 && tags.length === 0
+          ? null
+          : react.createElement(
+              'div',
+              { 'data-desktop-sc-section': 'tags' },
+              react.createElement(SectionHeader, {
+                label: t('sectionTags'),
+                count: tags.length,
+                action: iconButton('create-tag', t('actionCreateTag'), onCreateTag, tagGlyph),
+              }),
+              tagsLoading
+                ? react.createElement('div', { 'data-desktop-tags-loading': '', style: { padding: '4px 8px', fontSize: '12px', color: SECONDARY } }, t('tagsLoading'))
+                : visibleTags.length === 0
+                  ? react.createElement('div', { 'data-desktop-tags-empty': '', style: { padding: '4px 8px', fontSize: '12px', color: SECONDARY } }, t('tagsEmpty'))
+                  : visibleTags.map((entry) =>
+                      react.createElement(
+                        'button',
+                        {
+                          key: `t:${entry.name}`,
+                          type: 'button',
+                          'data-desktop-tag-name': entry.name,
+                          'data-desktop-tag-annotated': entry.annotated === true ? 'true' : 'false',
+                          'data-desktop-tag-head': entry.pointsAtHead === true ? 'true' : 'false',
+                          disabled: busy,
+                          onClick: (event) => onTagPick(event, entry),
+                          onDoubleClick: () => onTagActivate(entry),
+                          onContextMenu: (event) => onTagContextMenu(event, entry),
+                          title: `${entry.name}\n${entry.annotated === true ? t('tagAnnotated') : t('tagLightweight')}\n${entry.short} ${entry.subject}`,
+                          style: {
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            boxSizing: 'border-box',
+                            width: '100%',
+                            minHeight: '30px',
+                            padding: '5px 8px',
+                            border: 'none',
+                            borderRadius: '7px',
+                            background: 'var(--dsh-branch-option-bg, transparent)',
+                            color: entry.pointsAtHead === true ? ACCENT : 'inherit',
+                            fontFamily: UI_FONT,
+                            fontSize: '13px',
+                            textAlign: 'left',
+                            cursor: busy ? 'default' : 'pointer',
+                            opacity: busy ? 0.6 : 1,
+                          },
+                        },
+                        react.createElement('span', { style: { flexShrink: 0, display: 'flex', width: '12px', color: entry.pointsAtHead === true ? ACCENT : TERTIARY } }, tagGlyph),
+                        react.createElement(
+                          'span',
+                          { 'data-desktop-tag-label': '', style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: CODE_FONT, fontSize: '12.5px' } },
+                          entry.name,
+                        ),
+                        entry.pointsAtHead === true
+                          ? react.createElement('span', { style: { flexShrink: 0, color: ACCENT, fontSize: '11px' } }, t('tagPointsAtHead'))
+                          : null,
+                        react.createElement('span', { style: { flexShrink: 0, color: TERTIARY, fontSize: '11px' } }, entry.annotated === true ? t('tagAnnotated') : t('tagLightweight')),
+                      ),
+                    ),
+            )
 
       /**
        * 进行中的操作与还剩下的冲突。
@@ -2799,6 +3133,8 @@ window.__ModuleLoader__.load({
           // 情况，直接那一条必须一眼可见（见字典里 actionStash 的说明）。
           action('stash', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), directAction === 'stash' ? t('stashingNow') : t('actionStash'), onStashQuick),
           action('stash-options', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), t('actionStashOptions'), () => onDialog({ kind: 'stash' })),
+          // 新建标签：「签出标记或修订…」只负责切换，而"打一个版本"是另一件事。
+          action('create-tag', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(TagGlyph)), t('actionCreateTag'), onCreateTag),
         ),
 
         // 进行中的合并/变基/摘取/还原：这是**必须**露出来的一条，因为它表示仓库停在一个
@@ -3023,6 +3359,33 @@ window.__ModuleLoader__.load({
                     },
                     busy ? t('working') : t('stashRestore'),
                   ),
+              // 签出标签之后的「从这里新建分支…」：游离 HEAD 上的提交不属于任何分支，用户
+              // 想在这里继续工作就必须先建一个分支——把这条路指出来，而不是让他自己发现。
+              detachedFrom === '' || detachedFrom === undefined
+                ? null
+                : react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-desktop-sc-branch-from-tag': detachedFrom,
+                      disabled: busy,
+                      title: t('detachedHint'),
+                      onClick: onCreateBranchFromTag,
+                      style: {
+                        display: 'block',
+                        marginTop: '6px',
+                        padding: '5px 9px',
+                        borderRadius: '6px',
+                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                        background: SURFACE,
+                        color: 'inherit',
+                        fontFamily: UI_FONT,
+                        fontSize: '12px',
+                        cursor: busy ? 'default' : 'pointer',
+                      },
+                    },
+                    t('createBranchFromTag'),
+                  ),
             ),
 
         // 只滚动结果列表，搜索框与操作区始终留在顶部。
@@ -3085,6 +3448,11 @@ window.__ModuleLoader__.load({
                     )
                   : null,
               ),
+          /**
+           * 标签分组是列表里的**同级一段**（不是分支容器里的孩子）：分支被搜索过滤到空时，
+           * 标签必须还在——用户打的很可能就是标签名，而那时分支一个都不匹配。
+           */
+          tagsSection,
         ),
       )
     }
@@ -3108,8 +3476,116 @@ window.__ModuleLoader__.load({
     // =========================================================================
 
     /**
-     * 分支行的操作菜单（右键，以及单击分支行时打开的那一个）。
+     * 标签行的操作菜单。
      *
+     * 与分支菜单同一个形状与同一套几何（`cascadeMenuPosition`），但**条目不同**：标签不会
+     * 移动，因此没有"合并 / 变基 / 重命名"；它有"签出（进入游离 HEAD）/ 从这里新建分支 /
+     * 推送这个标记 / 删除本地标记 / 与当前比较"。
+     *
+     * 条目按"读 → 写 → 破坏性"排列，**签出放在第一条**：它是标签最常见的作用，而菜单里
+     * 第一项就在鼠标下方。删除是破坏性的（只是本地、却仍不可撤销），放最后并用危险色。
+     *
+     * @param props - `{ t, menu, menuRef, busy, onClose, onCheckout, onDialog, onPushTag, onCareful }`。
+     * @returns React 元素。
+     */
+    function TagContextMenu(props) {
+      const { t, menu, menuRef, busy, onClose, onCheckout, onDialog, onPushTag, onCompare } = props
+      const entry = menu.tag
+      const [measured, setMeasured] = react.useState(null)
+      react.useEffect(() => {
+        const node = menuRef?.current
+        if (node === null || node === undefined || typeof node.getBoundingClientRect !== 'function') return undefined
+        const rect = node.getBoundingClientRect()
+        const height = typeof rect?.height === 'number' ? rect.height : rect?.bottom - rect?.top
+        if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return undefined
+        setMeasured((previous) => (previous !== null && previous.menu === menu && Math.abs(previous.height - height) < 1 ? previous : { menu, height }))
+        return undefined
+      }, [menuRef, menu])
+      const submenuHeight = measured !== null && measured.menu === menu && measured.height > 0 ? measured.height : CASCADE_MENU_ESTIMATED_HEIGHT
+      const position = cascadeMenuPosition({
+        rowRect: menu.rowAnchor,
+        panelRect: menu.panelAnchor,
+        submenuWidth: CASCADE_MENU_WIDTH,
+        submenuHeight,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      })
+      const item = (key, label, onClick, options) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key,
+            'data-desktop-sc-tagitem': key,
+            disabled: busy || options?.disabled === true,
+            title: options?.title,
+            onClick: () => {
+              onClose()
+              onClick()
+            },
+            style: {
+              display: 'block',
+              boxSizing: 'border-box',
+              width: '100%',
+              padding: '6px 9px',
+              border: 'none',
+              borderRadius: '6px',
+              background: 'transparent',
+              color: options?.danger === true ? DANGER : 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              lineHeight: 1.5,
+              textAlign: 'left',
+              whiteSpace: 'normal',
+              cursor: busy ? 'default' : 'pointer',
+              opacity: busy ? 0.6 : 1,
+            },
+          },
+          label,
+        )
+      const separator = (key) => react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
+      return react.createElement(
+        'div',
+        {
+          ref: menuRef,
+          role: 'menu',
+          'data-desktop-sc-tagmenu': entry.name,
+          'data-desktop-sc-cascade': position.side,
+          style: {
+            position: 'fixed',
+            zIndex: 10000,
+            left: `${position.left}px`,
+            top: `${position.top}px`,
+            width: `${CASCADE_MENU_WIDTH}px`,
+            maxHeight: `min(${CASCADE_MENU_ESTIMATED_HEIGHT}px, calc(100vh - 16px))`,
+            overflowY: 'auto',
+            padding: '5px',
+            borderRadius: '10px',
+            border: `1px solid ${BORDER}`,
+            background: SURFACE,
+            color: 'var(--dsw-alias-label-primary, #202124)',
+            fontFamily: UI_FONT,
+            boxShadow: '0 10px 30px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.06)',
+          },
+        },
+        // 菜单顶部先把"这是标签、不是分支"说清楚（需求：不要让用户误以为 tag 是 branch）。
+        react.createElement(
+          'div',
+          { style: { padding: '4px 9px 6px', color: TERTIARY, fontSize: '11.5px', lineHeight: 1.5 } },
+          `${entry.name} · ${entry.annotated === true ? t('tagAnnotated') : t('tagLightweight')}`,
+        ),
+        item('checkout', t('menuTagCheckout'), () => onCheckout(entry)),
+        item('create-branch', t('menuTagCreateBranch'), () => onDialog({ kind: 'create', branch: { name: entry.name } })),
+        separator('sep1'),
+        item('compare', t('menuTagCompare'), () => onCompare(entry)),
+        item('push', t('menuTagPush'), () => onPushTag(entry)),
+        item('copy', t('menuTagCopy'), () => copyToClipboard(entry.name)),
+        separator('sep2'),
+        item('delete', t('menuTagDelete'), () => onDialog({ kind: 'delete-tag', tag: entry }), { danger: true }),
+      )
+    }
+
+    /**
+     * 分支行的操作菜单（右键，以及单击分支行时打开的那一个）。     *
      * **单击与右键打开的是同一个组件、同一份条目**：两种入口表达的是同一个意图
      * （"我要对这个分支做点什么"），各写一套菜单必然漂移（实测过：右键有「重命名」而
      * 单击菜单没有，用户完全无法预期）。
@@ -3338,6 +3814,10 @@ window.__ModuleLoader__.load({
        */
       const [stashMessage, setStashMessage] = react.useState('')
       const [stashUntracked, setStashUntracked] = react.useState(false)
+      /** 新建标签对话框的两个输入（附注的默认值由挂载时的 props 决定）。 */
+      const [tagName, setTagName] = react.useState('')
+      const [tagMessage, setTagMessage] = react.useState('')
+      const [tagAnnotated, setTagAnnotated] = react.useState(dialog?.defaultAnnotated === true)
       // 强制删除的二次确认：未并入的分支第一次会被 git 拒绝，第二次才带上 force。
       const [forceConfirmed, setForceConfirmed] = react.useState(false)
 
@@ -3533,6 +4013,47 @@ window.__ModuleLoader__.load({
             ...(stashMessage.trim() === '' ? {} : { message: stashMessage.trim() }),
             includeUntracked: stashUntracked,
           })
+          if (result !== undefined) onDone()
+        }
+      } else if (kind === 'create-tag') {
+        /**
+         * 「新建标记」：名字 + 是否附注（+ 信息）。
+         *
+         * 附注的默认值跟仓库现状走（`annotatedCount > 0` 说明这个项目习惯用附注标签），
+         * 用户随时可以改。**信息为空就一定是轻量标签**——git 的 `-a` 没有 `-m` 会去开
+         * 编辑器，而宿主没有终端（那会永久挂住），因此这一条不是风格问题而是硬约束。
+         */
+        title = t('dialogTagTitle')
+        body = [
+          field('tag-name', t('dialogFieldTagName'), tagName, setTagName, { autoFocus: true, placeholder: 'v1.7.0' }),
+          checkbox('tag-annotated', t('dialogTagAnnotated'), tagAnnotated, setTagAnnotated),
+          tagAnnotated
+            ? field('tag-message', t('dialogFieldTagMessage'), tagMessage, setTagMessage)
+            : react.createElement('div', { key: 'hint', style: { fontSize: '11.5px', color: TERTIARY, lineHeight: 1.6 } }, t('dialogTagTypeHint')),
+        ]
+        submit = async () => {
+          if (tagName.trim() === '') return
+          const result = await run(
+            'tag/create',
+            { name: tagName.trim(), ...(tagAnnotated ? { message: tagMessage.trim() } : {}) },
+            (payload) => t('tagCreated', { name: String(payload?.created ?? tagName.trim()) }),
+          )
+          if (result !== undefined) onDone()
+        }
+      } else if (kind === 'delete-tag') {
+        /**
+         * 删除**本地**标记（破坏性动作，必须确认）。
+         *
+         * 正文里明说"远端上的同名标记不会被删除"——这是本轮**有意不做**远端标记管理，
+         * 而不是一个遗漏；用户看到这句话才不会以为删完就到处都没了。
+         */
+        title = t('confirmDeleteTagTitle')
+        body = [
+          react.createElement('div', { key: 'text', style: { fontSize: '12.5px', lineHeight: 1.6, overflowWrap: 'anywhere' } }, t('confirmDeleteTagBody', { name: dialog?.tag?.name ?? '' })),
+          react.createElement('div', { key: 'remote', style: { fontSize: '11.5px', color: TERTIARY, lineHeight: 1.6 } }, t('confirmDeleteTagRemote')),
+        ]
+        submit = async () => {
+          const result = await run('tag/delete', { name: dialog?.tag?.name ?? '' }, (payload) => t('tagDeleted', { name: String(payload?.deleted ?? '') }))
           if (result !== undefined) onDone()
         }
       } else if (kind === 'commit') {

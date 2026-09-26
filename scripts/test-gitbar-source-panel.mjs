@@ -280,6 +280,16 @@ const STATUS = {
   head: 'a'.repeat(40),
 }
 const REMOTES = [{ name: 'origin', url: 'https://example.invalid/repo.git' }]
+/**
+ * 标签列表（`/tags` 是独立的只读路由）。
+ *
+ * 两个标签覆盖两种类型：`v1.6.0` 是附注标签（指向 HEAD，因此会标「当前版本」），
+ * `v1.5.8` 是轻量标签。列表按 `-creatordate` 排（宿主侧的顺序）。
+ */
+let TAGS = [
+  { name: 'v1.6.0', sha: 'a'.repeat(40), short: 'aaaaaaa', annotated: true, date: '2026-01-02T10:00:00+08:00', subject: 'Release 1.6.0', tagger: 'T', pointsAtHead: true },
+  { name: 'v1.5.8', sha: 'b'.repeat(40), short: 'bbbbbbb', annotated: false, date: '2026-01-01T10:00:00+08:00', subject: 'release 1.5.8', tagger: '', pointsAtHead: false },
+]
 
 /** 每次 POST 的记录：`{ route, body }`。 */
 const posts = []
@@ -296,9 +306,11 @@ let statusOverride = {}
 function writeOk() {
   return {
     ok: true,
-    text: async () => JSON.stringify({ ...STATUS, ...statusOverride, branches: BRANCHES, remotes: REMOTES }),
+    text: async () => JSON.stringify({ ...STATUS, ...statusOverride, branches: BRANCHES, remotes: REMOTES, ...writeExtra }),
   }
 }
+/** 下一次写操作响应里的附加字段（例如 `{ detached: true }`、`{ stash: {...} }`）。 */
+let writeExtra = {}
 
 globalThis.fetch = async (url, init) => {
   const target = String(url)
@@ -319,6 +331,9 @@ globalThis.fetch = async (url, init) => {
   }
   if (route === 'status') {
     return { ok: true, text: async () => JSON.stringify({ ...STATUS, ...statusOverride }) }
+  }
+  if (route === 'tags') {
+    return { ok: true, text: async () => JSON.stringify({ tags: TAGS, tagCount: TAGS.length, annotatedCount: TAGS.filter((entry) => entry.annotated).length }) }
   }
   if (route === 'branches') {
     return {
@@ -650,7 +665,9 @@ for (const key of ['update', 'commit', 'push', 'new', 'tag']) {
   check(`   快捷操作 ${key}`, ui.find('data-desktop-sc-action', key) === null, 'false')
 }
 const sections = ui.findAll('data-desktop-sc-section').map((node) => node.props['data-desktop-sc-section'])
-check('   分组顺序（最近在前，其后本地、远程）', sections.join(','), 'recent,local,remote')
+// 分组顺序：最近在前，其后本地、远程，最后是标签（标签在分支之后：它是"版本锚点"，
+// 而用户打开这个面板多数时候是在找分支）。
+check('   分组顺序（最近、本地、远程、标签）', sections.join(','), 'recent,local,remote,tags')
 // 「最近」是本地分支的**副本**（2 个），加上「本地」2 个、「远程」1 个 = 5 行。
 check('   分支行总数', ui.findAll('data-desktop-branch-option').length, 5)
 // 「最近」是「本地」的副本，因此当前分支会**出现两次**（VS Code 也是这样）。这里要断言
@@ -1027,6 +1044,134 @@ await ui.click('data-desktop-sc-restore', 'stash@{0}')
 check('   点恢复走 stash/pop', posts.map((p) => p.route).join(','), 'stash/pop')
 check('   带的是那条储藏的引用', posts[0]?.body?.ref, 'stash@{0}')
 nextWriteError = null
+
+console.log('')
+console.log('=== 22. 标签：列表 / 搜索 / 菜单 / 新建 / 删除 / 推送 / 比较 ===')
+writeErrorAlways = null
+statusOverride = {}
+TAGS = [
+  { name: 'v1.6.0', sha: 'a'.repeat(40), short: 'aaaaaaa', annotated: true, date: '2026-01-02T10:00:00+08:00', subject: 'Release 1.6.0', tagger: 'T', pointsAtHead: true },
+  { name: 'v1.5.8', sha: 'b'.repeat(40), short: 'bbbbbbb', annotated: false, date: '2026-01-01T10:00:00+08:00', subject: 'release 1.5.8', tagger: '', pointsAtHead: false },
+]
+ui = await mount()
+await ui.openPanel()
+{
+  const rows = ui.findAll('data-desktop-tag-name')
+  check('22) 标签分组列出了全部标签', rows.map((node) => node.props['data-desktop-tag-name']).join(','), 'v1.6.0,v1.5.8')
+  check('   附注标记标成 annotated', ui.find('data-desktop-tag-name', 'v1.6.0')?.props?.['data-desktop-tag-annotated'], 'true')
+  check('   轻量标记标成 lightweight', ui.find('data-desktop-tag-name', 'v1.5.8')?.props?.['data-desktop-tag-annotated'], 'false')
+  check('   指向 HEAD 的标出「当前版本」', ui.find('data-desktop-tag-name', 'v1.6.0')?.props?.['data-desktop-tag-head'], 'true')
+  const tagText = textOf(ui.find('data-desktop-tag-name', 'v1.6.0'))
+  check('   行里区分附注 / 轻量（不会误以为是分支）', tagText.includes('tagAnnotated'), 'true')
+  check('   分组标题是标签', ui.find('data-desktop-sc-section', 'tags') === null, 'false')
+}
+// 搜索框同时过滤标签：找一个不存在的名字 → 标签区显示空态。
+await ui.type('data-desktop-branch-menu', undefined, 'v1.5')
+check('   搜索也过滤标签（只剩匹配的那一个）', ui.findAll('data-desktop-tag-name').map((n) => n.props['data-desktop-tag-name']).join(','), 'v1.5.8')
+await ui.type('data-desktop-branch-menu', undefined, 'zzz')
+check('   全不匹配时给出空态', ui.find('data-desktop-tags-empty') === null, 'false')
+await ui.type('data-desktop-branch-menu', undefined, '')
+
+// 单击一行标签 → 标签菜单（条目与分支菜单不同）。
+posts.length = 0
+{
+  const row = ui.find('data-desktop-tag-name', 'v1.5.8')
+  row.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+  await ui.settle()
+  check('   单击标签弹出标签菜单', ui.find('data-desktop-sc-tagmenu', 'v1.5.8') === null, 'false')
+  const items = ui.findAll('data-desktop-sc-tagitem').map((node) => node.props['data-desktop-sc-tagitem'])
+  check('   菜单条目（签出 / 建分支 / 比较 / 推送 / 复制 / 删除）', items.join(','), 'checkout,create-branch,compare,push,copy,delete')
+}
+
+// 「推送标记」→ 单推这一条（绝不 --tags）。
+posts.length = 0
+await ui.click('data-desktop-sc-tagitem', 'push')
+check('   推标签走 tag/push', posts.map((p) => p.route).join(','), 'tag/push')
+check('   只带这一个标签名', posts[0]?.body?.name, 'v1.5.8')
+check('   没有 --tags 之类的批量参数', posts[0]?.body?.all, undefined)
+
+// 「删除本地标记」→ 确认框（并说明不动远端）。
+await ui.openPanel()
+{
+  const row = ui.find('data-desktop-tag-name', 'v1.5.8')
+  row.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+  await ui.settle()
+}
+await ui.click('data-desktop-sc-tagitem', 'delete')
+check('   删除弹确认框', ui.find('data-desktop-sc-dialog', 'delete-tag') === null, 'false')
+check('   正文说明只删本地', textOf(ui.find('data-desktop-sc-dialog', 'delete-tag')).includes('confirmDeleteTagRemote'), 'true')
+posts.length = 0
+await ui.click('data-desktop-sc-button', 'confirm')
+check('   确认后发 tag/delete', posts.map((p) => p.route).join(','), 'tag/delete')
+check('   带标签名', posts[0]?.body?.name, 'v1.5.8')
+
+// 「从这里新建分支」→ 复用既有的建分支对话框，起点是标签名。
+await ui.openPanel()
+{
+  const row = ui.find('data-desktop-tag-name', 'v1.6.0')
+  row.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+  await ui.settle()
+}
+await ui.click('data-desktop-sc-tagitem', 'create-branch')
+check('   建分支对话框已打开', ui.find('data-desktop-sc-dialog', 'create') === null, 'false')
+check('   起点预填标签名', ui.find('data-desktop-sc-field', 'from')?.props?.value, 'v1.6.0')
+
+// 「与当前比较」→ 交给 review 的跨插件比较入口（并说明它请求了哪两端）。
+{
+  const calls = []
+  const previous = globalThis.window.__dshDesktopReviewCompare
+  globalThis.window.__dshDesktopReviewCompare = { open: (request) => calls.push(request) }
+  await ui.openPanel()
+  const row = ui.find('data-desktop-tag-name', 'v1.5.8')
+  row.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+  await ui.settle()
+  await ui.click('data-desktop-sc-tagitem', 'compare')
+  check('   比较请求发给了 review 桥', calls.length, 1)
+  check('   一端是标签、另一端是 HEAD', `${calls[0]?.a}↔${calls[0]?.b}`, 'v1.5.8↔HEAD')
+  check('   带上工作区（面板才能认出是哪个项目）', typeof calls[0]?.workspace === 'string' && calls[0].workspace !== '', 'true')
+  globalThis.window.__dshDesktopReviewCompare = previous
+}
+
+// 快速操作里的「新建标记…」→ 对话框（附注默认跟随仓库现状：这里已有附注标签 → 默认开）。
+posts.length = 0
+await ui.openPanel()
+await ui.click('data-desktop-sc-action', 'create-tag')
+check('   新建标记对话框已打开', ui.find('data-desktop-sc-dialog', 'create-tag') === null, 'false')
+check('   仓库有附注标签 → 默认附注', ui.find('data-desktop-sc-check', 'tag-annotated')?.props?.checked, true)
+await ui.type('data-desktop-sc-field', 'tag-name', 'v1.7.0')
+await ui.type('data-desktop-sc-field', 'tag-message', 'Release 1.7.0')
+posts.length = 0
+await ui.click('data-desktop-sc-button', 'confirm')
+check('   创建走 tag/create', posts.map((p) => p.route).join(','), 'tag/create')
+check('   带名字与信息（附注）', JSON.stringify(posts[0]?.body), '{"name":"v1.7.0","message":"Release 1.7.0"}')
+
+// 只有轻量标签的仓库 → 默认轻量（信息为空 = 轻量，不会去开编辑器）。
+TAGS = [{ name: 'v0.1.0', sha: 'c'.repeat(40), short: 'ccccccc', annotated: false, date: '2025-01-01T10:00:00+08:00', subject: 'first', tagger: '', pointsAtHead: false }]
+ui = await mount()
+await ui.openPanel()
+await ui.click('data-desktop-sc-action', 'create-tag')
+check('   仓库只有轻量标签 → 默认轻量', ui.find('data-desktop-sc-check', 'tag-annotated')?.props?.checked, false)
+check('   轻量时给出类型说明', textOf(ui.find('data-desktop-sc-dialog', 'create-tag')).includes('dialogTagTypeHint'), 'true')
+
+// 签出标签 → 游离 HEAD 提示 + 「从这里新建分支」。
+posts.length = 0
+writeExtra = { detached: true }
+await ui.openPanel()
+{
+  const row = ui.find('data-desktop-tag-name', 'v0.1.0')
+  row.props.onDoubleClick({ stopPropagation() {}, preventDefault() {} })
+  await ui.settle()
+}
+check('   双击标签走 checkout', posts.map((p) => p.route).join(','), 'checkout')
+check('   请求体是标签名', posts[0]?.body?.branch, 'v0.1.0')
+// 面板在成功后会收起，重新打开看提示区（`detachedFrom` 住在组件状态里）。
+await ui.openPanel()
+check('   游离 HEAD 时给出提示', textOf(ui.find('data-desktop-sc-notice')).includes('detachedNotice'), 'true')
+check('   并给出「从这里新建分支」', ui.find('data-desktop-sc-branch-from-tag', 'v0.1.0') === null, 'false')
+posts.length = 0
+await ui.click('data-desktop-sc-branch-from-tag', 'v0.1.0')
+check('   点它打开建分支对话框，起点是那个标签', ui.find('data-desktop-sc-field', 'from')?.props?.value, 'v0.1.0')
+writeExtra = {}
 
 console.log('')
 console.log(failures === 0 ? '全部通过' : `${failures} 项失败`)

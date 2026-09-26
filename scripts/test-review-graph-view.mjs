@@ -399,6 +399,22 @@ globalThis.fetch = async (url, init) => {
     const revision = new URLSearchParams(target.split('?')[1] ?? '').get('revision') ?? ''
     requests.push({ url: target, route: `gitbar:${gitbarRoute}`, body })
     if (gitbarRoute === 'reset/preview') return { ok: true, text: async () => JSON.stringify(resetPreview(revision)) }
+    // 提交右键菜单里的写操作（摘取 / 还原 / 创建分支 / 创建标记）：记录请求体，回成功。
+    gitbarPosts.push({ route: gitbarRoute, body })
+    if (gitbarRoute !== 'reset') {
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            isRepo: true,
+            branch: 'main',
+            ...(gitbarRoute === 'branch/create' ? { created: body?.name, detached: false } : {}),
+            ...(gitbarRoute === 'tag/create' ? { created: body?.name, tag: { name: body?.name, annotated: (body?.message ?? '') !== '' } } : {}),
+            ...(gitbarRoute === 'cherry-pick' ? { picked: body?.revision, conflicted: false } : {}),
+            ...(gitbarRoute === 'revert' ? { reverted: body?.revision, conflicted: false } : {}),
+          }),
+      }
+    }
     if (gitbarRoute === 'reset') {
       if (resetError !== null) {
         const failure = resetError
@@ -436,6 +452,33 @@ globalThis.fetch = async (url, init) => {
       commitFileHolds.set(body?.path, () => resolve())
     })
   }
+  if (route === 'compare') {
+    return { ok: true, text: async () => JSON.stringify(compareFixture(body?.a, body?.b)) }
+  }
+  if (route === 'compare-file') {
+    return {
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          isRepo: true,
+          path: body?.path,
+          a: body?.a,
+          b: body?.b,
+          // 内容里带上两端，才能断言"显示的是这一组比较的差异"。
+          diff: [
+            `diff --git a/${String(body?.path)} b/${String(body?.path)}`,
+            '--- a/' + String(body?.path),
+            '+++ b/' + String(body?.path),
+            '@@ -1 +1 @@',
+            '-old',
+            `+compared ${String(body?.a).slice(0, 7)}..${String(body?.b).slice(0, 7)}`,
+            '',
+          ].join('\n'),
+          truncated: false,
+          binary: false,
+        }),
+    }
+  }
   const payload =
     route === 'roots'
       ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
@@ -448,8 +491,29 @@ globalThis.fetch = async (url, init) => {
             : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
-/** 下一次 gitbar `/reset` 的错误响应（用完即清）。 */
+/** 下一次 gitbar 写操作的错误响应（用完即清）。 */
 let resetError = null
+/** gitbar 写操作（cherry-pick / revert / branch/create / tag/create）的记录。 */
+const gitbarPosts = []
+
+/** 夹具：比较两个修订（`/compare`）。`HEAD` 解析成 HEAD 那条提交（与真实宿主一致）。 */
+const compareFixture = (a, b) => {
+  const head = 'm'.repeat(40)
+  const resolve = (value) => (value === 'HEAD' ? head : String(value))
+  return {
+    isRepo: true,
+    a: { sha: resolve(a), short: resolve(a).slice(0, 7), subject: 'main side work', author: 'tester', date: '2026-01-03T10:00:00+08:00' },
+    b: { sha: resolve(b), short: resolve(b).slice(0, 7), subject: 'merge feature into main', author: 'tester', date: '2026-01-04T10:00:00+08:00' },
+    same: false,
+    onlyA: 0,
+    onlyB: 2,
+    files: [
+      { path: 'src/app.ts', status: 'M' },
+      { path: 'docs/readme.md', status: 'A' },
+    ],
+    fileCount: 2,
+  }
+}
 globalThis.setTimeout = globalThis.setTimeout
 
 // ---- 加载并挂载插件 --------------------------------------------------------------
@@ -1412,6 +1476,139 @@ console.log('=== 13. 把当前分支重置到这里（右键 / 详情栏 / 预�
   checkTrue('   失败信息留在对话框里', find('data-reset-error') !== null)
   checkTrue('   失败后对话框仍然打开', find('data-reset-dialog') !== null)
   await click(find('data-reset-cancel'))
+}
+
+console.log('')
+console.log('=== 14. 提交右键菜单：复制 / 比较 / 建分支 / 建标记 / 摘取 / 还原 ===')
+{
+  /** 往某个输入框里打字（受控 onChange），并让状态落地。 */
+  const typeInto = async (marker, value) => {
+    find(marker)?.props?.onChange?.({ target: { value } })
+    await settle()
+  }
+  await mount()
+  const first = findAll('data-graph-row')[0]
+  const headSha = String(first.props['data-graph-row'])
+  requests.length = 0
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  const items = findAll('data-graph-menu-item').map((node) => node.props['data-graph-menu-item'])
+  check('14) 菜单条目齐全且按"读 → 写 → 危险"排列', items.join(','), 'copy-sha,compare-current,select-compare,create-branch,create-tag,cherry-pick,revert,reset')
+  check('   危险动作单独成组（有说明行）', find('data-graph-menu-danger') === null, 'false')
+
+  // 「复制提交 SHA」：复制完整 SHA，并给一句回执。
+  await click(find('data-graph-menu-item', 'copy-sha'))
+  // 本文件的 `t` 不做插值，因此"回执里带的是完整 SHA"要看 tCalls 的参数（比对着渲染文本
+  // 断言更准：文案会被润色，而参数是被代码引用的契约）。
+  {
+    const call = [...tCalls].reverse().find((entry) => entry.key === 'copiedSha')
+    checkTrue('   复制后给出回执', find('data-graph-menu-notice') !== null)
+    check('   回执里带的是完整 SHA', call?.params?.sha, headSha)
+  }
+
+  // 「与当前比较」→ 交给宿主算，并在右栏显示比较视图。
+  requests.length = 0
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  await click(find('data-graph-menu-item', 'compare-current'))
+  const compareCall = requests.filter((entry) => entry.route === 'compare').pop()
+  checkTrue('   比较请求发到宿主', compareCall !== undefined)
+  check('   一端是那条提交、另一端是 HEAD', `${compareCall?.body?.a}↔${compareCall?.body?.b}`, `${headSha}↔HEAD`)
+  checkTrue('   右栏出现比较视图', find('data-graph-compare') !== null)
+  check('   显示"只在终点有几个提交"', find('data-graph-compare-only-b')?.props?.['data-graph-compare-only-b'], '2')
+  check('   列出改动的文件', findAll('data-graph-compare-files').length, 1)
+  check('   文件数与宿主一致', find('data-graph-compare-count')?.props?.['data-graph-compare-count'], '2')
+
+  // 点比较里的文件 → 用**同一个**差异渲染器显示 `/compare-file` 的结果。
+  requests.length = 0
+  await click(find('data-graph-file-row', 'src/app.ts'))
+  const fileCall = requests.filter((entry) => entry.route === 'compare-file').pop()
+  checkTrue('   取的是两端之间的差异', fileCall !== undefined)
+  check('   带上了两端', `${fileCall?.body?.a !== undefined && fileCall?.body?.b !== undefined}`, 'true')
+  await settle()
+  checkTrue('   差异渲染出来了（并排/统一共用）', findAll('data-review-sbs-row').length >= 1 || findAll('data-review-diff-row').length >= 1)
+
+  // 「选择用于比较」→ 回执；再选另一条 → A ↔ B 比较。
+  await click(find('data-graph-compare-close'))
+  const second = findAll('data-graph-row')[1]
+  const secondSha = String(second.props['data-graph-row'])
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  await click(find('data-graph-menu-item', 'select-compare'))
+  checkTrue('   选择后给出回执', textOf(find('data-graph-menu-notice')).includes('compareSelectedBadge'))
+  requests.length = 0
+  second.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 60 })
+  await settle()
+  check('   菜单变成"与所选比较"', find('data-graph-menu-item', 'compare-selected') === null, 'false')
+  await click(find('data-graph-menu-item', 'compare-selected'))
+  const abCall = requests.filter((entry) => entry.route === 'compare').pop()
+  check('   比较的是所选与当前选中的那一条', `${abCall?.body?.a}↔${abCall?.body?.b}`, `${headSha}↔${secondSha}`)
+  await click(find('data-graph-compare-close'))
+  check('   关闭后比较视图消失', find('data-graph-compare'), null)
+
+  // 「在此创建分支」→ 对话框 → gitbar 的 branch/create（起点是那条提交）。
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  await click(find('data-graph-menu-item', 'create-branch'))
+  checkTrue('   建分支对话框已打开', find('data-graph-branch-dialog', headSha) !== null)
+  typeInto('data-graph-branch-name', 'feature/from-commit')
+  gitbarPosts.length = 0
+  await click(find('data-graph-dialog-confirm'))
+  const branchCall = gitbarPosts.filter((entry) => entry.route === 'branch/create').pop()
+  check('   走 branch/create', branchCall !== undefined, 'true')
+  check('   起点是那条提交', branchCall?.body?.from, headSha)
+  check('   默认创建后切换', branchCall?.body?.checkout, true)
+  checkTrue('   给出已创建的回执', textOf(find('data-graph-menu-notice')).includes('createdBranchNotice'))
+
+  // 「在此创建标记」→ 对话框 → gitbar 的 tag/create（轻量 / 附注由信息决定）。
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  await click(find('data-graph-menu-item', 'create-tag'))
+  checkTrue('   建标记对话框已打开', find('data-graph-tag-dialog', headSha) !== null)
+  typeInto('data-graph-tag-name', 'v9.9.9')
+  gitbarPosts.length = 0
+  await click(find('data-graph-dialog-confirm'))
+  const tagCall = gitbarPosts.filter((entry) => entry.route === 'tag/create').pop()
+  check('   走 tag/create', tagCall !== undefined, 'true')
+  check('   目标是那条提交', tagCall?.body?.revision, headSha)
+  check('   没有填信息 → 轻量（message 为空）', tagCall?.body?.message, '')
+  checkTrue('   给出已创建的回执', textOf(find('data-graph-menu-notice')).includes('createdTagNotice'))
+
+  // 勾上「附注标记」并填信息 → 带 message（= 附注）。
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  await click(find('data-graph-menu-item', 'create-tag'))
+  typeInto('data-graph-tag-name', 'v9.9.10')
+  await click(find('data-graph-tag-annotated'))
+  typeInto('data-graph-tag-message', 'Release 9.9.10')
+  gitbarPosts.length = 0
+  await click(find('data-graph-dialog-confirm'))
+  const annotatedCall = gitbarPosts.filter((entry) => entry.route === 'tag/create').pop()
+  check('   附注标记带上信息', annotatedCall?.body?.message, 'Release 9.9.10')
+
+  // 「摘取」/「还原」：都发给 gitbar（冲突处理已经在冲突面板里）。
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  gitbarPosts.length = 0
+  await click(find('data-graph-menu-item', 'cherry-pick'))
+  const pickCall = gitbarPosts.filter((entry) => entry.route === 'cherry-pick').pop()
+  check('   摘取走 cherry-pick', pickCall?.body?.revision, headSha)
+  checkTrue('   给出摘取回执', textOf(find('data-graph-menu-notice')).includes('cherryPickedNotice'))
+  first.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 60, clientY: 30 })
+  await settle()
+  gitbarPosts.length = 0
+  await click(find('data-graph-menu-item', 'revert'))
+  const revertCall = gitbarPosts.filter((entry) => entry.route === 'revert').pop()
+  check('   还原走 revert', revertCall?.body?.revision, headSha)
+
+  // 跨插件的比较入口（gitbar 的分支/标签菜单用它）：切到提交图面板 + 打开比较。
+  requests.length = 0
+  globalThis.window.__dshDesktopReviewCompare.open({ workspace: 'F:\\code\\projA', a: 'feature/login', b: 'HEAD', fromBranch: 'feature/login' })
+  await settle()
+  const bridged = requests.filter((entry) => entry.route === 'compare').pop()
+  check('   桥接请求打开了比较', `${bridged?.body?.a}↔${bridged?.body?.b}`, 'feature/login↔HEAD')
+  checkTrue('   并注明来自分支菜单', find('data-graph-compare-branch', 'feature/login') !== null)
+  await click(find('data-graph-compare-close'))
 }
 
 console.log('')

@@ -1394,6 +1394,20 @@ function asRef(value) {
 }
 
 /**
+ * 校验一个远端名。
+ *
+ * 比分支名更严（见 `REMOTE_PATTERN`）：远端名**不能带层级**，因此 `origin/main`、`bad/name`
+ * 这类值必须挡在发请求之前——否则它们会被当成远端名交给 git，换来一句"不像是个仓库"
+ * （那是把输入错误说成了环境问题）。
+ *
+ * @param value - 请求给出的值。
+ * @returns 通过校验则返回名字，否则 undefined。
+ */
+function asRemote(value) {
+  return typeof value === 'string' && REMOTE_PATTERN.test(value) ? value : undefined
+}
+
+/**
  * 读一个提交的概要（HEAD 或任意修订）。
  *
  * `%B` 是**完整**提交信息（含正文），amend 要靠它把原信息填回输入框；`%P` 是父提交，
@@ -1484,6 +1498,123 @@ async function resolveCommitSha(cwd, value) {
  *   * `hard`  —— 三者一起重置（**已跟踪文件的本地修改会被丢弃**，未跟踪文件保留）。
  */
 const RESET_MODES = new Set(['soft', 'mixed', 'hard'])
+
+/**
+ * 列出本仓库的标签（轻量与附注两类都读出来）。
+ *
+ * 用 `for-each-ref` 的稳定字段，**不解析 `git tag -l` 的输出**（那个只有名字，且附注标签的
+ * 信息还得再跑一次命令）：
+ *   * `%(objecttype)` 是 `tag` ⇒ **附注标签**，`commit` ⇒ **轻量标签**；
+ *   * `%(*objectname)` 是附注标签**解引用后**的提交（轻量标签为空，它自己就是提交）；
+ *   * `%(creatordate:iso-strict)` 对附注标签是打标签的时间、对轻量标签是那次提交的时间；
+ *   * `%(subject)` 对附注标签是标签信息的第一行，对轻量标签是提交标题 —— 因此列表里
+ *     每一行都有可读的说明，不需要为轻量标签再补一次提交查询。
+ *
+ * 按 `-creatordate` 排序（新的在前）：标签列表几乎总是"从最新往回看"。
+ *
+ * @param cwd - 仓库根。
+ * @returns `{ name, sha, short, annotated, date, subject, tagger, pointsAtHead }` 数组。
+ */
+async function listTags(cwd) {
+  const raw = await git(
+    [
+      'for-each-ref',
+      '--sort=-creatordate',
+      /**
+       * 字段分隔符用**字面的控制字符**（`\u001f` / `\u001e`），不是 `%x1f` 这种转义。
+       *
+       * 这一条是踩出来的：`log` 家族（`git log`/`git show`/`git stash list`）支持 `%xNN`，
+       * 而 **`for-each-ref` 不支持**——写了 `%x00` 它会原样打印那四个字符，于是每个字段都
+       * 分不开，解析出来的是空列表（实测：标签列表怎么都是空的）。把控制字符直接放进参数
+       * 数组里既能达到同样的效果，也不依赖任何版本特性。
+       */
+      `--format=%(refname:short)\u001f%(objecttype)\u001f%(objectname)\u001f%(*objectname)\u001f%(creatordate:iso-strict)\u001f%(subject)\u001f%(taggername)\u001e`,
+      'refs/tags',
+    ],
+    cwd,
+  )
+  const head = (await git(['rev-parse', 'HEAD'], cwd).catch(() => '')).trim()
+  const tags = []
+  for (const record of raw.split('\u001e')) {
+    if (record.trim() === '') continue
+    const fields = record.replace(/^\n/u, '').split('\u001f')
+    if (fields.length < 6) continue
+    const name = fields[0].trim()
+    if (name === '') continue
+    const annotated = fields[1].trim() === 'tag'
+    // 附注标签指向的是 tag 对象，真正的提交在 `*objectname` 里；轻量标签自己就是提交。
+    const sha = (annotated ? fields[3] : fields[2]).trim()
+    if (!/^[0-9a-f]{40}$/u.test(sha)) continue
+    tags.push({
+      name,
+      sha,
+      short: sha.slice(0, 7),
+      annotated,
+      date: fields[4].trim(),
+      subject: fields[5].trim(),
+      tagger: fields[6] === undefined ? '' : fields[6].trim(),
+      pointsAtHead: head !== '' && sha === head,
+    })
+  }
+  return tags
+}
+
+/**
+ * 把推送失败的 git 原文映射成稳定的 code。
+ *
+ * 抽出来是因为现在有**两条**推送入口（分支推送与「推送标签」），而"什么算被拒绝、
+ * 什么算没有远端、什么算网络不通"必须在两处完全一致——各写一份迟早漂移（一边说"被拒绝"、
+ * 另一边说"操作失败"，用户会以为是两件不同的事）。
+ *
+ * 顺序有意义：先判"没有上游"（它的报错里也会带 rejected 字样），再判租约/被拒，最后才是网络。
+ *
+ * @param error - git 抛出的错误。
+ * @returns `{ status, code }`，或 undefined（交给通用映射）。
+ */
+function mapPushFailure(error) {
+  const message = String(error?.message ?? error)
+  if (/has no upstream branch|no upstream branch/iu.test(message)) return { status: 409, code: 'noUpstream' }
+  if (/stale info|force-with-lease|fetch first/iu.test(message)) return { status: 409, code: 'pushRejected' }
+  if (/rejected|non-fast-forward|behind/iu.test(message)) return { status: 409, code: 'pushRejected' }
+  if (/could not read Username|Authentication failed|Permission denied|terminal prompts disabled/iu.test(message)) {
+    return { status: 502, code: 'authFailed' }
+  }
+  if (/does not appear to be a git repository|No such remote|no remote/iu.test(message)) return { status: 409, code: 'noRemote' }
+  if (/could not read|Could not resolve|unable to access|Connection refused|timed out/iu.test(message)) {
+    return { status: 502, code: 'networkFailed' }
+  }
+  return undefined
+}
+
+/**
+ * 校验一个标签名，并确认它在当前仓库里存在（或不存在）。
+ *
+ * 形状先过 `asRef`（与分支名同一套字符集规则），再由 **git 自己**用
+ * `check-ref-format refs/tags/<name>` 做权威判定——标签名的规则比字符集多（不能以 `.` 开头、
+ * 不能有 `..`、不能以 `.lock` 结尾……），猜一遍只会漏。
+ *
+ * @param cwd - 仓库根。
+ * @param value - 请求给出的标签名。
+ * @returns `{ name }`，或 `{ error: 'invalidTagName' | 'noSuchTag' | 'tagExists' }`。
+ */
+async function inspectTagName(cwd, value, options) {
+  const name = asRef(value)
+  // `refs/...` 这种**完整引用**要挡掉：`asRef` 只按字符集校验，而 `refs/tags/x` 恰好是合法
+  // 字符集，git 也会老老实实创建一个叫 `refs/tags/x` 的标签（存放在 `refs/tags/refs/tags/x`）。
+  // 用户填的是"标签名"，这种双重嵌套只会让人困惑，所以在这里明确拒绝。
+  if (name === undefined || name.startsWith('refs/')) return { error: 'invalidTagName' }
+  try {
+    await git(['check-ref-format', `refs/tags/${name}`], cwd)
+  } catch {
+    return { error: 'invalidTagName' }
+  }
+  const exists = await git(['rev-parse', '--verify', '--quiet', `refs/tags/${name}`], cwd)
+    .then(() => true)
+    .catch(() => false)
+  if (options?.mustExist === true && !exists) return { error: 'noSuchTag' }
+  if (options?.mustNotExist === true && exists) return { error: 'tagExists' }
+  return { name, exists }
+}
 
 /**
  * 创建 git 路由的处理器。
@@ -1611,8 +1742,19 @@ function createGitHandler() {
         // 当前 HEAD 的完整信息（amend 要把原信息填回输入框；撤销提交要知道它的父提交）。
         // 顺带算出"这个提交是否已经发布"，因为那决定了 amend 要不要给出改写历史的警告——
         // 而这只有宿主知道（upstream 与远端跟踪引用都在它手里）。
-        if (path === `${ROUTE_PREFIX}/head-commit`) {
-          if (context === undefined) {
+        // 标签列表：与 `/branches`、`/remotes` 同类（只读，因此是 GET）。
+        if (path === `${ROUTE_PREFIX}/tags`) {
+          const tags = context === undefined ? [] : await listTags(cwd)
+          sendJson(response, 200, {
+            isRepo: context !== undefined,
+            ...scope,
+            tags,
+            tagCount: tags.length,
+            annotatedCount: tags.filter((entry) => entry.annotated).length,
+          })
+          return
+        }
+        if (path === `${ROUTE_PREFIX}/head-commit`) {          if (context === undefined) {
             sendJson(response, 200, { isRepo: false, ...scope })
             return
           }
@@ -2147,33 +2289,153 @@ function createGitHandler() {
               return { pushed: source ?? 'HEAD', remote: target ?? '', forceWithLease }
             },
             (error) => {
-              const message = String(error?.message ?? error)
-              // 顺序有意义：先判"没有上游"（它也会带上 rejected 之类的字样），
-              // 否则用户看到的是"推送被拒绝"，而真正要做的是「发布分支」。
-              if (/has no upstream branch|no upstream branch/iu.test(message)) {
-                return { status: 409, code: 'noUpstream' }
-              }
-              if (/stale info|force-with-lease|fetch first/iu.test(message)) {
-                return { status: 409, code: 'pushRejected' }
-              }
-              if (/rejected|non-fast-forward|behind/iu.test(message)) {
-                return { status: 409, code: 'pushRejected' }
-              }
-              if (/could not read Username|Authentication failed|Permission denied|terminal prompts disabled/iu.test(message)) {
-                return { status: 502, code: 'authFailed' }
-              }
-              if (/does not appear to be a git repository|No such remote|no remote/iu.test(message)) {
-                return { status: 409, code: 'noRemote' }
-              }
-              if (/could not read|Could not resolve|unable to access|Connection refused|timed out/iu.test(message)) {
-                return { status: 502, code: 'networkFailed' }
-              }
-              return undefined
+              // 与「推送标签」共用同一套判定（见 mapPushFailure 的说明）。
+              return mapPushFailure(error)
             },
           )
           return
         }
         sendJson(response, 400, { error: 'unknown remote action', code: 'unknown' })
+        return
+      }
+
+      // ---- 标签 --------------------------------------------------------------
+      //
+      // 标签是**只读锚点**（不像分支会移动），因此这里的操作比分支少而明确：列出、创建
+      // （轻量 / 附注）、删除（本地）、推送**单个**标签。checkout 标签沿用 `/checkout`
+      // （它会显式 `--detach`，界面据此显示游离 HEAD）。
+      if (path === `${ROUTE_PREFIX}/tag/create`) {
+        const inspected = await inspectTagName(cwd, payload?.name, { mustNotExist: true })
+        if (inspected.error !== undefined) {
+          sendJson(response, inspected.error === 'invalidTagName' ? 400 : 409, {
+            error: inspected.error,
+            code: inspected.error,
+          })
+          return
+        }
+        // 目标：HEAD 或请求给的提交（提交图里的「在此创建标签」）。
+        const revision = payload?.revision === undefined || payload.revision === null ? undefined : asStartPoint(payload.revision)
+        if (payload?.revision !== undefined && payload.revision !== null && revision === undefined) {
+          sendJson(response, 400, { error: 'invalid revision', code: 'invalidRevision' })
+          return
+        }
+        if (revision !== undefined) {
+          const resolved = await resolveCommitSha(cwd, revision)
+          if (resolved === undefined) {
+            sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+            return
+          }
+        }
+        // 附注标签的判定只有一条：有没有消息。空消息 = 轻量标签（git 的 `-a` 需要 `-m`，
+        // 没有消息的 `-a` 会去开编辑器——宿主没有终端，那会永久挂住）。
+        const message = normalizeStashMessage(payload?.message)
+        if (message === undefined) {
+          sendJson(response, 400, { error: 'invalid tag message', code: 'invalidTagMessage' })
+          return
+        }
+        await runWrite(cwd, scope, response, async () => {
+          const args = message === '' ? ['tag', inspected.name] : ['tag', '-a', '-m', message, inspected.name]
+          if (revision !== undefined) args.push(revision)
+          await git(args, cwd, { env: NON_INTERACTIVE_ENV })
+          const tags = await listTags(cwd)
+          return { tag: tags.find((entry) => entry.name === inspected.name) ?? null, created: inspected.name }
+        })
+        return
+      }
+
+      // 删除**本地**标签（破坏性动作，界面必须确认）。远端标签不在本轮范围内。
+      if (path === `${ROUTE_PREFIX}/tag/delete`) {
+        const inspected = await inspectTagName(cwd, payload?.name, { mustExist: true })
+        if (inspected.error !== undefined) {
+          sendJson(response, inspected.error === 'invalidTagName' ? 400 : 404, {
+            error: inspected.error,
+            code: inspected.error,
+          })
+          return
+        }
+        await runWrite(cwd, scope, response, async () => {
+          await git(['tag', '-d', inspected.name], cwd)
+          return { deleted: inspected.name }
+        })
+        return
+      }
+
+      // 推送**单个**标签。
+      //
+      // **绝不 `git push --tags`**：那会把仓库里所有标签（包括本地随手打的、实验性的）
+      // 一次全推给所有人，而且不可撤销——远端标签的删除通常还要额外的权限。refspec 用
+      // 完整的 `refs/tags/<name>`：分支与标签可以同名，短名会让 git 猜（"推的是哪一个"）。
+      if (path === `${ROUTE_PREFIX}/tag/push`) {
+        const inspected = await inspectTagName(cwd, payload?.name, { mustExist: true })
+        if (inspected.error !== undefined) {
+          sendJson(response, inspected.error === 'invalidTagName' ? 400 : 404, {
+            error: inspected.error,
+            code: inspected.error,
+          })
+          return
+        }
+        const explicitRemote = payload?.remote === undefined ? undefined : asRemote(payload.remote)
+        if (payload?.remote !== undefined && explicitRemote === undefined) {
+          sendJson(response, 400, { error: 'invalid remote name', code: 'invalidRemote' })
+          return
+        }
+        const remote = explicitRemote ?? (await resolvePushRemote(cwd, await currentBranchName(cwd)))
+        if (remote === undefined) {
+          sendJson(response, 409, { error: 'no remote configured', code: 'noRemote' })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            await git(['push', remote, `refs/tags/${inspected.name}`], cwd, { env: NON_INTERACTIVE_ENV, timeoutMs: GIT_NETWORK_TIMEOUT_MS })
+            return { pushedTag: inspected.name, remote }
+          },
+          (error) => mapPushFailure(error),
+        )
+        return
+      }
+
+      // ---- 还原一次提交（`git revert`）---------------------------------------
+      //
+      // 与 cherry-pick 对称：都是"把某个提交的改动应用/反向应用到当前分支"。冲突时的
+      // 续做/中止**已经**由 `/op/continue` 与 `/op/abort` 处理（git 会写 REVERT_HEAD），
+      // 因此这里只负责"开始"这一步，不重复实现后端。
+      // `--no-edit`：默认会开编辑器让人确认信息，而宿主没有终端。
+      if (path === `${ROUTE_PREFIX}/revert`) {
+        const revision = asStartPoint(payload?.revision)
+        if (revision === undefined) {
+          sendJson(response, 400, { error: 'invalid revision', code: 'invalidRevision' })
+          return
+        }
+        const sha = await resolveCommitSha(cwd, revision)
+        if (sha === undefined) {
+          sendJson(response, 404, { error: 'no such revision', code: 'noSuchRevision' })
+          return
+        }
+        await runWrite(
+          cwd,
+          scope,
+          response,
+          async () => {
+            try {
+              await git(['revert', '--no-edit', sha], cwd, { env: NON_INTERACTIVE_ENV })
+            } catch (error) {
+              // 冲突不是失败：REVERT_HEAD 已经写好，界面会进冲突面板并给出「继续 / 中止」。
+              const conflicts = await listConflictEntries(cwd)
+              if (conflicts.length > 0) return { reverted: sha, conflicted: true, conflicts }
+              throw error
+            }
+            return { reverted: sha, conflicted: false, conflicts: [] }
+          },
+          (error) => {
+            const message = String(error?.message ?? error)
+            if (/your local changes|would be overwritten/iu.test(message)) return { status: 409, code: 'localChanges' }
+            if (/nothing to commit|empty|no changes/iu.test(message)) return { status: 409, code: 'emptyRevert' }
+            return undefined
+          },
+        )
         return
       }
 
@@ -2580,6 +2842,11 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/remotes`,
     `${ROUTE_PREFIX}/branch/sync`,
     `${ROUTE_PREFIX}/checkout`,
+    `${ROUTE_PREFIX}/tags`,
+    `${ROUTE_PREFIX}/tag/create`,
+    `${ROUTE_PREFIX}/tag/delete`,
+    `${ROUTE_PREFIX}/tag/push`,
+    `${ROUTE_PREFIX}/revert`,
     `${ROUTE_PREFIX}/head-commit`,
     `${ROUTE_PREFIX}/reset`,
     `${ROUTE_PREFIX}/reset/preview`,

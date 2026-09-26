@@ -945,6 +945,26 @@ console.log('=== 9c. 每个文件都能看变更记录 ===')
   check('   面板属于被点的文件', find('data-staging-history-panel')?.props?.['data-staging-history-panel'], 'unstaged.txt')
   await click(find('data-staging-history', 'unstaged.txt'))
   check('   再点收起', find('data-staging-history-panel') === null, 'true')
+
+  // ---- 历史行的四项信息（日期 / 作者 / 提交信息 / SHA）+ 点开该提交里这个文件的改动 ----
+  await click(find('data-staging-history', 'unstaged.txt'))
+  const rows = findAll('data-staging-history-row')
+  check('   历史行数与宿主一致', rows.length, 2)
+  {
+    const text = rows.map((node) => textOf(node)).join(' | ')
+    check('   行里有短 SHA', text.includes('aaaaaaa'), 'true')
+    check('   行里有提交信息', text.includes('second touch'), 'true')
+    check('   行里有作者（不只是 hover 提示）', text.includes('tester'), 'true')
+    check('   行里有日期', text.includes('2026-01-02'), 'true')
+  }
+  requests.length = 0
+  await click(find('data-staging-history-row', 'a'.repeat(40)))
+  const commitFile = requests.filter((r) => r.url.includes('/review/commit-file')).pop()
+  checkTrue('   点历史行取的是"这个提交里对这个文件的改动"', commitFile !== undefined)
+  check('   带的是那个提交', commitFile?.body?.revision, 'a'.repeat(40))
+  check('   以及文件路径', commitFile?.body?.path, 'unstaged.txt')
+  checkTrue('   差异用共享的查看器渲染（并排/统一都在）', find('data-review-sbs-row') !== null || find('data-review-diff-row') !== null)
+  checkTrue('   并保留"这是历史某一步"的上下文（关闭按钮在）', find('data-review-diff-close') !== null)
 }
 
 console.log('')
