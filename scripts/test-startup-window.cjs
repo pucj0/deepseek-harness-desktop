@@ -52,14 +52,19 @@ async function run() {
   await app.whenReady()
   mainWindow = createMainWindow({ userDataDir: scratch, splashTitle: 'Startup test', splashHint: 'Starting' })
   const { window } = mainWindow
+  // The window's own document is the custom title bar (+ splash); the Harness UI lives in a
+  // child view below it. Splash progress belongs to the shell page, app assertions to the view.
+  const shell = window.webContents
+  const contents = mainWindow.appContents
   // Keep automated checks from stealing focus; the renderer still paints normally.
   window.show = () => {}
-  const contents = window.webContents
+  const shellErrors = []
   const errors = []
+  shell.on('console-message', (_event, level, message) => { if (level >= 3) shellErrors.push(message) })
   contents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
   let loads = 0
-  contents.on('did-finish-load', () => { loads++ })
-  const text = () => contents.executeJavaScript("document.getElementById('startup-hint')?.textContent")
+  shell.on('did-finish-load', () => { loads++ })
+  const text = () => shell.executeJavaScript("document.getElementById('startup-hint')?.textContent")
   mainWindow.setSplashHint('Progress before first load')
   await expect('progress arriving before load is retained', async () => await text() === 'Progress before first load')
   for (let percent = 0; percent <= 100; percent++) mainWindow.setSplashHint(`Unpacking ${percent}%`)
@@ -89,6 +94,7 @@ async function run() {
     'duplicate single-slot registration breaks the workspace directory picker')
   assert.equal(new URL(contents.getURL()).origin, ready.url)
   assert.equal(window.getTitle(), 'DeepSeek Harness — test-branch')
+  assert.deepEqual(shellErrors, [], 'the custom title bar page must not log renderer errors')
   console.log('STARTUP_ERRORS ' + JSON.stringify(errors.sort()))
   console.log('PASS authenticated UI and late-progress navigation guard')
 }

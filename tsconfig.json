@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "node",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM"],
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,

@@ -73,6 +73,10 @@ export interface ShellStrings {
   /** 解包内置运行时时的提示，`{percent}` 会被替换成百分比。 */
   splashUnpacking: string
 
+  // 自定义标题栏（窗口控制按钮是原生的，因此这里只有导航按钮与菜单的无障碍文案）
+  titlebarBack: string
+  titlebarForward: string
+
   // 工作区 / 最近项目
   itemOpenFolder: string
   itemOpenRecent: string
@@ -210,6 +214,9 @@ const en: ShellStrings = {
   splashHint: 'Starting the agent runtime…',
   splashUnpacking: 'Unpacking the bundled runtime… {percent}%',
 
+  titlebarBack: 'Back',
+  titlebarForward: 'Forward',
+
   itemOpenFolder: 'Open Folder…',
   itemOpenRecent: 'Open Recent',
   itemNoRecent: 'No recent folders',
@@ -220,7 +227,7 @@ const en: ShellStrings = {
   switchWorkspaceTitle: 'Switch project',
   switchWorkspaceMessage: 'Open this folder as the workspace?',
   switchWorkspaceDetail:
-    'The agent reads and writes inside the workspace. Switching restarts the agent runtime; the current session stays on disk and can be resumed.',
+    'The agent reads and writes inside the workspace. Switching restarts the app so the new project goes through the full startup path; the current session stays on disk and can be resumed.',
   switchWorkspaceConfirm: 'Open Folder',
   switchWorkspaceCancel: 'Cancel',
   openFolderFailedTitle: 'Could not open the folder',
@@ -348,6 +355,9 @@ const zh: ShellStrings = {
   splashHint: '正在启动智能体运行时，首次启动可能需要十几秒…',
   splashUnpacking: '正在解包内置运行时… {percent}%',
 
+  titlebarBack: '返回',
+  titlebarForward: '前进',
+
   itemOpenFolder: '打开文件夹…',
   itemOpenRecent: '最近打开',
   itemNoRecent: '暂无最近打开的项目',
@@ -358,7 +368,7 @@ const zh: ShellStrings = {
   switchWorkspaceTitle: '切换项目',
   switchWorkspaceMessage: '把这个文件夹作为工作区打开？',
   switchWorkspaceDetail:
-    '智能体只在这个工作区内读写。切换会重启智能体运行时；当前会话已存盘，之后仍可恢复。',
+    '智能体只在这个工作区内读写。切换会重启应用，让新项目走完整的启动流程；当前会话已存盘，之后仍可恢复。',
   switchWorkspaceConfirm: '打开文件夹',
   switchWorkspaceCancel: '取消',
   openFolderFailedTitle: '无法打开该文件夹',

@@ -8,28 +8,31 @@
  * The heavy lifting (sandboxing, tools, sessions, jobs, subagents) all happens in
  * the child; this process is a shell and never runs agent code.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron'
 
 import { CredentialStore } from './credentials'
 import { DshServer } from './dsh-server'
+import type { ServerReady } from './dsh-server'
 import { formatGitBadge, readGitInfo } from './git'
 import { format, initShellStrings, t } from './i18n'
 import { healModuleFallback } from './module-heal'
+import { menuBarEntries, openMenuAt } from './menu'
 import type { PanelRow } from './panel'
 import { resolveRuntime } from './paths'
 import type { RuntimeLocation } from './paths'
 import { syncPluginsAtStartup } from './plugin-sync'
 import { ensureRuntimeUnpacked } from './runtime-unpack'
 import { showProjectInfo } from './project-info'
-import { readSettings, switchWorkspace } from './settings'
+import { readSettings } from './settings'
 import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
 import { RuntimeUpdater, locateNpmCli } from './updater'
 import { createMainWindow } from './window'
-import { fallbackWorkspace, normalizeWorkspaceArgument, recentLabels, removeSplashFile } from './workspace'
+import { pickFolderToOpen, resolveWorkspace, restartIntoWorkspace } from './workspace-switch'
+import { recentLabels, removeSplashFile } from './workspace'
 
 const SHELL_VERSION: string = (() => {
   try {
@@ -76,56 +79,6 @@ if (!app.requestSingleInstanceLock()) {
   void main()
 }
 
-/**
- * 决定智能体把哪个目录当作工作区。
- *
- * 优先级：**切换意图 > 命令行参数 > 上次记住的选择 > 用户主目录**。
- *
- * 为什么"切换意图"要排在命令行参数之前：`app.relaunch()` 会沿用原来的命令行，
- * 而菜单里的「打开文件夹」正是靠重启来生效的。于是重启后 argv 里带着**旧**工作区，
- * 把用户刚选的新路径盖掉——表现为"重启了但还是老目录"（实测踩到过）。
- * 因此切换时通过环境变量显式传出目标，它在本次启动里优先级最高。
- *
- * @param argv - 本次启动的 `process.argv`。
- * @param userDataDir - Electron 的每用户数据目录。
- * @returns 工作区绝对路径。
- */
-function resolveWorkspace(argv: string[], userDataDir: string): string {
-  // 1) 菜单切换工作区时留下的"待切换"标记，只对紧接着的那一次启动有效。
-  //
-  // 用文件而不是环境变量：`app.relaunch()` 是否继承当前环境并不由我们保证，而文件
-  // 一定跨得过重启。读到即删，避免它影响后续启动。
-  const pendingPath = join(userDataDir, 'pending-workspace')
-  if (existsSync(pendingPath)) {
-    try {
-      const requested = readFileSync(pendingPath, 'utf8').trim()
-      rmSync(pendingPath, { force: true })
-      const normalized = requested === '' ? undefined : normalizeWorkspaceArgument(requested)
-      if (normalized !== undefined) {
-        switchWorkspace(userDataDir, normalized)
-        return normalized
-      }
-    } catch (error) {
-      // 标记文件坏掉不该阻止启动——回落到常规解析。
-      console.warn(`[shell] 无法读取待切换工作区: ${String(error)}`)
-    }
-  }
-
-  const fromArgv = argv.slice(1).find((token) => !token.startsWith('--') && !token.startsWith('-'))
-  if (fromArgv !== undefined) {
-    const normalized = normalizeWorkspaceArgument(fromArgv)
-    if (normalized !== undefined) {
-      // 走 switchWorkspace 而不是只写 workspace：命令行打开一个目录同样应当
-      // 进入"最近打开"列表。
-      switchWorkspace(userDataDir, normalized)
-      return normalized
-    }
-  }
-  const remembered = readSettings(userDataDir).workspace
-  if (remembered !== undefined && existsSync(remembered)) return remembered
-  return fallbackWorkspace()
-}
-
 /** Launch, wire, and supervise the whole application. */
 async function main(): Promise<void> {
   // Deliberately do NOT call app.setName(): it changes the userData directory, so
@@ -149,8 +102,8 @@ async function main(): Promise<void> {
   const strings = initShellStrings()
 
   const userDataDir = process.env.DSH_DESKTOP_HOME ?? app.getPath('userData')
-  // `let` 而不是 `const`：切换工作区时会在原地更新它（不再重启应用）。
-  let workspace = resolveWorkspace(process.argv, userDataDir)
+  // 本进程生命周期内不变：切换工作区靠重启应用，而不是就地替换（见 workspace-switch.ts）。
+  const workspace = resolveWorkspace(process.argv, userDataDir)
   // A dedicated harness home keeps this app's sessions and credentials entirely
   // separate from a command-line `dsh` install, so the two can coexist.
   const dshHome = join(userDataDir, 'home')
@@ -169,14 +122,21 @@ async function main(): Promise<void> {
     ...(iconPath !== undefined ? { iconPath } : {}),
     splashTitle: strings.splashTitle,
     splashHint: strings.splashHint,
+    backLabel: strings.titlebarBack,
+    forwardLabel: strings.titlebarForward,
+    // 标题栏里的菜单按钮与"点哪个弹哪个"都来自**同一份原生菜单**（下面构建的那个）。
+    // 菜单因此只有一份定义：accelerator 仍由它注册，标题栏只是换个地方画标题。
+    menu: {
+      entries: () => menuBarEntries(Menu.getApplicationMenu() ?? Menu.buildFromTemplate([])),
+      open: (index, point, onClosed) => {
+        const applicationMenu = Menu.getApplicationMenu()
+        if (applicationMenu === null) return false
+        return openMenuAt(applicationMenu, index, window, point, onClosed)
+      },
+    },
   })
   const window = mainWindow.window
-  // 单独取出导航方法：`window` 是 BrowserWindow，本身没有 navigate。
-  const navigate = mainWindow.navigate
-  const initialWorkspace = workspace
-  void readGitInfo(initialWorkspace).then((info) => {
-    if (workspace === initialWorkspace) mainWindow.setGitBadge(formatGitBadge(info, '*'))
-  })
+  void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
 
   // 解包内置运行时（已解过则瞬间返回）。
   let unpackedDir: string | undefined
@@ -253,8 +213,9 @@ async function main(): Promise<void> {
     ...(readSettings(userDataDir).channel !== undefined ? { channel: readSettings(userDataDir).channel } : {}),
   })
 
-  // `let` 而不是 `const`：切换工作区时会换掉这个实例。
-  let server = new DshServer({
+  // 服务端实例在本次进程里只有一个：切换工作区走的是重启应用（见 workspace-switch.ts），
+  // 不再就地替换它。
+  const server = new DshServer({
     runtime,
     dshHome,
     workspace,
@@ -282,52 +243,38 @@ async function main(): Promise<void> {
 
   // Server output is valuable when diagnosing a failed boot, so keep it visible
   // during development and in the log file rather than swallowing it.
-  // 抽成具名函数：切换工作区时会新建一个服务端实例，需要把同一个监听器挂上去。
-  const forwardServerLog = ({ stream, line }: { stream: 'stdout' | 'stderr'; line: string }): void => {
+  server.on('log', ({ stream, line }: { stream: 'stdout' | 'stderr'; line: string }) => {
     if (!app.isPackaged || stream === 'stderr') process[stream].write(`${line}\n`)
-  }
-  server.on('log', forwardServerLog)
+  })
 
   // 窗口已在前面建好（为了在解包运行时期间就能显示进度），这里不再重建。
   // 下面开始等 dsh 服务端就绪——它要 ~11 秒启动插件树，窗口此时正显示加载页。
 
   /**
-   * 就地切换到新的工作区——换掉服务端并重新导航，**不重启应用**。
+   * 切换工作区：记录选择、留下"待切换"标记，然后重启应用。
    *
-   * 定义在这里而不是 `createWorkspaceActions` 里，是因为它需要访问 `main()` 作用域中的
-   * 服务端、运行时、凭据与窗口，而这些在菜单动作那个模块级函数里都拿不到（只有解构出的
-   * 只读副本）。早先因此只能用"重启应用"这个笨办法。
+   * 定义在 `main()` 里而不是 `createWorkspaceActions` 里，因为重启动作要拿到服务端
+   * （先停子进程再重启，避免两个服务端争用同一个 harness home）与 `session` 状态。
+   * 真正的协议本身在 `workspace-switch.ts`，那里不依赖 Electron，因此可被回归测试直接跑。
+   *
+   * 为什么重启而不是就地换服务端：Harness 的项目/工作区状态是启动时登记的持久记录，
+   * 不只取决于服务端 cwd。完整理由见 `workspace-switch.ts` 的文件头。
    * @param dir - 目标工作区绝对路径。
    */
-  const onSwitchWorkspace = async (dir: string): Promise<void> => {
-    workspace = dir
-    // 插件按请求解析工作区时会读这个变量（分支徽章、审查面板都依赖它）。
-    process.env.DSH_DESKTOP_WORKSPACE = dir
-
-    // 先停旧服务端，避免两个进程争用同一个 harness home。
-    await server.stop(2000)
-
-    server = new DshServer({
-      runtime: activeRuntime ?? runtime,
-      dshHome,
-      workspace: dir,
-      env: credentials.read(),
+  const onSwitchWorkspace = (dir: string): void => {
+    void restartIntoWorkspace({
+      userDataDir,
+      current: workspace,
+      target: dir,
+      // 关窗即隐藏到托盘；切换要真的退出进程，先把它关掉。`beginQuit` 只在真的会重启时
+      // 被调用，因此"最近打开"里点到当前项目不会把这项行为永久改掉。
+      beginQuit: () => {
+        if (session !== undefined) session.quitting = true
+      },
+      stopServer: () => server.stop(2000),
+      relaunch: () => app.relaunch(),
+      exit: (code) => app.exit(code),
     })
-    server.on('log', forwardServerLog)
-
-    try {
-      // 关键的顺序：先把"上一个项目"的客户端状态清掉，再导航。
-      //
-      // dsh 把当前选中的会话与工作区视图存在 localStorage 里。切换项目后它们指向旧项目
-      // 的会话，新服务端不认识，界面就卡在「自动重连中」——服务端其实已经就绪（实测）。
-      await mainWindow.clearProjectState()
-      await navigate(await server.start())
-    } catch (error) {
-      dialog.showErrorBox(
-        strings.startupFailedTitle,
-        `切换工作区失败：${error instanceof Error ? error.message : String(error)}\n\n工作区：${dir}`,
-      )
-    }
   }
 
   // 纯菜单诊断：菜单不依赖服务端，而启动服务端要 ~11 秒。以
@@ -339,16 +286,7 @@ async function main(): Promise<void> {
       updater,
       runtimeVersion,
       () => {},
-      createWorkspaceActions({
-        window,
-        currentWorkspace: () => workspace,
-        userDataDir,
-        dshHome,
-        runtime,
-        runtimeVersion,
-        strings,
-        onSwitchWorkspace,
-      }),
+      createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace }),
       () => {},
     )
     app.exit(0)
@@ -411,7 +349,7 @@ async function main(): Promise<void> {
       window.focus()
     },
     restartServer: () => {
-      void restart(server, window)
+      void restart(server, mainWindow.navigate)
     },
     checkForUpdates: openUpdates,
     projectInfo: () => {
@@ -436,16 +374,7 @@ async function main(): Promise<void> {
     () => {
       showProjectInfoFor(window, workspace, dshHome, userDataDir, runtime, runtimeVersion, strings)
     },
-    createWorkspaceActions({
-        window,
-        currentWorkspace: () => workspace,
-        userDataDir,
-        dshHome,
-        runtime,
-        runtimeVersion,
-        strings,
-        onSwitchWorkspace,
-      }),
+    createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace }),
     openUpdates,
   )
   session = { server, window, ...(tray !== undefined ? { tray } : {}), updater, quitting: false }
@@ -475,103 +404,76 @@ async function main(): Promise<void> {
 /**
  * 构造文件菜单里工作区相关动作的实现。
  *
- * 关键取舍：切换工作区**重启整个应用**，而不是原地换掉子进程的 `--workspace`。
- * 原因：
- *   * 工作区是在服务端启动时传入的，中途更换意味着要重建整棵插件树（约 11 秒），
- *     而重启走的是同一条已验证的启动路径，出问题的面更小；
- *   * 只有一条启动路径，不存在"半个进程还在用旧工作区"的中间态；
- *   * 会话已持久化，重启后可继续。
+ * 两条切换入口（「打开文件夹」与「最近打开」）都只用下面这**一个**注入的
+ * `onSwitchWorkspace`，不存在"一个走方案 A、一个走方案 B"。1.2.0–1.5.8 期间它是
+ * "就地换服务端"，那样换不掉 Harness 的工作区生命周期；现在的实现是"写意图 + 重启应用"，
+ * 理由见 `workspace-switch.ts` 的文件头。
  *
- * @param deps - 需要的窗口、当前工作区、数据目录、服务端与文案。
+ * @param deps - 需要的窗口、当前工作区、数据目录、切换回调与文案。
  * @returns 菜单动作集合。
  */
 function createWorkspaceActions(deps: {
   window: BrowserWindow
-  /**
-   * 读取**当前**工作区。
-   *
-   * 用取值函数而不是传入字符串：切换工作区是就地发生的，闭包捕获的字符串会一直是切换前
-   * 的值——那会让"最近打开"里的当前项判断失误、也会把旧路径复制到剪贴板。
-   */
-  currentWorkspace: () => string
+  /** 本次进程的工作区。切换靠重启，因此它在进程生命周期内不变。 */
+  workspace: string
   userDataDir: string
-  /** 项目信息面板需要的数据目录、harness 主目录与运行时（它们也在 main() 作用域里）。 */
-  dshHome: string
-  runtime: RuntimeLocation
-  runtimeVersion: string
   strings: ReturnType<typeof t>
   /**
-   * 就地切换到新工作区。
+   * 切换到新工作区：记录选择 + 重启应用。
    *
-   * 由 `main()` 提供：切换需要换掉服务端实例并重新导航，而服务端、运行时、凭据、
-   * 窗口都在 `main()` 的作用域里。此前这段逻辑写在这里，结果因为它只能拿到解构出的
-   * 只读副本（窗口、工作区、服务端都是 const），既改不了服务端、也拿不到运行时，
-   * 于是只能用"重启应用"这个笨办法。改成注入回调后，切换不再需要重启。
+   * 由 `main()` 注入，因为重启前要先停掉服务端子进程、并让"关窗即隐藏到托盘"
+   * 让开——那些都在 `main()` 的作用域里。
    */
-  onSwitchWorkspace: (dir: string) => Promise<void>
+  onSwitchWorkspace: (dir: string) => void
 }): WorkspaceActions {
-  const { window, userDataDir, currentWorkspace, dshHome, runtime, runtimeVersion, strings, onSwitchWorkspace } = deps
+  const { window, workspace, userDataDir, strings, onSwitchWorkspace } = deps
   const s = strings
 
-  /**
-   * 切换到新的工作区。
-   *
-   * 真正的落地（换服务端、重新导航）由注入的 `onSwitchWorkspace` 完成——它运行在
-   * `main()` 的作用域里，能拿到服务端、运行时与窗口。这里只负责记录选择并转发。
-   *
-   * 为什么不再重启应用：换工作区原本走 `app.relaunch()`，用户看到的是"选了文件夹之后
-   * 应用自己重启了"——窗口消失、白屏十几秒、会话列表重新加载。而窗口与渲染进程根本
-   * 不需要重建，只有服务端需要换。
-   * @param dir - 目标工作区绝对路径。
-   */
-  const applyWorkspace = (dir: string): void => {
-    switchWorkspace(userDataDir, dir)
-    void onSwitchWorkspace(dir)
-  }
-
-  const recent = recentLabels(readSettings(userDataDir).recent ?? [])
+  const recent = readSettings(userDataDir).recent ?? []
+  const recentLabelsForMenu = recentLabels(recent)
 
   return {
-    recent: recent.map((label, index) => ({
-      label,
-      path: (readSettings(userDataDir).recent ?? [])[index] ?? '',
-    })),
+    recent: recentLabelsForMenu.map((label, index) => ({ label, path: recent[index] ?? '' })),
     openFolder: (): void => {
-      const picked = dialog.showOpenDialogSync(window, {
-        title: s.dialogOpenFolderTitle,
-        buttonLabel: s.dialogOpenFolderButton,
-        properties: ['openDirectory', 'createDirectory'],
+      // 关闭选择器、确认框里取消、以及"选中的就是当前目录"都在这里被挡掉：三种情况
+      // 都不该改设置、不该写标记、更不该重启。判定本身在 workspace-switch.ts，
+      // 因此可以被回归测试直接跑（那里的对话框是注入的）。
+      const dir = pickFolderToOpen({
+        currentWorkspace: workspace,
+        showOpenDialog: () =>
+          dialog.showOpenDialogSync(window, {
+            title: s.dialogOpenFolderTitle,
+            buttonLabel: s.dialogOpenFolderButton,
+            properties: ['openDirectory', 'createDirectory'],
+          })?.[0],
+        confirm: (candidate) =>
+          dialog.showMessageBoxSync(window, {
+            type: 'question',
+            title: s.switchWorkspaceTitle,
+            message: s.switchWorkspaceMessage,
+            detail: `${candidate}\n\n${s.switchWorkspaceDetail}`,
+            buttons: [s.switchWorkspaceConfirm, s.switchWorkspaceCancel],
+            defaultId: 0,
+            cancelId: 1,
+          }) === 0,
       })
-      const dir = picked?.[0]
       if (dir === undefined) return
-
-      // 此前这里会提示"应用将重启"，因为切换确实走 app.relaunch()。现在切换是就地的
-      // （只换服务端、窗口不动），因此确认框只需要说明要切换工作区。
-      const confirmation = dialog.showMessageBoxSync(window, {
-        type: 'question',
-        title: s.switchWorkspaceTitle,
-        message: s.switchWorkspaceMessage,
-        detail: `${dir}\n\n${s.switchWorkspaceDetail}`,
-        buttons: [s.switchWorkspaceConfirm, s.switchWorkspaceCancel],
-        defaultId: 0,
-        cancelId: 1,
-      })
-      if (confirmation !== 0) return
-      applyWorkspace(dir)
+      onSwitchWorkspace(dir)
     },
     openRecent: (dir: string): void => {
-      if (dir === '' || dir === currentWorkspace()) return
-      applyWorkspace(dir)
+      // 空条目与"已经是当前工作区"都由 restartIntoWorkspace 挡掉（同一个判定，
+      // 因此这里不需要再写一遍）。
+      onSwitchWorkspace(dir)
     },
     revealWorkspace: (): void => {
-      void shell.openPath(currentWorkspace())
+      void shell.openPath(workspace)
     },
     copyWorkspacePath: (): void => {
-      clipboard.writeText(currentWorkspace())
+      clipboard.writeText(workspace)
       dialog.showMessageBox(window, {
         type: 'info',
         message: s.copiedPathTitle,
-        detail: `${currentWorkspace()}\n\n${s.copiedPathMessage}`,
+        detail: `${workspace}\n\n${s.copiedPathMessage}`,
         buttons: [s.buttonOk],
       })
     },
@@ -580,14 +482,18 @@ function createWorkspaceActions(deps: {
 
 /**
  * Restart the agent runtime child process in place, keeping the window.
+ *
+ * 重新加载必须走窗口的 `navigate`（它把带 token 的 URL 装进**Harness 子视图**）：
+ * 直接 `window.loadURL(...)` 会把官方界面装进窗口自身的文档，也就是**顶掉自绘标题栏**、
+ * 并让官方界面铺满整个窗口（越过标题栏区域）。这是托盘「重启服务端」唯一的坑。
+ *
  * @param server - the running child.
- * @param window - the window to reload afterwards.
+ * @param navigate - the window's navigate method (loads into the Harness view).
  */
-async function restart(server: DshServer, window: BrowserWindow): Promise<void> {
+async function restart(server: DshServer, navigate: (ready: ServerReady) => Promise<void>): Promise<void> {
   await server.stop()
   try {
-    const ready = await server.start()
-    await window.loadURL(ready.authenticatedUrl)
+    await navigate(await server.start())
   } catch (error) {
     dialog.showErrorBox(t().restartFailedTitle, error instanceof Error ? error.message : String(error))
   }
