@@ -86,6 +86,24 @@ if (!response.ok) {
   if (!assets.some((name) => name.endsWith('.dmg'))) problems.push('缺少 macOS 安装包')
   if (!assets.some((name) => name.endsWith('.AppImage'))) problems.push('缺少 Linux 安装包')
 
+  // 自动更新 metadata 里的版本号也必须对得上。
+  //
+  // 这一条防的是一整类"提示有新版本、却永远装不上"的事故：安装包挂对了、标签也打对了，但
+  // latest*.yml 里的 `version` 还是上一版（或被人手工填错），electron-updater 就会一直提示
+  // 同一个版本、或者拒绝安装——页面上完全看不出来。附件的**名字**对不代表里面的**版本**对。
+  for (const name of ['latest.yml', 'latest-mac.yml', 'latest-linux.yml']) {
+    const asset = (release.assets ?? []).find((entry) => entry.name === name)
+    if (asset === undefined) continue
+    try {
+      const text = await (await fetch(asset.browser_download_url)).text()
+      const found = /(?:^|\n)version:\s*(\S+)/u.exec(text)?.[1] ?? ''
+      console.log(`metadata   : ${name} → version: ${found || '(缺)'}`)
+      if (found !== version) problems.push(`${name} 里的版本是 ${found || '(缺)'}，期望 ${version}`)
+    } catch (error) {
+      problems.push(`读取 ${name} 失败：${String(error?.message ?? error)}`)
+    }
+  }
+
   console.log(problems.length === 0 ? 'Release 校验通过' : `Release 校验失败：${problems.join('；')}`)
   process.exitCode = problems.length === 0 ? 0 : 1
 }
