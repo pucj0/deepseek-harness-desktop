@@ -33,10 +33,18 @@ const check = (label, actual, expected) => {
 const has = (label, actual) => check(label, actual === true, true)
 
 // ---- 连接 CDP --------------------------------------------------------------------
+//
+// **必须挑那个 http(s) 页面**：外壳自己的 `shell.html`（标题栏那一页）标题也是
+// "DeepSeek Harness"，而 `/json/list` 的顺序不保证。选错的表现是第 0 节报"加载的是旧
+// bundle"——其实只是连到了外壳页。真页面是 `<本地服务器>/`，因此先按协议过滤。
+const isHarnessPage = (target) =>
+  target.type === 'page' && String(target.title).includes(KEYWORD) && /^https?:/u.test(String(target.url))
 let page
 try {
   const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-  page = list.find((t) => t.type === 'page' && String(t.title).includes(KEYWORD))
+  page =
+    list.find(isHarnessPage) ??
+    list.find((t) => t.type === 'page' && String(t.title).includes(KEYWORD))
 } catch (error) {
   console.error(`连不上 CDP（端口 ${PORT}）：${String(error.message ?? error)}`)
   page = undefined
@@ -68,6 +76,12 @@ socket.addEventListener('message', (event) => {
   const entry = pending.get(message.id)
   if (entry === undefined) return
   pending.delete(message.id)
+  // CDP 自己的错误（连接断了、上下文没了）走 `message.error`：**必须**把它带出来，
+  // 否则调用方只会看到"求值超时/结果不是字符串"，完全不知道该查什么。
+  if (message.error !== undefined) {
+    entry.reject(new Error(`CDP ${message.error.code ?? ''}: ${message.error.message ?? 'unknown'}`))
+    return
+  }
   if (message.result?.exceptionDetails) {
     entry.reject(new Error(message.result.exceptionDetails.exception?.description ?? message.result.exceptionDetails.text))
     return
@@ -81,6 +95,13 @@ await new Promise((resolve, reject) => {
 
 /** 在页面里求值。 */
 function evaluate(expression, timeoutMs = 20000) {
+  // 表达式必须是字符串。这里看似多余的守卫挡的是一个**真踩过**的坑：表达式写成模板字面量时，
+  // 里面只要出现一个反引号（例如注释里的 `order: 3`），模板就会提前结束、把后半段当代码求值，
+  // 最终 `expression` 变成一个字符串相除的 NaN。CDP 只会回
+  // "Invalid parameters"（-32602），完全指不到现场；这一句直接把原因说出来。
+  if (typeof expression !== 'string') {
+    throw new Error(`求值表达式不是字符串（${typeof expression}）：模板字面量里是不是有反引号？`)
+  }
   const id = nextId++
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
@@ -107,6 +128,41 @@ async function waitFor(expression, timeoutMs = 10000) {
     await sleep(200)
   }
 }
+
+/**
+ * 求值并解析 JSON，结果不是字符串时**重试**再报错。
+ *
+ * 为什么不能直接 `JSON.parse(await evaluate(...))`：切项目/重载会让页面的执行上下文被销毁，
+ * 那一瞬间 CDP 会回一个"没有 value"的结果（`value === undefined`），于是报出
+ * `"undefined" is not valid JSON`——看起来像脚本坏了，其实只是页面正在导航。重试之后
+ * 仍然拿不到字符串就是真的有问题，此时给一条能看懂的报错。
+ * @param expression - 页面里求值的表达式（应当返回 JSON 字符串）。
+ * @param label - 报错时点名用。
+ * @returns 解析后的对象。
+ */
+async function evaluateJson(expression, label) {
+  let lastError
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let raw
+    try {
+      raw = await evaluate(expression)
+    } catch (error) {
+      lastError = error
+      await sleep(400)
+      continue
+    }
+    if (typeof raw === 'string' && raw !== '') return JSON.parse(raw)
+    lastError = new Error(`求值结果不是 JSON 字符串（${typeof raw}）`)
+    await sleep(400)
+  }
+  throw new Error(`${label}: ${lastError === undefined ? '未知错误' : String(lastError.message ?? lastError)}`)
+}
+
+/** 头栏那个改动计数（抽屉标题右侧的胶囊）。 */
+const HEADER_COUNT = `(() => {
+  const node = document.querySelector('[data-review-header] [data-review-count]');
+  return node ? node.textContent.trim() : '';
+})()`
 
 // ---- 页面侧的状态读取 ------------------------------------------------------------
 //
@@ -152,6 +208,30 @@ console.log('=== 0. 前置：加载的必须是**修好之后**的 bundle ===')
     process.exit(1)
   }
   console.log(`  诊断: ${String(diag).slice(0, 200)}`)
+}
+
+// ---- A0. 「提交图」不再有独立入口（只留在抽屉的 Log 里）-------------------------
+//
+// 需求 A：这个入口与抽屉的 Log 画的是同一个 `CommitGraphView`，用户在主界面左侧看到的是
+// "多了一个重复入口"。它是两处槽位注册（`sidebar.panellist` 的图标 + `main` 的内容），
+// 现在两处都删了。真实 DOM 里要能证明这一点：旧图标带着 `data-graph-icon` 标记，
+// 且侧栏里不该再有任何文案是「提交图 / Commit graph」的可点项。
+console.log('')
+console.log('=== A0. 独立「提交图」入口已删除（不依赖 CSS 类名）===')
+{
+  const sidebar = await evaluateJson(
+    `(() => {
+      const icons = document.querySelectorAll('[data-graph-icon]').length;
+      const labels = [...document.querySelectorAll('button, [role=button], [role=tab], [role=treeitem], a, li')]
+        .filter((el) => el.closest('[data-desktop-review-surface]') === null)
+        .map((el) => (el.innerText || '').trim())
+        .filter((text) => /^(提交图|Commit graph\\s*图?)$/i.test(text));
+      return JSON.stringify({ icons, labels });
+    })()`,
+    '侧栏入口',
+  )
+  check('A0) 侧栏里没有独立的「提交图」图标', sidebar.icons, 0)
+  check('   侧栏里没有任何「提交图」可点项', sidebar.labels.length, 0)
 }
 
 // ---- 找到两个"项目"（会话）-------------------------------------------------------
@@ -304,9 +384,13 @@ console.log('=== D. 快速 A→B→A：最终数据必须都属于 A ===')
   has('   抽屉仍在', state.panel)
   has('   诊断里的 session 是 A', state.session !== null && String(state.session).length > 0)
   // 入口数字与抽屉里的行数必须一致（同一份快照）。
-  const header = state.counts[state.counts.length - 1]
-  if (state.panel && header !== undefined && String(header).trim() !== '') {
-    check('   头栏计数等于抽屉行数', Number(String(header).trim()), state.rows)
+  //
+  // 这里**点名头栏**那个胶囊，而不是"最后一个 `[data-review-count]`"：Changes 里每个分区
+  // （已暂存/未暂存/未跟踪）也带同一个标记，DOM 顺序上它们排在这个计数之后，取最后一个
+  // 只会取到"未跟踪 183 个"这种分区计数——那是另一件事，两边本来就不该相等。
+  const header = String(await evaluate(HEADER_COUNT)).trim()
+  if (state.panel && header !== '') {
+    check('   头栏计数等于抽屉行数', Number(header), state.rows)
   }
   check('   这一段没有 React error', reactErrors().length, 0)
 }
@@ -320,6 +404,54 @@ console.log('=== E. 点分支：左栏完整、不白屏、滚动位置保持 ==
 {
   await click('[data-review-tab="log"]')
   has('E) 提交图已渲染', await waitFor(`document.querySelector('[data-graph-tree]') !== null`, 10000))
+  // 左栏是**权威 refs 清单**（gitbar 的 `/branches` + `/tags`，宿主跑 `for-each-ref`），
+  // 不是"第一页提交上的 `%D` 装饰"。真实页面里可以从 Resource Timing 看到那两条请求：
+  // 少了它们，左栏的分支清单就只能来自 decor——那正是"远端分支被当成唯一真相"的老问题。
+  const inventoryCalls = await evaluateJson(
+    `(() => {
+      const names = performance.getEntriesByType('resource').map((e) => e.name);
+      return JSON.stringify({
+        branches: names.filter((n) => /\\/dsh-desktop\\/gitbar\\/branches/.test(n)).length,
+        tags: names.filter((n) => /\\/dsh-desktop\\/gitbar\\/tags/.test(n)).length,
+      });
+    })()`,
+    'gitbar 清单请求',
+  )
+  has('   清单取自 gitbar /branches（权威 for-each-ref）', inventoryCalls.branches >= 1)
+  has('   清单取自 gitbar /tags', inventoryCalls.tags >= 1)
+  // 结构契约：三段（本地/远程/标签）、没有单独的 HEAD 分组、当前分支留在本地并带 ✓。
+  const treeShape = await evaluateJson(
+    `(() => {
+      const sections = [...document.querySelectorAll('[data-graph-tree-section]')].map((n) => n.getAttribute('data-graph-tree-section'));
+      const rows = [...document.querySelectorAll('[data-graph-tree-row]')];
+      const current = rows.filter((n) => n.getAttribute('data-graph-tree-current') === 'true');
+      const inLocal = (el) => {
+        const section = el.closest('[data-graph-tree-section]');
+        return section ? section.getAttribute('data-graph-tree-section') : '';
+      };
+      return JSON.stringify({
+        sections,
+        currentCount: current.length,
+        currentName: current[0] ? current[0].getAttribute('data-graph-tree-row') : '',
+        currentText: current[0] ? (current[0].innerText || '').trim() : '',
+        currentSection: current[0] ? inLocal(current[0]) : '',
+        // 带斜杠的本地分支必须落在 local 段（分类只看 namespace，不看名字里有没有斜杠）。
+        localSlash: rows.filter((n) => inLocal(n) === 'local' && String(n.getAttribute('data-graph-tree-row')).includes('/')).map((n) => n.getAttribute('data-graph-tree-row')),
+        // 反过来：remote 段里的每一行都必须是真·远端跟踪引用。
+        remoteSlash: rows.filter((n) => inLocal(n) === 'remote').map((n) => n.getAttribute('data-graph-tree-row')),
+      });
+    })()`,
+    '左栏结构',
+  )
+  check('   左栏三段就是 本地/远程/标签', treeShape.sections.join(','), 'local,remote,tags')
+  check('   没有 HEAD 分组', treeShape.sections.includes('head'), false)
+  check('   恰好一个当前分支被标 current', treeShape.currentCount, 1)
+  check('   当前分支在「本地」段里', treeShape.currentSection, 'local')
+  has('   当前分支行带 ✓ 前缀', treeShape.currentText.startsWith('\u2713'))
+  console.log(`   当前分支: ${treeShape.currentText}（本地段）`)
+  if (treeShape.localSlash.length > 0) {
+    has('   带 `/` 的本地分支没有跑到远程段', treeShape.remoteSlash.some((n) => treeShape.localSlash.includes(n)) === false)
+  }
   const readTree = async () =>
     JSON.parse(
       await evaluate(`(() => {
@@ -366,11 +498,19 @@ console.log('')
 console.log('=== F. 抽屉默认宽度 80%，点外部关闭且入口仍在 ===')
 {
   // 清掉持久化宽度并重载，拿到"默认宽度"这一帧。重载后入口与抽屉都会复位。
-  await evaluate(`localStorage.removeItem('dsh.review.panelWidth'), localStorage.removeItem('dsh.review.panelOpen'), true`)
+  //
+  // 键是 **v2**：旧键 `dsh.review.panelWidth` 里存的像素值**故意不迁移**（需求 38/63）——
+  // 继续读它的话，"默认 80%" 在升级用户那里永远不生效。这里两个键都清，断言的是真正的
+  // 默认值。
+  await evaluate(
+    `localStorage.removeItem('dsh.review.panelWidth.v2'), localStorage.removeItem('dsh.review.panelWidth'), localStorage.removeItem('dsh.review.panelOpen'), true`,
+  )
   await evaluate(`location.reload(), true`)
   await sleep(9000)
   const opened = await ensureDrawer()
-  has('F) 抽屉已打开', opened)
+  // `ensureDrawer()` 回的是**状态对象**（`{ panel, trigger, ... }`），不是布尔值：这里曾经
+  // 直接把它喂给 `has()`，于是这条断言永远是红的（对象 `!== true`），却看起来像"抽屉没开"。
+  has('F) 抽屉已打开', opened.panel === true)
   const measured = JSON.parse(
     await evaluate(`(() => {
       const panel = document.querySelector('[data-desktop-review-surface]');
@@ -402,6 +542,10 @@ console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
 {
   await click('[data-review-tab="log"]')
   has('G) 提交图已渲染', await waitFor(`document.querySelector('[data-graph]') !== null || document.querySelector('[data-graph-view]') !== null`, 10000))
+  // 行要等**渲染出来**再读：切页签的那一帧提交还没到，`rows[0]` 不存在，下面"首行时间到秒"
+  // 之类会拿到空字符串（实测踩到过：计数「」、首行「」）。
+  has('   提交行已渲染', await waitFor(`document.querySelector('[data-graph-row]') !== null`, 10000))
+  await sleep(500)
   const read = async () =>
     JSON.parse(
       await evaluate(`(() => {
@@ -420,15 +564,19 @@ console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
         });
       })()`),
     )
-  console.log(`   ${read.rowCount} 行；计数「${read.countText}」；首行「${read.firstRow.slice(0, 90)}」`)
-  has('   计数说的是"提交"而不是"文件"', read.graphFilesUsed === false)
+  // `read` 是**函数**：必须 `await read()` 才能拿到对象。早先这里直接写 `read.rowCount`
+  // （访问函数对象上的属性 → undefined），于是这一段在第一个 console.log 就抛
+  // `Cannot read properties of undefined (reading 'slice')`——整个冒烟在这之前都跑不完。
+  const first = await read()
+  console.log(`   ${first.rowCount} 行；计数「${first.countText}」；首行「${first.firstRow.slice(0, 90)}」`)
+  has('   计数说的是"提交"而不是"文件"', first.graphFilesUsed === false)
   // 时间精确到秒：首行必须带 HH:mm:ss。
-  check('   首行时间精确到秒', /\d{2}:\d{2}:\d{2}/.test(read.firstRow), true)
+  check('   首行时间精确到秒', /\d{2}:\d{2}:\d{2}/.test(first.firstRow), true)
   // 不显示哈希：首行里不该出现 7 位以上的十六进制串（分支名/标签里也不会有）。
-  check('   首行没有短哈希', /\b[0-9a-f]{7,40}\b/.test(read.firstRow), false)
+  check('   首行没有短哈希', /\b[0-9a-f]{7,40}\b/.test(first.firstRow), false)
 
   // 滚动到底若干次：分页必须自动发生，且**不重复**（skip 单调递增由行数增长体现）。
-  const counts = [read.rowCount]
+  const counts = [first.rowCount]
   for (let i = 0; i < 4; i += 1) {
     await evaluate(`(() => { const el = document.querySelector('[data-graph-scroll]'); if (el) el.scrollTop = el.scrollHeight; return true })()`)
     await sleep(1800)
@@ -441,6 +589,53 @@ console.log('=== G. Log 计数/时间/无哈希/滚动分页 ===')
   check('   这一段没有 React error', reactErrors().length, 0)
 }
 
+// ---- G1. 大屏首屏：视口按真实 DOM 量 + 自动补页（需求 21/22/26）----------------
+//
+// 这一条只有在真实布局下才有意义：`viewport` 曾经初始化为 600 且**只在 onScroll 里更新**，
+// 于是大窗口首次打开 Log 时，虚拟列表按 600px 算可见行数，下面一大片空白，而且不滚一下
+// 永远不会自己补数据。这里量的是真实 `clientHeight` 与真实行数。
+console.log('')
+console.log('=== G1. 首屏按真实视口渲染并自动补页（不需要用户滚动）===')
+{
+  await click('[data-review-tab="log"]')
+  has('G1) 提交图已渲染', await waitFor(`document.querySelector('[data-graph-scroll]') !== null`, 10000))
+  // 上一节把滚动容器拉到底过，这里先回到顶部：这一节要证明的是"**不用滚动**就已按真实视口
+  // 铺满"，而不是"滚动位置是 0"（那是上一节的副作用，不是产品的性质）。
+  await evaluate(`(() => { const el = document.querySelector('[data-graph-scroll]'); if (el) el.scrollTop = 0; return true })()`)
+  // 等自动补页把首屏填满（每轮是"请求 → 响应 → 渲染 → 再判断"，因此给它几秒）。
+  await sleep(2500)
+  const coverage = await evaluateJson(
+    `(() => {
+      const scroll = document.querySelector('[data-graph-scroll]');
+      const count = document.querySelector('[data-graph-count]');
+      const rows = document.querySelectorAll('[data-graph-row]').length;
+      const digits = count ? (count.textContent.match(/\\d+/) ?? [])[0] : undefined;
+      return JSON.stringify({
+        rows,
+        loadedTotal: digits === undefined ? -1 : Number(digits),
+        clientHeight: scroll ? scroll.clientHeight : -1,
+        scrollTop: scroll ? scroll.scrollTop : -1,
+        hasMore: count ? count.getAttribute('data-graph-has-more') : null,
+        loadingMore: document.querySelector('[data-graph-loading-more]') !== null,
+      });
+    })()`,
+    '首屏覆盖率',
+  )
+  console.log(`   行数=${coverage.rows}/${coverage.loadedTotal} 视口=${coverage.clientHeight}px hasMore=${coverage.hasMore}`)
+  has('   滚动容器有真实高度（不是 0）', coverage.clientHeight > 200)
+  // 24px 是行高（`GRAPH_ROW_HEIGHT`）：**画出来的行必须铺满真实视口**。这是虚拟列表有没有
+  // 按真实高度算的判据——老实现把 viewport 初始化为 600 且只在 onScroll 里更新，771px 的
+  // 容器只会画 600px 对应的 25 行，下面一片空白，而且不滚一下永远不会自己补。
+  //
+  // 注意别写成"已加载的提交要全部渲染"：虚拟列表**本来**只画可见窗口（实测：219 条已加载、
+  // 画 43 行正好覆盖 771px），要求全画出来等于要求关掉虚拟化。
+  check('   首屏行数铺满真实视口（虚拟窗口按真实高度算）', coverage.rows * 24 >= coverage.clientHeight, true)
+  if (coverage.hasMore === 'true') {
+    has('   还有更多时不需要用户滚动（自动补页在跑）', coverage.rows * 24 >= coverage.clientHeight || coverage.loadingMore === true)
+  }
+  check('   G1 没有 React error', reactErrors().length, 0)
+}
+
 // ---- G2. Log：点改动文件 → 底部 Diff Preview（不再内联在窄右栏里）--------------
 console.log('')
 console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动换行且可切换、能关能恢复 ===')
@@ -448,16 +643,32 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
   // 选一条提交（第一条），右栏出现改动文件清单。
   await evaluate(`(() => { const row = document.querySelector('[data-graph-row]'); if (row) row.click(); return true })()`)
   await sleep(1800)
-  const fileRow = await evaluate(`(() => {
-    const row = document.querySelector('[data-graph-file-row]');
-    if (!row) return null;
-    row.click();
-    return row.getAttribute('data-graph-file-row');
-  })()`)
+  /**
+   * 挑一个**有逐行差异**的文件来点。
+   *
+   * 不能无脑点第一个：这条提交可能改的是 lockfile / 图片之类的二进制文件，那时 Preview 会
+   * 正大光明地显示"该文件是二进制内容，不展示逐行差异"，`[data-review-diff-code]` 根本不存在
+   * ——断言全红，但界面是对的（实测就踩到了：HEAD 提交里第一个文件是 package-lock.json）。
+   * 因此按顺序试，直到 Preview 里真的出现了代码区；全都不行才跳过。
+   */
+  const pickTextFile = async () => {
+    const paths = JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('[data-graph-file-row]')].map((n) => n.getAttribute('data-graph-file-row')))`))
+    for (const path of paths) {
+      await evaluate(`(() => {
+        const row = [...document.querySelectorAll('[data-graph-file-row]')].find((n) => n.getAttribute('data-graph-file-row') === ${JSON.stringify(path)});
+        if (row) row.click();
+        return true;
+      })()`)
+      await sleep(2000)
+      const hasCode = await evaluate(`document.querySelector('[data-review-diff-code]') !== null`)
+      if (hasCode === true) return path
+    }
+    return null
+  }
+  const fileRow = await pickTextFile()
   if (fileRow === null) {
-    console.log('   SKIP  这条提交没有改动文件（或详情还没到）')
+    console.log('   SKIP  这条提交的文件都是二进制/没有可展示的逐行差异')
   } else {
-    await sleep(2000)
     const read = async () =>
       JSON.parse(
         await evaluate(`(() => {
@@ -482,6 +693,7 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
             codeScrollsX: code ? code.scrollWidth > code.clientWidth + 1 : false,
             overflowX: body ? getComputedStyle(body).overflowX : '',
             wrap: body ? body.getAttribute('data-review-diff-wrap') : null,
+            mode: body ? body.getAttribute('data-review-diff-mode') : null,
             hasWrapToggle: document.querySelector('[data-review-diff-wrap]') !== null,
             gutterUserSelect: gutter ? getComputedStyle(gutter).userSelect : '',
             gutterGrid: oldCell && newCell ? getComputedStyle(oldCell).gridColumnStart + '/' + getComputedStyle(newCell).gridColumnStart : '',
@@ -506,10 +718,6 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
     check('   换行态下容器不横向滚动', first.overflowX, 'hidden')
     check('   换行之后代码区没有横向溢出', first.codeScrollsX, false)
     has('   有「自动换行」开关', first.hasWrapToggle === true)
-    check('   行号栏不可选中', first.gutterUserSelect, 'none')
-    check('   旧/新行号各占一列（不重复）', first.gutterGrid, '1/2')
-    // 文案随 Harness 的语言走，因此两种语言都算过（这个冒烟脚本跑在真实实例上，
-    // 实例当前是中文还是英文由 Harness 的设置决定）。
     has(
       '   文件头被折叠成一条',
       first.hasHeader &&
@@ -518,6 +726,30 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
     check('   默认高度是百分比', first.flex, '0 0 40%')
     check('   这一段没有 React error / ReferenceError', pageErrors.filter((t) => /is not defined|ReferenceError/.test(t)).length, 0)
 
+    /**
+     * 切到「统一」再看行号栏的列契约。
+     *
+     * 两个原因：差异视图有「统一 / 并排」两种模式（默认跟随用户偏好，本机是并排），而
+     * **行号栏的 grid 契约、以及"关掉换行后横向滚动落回容器"都只属于统一模式**——并排模式下
+     * 左右两侧各自横滚，容器本身永远是 `hidden`。不先切模式，这两条断言测的其实是并排视图，
+     * 报红也只说明"跑在另一种模式上"。
+     */
+    const switchedToUnified = await evaluate(`(() => {
+      const button = document.querySelector('[data-review-diff-mode-option="unified"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`)
+    if (switchedToUnified === true) {
+      await sleep(900)
+      const unified = await read()
+      check('   切到统一模式后 body 标记跟着变', unified.mode ?? 'unified', 'unified')
+      check('   行号栏不可选中', unified.gutterUserSelect, 'none')
+      check('   旧/新行号各占一列（不重复）', unified.gutterGrid, '1/2')
+    } else {
+      console.log('   SKIP  没有「统一 / 并排」切换按钮，跳过行号栏列契约')
+    }
+
     // 关掉自动换行 → 回到 pre + 容器横向滚动；再打开 → 回到 pre-wrap。
     const toggled = await evaluate(`(() => { const el = document.querySelector('[data-review-diff-wrap]'); if (!el) return false; el.click(); return true })()`)
     has('   点得中「自动换行」开关', toggled === true)
@@ -525,7 +757,9 @@ console.log('=== G2. Diff Preview：右栏不内联 diff、代码区默认自动
     const nowrap = await read()
     check('   关掉后代码不再折行（white-space: pre）', nowrap.whiteSpace, 'pre')
     check('   关掉后 wrap 状态是 off', nowrap.wrap, 'off')
-    check('   关掉后横向滚动回到容器上', nowrap.overflowX, 'auto')
+    if (switchedToUnified === true) {
+      check('   关掉后横向滚动回到容器上', nowrap.overflowX, 'auto')
+    }
     await evaluate(`(() => { const el = document.querySelector('[data-review-diff-wrap]'); if (el) el.click(); return true })()`)
     await sleep(700)
     const rewrapped = await read()
@@ -559,6 +793,7 @@ console.log('=== G3. Changes 左右分栏：选文件、右栏看差异、提交
       const pane = document.querySelector('[data-changes-diff-preview]');
       const card = document.querySelector('[data-staging-commit-card]');
       const rect = card ? card.getBoundingClientRect() : null;
+      const mainRect = main ? main.getBoundingClientRect() : null;
       return JSON.stringify({
         hasMain: main !== null,
         mode: main ? main.getAttribute('data-changes-layout') : null,
@@ -570,7 +805,10 @@ console.log('=== G3. Changes 左右分栏：选文件、右栏看差异、提交
         rowsInFiles: files ? files.querySelectorAll('[data-review-diff-row]').length : -1,
         hasPreviewEmptyHint: pane !== null && pane.innerText.trim().length > 0,
         cardPinned: rect !== null && rect.bottom <= window.innerHeight + 1 && rect.top > 0,
-        cardAfterMain: main !== null && card !== null && (main.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        // **看的是屏幕位置，不是 DOM 顺序**：提交卡片在 DOM 里排在主区之前，靠 CSS
+        // order:3（主区 order:1）落在下面。早先这里用 compareDocumentPosition 判
+        // "卡片在主区之后"，那是 DOM 顺序——按现在的实现永远是 false，而界面是对的。
+        cardBelowMain: rect !== null && mainRect !== null && rect.top >= mainRect.top,
       });
     })()`),
   )
@@ -587,7 +825,7 @@ console.log('=== G3. Changes 左右分栏：选文件、右栏看差异、提交
     check('   窄窗口退化成上下堆叠', layout.mode, 'stacked')
   }
   has('   提交区常驻在底部（没有被差异挤出视口）', layout.cardPinned)
-  has('   提交区在主区之后', layout.cardAfterMain)
+  has('   提交区在主区下方（看屏幕位置）', layout.cardBelowMain)
 
   // 选中一个已跟踪文件：只改变选中，绝不动勾选/暂存状态。
   const picked = JSON.parse(

@@ -37,8 +37,6 @@ export interface ShellState {
   ready: boolean
   maximized: boolean
   fullScreen: boolean
-  canGoBack: boolean
-  canGoForward: boolean
   theme: ShellTheme
   /**
    * Active language, as a canonical id (`zh-CN` / `en-US`).
@@ -54,9 +52,6 @@ export interface ShellState {
    * 运行中重建的（装上真正的应用菜单、语言变化、最近打开变化）。
    */
   menuRevision: number
-  /** Accessibility text for the navigation buttons (changes with the language). */
-  backLabel: string
-  forwardLabel: string
 }
 
 interface ShellMenuBarEntry {
@@ -76,12 +71,9 @@ const api = {
    */
   openMenu: (index: number, x: number, y: number): Promise<void> =>
     ipcRenderer.invoke('dsh-desktop:shell-menu-open', index, x, y) as Promise<void>,
-  /** Ask the shell for a real history navigation ('back' | 'forward'). */
-  navigate: (direction: string): Promise<void> =>
-    ipcRenderer.invoke('dsh-desktop:shell-navigate', direction) as Promise<void>,
   /** Hand keyboard focus back to the Harness page after a menu closes. */
   focusApp: (): Promise<void> => ipcRenderer.invoke('dsh-desktop:shell-focus-app') as Promise<void>,
-  /** State pushes (ready / maximized / theme / history availability). */
+  /** State pushes (ready / maximized / theme / locale / menu revision). */
   onState: (listener: (state: ShellState) => void): void => {
     ipcRenderer.on('dsh-desktop:shell-state', (_event, state: ShellState) => listener(state))
   },

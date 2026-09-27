@@ -56,18 +56,47 @@ const report = (label, ok, detail) => {
 }
 
 /**
- * 一次变异：改文件 → 跑测试（期望失败）→ 还原 → 再跑一次（期望通过）。
- * @param options - `{ file, from, to, script, label, expectFail }`。
+ * 跑一次 TypeScript 构建。
+ *
+ * 只给"变异点在 `src/`"的那几条用：外壳的测试读的是 `dist/`（`npm run build` 的产物），
+ * 因此改了源码不重新编译，测试根本看不到变异。直接调 `tsc` 的入口而不是 `npm.cmd`：
+ * 后者在本机的 PATH 上是坏的（`npm.ps1`），而且多一层进程。
  */
-const mutate = ({ file, from, to, script, label }) => {
+const runBuild = () => {
+  const result = spawnSync(process.execPath, [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.json'], {
+    encoding: 'utf8',
+    cwd: ROOT,
+  })
+  if (result.status !== 0) throw new Error(`构建失败：\n${result.stdout ?? ''}\n${result.stderr ?? ''}`)
+}
+
+/**
+ * 可选的命令行过滤：只跑标签里含这个子串的变异。
+ *
+ *   node scripts/mutation-check.mjs 34
+ *
+ * 全量一轮要跑几十次测试（十几分钟），改完一条断言想只确认那一条时，全量重跑是浪费。
+ * 不带参数时行为与以前完全一致（全跑）。
+ */
+const FILTER = process.argv[2] ?? ''
+
+/**
+ * 一次变异：改文件 → 跑测试（期望失败）→ 还原 → 再跑一次（期望通过）。
+ * @param options - `{ file, from, to, script, label, prepare }`；`prepare` 在每次跑测试前执行
+ *   （`src/` 下的变异要先用它把源码编译进 `dist/`）。
+ */
+const mutate = ({ file, from, to, script, label, prepare }) => {
+  if (FILTER !== '' && !label.includes(FILTER)) return
   const original = readFileSync(file, 'utf8')
   if (!original.includes(from)) {
     report(label, false, `变异点没找到：${from.slice(0, 60)}`)
     return
   }
   writeWithRetry(file, original.split(from).join(to))
+  if (prepare !== undefined) prepare()
   const mutated = run(script)
   writeWithRetry(file, original)
+  if (prepare !== undefined) prepare()
   const restored = run(script)
   const mutatedFailed = mutated.code !== 0
   const restoredOk = restored.code === 0
@@ -87,16 +116,40 @@ console.log('=== 变异验证（改回旧写法必须变红）===')
 mutate({
   file: CLIENT,
   label: '1) 默认宽度 50% → 宽度断言变红',
-  from: '      return clampPanelWidth(Math.round(viewport * 0.8))',
-  to: '      return clampPanelWidth(Math.round(viewport * 0.5))',
+  from: '    const PANEL_WIDTH_RATIO = 0.8',
+  to: '    const PANEL_WIDTH_RATIO = 0.5',
   script: 'test-review-overlay-hooks.mjs',
 })
 
 mutate({
   file: CLIENT,
   label: '1b) 恢复 1600 像素上限 → 宽屏 80% 断言变红',
-  from: '      return Math.max(PANEL_WIDTH_MIN, Math.round(viewport * 0.8))',
-  to: '      return Math.max(PANEL_WIDTH_MIN, Math.min(1600, Math.round(viewport * 0.8)))',
+  from: '      const ratio = Math.max(PANEL_WIDTH_MIN, Math.round(width * PANEL_WIDTH_RATIO))',
+  to: '      const ratio = Math.max(PANEL_WIDTH_MIN, Math.min(1600, Math.round(width * PANEL_WIDTH_RATIO)))',
+  script: 'test-review-overlay-hooks.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '1c) 读回旧键 dsh.review.panelWidth → "不迁移旧像素值"断言变红',
+  from: "    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth.v2'",
+  to: "    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'",
+  script: 'test-review-overlay-hooks.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '1d) 去掉"视口比最小宽度还窄"的分支 → 480 视口占满断言变红',
+  from: '      if (width < PANEL_WIDTH_MIN) return { min: width, max: width, default: width }',
+  to: '      if (false) return { min: width, max: width, default: width }',
+  script: 'test-review-overlay-hooks.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '1e) 抽屉下限退回 320 → 窄视口 500 断言变红',
+  from: '    const PANEL_WIDTH_MIN = 500',
+  to: '    const PANEL_WIDTH_MIN = 320',
   script: 'test-review-overlay-hooks.mjs',
 })
 
@@ -126,9 +179,33 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '5) 让未过滤分页重新写 treeCommits → 左栏不被污染断言变红',
-  from: '              loadingMore: false,\n              loadMoreError: \'\',\n              // 注意：**这里没有 `treeCommits`**。分页不写左栏（见上面的说明）。',
-  to: '              loadingMore: false,\n              loadMoreError: \'\',\n              ...(filterRef === \'\' ? { treeCommits: [...prev.commits, ...more], treeHasMore: outcome.value?.hasMore === true } : {}),',
+  label: '5) 左栏分类退回"名字里有斜杠就算远程"→ 带 `/` 的本地分支断言变红',
+  from: '        const isRemote = raw.isRemote === true',
+  to: "        const isRemote = raw.isRemote === true || name.includes('/')",
+  script: 'test-review-graph-branch-filter.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '5b) 不再挡掉符号引用 origin/HEAD → "没有把 HEAD 当分支"断言变红',
+  from: "        if (name.endsWith('/HEAD')) continue",
+  to: '        if (false) continue',
+  script: 'test-review-graph-branch-filter.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '5c) 让 refs 清单跟着过滤条件重拉 → "过滤没有重发清单请求"断言变红',
+  from: '        void loadRefs()\n      }, [loadRefs, refreshToken])',
+  to: '        void loadRefs()\n      }, [loadRefs, refreshToken, fresh.ref])',
+  script: 'test-review-graph-branch-filter.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '5d) 清单效应去掉依赖数组（每次渲染都重发）→ "一轮挂载只拉一次"断言变红',
+  from: '        void loadRefs()\n      }, [loadRefs, refreshToken])',
+  to: '        void loadRefs()\n      })',
   script: 'test-review-graph-branch-filter.mjs',
 })
 
@@ -143,8 +220,8 @@ mutate({
 mutate({
   file: CLIENT,
   label: '7) 字号的 CSS 退回裸 px → token 断言变红',
-  from: '        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};\n      }\n\n      /* Log 页签工具条里的搜索框',
-  to: '        font-family: ${UI_FONT}; font-size: 11.5px;\n      }\n\n      /* Log 页签工具条里的搜索框',
+  from: '        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};\n      }',
+  to: '        font-family: ${UI_FONT}; font-size: 11.5px;\n      }',
   script: 'test-review-overlay-hooks.mjs',
 })
 
@@ -191,8 +268,8 @@ mutate({
 mutate({
   file: CLIENT,
   label: '11b) 把 pre-wrap 偷偷改回 pre（自动换行失效）→ 自动换行断言变红',
-  from: "        wrap === true\n          ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }",
-  to: "        wrap === true\n          ? { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize }",
+  from: "            ? { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', tabSize: reviewMetrics.tabSize }",
+  to: "            ? { whiteSpace: 'pre', overflowWrap: 'normal', wordBreak: 'normal', tabSize: reviewMetrics.tabSize }",
   script: 'test-review-graph-view.mjs',
 })
 
@@ -231,8 +308,8 @@ mutate({
 mutate({
   file: CLIENT,
   label: '12c) 点文件名顺手改勾选状态 → "勾选状态没被改动"断言变红',
-  from: '              onClick: () => setSelectedFile(entry.path),',
-  to: '              onClick: () => {\n                setSelectedFile(entry.path)\n                setDeselectedFiles((current) => [...current, entry.path])\n              },',
+  from: '              onClick: () => selectFile(entry.path),',
+  to: '              onClick: () => {\n                selectFile(entry.path)\n                setDeselectedFiles((current) => [...current, entry.path])\n              },',
   script: 'test-review-overlay-hooks.mjs',
 })
 
@@ -247,8 +324,8 @@ mutate({
 mutate({
   file: CLIENT,
   label: '11d) 切提交时不清空选中文件 → "切提交没有残留 Preview"断言变红',
-  from: '        selectedDiffFile !== null && selectedDiffFile.revision === selectedCommit ? selectedDiffFile : null',
-  to: '        selectedDiffFile',
+  from: '        (selectedDiffFile.compare !== undefined || selectedDiffFile.revision === selectedCommit)',
+  to: '        (selectedDiffFile.compare !== undefined || true)',
   script: 'test-review-graph-view.mjs',
 })
 
@@ -539,6 +616,87 @@ mutate({
   from: "              paddingBottom: '12px',",
   to: "              paddingBottom: '2px',",
   script: 'test-review-staging.mjs',
+})
+
+// ===========================================================================
+// 1.6.5：项目级 Git 界面（重复入口 / 权威 refs / 大屏虚拟化 / 自动补页 / 抽屉宽度 / 标题栏）
+// ===========================================================================
+
+mutate({
+  file: CLIENT,
+  label: '33) 挂载后不再量真实视口 → "大屏首屏按真实高度渲染"断言变红',
+  from: '        measureViewport()\n        const node = scrollRef.current',
+  to: '        const node = scrollRef.current',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '34) ResizeObserver 不再观察滚动容器 → "视口变大后自动补数据"断言变红',
+  from: '        observer.observe(node)',
+  to: '        void node',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '35) 自动补页不再发请求（退回"只能靠用户滚动"）→ 22a 断言变红',
+  from: '        if (remaining > GRAPH_LOAD_MORE_THRESHOLD) return\n        void loadMore()\n      }, [fresh.hasMore, fresh.loadingMore, fresh.refreshing, fresh.autoFillStopped, loadMore])',
+  to: '        if (remaining > GRAPH_LOAD_MORE_THRESHOLD) return\n        void 0\n      }, [fresh.hasMore, fresh.loadingMore, fresh.refreshing, fresh.autoFillStopped, loadMore])',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '36) 去掉"没有进展就停闸"的判断 → 空页被无限请求的断言变红',
+  from: '        if (fresh.autoFillStopped === true) return',
+  to: '        if (false) return',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '37) 空页不再立停闸标记 → 22b 断言变红',
+  from: '              autoFillStopped: stalled ? true : false,',
+  to: '              autoFillStopped: false,',
+  script: 'test-review-graph-view.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '38) 把已删除的独立「提交图」入口重新注册回去 → 重复入口断言变红',
+  // 需求 A：那个入口与抽屉的 Log 是同一个视图，用户看到的是"多了一个重复入口"。
+  // 这里把它加回源码，断言必须变红。
+  from: '      // 项目页的常驻面板入口。挂在这个槽位是因为它**在没有会话时也渲染**——',
+  to: "      ctx.slots.register({ name: 'sidebar.panellist', id: 'git-graph' }, CommitGraphView)\n      // 项目页的常驻面板入口。挂在这个槽位是因为它**在没有会话时也渲染**——",
+  script: 'test-review-overlay-hooks.mjs',
+})
+
+mutate({
+  file: join(ROOT, 'src', 'main', 'shell-page.ts'),
+  label: '39) 把「后退」按钮加回标题栏 → DOM 断言变红（需要重新编译）',
+  from: '  <span class="tb-group">\n    <span class="tb-icon" aria-hidden="true">',
+  to: '  <span class="tb-group">\n    <button class="tb-btn" id="nav-back" aria-label="back">\u2039</button>\n    <span class="tb-icon" aria-hidden="true">',
+  prepare: runBuild,
+  script: 'test-titlebar.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '40) 提交图退回 --decorate=short → 带斜杠分支的命名空间断言变红',
+  // 短名装饰分不清 `refs/heads/feature/foo` 与 `refs/remotes/origin/foo`（两者都印成
+  // `feature/foo`），因此"按 namespace 分类"必须有 `--decorate=full`（需求 12/13）。
+  from: "    '--decorate=full',",
+  to: "    '--decorate=short',",
+  script: 'test-review-graph.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '41) 抽屉 CSS 上限改回 calc(100vw - 64px) → 窄视口"占满视口"断言变红',
+  from: "            maxWidth: '100vw',",
+  to: "            maxWidth: 'calc(100vw - 64px)',",
+  script: 'test-review-overlay-hooks.mjs',
 })
 
 console.log('')

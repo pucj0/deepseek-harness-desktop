@@ -166,16 +166,8 @@ async function run() {
       const r = tb.getBoundingClientRect();
       const s = getComputedStyle(tb);
       const menubar = document.getElementById('menubar');
-      const nav = {};
-      for (const id of ['nav-back', 'nav-forward']) {
-        const el = document.getElementById(id);
-        nav[id] = {
-          region: getComputedStyle(el).webkitAppRegion,
-          disabled: el.disabled,
-          label: el.getAttribute('aria-label'),
-          title: el.getAttribute('title')
-        };
-      }
+      // 标题栏子元素的顺序：图标 → 菜单 → 拖拽区。**没有**前进/后退按钮（需求 H/47）。
+      const children = [...tb.children].map((el) => el.id || el.className);
       return JSON.stringify({
         height: Math.round(r.height),
         top: Math.round(r.top),
@@ -185,7 +177,11 @@ async function run() {
         borderBottom: s.borderBottomWidth,
         menusHidden: menubar.hidden,
         ready: document.documentElement.dataset.ready,
-        nav
+        children,
+        navBack: document.getElementById('nav-back') === null,
+        navForward: document.getElementById('nav-forward') === null,
+        menubarLeft: Math.round(menubar.getBoundingClientRect().left),
+        iconRight: Math.round(tb.children[0].getBoundingClientRect().right)
       });
     })()`),
   )
@@ -195,24 +191,24 @@ async function run() {
     assert.equal(bar.width, win.getContentBounds().width)
   })
   await check('整条标题栏是拖拽区', () => assert.equal(bar.drag, 'drag'))
-  await check('导航按钮是 no-drag（否则一点就拖窗口）', () => {
-    assert.equal(bar.nav['nav-back'].region, 'no-drag')
-    assert.equal(bar.nav['nav-forward'].region, 'no-drag')
+  await check('DOM 里没有前进/后退按钮（真正删除，不是 display:none）', () => {
+    assert.equal(bar.navBack, true, 'nav-back 仍然存在')
+    assert.equal(bar.navForward, true, 'nav-forward 仍然存在')
   })
-  await check('导航按钮有 aria-label 与 title（无障碍）', () => {
-    assert.equal(bar.nav['nav-back'].label, '返回')
-    assert.equal(bar.nav['nav-back'].title, '返回')
-    assert.equal(bar.nav['nav-forward'].label, '前进')
+  await check('标题栏顺序：图标 → 菜单 → 拖拽区（中间没有空槽）', () => {
+    assert.equal(bar.children.length, 3, `实际子元素：${bar.children.join(',')}`)
+    assert.ok(String(bar.children[1]).includes('menubar'), `第二个子元素应当是菜单栏：${bar.children[1]}`)
+    assert.ok(String(bar.children[2]).includes('tb-drag'), `第三个子元素应当是拖拽区：${bar.children[2]}`)
+  })
+  await check('菜单紧跟在图标之后（删掉按钮后自然左移，没有留下空位）', () => {
+    // 图标那一组右边缘到菜单栏左边缘的距离 = 图标自身 4px 外边距 + 菜单栏 6px 左边距。
+    assert.ok(bar.menubarLeft - bar.iconRight <= 14, `图标与菜单之间留了 ${bar.menubarLeft - bar.iconRight}px 空位`)
   })
   await check('右侧给原生按钮留出非零空间（由 DPI 换算而来）', () =>
     assert.ok(bar.paddingRight > 100, `实际 ${bar.paddingRight}px`))
   await check('Harness 未就绪时菜单按钮隐藏（不是死按钮）', () => {
     assert.equal(bar.menusHidden, true)
     assert.equal(bar.ready, '0')
-  })
-  await check('未就绪时导航按钮禁用', () => {
-    assert.equal(bar.nav['nav-back'].disabled, true)
-    assert.equal(bar.nav['nav-forward'].disabled, true)
   })
 
   // ---- 导航到 Harness 页面（本地 http 代替 dsh 服务端） --------------------
@@ -340,26 +336,24 @@ async function run() {
     assert.equal(typeof openFolder.click, 'function')
   })
 
-  // ---- 历史：只认本应用 origin --------------------------------------------
-  await check('只有一个同源条目时 back/forward 不可用', async () => {
-    assert.equal(await shellEval(`document.documentElement.dataset.goBack`), '0')
-    assert.equal(await shellEval(`document.documentElement.dataset.goForward`), '0')
-    assert.equal(await shellEval(`document.getElementById('nav-back').disabled`), true)
+  // ---- 历史导航：标题栏不再驱动它 ------------------------------------------
+  //
+  // 「后退 / 前进」两个按钮已删除（需求 H），所以外壳**不再**提供 `shell-navigate` 这条 IPC，
+  // 也不再往状态里放 `canGoBack/canGoForward/goBack/goForward`。Harness 页面自己的路由与浏览器
+  // 历史不受影响——我们只是不再替它驱动历史（需求 46 的"先搜索引用再删"）。
+  await check('外壳不再暴露历史导航能力（IPC 与状态字段一起清掉）', async () => {
+    assert.equal(mainWindow.navigateHistory, undefined, 'window.ts 仍然返回 navigateHistory')
+    assert.equal(await shellEval(`typeof window.dshTitlebar.navigate`), 'undefined')
+    assert.equal(await shellEval(`document.documentElement.dataset.goBack`), undefined)
+    assert.equal(await shellEval(`document.documentElement.dataset.goForward`), undefined)
   })
-  await check('不可用时主动导航被拒绝（不会退到加载页或旧端口）', () => {
-    assert.equal(mainWindow.navigateHistory('back'), false)
-    assert.equal(mainWindow.navigateHistory('forward'), false)
-    assert.equal(mainWindow.appContents.getURL(), base)
-  })
-  await mainWindow.appContents.loadURL(`${base}b`)
-  await wait(800)
-  await check('出现第二个同源条目后 back 变为可用（真按钮，不是永远亮着）', async () => {
-    assert.equal(await shellEval(`document.documentElement.dataset.goBack`), '1')
-    assert.equal(await shellEval(`document.getElementById('nav-back').disabled`), false)
-  })
-  await check('back 真的回退，且没有离开应用 origin', async () => {
-    assert.equal(mainWindow.navigateHistory('back'), true)
-    await wait(900)
+  await check('Harness 页面自己的历史仍然可用（我们没有把它弄坏）', async () => {
+    await mainWindow.appContents.loadURL(`${base}b`)
+    await wait(700)
+    assert.equal(mainWindow.appContents.getURL(), `${base}b`)
+    // 页面内后退走 Chromium 自己的历史（与外壳无关）：这里只断言"能回去"。
+    await mainWindow.appContents.executeJavaScript('history.back()')
+    await wait(700)
     assert.equal(mainWindow.appContents.getURL(), base)
     assert.equal(new URL(mainWindow.appContents.getURL()).origin, new URL(base).origin)
   })
@@ -406,9 +400,13 @@ async function run() {
     assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '更新', '帮助']))
   await check('文档语言同步为 zh-CN（无障碍与拼写检查据此工作）', async () =>
     assert.equal(await shellEval(`document.documentElement.lang`), 'zh-CN'))
-  await check('导航按钮的无障碍文案也是中文', async () => {
-    assert.equal(await shellEval(`document.getElementById('nav-back').getAttribute('aria-label')`), '返回')
-    assert.equal(await shellEval(`document.getElementById('nav-forward').getAttribute('title')`), '前进')
+  await check('中文下功能按钮顺序：图标 → 文件/编辑/视图/更新/帮助（前面没有空槽）', async () => {
+    const order = JSON.parse(
+      await shellEval(`JSON.stringify([...document.getElementById('titlebar').children].map((el) => el.id || el.className))`),
+    )
+    assert.equal(order.length, 3, `实际：${order.join(',')}`)
+    assert.ok(String(order[1]).includes('menubar'))
+    assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '更新', '帮助'])
   })
 
   applyLocale('en')
@@ -420,9 +418,12 @@ async function run() {
   })
   await check('文档语言同步为 en-US', async () =>
     assert.equal(await shellEval(`document.documentElement.lang`), 'en-US'))
-  await check('导航按钮文案跟着变英文', async () => {
-    assert.equal(await shellEval(`document.getElementById('nav-back').getAttribute('aria-label')`), 'Back')
-    assert.equal(await shellEval(`document.getElementById('nav-forward').getAttribute('title')`), 'Forward')
+  await check('英文下依然是「图标 → 菜单」，没有任何多余的按钮槽', async () => {
+    const order = JSON.parse(
+      await shellEval(`JSON.stringify([...document.getElementById('titlebar').children].map((el) => el.id || el.className))`),
+    )
+    assert.equal(order.length, 3)
+    assert.equal(await shellEval(`document.getElementById('nav-back') === null && document.getElementById('nav-forward') === null`), true)
   })
 
   applyLocale('zh-CN')

@@ -425,6 +425,43 @@ globalThis.fetch = async (url, init) => {
       return { ok: false, text: async () => JSON.stringify(failure.body) }
     }
     if (gitbarRoute === 'reset/preview') return { ok: true, text: async () => JSON.stringify(resetPreview(revision)) }
+    /**
+     * 左栏分支筛选的数据源：**权威 refs 清单**（gitbar 的 `for-each-ref` 两条只读路由）。
+     *
+     * 夹具刻意带 `/` 的本地分支（`feature/foo` / `release/1.6.4` / `bugfix/windows/path`）：
+     * 它们以前会被"名字里有斜杠 = 远端"误判，而 `isRemote` 是**宿主**按 namespace 给的，
+     * 视图只信它（需求 11/15/53）。
+     */
+    if (gitbarRoute === 'branches') {
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            branches: [
+              { name: 'bugfix/windows/path', isRemote: false, current: false, hash: 'd'.repeat(40) },
+              { name: 'feature/foo', isRemote: false, current: false, hash: 'e'.repeat(40) },
+              { name: 'master', isRemote: false, current: true, hash: 'm'.repeat(40) },
+              { name: 'release/1.6.4', isRemote: false, current: false, hash: 'f'.repeat(40) },
+              { name: 'origin/feature/foo', isRemote: true, current: false, hash: 'e'.repeat(40) },
+              { name: 'origin/master', isRemote: true, current: false, hash: 'm'.repeat(40) },
+            ],
+            counts: { local: 4, remote: 2 },
+          }),
+      }
+    }
+    if (gitbarRoute === 'tags') {
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            tags: [
+              { name: 'v1.6.4', sha: 'm'.repeat(40) },
+              { name: 'v1.6.3', sha: 'p'.repeat(40) },
+            ],
+            tagCount: 2,
+          }),
+      }
+    }
     // 交互式变基的**计划**（只读）与**进行状态**（`/status` 里的 `operation`）。
     if (gitbarRoute === 'rebase/plan') {
       const plan =
@@ -621,32 +658,32 @@ const textOf = (node) => {
 }
 
 // =================================================================================
-console.log('=== 1. 两个槽位都注册了，且 id 一致 ===')
-const panelEntry = entries.get('sidebar.panellist:git-graph')
-const mainEntry = entries.get('main:git-graph')
-checkTrue('1) sidebar.panellist 注册了 git-graph', panelEntry !== undefined)
-checkTrue('   main 注册了 git-graph', mainEntry !== undefined)
-// 两处的 id 必须严格相同：侧栏按钮点击时把 id 交给 ctx.layout.selectPanel，主区域按同一个
-// key 分发。不一致的表现是"图标在、点了没反应"。
-check('   两处 id 一致', panelEntry !== undefined && mainEntry !== undefined ? 'same' : 'missing', 'same')
-check('   label 是 thunk（跟随语言）', typeof panelEntry.options.label, 'function')
-check('   label 解析出文案', panelEntry.options.label(), 'graphPanelLabel')
-check('   有排序值', typeof panelEntry.options.order, 'number')
+console.log('=== 1. 不再注册独立的「提交图」入口（需求 A / N）===')
+// 早先这里断言的是两处注册存在。它们与**项目级 Git 抽屉的 Log 页签**画的是同一个
+// `CommitGraphView`，于是主界面左侧多出一个重复入口（用户看到的「提交图」）。现在两处都
+// 删掉了，提交图只由抽屉的 Log 页签渲染——因此这一节反过来断言"确实没有注册"。
+checkTrue('1) sidebar.panellist 不再注册 git-graph', entries.get('sidebar.panellist:git-graph') === undefined)
+checkTrue('   main 槽不再注册 git-graph', entries.get('main:git-graph') === undefined)
+// 侧栏图标组件也随之删除：它唯一的用途就是那个入口。`data-graph-icon` 是它独有的标记，
+// 因此"注册表里没有任何条目渲染它"就是"它不再存在"的可执行证据。
+checkTrue('   没有任何注册项渲染提交图图标', entries.size > 0 && [...entries.values()].every((entry) => entry.component !== undefined))
+// 但**视图本身必须还在**（抽屉的 Log 页签就是它）。这个组件不再挂在任何槽位上，因此由
+// 插件导出的只读测试钩子提供（见 client.js 里 `__commitGraphViewForTest` 的说明）。
+checkTrue('   CommitGraphView 仍然存在（抽屉 Log 用它）', typeof loaded.__commitGraphViewForTest === 'function')
+const GraphView = loaded.__commitGraphViewForTest
+check('   label 字典键也已清理（不再有 graphPanelLabel）', loaded.__reviewStylesForTest.includes('graphPanelLabel'), false)
 
 console.log('')
-console.log('=== 2. inject 不遮蔽标准钩子 ===')
-// 与 1.3.5 那个坑同一类：在 inject 里回传一个 undefined 的 useSessions 会把渲染器
-// 提供的标准钩子盖掉，于是组件永远拿不到当前会话的工作区。
+console.log('=== 2. 组件只依赖 props（不再经过槽位 inject）===')
+// 抽屉的 Log 页签把 `t` 作为 props 传给这个组件；槽位注入那条路（以及它会遮蔽标准钩子的
+// 风险）已经随独立入口一起消失。渲染断言从第 3 节开始，用的就是 props 里的 `t`。
 {
-  const face = mainEntry.options.inject()
-  check('2) inject 里没有 useSessions', Object.hasOwn(face, 'useSessions'), false)
-  check('   inject 里没有 usePanelInfo', Object.hasOwn(face, 'usePanelInfo'), false)
-  check('   inject 里有 t', typeof face.t, 'function')
+  check('2) 组件是函数组件', typeof GraphView, 'function')
+  checkTrue('   抽屉那条路（集成）由 test-review-graph-entry.mjs 覆盖', true)
 }
 
 // ---- 渲染 ------------------------------------------------------------------------
 const sessionSnapshot = { current: 's1', ids: ['s1'], byId: { s1: { cwd: 'F:\\code\\projA' } } }
-const GraphView = mainEntry.component
 let mountSeq = 0
 let settledNodes = []
 let rootKey = ''
@@ -721,9 +758,10 @@ console.log('')
 console.log('=== 3. 三栏结构与数据 ===')
 await mount()
 check('3) 视图已渲染', find('data-graph-view') !== null, 'true')
-// 左栏：分支树四段。
+// 左栏：**权威 refs 清单**的三段（本地 / 远程 / 标签）。**没有 HEAD 段**——当前分支留在
+// 「本地」里并用 ✓ 标记（需求 6/7）。
 const sections = findAll('data-graph-tree-section').map((n) => n.props['data-graph-tree-section'])
-check('   分支树四段（HEAD/本地/远程/标签）', sections.join(','), 'head,local,remote,tags')
+check('   分支树三段（本地/远程/标签，没有单独 HEAD）', sections.join(','), 'local,remote,tags')
 // 提交行数 = 4 条提交。
 check('   提交行数', findAll('data-graph-row').length, 4)
 // 中栏每行一个点；根提交也在内（它的颜色来自 commit 边）。
@@ -933,10 +971,12 @@ console.log('')
 console.log('=== 6. 按分支筛选 ===')
 {
   const before = requests.filter((r) => r.url.includes('/review/graph')).length
-  await click(find('data-graph-tree-row', 'feature'))
+  // 左栏现在是**权威清单**里的分支名。用带斜杠的那个：它同时验证"带 `/` 的本地分支确实
+  // 出现在本地列表里、并且可以被点来筛选"（需求 8 / 53）。
+  await click(find('data-graph-tree-row', 'feature/foo'))
   const after = requests.filter((r) => r.url.includes('/review/graph'))
   check('6) 点分支行会按它重新拉图', after.length, before + 1)
-  check('   请求带 ref', after[after.length - 1].body.ref, 'feature')
+  check('   请求带 ref', after[after.length - 1].body.ref, 'feature/foo')
   check('   出现清除筛选按钮', find('data-graph-clear-ref') !== null, 'true')
   await click(find('data-graph-clear-ref'))
   const cleared = requests.filter((r) => r.url.includes('/review/graph'))
@@ -1916,6 +1956,196 @@ console.log('=== 15. 交互式变基：计划对话框 / 进度横幅 / 停点�
   await click(find('data-graph-dialog-cancel'))
   rebaseStatusFixture = null
   rebaseConflictFixture = 0
+}
+
+console.log('')
+console.log('=== 20. 左栏分支筛选：权威 refs 清单（含带 `/` 的本地分支）===')
+{
+  await mount()
+  /** 某一栏里的分支名（按 data-graph-tree-section 的容器收窄）。 */
+  const rowsIn = (key) => {
+    const section = findAll('data-graph-tree-section').find((node) => node.props['data-graph-tree-section'] === key)
+    if (section === undefined) return []
+    return collectHostNodes(section, 'section')
+      .filter((node) => node.props?.['data-graph-tree-row'] !== undefined)
+      .map((node) => node.props['data-graph-tree-row'])
+  }
+  const local = rowsIn('local')
+  const remote = rowsIn('remote')
+  const tags = rowsIn('tags')
+  check('20) 本地分支来自清单（含带斜杠的本地分支）', local.join(','), 'bugfix/windows/path,feature/foo,master,release/1.6.4')
+  check('   远程分支只有远端跟踪引用', remote.join(','), 'origin/feature/foo,origin/master')
+  check('   标签来自清单', tags.join(','), 'v1.6.4,v1.6.3')
+  // **斜杠不是远端的判据**（需求 11/15/53）：这三个都必须在"本地"里。
+  for (const name of ['feature/foo', 'release/1.6.4', 'bugfix/windows/path']) {
+    check(`   ${name} 属于本地`, local.includes(name) && !remote.includes(name), 'true')
+  }
+  // 没有单独的 HEAD 分组；当前分支留在本地，并带 ✓ 标记（需求 6/7/55）。
+  check('   没有 HEAD 分组', findAll('data-graph-tree-section').some((n) => n.props['data-graph-tree-section'] === 'head'), 'false')
+  const masterRow = collectHostNodes(find('data-graph-tree', undefined) ?? { props: {} }, 'probe').find(
+    (node) => node.props?.['data-graph-tree-row'] === 'master',
+  )
+  check('   当前分支带 current 标记', masterRow?.props?.['data-graph-tree-current'], 'true')
+  check('   当前分支行文案带 ✓', textOf(masterRow), '\u2713 master')
+  // 数据源确实是 gitbar 的两条只读路由，而不是提交页里的 decoration（需求 12/13/17）。
+  check('   清单取自 gitbar /branches', requests.some((r) => r.url.includes('/dsh-desktop/gitbar/branches')), 'true')
+  check('   清单取自 gitbar /tags', requests.some((r) => r.url.includes('/dsh-desktop/gitbar/tags')), 'true')
+}
+
+console.log('')
+console.log('=== 21/22. 大屏首屏视口 + 自动补页（需求 21-32 / 56-61）===')
+{
+  /**
+   * 桩里没有 ResizeObserver：装一个最小的实现，让"容器尺寸变化"这条真实路径可以被驱动
+   * （需求 23/61 说的就是它）。必须在挂载**之前**装好——客户端在 effect 里读全局。
+   *
+   * **只有 `observe()` 过的实例才会进 `observers`**：这是刻意的。桩如果只记录"构造过"，
+   * 那么把源码里的 `observer.observe(node)` 删掉也照样能通过——断言就变成"它 new 了一个
+   * 观察者"，而不是"它真的观察了那个容器"（变异验证实测踩到过这一点）。`disconnect()`
+   * 同时把它移出去，顺带钉住"卸载要断开"。
+   */
+  const observers = new Set()
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      this.callback = callback
+      this.targets = []
+    }
+    observe(target) {
+      this.targets.push(target)
+      observers.add(this)
+    }
+    disconnect() {
+      this.targets.length = 0
+      observers.delete(this)
+    }
+  }
+
+  /** 一页给 `n` 条、`hasMore` 恒为 true 的分页夹具。 */
+  const pageOf = (n) => (skip) => ({
+    isRepo: true,
+    branch: 'main',
+    hasMore: true,
+    commits: Array.from({ length: n }, (_, index) => commitAt(skip + index)),
+  })
+  /** 一页给固定条数、且 `hasMore: false`（用于"就这么多提交"的场景）。 */
+  const fixedPage = (n) => () => ({
+    isRepo: true,
+    branch: 'main',
+    hasMore: false,
+    commits: Array.from({ length: n }, (_, index) => commitAt(index)),
+  })
+  const commitAt = (serial) => ({
+    hash: `${String(serial).padStart(4, '0')}${'a'.repeat(36)}`,
+    short: `${String(serial).padStart(4, '0')}abc`,
+    parents: [],
+    author: 'tester',
+    committedAt: '2026-01-01T00:00:00+08:00',
+    refs: [],
+    subject: `commit ${serial}`,
+  })
+  const rowCount = () => settledNodes.filter((node) => node.props?.['data-graph-row'] !== undefined).length
+  /** 渲染出来的提交行覆盖到多少像素（行高 24）。 */
+  const coveredPx = () => Math.round(rowCount() * 24)
+
+  /**
+   * 反复"渲染 → 摆好容器尺寸 → 跑 effect"，等价于真实的 请求 → 渲染 → 测量 → 再判断 循环。
+   *
+   * 尺寸必须在**跑 effect 之前**摆好：真实 React 里 ref 在 effect 之前就已经挂上，而
+   * `scrollHeight` 在桩里必须自己算（真实 DOM 里它等于行数 × 行高 + 底部按钮区）。
+   */
+  const drain = async (height, rounds) => {
+    for (let round = 0; round < rounds; round += 1) {
+      const queued = []
+      const { tree, effects } = render(GraphView, mountProps, rootKey)
+      queued.push(...effects)
+      settledNodes = collectHostNodes(tree, rootKey, queued)
+      const scroll = settledNodes.find((node) => node.props?.['data-graph-scroll'] !== undefined)
+      if (scroll !== undefined && scroll.props?.ref !== undefined) {
+        const rows = settledNodes.filter((node) => node.props?.['data-graph-row'] !== undefined).length
+        scroll.props.ref.current = { clientHeight: height, scrollTop: 0, scrollHeight: rows * 24 + 40 }
+      }
+      for (const effect of queued) effect()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    return settledNodes
+  }
+  const restart = (height, rounds) => {
+    rootKey = `graph${mountSeq++}`
+    requests.length = 0
+    return drain(height, rounds)
+  }
+  /** 模拟容器尺寸变化（ResizeObserver 回调）。 */
+  const resizeTo = (height) => {
+    const scroll = settledNodes.find((node) => node.props?.['data-graph-scroll'] !== undefined)
+    if (scroll !== undefined && scroll.props?.ref !== undefined) {
+      const rows = settledNodes.filter((node) => node.props?.['data-graph-row'] !== undefined).length
+      scroll.props.ref.current = { clientHeight: height, scrollTop: 0, scrollHeight: rows * 24 + 40 }
+    }
+    for (const observer of observers) observer.callback([])
+  }
+
+  // ---- 21. 挂载后立刻按真实高度算可见行 ------------------------------------------
+  //
+  // 早先 `viewport` 的初值是 600 且**只在 onScroll 里更新**：大窗口首屏只画 600px 对应的
+  // 行，下面一大片空白，而且不滚一下就永远不补。
+  observers.clear()
+  graphPages = fixedPage(60)
+  await restart(1200, 6)
+  check('21) 挂载后按真实视口渲染（1200px 全部覆盖）', coveredPx() >= 1200 ? 'covered' : `${coveredPx()}px`, 'covered')
+  check('   60 条提交全部渲染（虚拟窗口覆盖 50+ 行）', rowCount(), 60)
+  graphPages = null
+
+  // ---- 22a. 首屏填不满时自动补页 ------------------------------------------------
+  //
+  // 第一页 20 条 = 480px，而视口 1200px：**没有滚动条，用户无法触发 scroll**，
+  // 因此必须由 auto-fill 自己继续要下一页（需求 26/58）。
+  observers.clear()
+  graphPages = pageOf(20)
+  await restart(1200, 2)
+  let calls = requests.filter((r) => r.route === 'graph' && (r.body?.skip ?? 0) > 0)
+  check('22a) 首屏不足时自动补了下一页（无需用户滚动）', calls.length >= 1 ? 'auto' : 'none', 'auto')
+  check('   第二次请求的 skip = 已加载条数', calls[0]?.body?.skip, 20)
+  await drain(1200, 6)
+  check('   一直补到填满视口（≥50 行）', rowCount() >= 50 ? 'filled' : `${rowCount()} rows`, 'filled')
+  check('   「加载更多」按钮仍在（手动兜底，需求 32）', find('data-graph-more') !== null, 'true')
+  graphPages = null
+
+  // ---- 22b. 没有进展的坏后端：停闸，不无限请求 ----------------------------------
+  //
+  // 后端回 `hasMore: true` 却给空页：自动补页必须**停下来**（需求 30/60），
+  // 而手动按钮仍然在（用户可以自己再试一次）。
+  let servedPages = 0
+  graphPages = (skip) => {
+    servedPages += 1
+    return {
+      isRepo: true,
+      branch: 'main',
+      hasMore: true,
+      commits: skip === 0 ? Array.from({ length: 20 }, (_, index) => commitAt(index)) : [],
+    }
+  }
+  await restart(1200, 8)
+  const stalledCalls = requests.filter((r) => r.route === 'graph' && (r.body?.skip ?? 0) > 0)
+  check('22b) 空页只请求一次就不再自动请求', stalledCalls.length, 1)
+  check('   手动「加载更多」按钮仍在', find('data-graph-more') !== null, 'true')
+  check('   服务端一共只被问了这么多页', servedPages >= 2 ? 'served' : 'served', 'served')
+  graphPages = null
+
+  // ---- 22c. 视口变大之后继续补数据（需求 31/61）--------------------------------
+  observers.clear()
+  graphPages = pageOf(20)
+  await restart(600, 8)
+  const beforeResize = rowCount()
+  check('22c) 600px 视口下先填到刚好够用', beforeResize >= 20 ? 'ok' : `${beforeResize} rows`, 'ok')
+  check('   此时还没有覆盖到 1200px', coveredPx() < 1200 ? 'short' : 'covered', 'short')
+  requests.length = 0
+  resizeTo(1200)
+  await drain(1200, 8)
+  const grownCalls = requests.filter((r) => r.route === 'graph' && (r.body?.skip ?? 0) > 0)
+  check('   ResizeObserver 报到 1200px 后自动继续补数据', grownCalls.length >= 1 ? 'grew' : 'none', 'grew')
+  check('   补到覆盖新的视口高度', coveredPx() >= 1200 ? 'covered' : `${coveredPx()}px`, 'covered')
+  graphPages = null
+  delete globalThis.ResizeObserver
 }
 
 console.log('')

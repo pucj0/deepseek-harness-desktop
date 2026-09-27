@@ -35,9 +35,6 @@ export interface ShellPageOptions {
   splashTitle: string
   /** 加载页提示文案。 */
   splashHint: string
-  /** 导航按钮的无障碍文案（窗口控制按钮是原生的，由系统提供文案）。 */
-  backLabel: string
-  forwardLabel: string
   /**
    * 当前语言（规范 id，如 `zh-CN`）。
    *
@@ -122,18 +119,7 @@ html[data-platform="darwin"] #titlebar { padding-left: 78px; }
   -webkit-app-region: no-drag;
 }
 .tb-icon svg { display: block; }
-.tb-btn {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 28px; height: 26px; padding: 0 6px;
-  border: 0; border-radius: 4px;
-  background: transparent; color: var(--tb-fg);
-  font: inherit; cursor: default;
-  -webkit-app-region: no-drag;
-}
-.tb-btn:hover:not(:disabled) { background: var(--tb-hover); }
-.tb-btn:active:not(:disabled) { background: var(--tb-active); }
-.tb-btn:disabled { color: var(--tb-fg-dim); opacity: .55; }
-.tb-btn:focus-visible { outline: 1px solid var(--tb-fg-dim); outline-offset: -1px; }
+/* 原先还有一组 .tb-btn 规则，只服务于已删除的「后退 / 前进」按钮（需求 H）。 */
 #menubar { display: flex; align-items: center; gap: 1px; margin-left: 6px; -webkit-app-region: no-drag; }
 #menubar[hidden] { display: none; }
 .tb-menu {
@@ -171,11 +157,9 @@ const SCRIPT = `
   var root = document.documentElement
   var titlebar = document.getElementById('titlebar')
   var menubar = document.getElementById('menubar')
-  var back = document.getElementById('nav-back')
-  var forward = document.getElementById('nav-forward')
   var splash = document.getElementById('splash')
   var hint = document.getElementById('startup-hint')
-  var state = { ready: false, maximized: false, fullScreen: false, canGoBack: false, canGoForward: false }
+  var state = { ready: false, maximized: false, fullScreen: false }
   var layout = { custom: true, menus: true }
   // 已经画出来的语言。语言一变，菜单按钮的文案（来自原生菜单）必须重新拉一次。
   var locale = null
@@ -192,20 +176,12 @@ const SCRIPT = `
 
   if (!api) { return }
 
-  /** 把语言落到文档与导航按钮上。 */
+  /** 把语言落到文档上（html 的 lang 属性；按钮文案已随导航按钮一起删除）。 */
   function applyLocale(next) {
     if (!next || typeof next.locale !== 'string' || next.locale === '') { return false }
     var changed = next.locale !== locale
     locale = next.locale
     root.lang = next.locale
-    if (back && typeof next.backLabel === 'string') {
-      back.setAttribute('aria-label', next.backLabel)
-      back.title = next.backLabel
-    }
-    if (forward && typeof next.forwardLabel === 'string') {
-      forward.setAttribute('aria-label', next.forwardLabel)
-      forward.title = next.forwardLabel
-    }
     return changed
   }
 
@@ -277,8 +253,6 @@ const SCRIPT = `
   }
 
   function renderState() {
-    back.disabled = !state.ready || !state.canGoBack
-    forward.disabled = !state.ready || !state.canGoForward
     // 服务端就绪前没有项目可开，菜单按钮此时点不出内容——隐藏而不是给个死按钮。
     menubar.hidden = !layout.menus || !state.ready
     titlebar.classList.toggle('no-border', !state.ready)
@@ -286,8 +260,6 @@ const SCRIPT = `
     root.dataset.ready = state.ready ? '1' : '0'
     root.dataset.maximized = state.maximized ? '1' : '0'
     root.dataset.fullscreen = state.fullScreen ? '1' : '0'
-    root.dataset.goBack = state.canGoBack ? '1' : '0'
-    root.dataset.goForward = state.canGoForward ? '1' : '0'
     if (state.ready) { splash.hidden = true }
   }
 
@@ -297,8 +269,6 @@ const SCRIPT = `
     for (var i = 0; i < buttons.length; i += 1) { buttons[i].setAttribute('aria-expanded', 'false') }
   }
 
-  back.addEventListener('click', function () { api.navigate('back') })
-  forward.addEventListener('click', function () { api.navigate('forward') })
   // 原生菜单关闭时主进程会回调（见 window.ts），但那条链路依赖 Electron 的 popup 回调；
   // 这里再加两道本地兜底，保证标记不会因为回调没回来而永久停在"展开"。
   window.addEventListener('blur', resetMenus)
@@ -380,18 +350,6 @@ export function shellPageHtml(options: ShellPageOptions): string {
         <circle cx="12" cy="12" r="3.4" fill="currentColor"/>
       </svg>
     </span>
-  </span>
-  <span class="tb-group">
-    <button id="nav-back" class="tb-btn" type="button" disabled aria-label="${escapeHtml(options.backLabel)}" title="${escapeHtml(options.backLabel)}">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M9.8 3.3 5.1 8l4.7 4.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </button>
-    <button id="nav-forward" class="tb-btn" type="button" disabled aria-label="${escapeHtml(options.forwardLabel)}" title="${escapeHtml(options.forwardLabel)}">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M6.2 3.3 10.9 8l-4.7 4.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </button>
   </span>
   <span id="menubar" role="menubar"${menus}></span>
   <span class="tb-drag"></span>

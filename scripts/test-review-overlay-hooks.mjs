@@ -302,6 +302,30 @@ const heldDetails = []
 globalThis.fetch = async (url, init) => {
   fetches.push({ url: String(url), body: init?.body })
   const target = String(url)
+  /**
+   * 左栏分支筛选的数据源：gitbar 的两条**权威 refs**只读路由（`for-each-ref`）。
+   *
+   * 夹具里刻意放带 `/` 的**本地**分支：它们必须出现在「本地」而不是「远程」——
+   * 分类由宿主的 `isRemote`（namespace）决定，界面不看名字里有没有斜杠（需求 11/15）。
+   */
+  if (target.includes('/dsh-desktop/gitbar/branches')) {
+    return {
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          branches: [
+            { name: 'feature/foo', isRemote: false, current: false, hash: 'c'.repeat(40) },
+            { name: 'master', isRemote: false, current: true, hash: 'a'.repeat(40) },
+            { name: 'release/1.6.4', isRemote: false, current: false, hash: 'd'.repeat(40) },
+            { name: 'origin/master', isRemote: true, current: false, hash: 'a'.repeat(40) },
+          ],
+          counts: { local: 3, remote: 1 },
+        }),
+    }
+  }
+  if (target.includes('/dsh-desktop/gitbar/tags')) {
+    return { ok: true, text: async () => JSON.stringify({ tags: [{ name: 'v1.6.4', sha: 'a'.repeat(40) }], tagCount: 1 }) }
+  }
   const payload = target.includes('/roots')
     ? {
         roots: ['C:\\Users\\Administrator', 'F:\\code\\projA', 'F:\\code\\projB', 'F:\\code\\projC'],
@@ -523,6 +547,12 @@ walk(drawer.tree, (node) => drawerNodes.push(node))
 
 check('抽屉是 aside', drawer.tree.type, 'aside')
 check('抽屉是 fixed 定位', drawer.tree.props?.style?.position, 'fixed')
+// CSS 上的宽度上限必须与 `panelWidthBounds` 一致。早先写的是 `calc(100vw - 64px)`，
+// 那是"默认 560px 固定宽度"时代的护栏：视口 480 时代码算出 480（占满、不溢出），而 CSS
+// 只给 416——屏幕上右侧留出一条缝，测试却断言 480。两边必须是同一个数（需求 35/63）。
+check('抽屉 CSS 上限就是视口本身', drawer.tree.props?.style?.maxWidth, '100vw')
+// 写死 min-width 会让窄视口横向溢出（用户连关闭按钮都点不到）；宽度只由 width 决定。
+is('抽屉没有写死 min-width', drawer.tree.props?.style?.minWidth, undefined)
 
 const resizer = drawerNodes.find((node) => node.props?.['data-review-resizer'] !== undefined)
 check('存在宽度手柄', resizer !== undefined, 'true')
@@ -545,26 +575,50 @@ check('宽度默认为视口的 80%', startWidth, Math.round(1400 * 0.8))
 // `globalThis.window.localStorage`——写成 `globalThis.localStorage` 会静默变成空操作
 // （可选链把它吞掉），断言随即变成"什么都没测"。
 const panelStorage = globalThis.window.localStorage
-check('2560 的屏幕默认 2048（不被像素上限夹住）', (() => {
+/** 在指定视口宽度下重新挂一次面板，返回它算出来的宽度。 */
+const widthAtViewport = (viewport, key, prepare) => {
   const saved = globalThis.window.innerWidth
-  globalThis.window.innerWidth = 2560
-  // 直接重挂面板：默认宽度是"读不到持久化值"时算出来的，因此先把持久化清掉。
-  panelStorage.removeItem('dsh.review.panelWidth')
-  const tree = render(panelElement.type, panelElement.props, 'panel-width-wide').tree
+  globalThis.window.innerWidth = viewport
+  if (typeof prepare === 'function') prepare()
+  const tree = render(panelElement.type, panelElement.props, key).tree
   globalThis.window.innerWidth = saved
   return widthOf(tree)
-})(), Math.round(2560 * 0.8))
+}
+check('2560 的屏幕默认 2048（不被像素上限夹住）', widthAtViewport(2560, 'panel-width-2560', () => {
+  // 直接重挂面板：默认宽度是"读不到持久化值"时算出来的，因此先把持久化清掉。
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+}), Math.round(2560 * 0.8))
+check('1920 的屏幕默认 1536', widthAtViewport(1920, 'panel-width-1920', () => {
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+}), Math.round(1920 * 0.8))
+// 小窗口：视口 600 时 80% 只有 480，而下限是 500 —— 取 500（需求 34/35/62）。
+check('600 的窗口取 500（下限生效，且不越界）', widthAtViewport(600, 'panel-width-600', () => {
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+}), 500)
+// 视口比下限还窄：抽屉占满视口，绝不横向溢出（需求 35）。
+check('480 的窗口占满 480（不因 min-width 溢出）', widthAtViewport(480, 'panel-width-480', () => {
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+}), 480)
+// 800 的窗口：80% = 640 > 500，因此取 640（下限没有把默认值拉低）。
+check('800 的窗口默认 640', widthAtViewport(800, 'panel-width-800', () => {
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+}), 640)
 
 // 有持久化宽度时**优先用持久化的值**，而不是每次都回到 80%。
-check('持久化宽度优先', (() => {
-  const saved = globalThis.window.innerWidth
-  globalThis.window.innerWidth = 1920
-  panelStorage.setItem('dsh.review.panelWidth', '1100')
-  const tree = render(panelElement.type, panelElement.props, 'panel-width-persist').tree
-  globalThis.window.innerWidth = saved
-  panelStorage.removeItem('dsh.review.panelWidth')
-  return widthOf(tree)
-})(), 1100)
+check('持久化宽度优先（v2 键）', widthAtViewport(1920, 'panel-width-persist', () => {
+  panelStorage.setItem('dsh.review.panelWidth.v2', '1100')
+}), 1100)
+// **旧键（v1）不再被使用**：它存的是旧默认值下用户拖出来的像素宽度，继续读它会让"默认 80%"
+// 永远不生效——那正是"源码写着 80%、打开还是那么窄"的原因（需求 37/38/63）。
+check('旧 dsh.review.panelWidth 被忽略（不迁移旧像素值）', widthAtViewport(1440, 'panel-width-legacy', () => {
+  panelStorage.removeItem('dsh.review.panelWidth.v2')
+  panelStorage.setItem('dsh.review.panelWidth', '680')
+}), Math.round(1440 * 0.8))
+check('视口变窄之后持久化值被夹回上限', widthAtViewport(1000, 'panel-width-clamp', () => {
+  panelStorage.setItem('dsh.review.panelWidth.v2', '1400')
+}), 800)
+panelStorage.removeItem('dsh.review.panelWidth')
+panelStorage.removeItem('dsh.review.panelWidth.v2')
 
 const press = (key) => {
   let prevented = false
@@ -1139,6 +1193,66 @@ console.log('=== 8b. 详情还没到手时，右栏已经在了 ===')
   const loadedNodes = await drain()
   check('   放行后出现文件行', rowsOf(loadedNodes, 'data-graph-file-row').length, 2)
   check('   放行后没有重复请求', detailCalls().length - beforeCount, 1)
+}
+
+console.log('')
+console.log('=== 9. 独立「提交图」入口已删除，但抽屉的 Log 一个字都没少（需求 A / N / 70）===')
+{
+  // 独立入口是两处槽位注册（`sidebar.panellist` 的图标 + `main` 的内容），它与**抽屉的 Log
+  // 页签**画的是同一个视图。用户在主界面左侧看到的是"多了一个重复入口"，因此两处都删掉了。
+  is('9) 不再注册 sidebar.panellist:git-graph', entries.has('sidebar.panellist:git-graph'), false)
+  is('   不再注册 main:git-graph', entries.has('main:git-graph'), false)
+  // 删入口 ≠ 删功能：抽屉 → Log 仍然渲染完整的提交图。这一节走的就是用户真实路径
+  // （打开抽屉 → 点 Log 页签），而不是直接渲染组件。
+  await mount('entry')
+  check('   点得中 Log 页签', await clickNow('data-review-tab', 'log'), 'true')
+  const nodes = await drain()
+  check('   Log 里仍然有提交图', rowsOf(nodes, 'data-graph-view').length, 1)
+  check(
+    '   三栏都在（分支筛选 / 提交列表 / 详情）',
+    rowsOf(nodes, 'data-graph-pane').map((n) => n.props['data-graph-pane']).join(','),
+    'tree,list,detail',
+  )
+  check('   分支筛选栏在（data-graph-tree）', rowsOf(nodes, 'data-graph-tree').length, 1)
+  // 左栏结构：本地 / 远程 / 标签三段，**没有单独 HEAD 段**；当前分支留在本地并带 ✓。
+  check(
+    '   分支栏三段（本地/远程/标签）',
+    rowsOf(nodes, 'data-graph-tree-section').map((n) => n.props['data-graph-tree-section']).join(','),
+    'local,remote,tags',
+  )
+  const treeRows = rowsOf(nodes, 'data-graph-tree-row')
+  const rowNames = treeRows.map((n) => n.props['data-graph-tree-row'])
+  has('   带 `/` 的本地分支出现在左栏', rowNames.includes('feature/foo') && rowNames.includes('release/1.6.4'))
+  has('   当前分支在本地并带 current 标记', treeRows.some((n) => n.props['data-graph-tree-row'] === 'master' && n.props['data-graph-tree-current'] === 'true'))
+  check('   当前分支行显示 ✓', textOf(treeRows.find((n) => n.props['data-graph-tree-row'] === 'master')), '\u2713 master')
+  check('   标签来自权威清单', rowNames.includes('v1.6.4'), 'true')
+  // 数据源是 gitbar 的两条只读路由（不是提交页里的 decoration）。
+  has('   清单取自 gitbar /branches', fetches.some((f) => f.url.includes('/dsh-desktop/gitbar/branches')))
+  has('   清单取自 gitbar /tags', fetches.some((f) => f.url.includes('/dsh-desktop/gitbar/tags')))
+}
+
+console.log('')
+console.log('=== 9b. 「与当前比较」仍然能打开抽屉的 Log（删入口不能删功能）===')
+{
+  // gitbar 的分支右键菜单通过 `window.__dshDesktopReviewCompare.open` 请求比较。以前它靠
+  // `ctx.layout.selectPanel('git-graph')` 切到独立面板；入口删掉之后必须改成"打开抽屉并切到
+  // Log"，否则用户点「与当前比较」会看起来什么都没发生。
+  const bridge = globalThis.window.__dshDesktopReviewCompare
+  is('9b) 比较桥仍然存在', typeof bridge?.open, 'function')
+  // 先把抽屉关掉并停在 Changes 页签，模拟"用户没打开过 Git 抽屉"。
+  panelStorage.removeItem('dsh.review.panelOpen')
+  await mount('compare-closed')
+  await clickNow('data-review-tab', 'changes')
+  await drain()
+  bridge.open({ workspace: 'F:\\code\\projC', a: 'v1.6.4', b: 'HEAD', fromBranch: 'v1.6.4' })
+  const nodes = await drain()
+  has('   抽屉被打开了', nodes.length > 0)
+  has('   Log 页签被选中', nodes.some((n) => n.props?.['data-review-tab'] === 'log' && n.props?.['aria-selected'] === true))
+  has('   比较视图出现', rowsOf(nodes, 'data-graph-compare').length === 1)
+  // 消费即清：再渲染几轮不会反复打开（用户的"关闭"必须生效）。
+  await clickNow('data-graph-compare-close')
+  const afterClose = await drain()
+  check('   关掉之后不再自己弹回来', rowsOf(afterClose, 'data-graph-compare').length, 0)
 }
 
 console.log('')

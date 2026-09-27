@@ -91,8 +91,6 @@ interface ShellState {
   ready: boolean
   maximized: boolean
   fullScreen: boolean
-  canGoBack: boolean
-  canGoForward: boolean
   theme: ShellTheme
   /**
    * 当前语言（规范 id，如 `zh-CN`）。
@@ -112,9 +110,6 @@ interface ShellState {
    * 通知页面，于是标题栏上永远挂着那份默认菜单。
    */
   menuRevision: number
-  /** 前进/后退按钮的无障碍文案（随语言变化，因此走状态推送而不是只在加载时给一次）。 */
-  backLabel: string
-  forwardLabel: string
 }
 
 /** 读取持久化的窗口几何。 */
@@ -145,9 +140,6 @@ export interface MainWindowOptions {
   splashTitle: string
   /** 加载页提示文案。 */
   splashHint: string
-  /** 导航按钮的无障碍文案（缺省时用英文兜底，测试可以省掉）。 */
-  backLabel?: string
-  forwardLabel?: string
   /**
    * 菜单栏来源。
    *
@@ -207,8 +199,6 @@ export function createMainWindow(options: MainWindowOptions): {
   /** Harness 官方界面所在的 webContents（标题栏下方的子视图）。 */
   appContents: WebContents
   navigate: (ready: ServerReady) => Promise<void>
-  /** 往历史里后退/前进。返回是否真的导航了（越界或跨 origin 时拒绝）。 */
-  navigateHistory: (direction: 'back' | 'forward') => boolean
   /** 更新加载页的提示文案（例如解包进度）。 */
   setSplashHint: (hint: string) => void
   setGitBadge: (badge: string | undefined) => void
@@ -222,14 +212,6 @@ export function createMainWindow(options: MainWindowOptions): {
   close: () => void
 } {
   const { userDataDir, iconPath, splashTitle, splashHint, menu } = options
-  /**
-   * 导航按钮的无障碍文案。
-   *
-   * 显式传入的优先（标题栏测试会固定文案），否则**每次读取当前语言**——语言可以在运行中
-   * 变化，因此这里不能像以前那样在创建窗口时取一次就存下来。
-   */
-  const backLabel = (): string => options.backLabel ?? t().titlebarBack
-  const forwardLabel = (): string => options.forwardLabel ?? t().titlebarForward
   const state = loadState(userDataDir)
   const custom = usesCustomTitleBar()
   const titlebarHeight = custom ? TITLEBAR_HEIGHT : 0
@@ -309,8 +291,6 @@ export function createMainWindow(options: MainWindowOptions): {
           menus: drawsMenusInTitleBar(),
           splashTitle,
           splashHint: hint,
-          backLabel: backLabel(),
-          forwardLabel: forwardLabel(),
           locale: currentLocale(),
           dark: theme.dark === true,
         }),
@@ -369,26 +349,13 @@ export function createMainWindow(options: MainWindowOptions): {
     timers.length = 0
   })
 
-  /** 当前可安全导航的历史方向：只认本应用 origin，避免退回加载页或旧端口。 */
-  const historyAvailability = (): { canGoBack: boolean; canGoForward: boolean } => {
-    const origin = appOrigin
-    if (origin === undefined || appContents.isDestroyed()) return { canGoBack: false, canGoForward: false }
-    const history = appContents.navigationHistory
-    const index = history.getActiveIndex()
-    const entries = history.getAllEntries()
-    const sameApp = (offset: number): boolean => {
-      const entry = entries[index + offset]
-      if (entry === undefined) return false
-      try {
-        return new URL(entry.url).origin === origin
-      } catch {
-        return false
-      }
-    }
-    return { canGoBack: history.canGoBack() && sameApp(-1), canGoForward: history.canGoForward() && sameApp(1) }
-  }
-
-  /** 一份完整状态：初值、推送、IPC 拉取都走它，避免三处各写一遍。 */
+  /**
+   * 一份完整状态：初值、推送、IPC 拉取都走它，避免三处各写一遍。
+   *
+   * 这里**没有**前进/后退的可用性：那两个按钮已经从标题栏删除（需求 H），连同
+   * `navigateHistory` / `shell-navigate` / `canGoBack` / `canGoForward` 一起清理。
+   * Harness 页面自己的路由与浏览器历史不受影响——我们只是不再替它驱动历史导航。
+   */
   const currentState = (): ShellState => ({
     platform: process.platform,
     height: titlebarHeight,
@@ -397,15 +364,12 @@ export function createMainWindow(options: MainWindowOptions): {
     ready: appVisible,
     maximized: window.isMaximized(),
     fullScreen: window.isFullScreen(),
-    ...historyAvailability(),
     theme,
-    // 语言与它的两个按钮文案都是**当前值**：语言在运行中会变（见 index.ts 的 locale 监听），
-    // 标题栏据此写对 <html lang> 并重新取菜单按钮。
+    // 语言是**当前值**：它在运行中会变（见 index.ts 的 locale 监听），标题栏据此写对
+    // <html lang> 并重新取菜单按钮。
     locale: currentLocale(),
     // 菜单版本：页面拿它判断"菜单按钮要不要重新拉一次"（见 ShellState.menuRevision）。
     menuRevision: menu?.revision?.() ?? 0,
-    backLabel: backLabel(),
-    forwardLabel: forwardLabel(),
   })
 
   /** 推一次完整状态给标题栏页面。 */
@@ -472,9 +436,6 @@ export function createMainWindow(options: MainWindowOptions): {
     event.preventDefault()
     window.setTitle(title)
   })
-  // 历史可用性会随页面内导航变化；导航结束后刷新标题栏按钮状态。
-  appContents.on('did-navigate', () => publishState())
-  appContents.on('did-navigate-in-page', () => publishState())
 
   // 窗口几何变化时子视图必须跟着重排（并在状态变化后补排，见 settleLayout）。
   window.on('resize', settleLayout)
@@ -532,16 +493,6 @@ export function createMainWindow(options: MainWindowOptions): {
     ipcMain.handle(channel, listener)
   }
 
-  /** 真实的 history 导航，带 origin 白名单。 */
-  const navigateHistory = (direction: 'back' | 'forward'): boolean => {
-    const availability = historyAvailability()
-    if (direction === 'back' && !availability.canGoBack) return false
-    if (direction === 'forward' && !availability.canGoForward) return false
-    if (direction === 'back') appContents.navigationHistory.goBack()
-    else appContents.navigationHistory.goForward()
-    return true
-  }
-
   handle('dsh-desktop:shell-state', () => currentState())
   handle('dsh-desktop:shell-menu', () => {
     try {
@@ -558,10 +509,6 @@ export function createMainWindow(options: MainWindowOptions): {
       const opened = menu?.open(index, point, () => resolve()) ?? false
       if (!opened) resolve()
     })
-  })
-  handle('dsh-desktop:shell-navigate', (_event, direction) => {
-    if (direction !== 'back' && direction !== 'forward') return false
-    return navigateHistory(direction)
   })
   handle('dsh-desktop:shell-focus-app', () => {
     if (!appContents.isDestroyed()) appContents.focus()
@@ -654,7 +601,6 @@ export function createMainWindow(options: MainWindowOptions): {
       publishState()
       show()
     },
-    navigateHistory,
     setSplashHint: (hint: string): void => {
       if (window.isDestroyed() || navigated) return
       pendingHint = hint

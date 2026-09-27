@@ -107,16 +107,37 @@ const COMMIT_FILES_MAX = 2000
  */
 const SAFE_PATH_PATTERN_GRAPH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]{1,1024}$/u
 
+/** 三个引用命名空间。分类**只**看它们，绝不再看"名字里有没有 `/`"。 */
+const REF_HEADS_PREFIX = 'refs/heads/'
+const REF_REMOTES_PREFIX = 'refs/remotes/'
+const REF_TAGS_PREFIX = 'refs/tags/'
+
 /**
  * 从 `git log` 的 `%D` 字段解析出装饰信息（分支、标签、HEAD）。
  *
- * git 在这里给出的是 `HEAD -> main, origin/main, tag: v1.0.0` 这样的文本，因此必须解析；
- * 而它是**稳定的机器可读格式**（`%D` 的文档明确列出了这几种前缀），与 `%(upstream:track)`
- * 那种"给人看的中文括号"不同。逐个前缀判定：
- *   `HEAD -> x`  当前分支
- *   `tag: x`     标签
- *   `origin/x`   远端分支（含 `/` 且不是 tag）
- *   其余         本地分支
+ * ## 必须配合 `--decorate=full`
+ *
+ * `%D` 的输出形状取决于 `--decorate` 的模式：加 `--decorate=full` 之后给的是**完整引用名**
+ * （实测）：
+ *
+ *     HEAD -> refs/heads/master, tag: refs/tags/v1.6.4, refs/remotes/origin/master, refs/remotes/origin/HEAD
+ *
+ * 于是分类只看 namespace：`refs/heads/*` = 本地分支，`refs/remotes/*` = 远端跟踪引用，
+ * `refs/tags/*` = 标签，显示时再按各自前缀 strip（`refs/heads/feature/foo` → `feature/foo`）。
+ *
+ * ## 这里曾经错在哪
+ *
+ * 旧实现是 `kind: piece.includes('/') ? 'remote' : 'branch'`——**用斜杠猜远端**。而
+ * `feature/foo`、`release/1.6.4`、`bugfix/windows/path` 都是合法的**本地分支**，它们全被判成
+ * 远端分支：界面上"远程"那一栏混进一堆本地分支，而"本地"一栏又空着——用户看到的就是
+ * "我的本地分支没取到"。分支名里的 `/` 只是命名习惯，与它属于哪个 namespace 毫无关系。
+ *
+ * ## 短名兜底：不猜
+ *
+ * 万一 `--decorate=full` 没生效（旧 git、或将来有人把参数改回去），`%D` 只给短名，而短名里
+ * `feature/foo`（本地）与 `origin/foo`（远端）**同形、无法可靠区分**。这时一律标成
+ * `kind: 'ref'`：渲染层把它当普通徽标显示，**绝不**进"本地 / 远程 / 标签"任何一栏——
+ * 宁可少一个颜色，也不要给出一个错的分类。`HEAD` / `HEAD -> x` / `tag: x` 三种前缀仍然认。
  *
  * @param decoration - `%D` 的原文。
  * @returns `{ refs: Array<{name, kind, isHead}>, headBranch, localBranches, remoteBranches, tags }`。
@@ -124,11 +145,41 @@ const SAFE_PATH_PATTERN_GRAPH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]{1,1024}$
 function parseDecoration(decoration) {
   const refs = []
   const raw = typeof decoration === 'string' ? decoration.trim() : ''
+
+  /**
+   * 把一个引用名归类并按 namespace 取出短名。
+   * @param rawName - 完整引用名（`refs/heads/x`）或无法判断的短名（`feature/foo`）。
+   * @param isHead - 是不是当前分支（`HEAD -> …`）。
+   * @param isTag - 是不是 `tag: ` 前缀。
+   * @returns `{ name, kind, isHead }`；符号引用（远端命名空间下以 `/HEAD` 结尾的那个）返回 null
+   *   （不显示）。
+   */
+  const classify = (rawName, isHead, isTag) => {
+    const name = String(rawName ?? '').trim()
+    if (name === '') return null
+    if (isTag || name.startsWith(REF_TAGS_PREFIX)) {
+      return { name: name.startsWith(REF_TAGS_PREFIX) ? name.slice(REF_TAGS_PREFIX.length) : name, kind: 'tag', isHead: false }
+    }
+    if (name.startsWith(REF_HEADS_PREFIX)) {
+      return { name: name.slice(REF_HEADS_PREFIX.length), kind: 'branch', isHead: isHead === true }
+    }
+    if (name.startsWith(REF_REMOTES_PREFIX)) {
+      const short = name.slice(REF_REMOTES_PREFIX.length)
+      // 远端 `origin/HEAD` 是**符号引用**，它不是一个分支（与 gitbar 的 listBranches 同一条规则：
+      // 那里靠 `%(symref)` 跳过）。让它和 `origin/master` 并排显示会让人以为它是两条远端分支。
+      if (short.endsWith('/HEAD')) return null
+      return { name: short, kind: 'remote', isHead: false }
+    }
+    // 短名：不猜 namespace（见函数头）。
+    return { name, kind: 'ref', isHead: isHead === true }
+  }
+
   for (const part of raw.split(',')) {
     const piece = part.trim()
     if (piece === '') continue
     if (piece.startsWith('HEAD -> ')) {
-      refs.push({ name: piece.slice('HEAD -> '.length), kind: 'branch', isHead: true })
+      const entry = classify(piece.slice('HEAD -> '.length), true, false)
+      if (entry !== null) refs.push(entry)
       continue
     }
     if (piece === 'HEAD') {
@@ -137,10 +188,12 @@ function parseDecoration(decoration) {
       continue
     }
     if (piece.startsWith('tag: ')) {
-      refs.push({ name: piece.slice('tag: '.length), kind: 'tag', isHead: false })
+      const entry = classify(piece.slice('tag: '.length), false, true)
+      if (entry !== null) refs.push(entry)
       continue
     }
-    refs.push({ name: piece, kind: piece.includes('/') ? 'remote' : 'branch', isHead: false })
+    const entry = classify(piece, false, false)
+    if (entry !== null) refs.push(entry)
   }
 
   const head = refs.find((ref) => ref.isHead === true && ref.kind === 'branch')
@@ -181,6 +234,10 @@ async function readGraph(cwd, options) {
     // 缩写哈希在极端情况下会与另一条提交的前缀相同，那时图会连错线——而且只在很少见的
     // 仓库里出现，属于最难查的一类 bug。`%H` 本来就是完整的，这里是为了 `%p`。
     '--no-abbrev',
+    // `--decorate=full` **不能省**：`%D` 的输出形状由它决定，而 `parseDecoration` 现在靠
+    // **完整引用名**（`refs/heads/…`）分类。少了它 `%D` 只给短名，`feature/foo` 与
+    // `origin/foo` 同形，分类只能靠猜——那正是"带 `/` 的本地分支被当成远端"的来源。
+    '--decorate=full',
     `--max-count=${limit + 1}`,
     `--skip=${skip}`,
     '-M',
@@ -232,7 +289,8 @@ async function readGraph(cwd, options) {
  */
 async function readCommit(cwd, revision) {
   const raw = await git(
-    ['show', '--no-patch', '--no-abbrev', '--pretty=format:%H%x1f%h%x1f%p%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%D%x1f%s%x1f%b', revision],
+    // 同 `readGraph`：`--decorate=full` 是 `parseDecoration` 按 namespace 分类的前提。
+    ['show', '--no-patch', '--no-abbrev', '--decorate=full', '--pretty=format:%H%x1f%h%x1f%p%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%D%x1f%s%x1f%b', revision],
     cwd,
   )
   const parts = raw.split('\x1f')

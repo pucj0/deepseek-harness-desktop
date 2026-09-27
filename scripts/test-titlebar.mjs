@@ -157,8 +157,6 @@ const html = shellPageHtml({
   menus: true,
   splashTitle: 'DeepSeek Harness',
   splashHint: '正在启动…',
-  backLabel: '返回',
-  forwardLabel: '前进',
   dark: false,
 })
 await check('窗口控制交给系统：标题栏里没有自绘的最小化/最大化/关闭', () => {
@@ -167,22 +165,34 @@ await check('窗口控制交给系统：标题栏里没有自绘的最小化/最
     assert.ok(!html.includes(forbidden), `标题栏里出现了自绘的窗口控制：${forbidden}`)
   }
 })
-await check('包含标题栏、菜单栏与导航按钮，并保留旧加载页 id', () => {
-  for (const id of ['id="titlebar"', 'id="menubar"', 'id="nav-back"', 'id="nav-forward"', 'id="startup-hint"']) {
+await check('包含标题栏与菜单栏，并保留旧加载页 id', () => {
+  for (const id of ['id="titlebar"', 'id="menubar"', 'id="startup-hint"']) {
     assert.ok(html.includes(id), `缺少 ${id}`)
   }
   assert.ok(html.includes('role="menubar"'))
 })
-await check('交互元素有 aria-label / title（无障碍）', () => {
-  assert.ok(html.includes('aria-label="返回"') && html.includes('title="返回"'))
-  assert.ok(html.includes('aria-label="前进"') && html.includes('title="前进"'))
+await check('「后退 / 前进」按钮已彻底删除（DOM 与样式都不在）', () => {
+  // 需求 H：只删 DOM 不够——按钮的样式规则、脚本引用与无障碍文案都要一起清掉，否则
+  // "菜单左边那两个按钮的宽度"会以 padding/margin 的形式留下来（菜单不左移）。
+  for (const forbidden of ['nav-back', 'nav-forward', 'backLabel', 'forwardLabel', 'goBack', 'goForward']) {
+    assert.ok(!html.includes(forbidden), `标题栏里仍有「后退 / 前进」的残留：${forbidden}`)
+  }
+  // 样式里连一条 `.tb-btn { … }` 规则都不该留下（注释里提到它是可以的，那是给后来人的说明）。
+  assert.ok(!/\.tb-btn\s*(?::[a-z-]+)?\s*\{/u.test(html), '样式里仍留着 .tb-btn 规则（死代码）')
+})
+await check('标题栏结构就是「图标 + 菜单 + 拖拽区」，中间没有空槽', () => {
+  const titlebar = /<div id="titlebar"[\s\S]*?<\/div>/.exec(html)?.[0] ?? ''
+  const groups = (titlebar.match(/class="tb-group"/gu) ?? []).length
+  assert.equal(groups, 1, `标题栏里应当只剩图标那一组，实际 ${groups} 组`)
+  assert.ok(titlebar.includes('id="menubar"'))
+  assert.ok(titlebar.includes('class="tb-drag"'))
 })
 await check('整条是拖拽区，交互元素逐个让开', () => {
   assert.ok(html.includes('-webkit-app-region: drag'))
   assert.ok(html.includes('-webkit-app-region: no-drag'))
   // 每个可点元素都必须自己声明 no-drag，否则"点菜单等于拖窗口"。
   const noDragRuleCount = (html.match(/no-drag/gu) ?? []).length
-  assert.ok(noDragRuleCount >= 4, `no-drag 规则偏少：${noDragRuleCount}`)
+  assert.ok(noDragRuleCount >= 2, `no-drag 规则偏少：${noDragRuleCount}`)
 })
 /** 绝对定位式的像素坐标（`left: 1134px` 这种）；`padding-left` 不算。 */
 const ABSOLUTE_PIXEL = /(?:^|[;{]\s*)(?:left|right|top)\s*:\s*-?\d+(?:\.\d+)?px/mu
@@ -211,8 +221,6 @@ await check('标题与提示按数据转义', () => {
     menus: true,
     splashTitle: '<script>alert(1)</script>',
     splashHint: '"><img src=x>',
-    backLabel: '<b>',
-    forwardLabel: '"',
     dark: true,
   })
   assert.ok(!evil.includes('<script>alert(1)</script>'))
@@ -227,8 +235,6 @@ await check('不自绘标题栏时整条隐藏（Linux 保留原生边框）', (
     menus: false,
     splashTitle: 'T',
     splashHint: 'H',
-    backLabel: 'B',
-    forwardLabel: 'F',
     dark: false,
   })
   assert.ok(native.includes('id="titlebar" hidden'))
@@ -245,8 +251,6 @@ await check('平台与主题反映在 html 属性上', () => {
     menus: false,
     splashTitle: 'T',
     splashHint: 'H',
-    backLabel: 'B',
-    forwardLabel: 'F',
     dark: true,
   })
   assert.ok(darkHtml.includes('data-theme="dark"'))

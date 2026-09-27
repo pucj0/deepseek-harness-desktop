@@ -1,21 +1,24 @@
-// Log 左栏分支树与中栏提交过滤的**解耦**回归。
+// Log 左栏（分支筛选）与中栏（提交列表）的**解耦**回归。
 //
 //   node scripts/test-review-graph-branch-filter.mjs
 //
-// 这一版修的两个实机现象：
-//   1. 点左栏某个分支之后，左栏被过滤得只剩那个分支附近的 refs——因为 `GraphBranchTree`
-//      的数据源是 `fresh.commits`，而它同时又是中栏（会被 `/graph { ref }` 替换）的数据。
-//   2. 点分支时整个 Log 先变成 loading 空白页再出现——因为 `reload` 无条件
-//      `update({ phase: 'loading' })`，而视图在 `phase === 'loading'` 时直接 return 整页。
+// 这一版里左栏与中栏的数据源是**两个完全不同的东西**，本文件钉的就是这条边界：
+//   * 左栏 = **权威 refs 清单**：gitbar 宿主的 `GET /branches` + `GET /tags`（`for-each-ref`）。
+//     分类按 namespace（`refs/heads` / `refs/remotes` / `refs/tags`），**不看名字里有没有
+//     `/`**——`feature/a`、`release/1.6.4` 都是本地分支。
+//   * 中栏 = `/graph` 的分页结果。提交行上的 `%D` 徽标只说明"这条提交上有哪些 ref"。
 //
 // 因此这里逐条钉住：
-//   * 左栏数据源是 `treeCommits`（只由未过滤响应写入），点任何 ref 都不变；
-//   * 中栏才跟着 `selectedRef` 变；再点同一个 = 取消过滤、回到全部；
-//   * 已有数据时切 ref 只置 `refreshing`：三栏 DOM（含左栏分支树）**全程存在**，不出现
-//     只剩 `graphLoading` 的白屏；
+//   * 左栏内容由清单决定：点任何 ref、翻任何一页都**不改变**它；
+//   * 更深历史里的 ref（`legacy/support`，只在第二页的装饰里出现）**不会**因此进入左栏
+//     ——左栏不是 decoration 聚合，`legacy/support` 在清单里没有就不该出现；
+//   * 当前分支留在「本地」并带 `✓`，**没有单独的 HEAD 分组**；
+//   * 再点同一个 ref = 取消过滤、回到全部；
+//   * 一轮挂载只拉一次清单：滚动 / 过滤 / 分页都不重发（需求 71）；
+//   * 已有数据时切 ref 只置 `refreshing`：三栏 DOM（含左栏）**全程存在**，不出现只剩
+//     `graphLoading` 的白屏；
 //   * 每个 ref 的首屏有缓存：切回来同一帧就显示，且不会因此把左栏弄乱；
-//   * 分页只追加到中栏；未过滤分页才顺带扩展左栏（左栏永远不会因为**过滤**分页而增减）；
-//   * 快速点 develop → master → feature/a 且响应乱序（master、develop、feature/a）时，
+//   * 快速点 develop → master → feature/a 且响应乱序（feature/a、master、develop）时，
 //     最终只采用 feature/a 那一份，旧响应不得覆盖。
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -167,7 +170,30 @@ globalThis.clearInterval = () => {}
 // ---- 假 host ---------------------------------------------------------------------
 const WORKSPACE = 'F:\\code\\projA'
 let seq = 0
-/** 造一条提交：`refs` 决定左栏分支树里会出现哪些行。 */
+
+/**
+ * 权威 refs 清单夹具（gitbar `/branches` + `/tags` 的响应）。
+ *
+ * 刻意放三个**带 `/` 的本地分支**与两个远程分支：分类必须由宿主的 `isRemote`（namespace）
+ * 决定。若界面退回"名字里有 `/` 就算远程"，`feature/a` / `release/1.6.4` 会跑到远程段去。
+ */
+const INVENTORY_BRANCHES = {
+  branches: [
+    { name: 'develop', isRemote: false, current: false, hash: 'd'.repeat(40) },
+    { name: 'feature/a', isRemote: false, current: false, hash: 'f'.repeat(40) },
+    { name: 'feature/b', isRemote: false, current: false, hash: 'e'.repeat(40) },
+    { name: 'master', isRemote: false, current: true, hash: 'a'.repeat(40) },
+    { name: 'release/1.6.4', isRemote: false, current: false, hash: 'c'.repeat(40) },
+    { name: 'origin/develop', isRemote: true, current: false, hash: 'd'.repeat(40) },
+    { name: 'origin/master', isRemote: true, current: false, hash: 'a'.repeat(40) },
+    // 符号引用：宿主已经过滤掉，这里再放一次是防止界面把它当成一个真分支显示出来。
+    { name: 'origin/HEAD', isRemote: true, current: false, hash: 'a'.repeat(40) },
+  ],
+  counts: { local: 5, remote: 2 },
+}
+const INVENTORY_TAGS = { tags: [{ name: 'v1.6.4', sha: 'a'.repeat(40) }], tagCount: 1 }
+
+/** 造一条提交：`refs` 是这条提交上的 `%D` 徽标（与左栏清单是两回事）。 */
 const commit = (hash, subject, refs) => ({
   hash,
   short: hash.slice(0, 7),
@@ -181,7 +207,7 @@ const commit = (hash, subject, refs) => ({
 })
 
 const c = (name, refs) => commit((name + '0'.repeat(40)).slice(0, 40), `subject ${name}`, refs)
-/** 未过滤（`ref: ''`）：一次就能看到全部六个 ref。 */
+/** 未过滤第一页。 */
 const ALL_PAGE_1 = {
   isRepo: true,
   branch: 'master',
@@ -195,17 +221,17 @@ const ALL_PAGE_1 = {
     c('a6', ['origin/develop']),
   ],
 }
-/** 未过滤的第二页：带出一个**新**分支（未过滤分页扩展左栏是特性）。 */
-const ALL_PAGE_2 = { isRepo: true, branch: 'master', hasMore: false, commits: [c('a7', ['feature/c'])] }
+/**
+ * 未过滤第二页：带一个**只在装饰里出现**的 ref（`legacy/support`）。
+ *
+ * 它在权威清单里**不存在**，因此绝不该出现在左栏——这正是"左栏是清单、不是 decoration
+ * 聚合"的判据（需求 12/17）。
+ */
+const ALL_PAGE_2 = { isRepo: true, branch: 'master', hasMore: false, commits: [c('a7', ['legacy/support'])] }
 /** 过滤页：rows 数量各不相同，便于断言"中栏换成了哪一份"。 */
 const PAGES = {
-  develop: {
-    isRepo: true,
-    branch: 'develop',
-    hasMore: true,
-    commits: [c('d1', ['develop']), c('d2', ['develop'])],
-  },
-  'develop+80': { isRepo: true, branch: 'develop', hasMore: false, commits: [c('d3', ['develop'])] },
+  develop: { isRepo: true, branch: 'develop', hasMore: true, commits: [c('d1', ['develop']), c('d2', ['develop'])] },
+  'develop+2': { isRepo: true, branch: 'develop', hasMore: false, commits: [c('d3', ['develop'])] },
   master: { isRepo: true, branch: 'master', hasMore: false, commits: [c('m1', ['master']), c('m2', ['master']), c('m3', ['master'])] },
   'feature/a': { isRepo: true, branch: 'feature/a', hasMore: false, commits: [c('f1', ['feature/a'])] },
 }
@@ -215,7 +241,7 @@ const PAGES_BY_KEY = new Map([
   [pageKey('', 0), ALL_PAGE_1],
   [pageKey('', 6), ALL_PAGE_2],
   [pageKey('develop', 0), PAGES.develop],
-  [pageKey('develop', 2), PAGES['develop+80']],
+  [pageKey('develop', 2), PAGES['develop+2']],
   [pageKey('master', 0), PAGES.master],
   [pageKey('feature/a', 0), PAGES['feature/a']],
 ])
@@ -223,9 +249,20 @@ const PAGES_BY_KEY = new Map([
 /** 挂起某个页的响应：`held.get(key)` 是一个待放行函数数组。 */
 const held = new Map()
 const graphRequests = []
+/** 清单请求（`/branches` + `/tags`）：用来断言"一轮挂载只拉一次"（需求 71）。 */
+const inventoryRequests = []
 globalThis.fetch = async (url, init) => {
+  const target = String(url)
+  if (target.includes('/dsh-desktop/gitbar/branches')) {
+    inventoryRequests.push({ route: 'branches', url: target })
+    return { ok: true, text: async () => JSON.stringify(INVENTORY_BRANCHES) }
+  }
+  if (target.includes('/dsh-desktop/gitbar/tags')) {
+    inventoryRequests.push({ route: 'tags', url: target })
+    return { ok: true, text: async () => JSON.stringify(INVENTORY_TAGS) }
+  }
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
-  const route = String(url).slice(String(url).indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
+  const route = target.slice(target.indexOf('/dsh-desktop/review/') + '/dsh-desktop/review/'.length).split('?')[0]
   if (route !== 'graph') return { ok: true, text: async () => JSON.stringify({ isRepo: true }) }
   const ref = typeof body?.ref === 'string' ? body.ref : ''
   const skip = Number(body?.skip ?? 0)
@@ -307,6 +344,26 @@ async function drain(passes = 8) {
 /** 左栏的行名（按渲染顺序）。 */
 const treeRows = (nodes) => rowsOf(nodes, 'data-graph-tree-row').map((n) => n.props['data-graph-tree-row'])
 const treeSelected = (nodes) => rowsOf(nodes, 'data-graph-tree-row').filter((n) => n.props['aria-selected'] === true).map((n) => n.props['data-graph-tree-row'])
+/**
+ * 左栏按**分段**收窄的行名。
+ *
+ * `collectHostNodes` 把宿主元素拍平成一个列表，但**保留文档顺序**，而三段是按
+ * local → remote → tags 顺序渲染的，因此"最近遇到的分段标记"就是这一行的归属。
+ */
+const rowsBySection = (nodes) => {
+  const out = { local: [], remote: [], tags: [] }
+  let current = ''
+  for (const node of nodes) {
+    const section = node.props?.['data-graph-tree-section']
+    if (section !== undefined) {
+      current = section
+      continue
+    }
+    const row = node.props?.['data-graph-tree-row']
+    if (row !== undefined && current !== '') out[current]?.push(row)
+  }
+  return out
+}
 const middleRows = (nodes) => rowsOf(nodes, 'data-graph-row').map((n) => String(n.props['data-graph-row']).slice(0, 2))
 /** 点左栏的一行。 */
 async function clickTree(name) {
@@ -330,15 +387,29 @@ const dump = (label, nodes) => {
       ` more=${rowsOf(nodes, 'data-graph-more').length} sel=${treeSelected(nodes).join(',') || '-'} reqs=${graphRequests.map((r) => r.key).join('|')}`,
   )
 }
-const FULL_TREE = 'master,develop,feature/a,feature/b,origin/master,origin/develop'
+/** 清单里的完整左栏（顺序 = 宿主返回顺序）。 */
+const LOCAL = 'develop,feature/a,feature/b,master,release/1.6.4'
+const REMOTE = 'origin/develop,origin/master'
+const TAGS = 'v1.6.4'
+const FULL_TREE = `${LOCAL},${REMOTE},${TAGS}`
 
-console.log('=== 0. 初始：左栏列出全部六个 ref，中栏是未过滤提交 ===')
+console.log('=== 0. 初始：左栏来自权威清单，中栏是未过滤提交 ===')
 {
   const nodes = await drain()
   dump('after-drain-2', nodes)
-  check('0) 左栏六个 ref', treeRows(nodes).join(','), FULL_TREE)
+  check('0) 左栏列出清单里的全部 ref', treeRows(nodes).join(','), FULL_TREE)
+  check('   分段只有 本地/远程/标签', rowsOf(nodes, 'data-graph-tree-section').map((n) => n.props['data-graph-tree-section']).join(','), 'local,remote,tags')
+  check('   本地段（带 `/` 的也是本地）', rowsBySection(nodes).local.join(','), LOCAL)
+  check('   远程段', rowsBySection(nodes).remote.join(','), REMOTE)
+  check('   标签段', rowsBySection(nodes).tags.join(','), TAGS)
+  check('   没有单独的 HEAD 分组', rowsOf(nodes, 'data-graph-tree-section').some((n) => n.props['data-graph-tree-section'] === 'head'), 'false')
+  const master = rowsOf(nodes, 'data-graph-tree-row').find((n) => n.props['data-graph-tree-row'] === 'master')
+  check('   当前分支在本地段里标了 current', master?.props['data-graph-tree-current'], 'true')
+  check('   当前分支行显示 ✓ 前缀', textOf(master), '\u2713 master')
+  has('   没有把 origin/HEAD 当成一个分支', treeRows(nodes).includes('origin/HEAD') === false)
   check('   中栏六条提交', middleRows(nodes).length, 6)
   check('   初始没有选中任何 ref', treeSelected(nodes).length, 0)
+  check('   清单来自 gitbar 的两条只读路由', inventoryRequests.map((r) => r.route).sort().join(','), 'branches,tags')
   check('   没有 hook 数量变化', hookOrderErrors.length, 0)
 }
 
@@ -348,10 +419,13 @@ console.log('=== 1. 点 develop：左栏完整不变，develop 高亮，中栏�
   has('1) 点得中 develop', await clickTree('develop'))
   const nodes = await drain()
   dump('after-drain-3', nodes)
-  check('   左栏仍然是完整六项', treeRows(nodes).join(','), FULL_TREE)
+  check('   左栏仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
+  check('   本地段照旧', rowsBySection(nodes).local.join(','), LOCAL)
   check('   只有 develop 被选中', treeSelected(nodes).join(','), 'develop')
   check('   中栏是 develop 的提交', middleRows(nodes).join(','), 'd1,d2')
   has('   三栏都在', threePanesAlive(nodes))
+  // 需求 71：过滤**不重拉清单**（清单与"看哪一页提交"无关）。
+  check('   过滤没有重发清单请求', inventoryRequests.length, 2)
   check('   没有 hook 数量变化', hookOrderErrors.length, 0)
 }
 
@@ -416,7 +490,7 @@ console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动左
 {
   has('5) 点得中「加载更多」', await (async () => {
     const nodes = await drain()
-  dump('after-drain-6', nodes)
+    dump('after-drain-6', nodes)
     const more = rowsOf(nodes, 'data-graph-more')[0]
     if (more === undefined) return false
     more.props.onClick()
@@ -425,29 +499,27 @@ console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动左
   const nodes = await drain()
   dump('after-drain-7', nodes)
   check('   中栏追加了 develop 的第二页', middleRows(nodes).join(','), 'd1,d2,d3')
-  check('   左栏仍然是完整六项', treeRows(nodes).join(','), FULL_TREE)
+  check('   左栏仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
   check('   仍然只有 develop 被选中', treeSelected(nodes).join(','), 'develop')
   const last = graphRequests.at(-1)
   check('   第二页带的是 develop 与 skip=2', `${last?.ref}/${last?.skip}`, 'develop/2')
 }
 
 console.log('')
-console.log('=== 6. 未过滤分页也只追加中栏：左栏永远只反映第一页 ===')
+console.log('=== 6. 未过滤分页：只追加中栏；装饰里的新 ref 不得混进左栏 ===')
 {
-  // 这一节的行为在需求里被**明确改过**，因此这里钉的是新契约而不是旧行为。
+  // 这一节钉的是**数据源分离**这条设计（需求 12/13/17）：
   //
-  // 旧行为：未过滤（ref === ''）时把并入的第二页一起写进 `treeCommits`，于是左栏会随着
-  // "加载更多"多出更深历史里的分支（feature/c）。它的代价是左栏内容会在**滚动**这种
-  // 与左栏无关的动作里自己变化，而且左栏那句"加载更多"提示永远亮着却并不是用户点出来的。
-  //
-  // 新契约（需求第 5 节）：**任何分页都不得修改 `treeCommits`**。左栏数据源固定为
-  // "未过滤的第一页"，因此这里既不多出 feature/c，左栏也不发生任何变化；中栏照常追加。
-  // 取舍：更深历史里的分支不再出现，彻底方案是 host 侧提供 refs 快照（见 README）。
+  // 左栏是权威 refs 清单，中栏是 `/graph` 分页。第二页的装饰里带了一个清单里没有的
+  // `legacy/support`——它必须**只**出现在提交行的徽标上，绝不能因此多出一行左栏。
+  // 旧实现把分页结果并进 `treeCommits` 再聚合 `commit.refs`，于是左栏会在滚动这种与它
+  // 无关的动作里自己长出新分支（而且那句"加载更多"是谁点的也说不清）。
   has('6) 取消过滤（再点 develop）', await clickTree('develop'))
   await drain()
+  const beforeMid = graphRequests.length
   has('   点得中「加载更多」', await (async () => {
     const nodes = await drain()
-  dump('after-drain-8', nodes)
+    dump('after-drain-8', nodes)
     const more = rowsOf(nodes, 'data-graph-more')[0]
     if (more === undefined) return false
     more.props.onClick()
@@ -455,8 +527,12 @@ console.log('=== 6. 未过滤分页也只追加中栏：左栏永远只反映第
   })())
   const nodes = await drain()
   dump('after-drain-9', nodes)
-  check('   左栏没有多出无过滤第二页里的 feature/c', treeRows(nodes).join(','), FULL_TREE)
   check('   中栏也追加了那一条', middleRows(nodes).join(','), 'a1,a2,a3,a4,a5,a6,a7')
+  check('   左栏没有多出装饰里的 legacy/support', treeRows(nodes).join(','), FULL_TREE)
+  check('   本地段也没有多出来', rowsBySection(nodes).local.join(','), LOCAL)
+  has('   分页确实发了请求', graphRequests.length - beforeMid >= 1)
+  // 整个第六节（两次过滤 + 两次分页 + 若干轮渲染）都不该重拉清单。
+  check('   分页/渲染都没有重发清单请求', inventoryRequests.length, 2)
 }
 
 console.log('')
@@ -467,7 +543,8 @@ console.log('=== 7. 快速切换 + 乱序返回：最终只采用最后一次的
   // ——这正是"旧响应不得覆盖新结果"最容易出错的方向。
   for (const ref of ['develop', 'master', 'feature/a']) hold(pageKey(ref, 0))
   const nodes0 = await drain()
-  check('7) 重新挂载后左栏是完整六项', treeRows(nodes0).join(','), FULL_TREE)
+  check('7) 重新挂载后左栏是完整清单', treeRows(nodes0).join(','), FULL_TREE)
+  const invBefore = inventoryRequests.length
   has('   点得中 develop', await clickTree('develop'))
   await drain(1)
   has('   点得中 master', await clickTree('master'))
@@ -488,6 +565,7 @@ console.log('=== 7. 快速切换 + 乱序返回：最终只采用最后一次的
   check('   迟到的 master 响应没有覆盖', middleRows(afterMaster).join(','), 'f1')
   check('   迟到的 develop 响应也没有覆盖', middleRows(nodes).join(','), 'f1')
   has('   三栏都在', threePanesAlive(nodes))
+  check('   切 ref 期间没有重发清单请求', inventoryRequests.length - invBefore, 0)
 }
 
 console.log('')

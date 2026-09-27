@@ -64,8 +64,12 @@ try {
   await git(['commit', '-q', '-m', 'init'], repo)
   await git(['tag', 'v0.1.0'], repo)
 
-  // 分叉：feature 上两个提交，然后合并回 main —— 于是历史里有一个合并提交（两个父提交）。
-  await git(['switch', '-q', '-c', 'feature'], repo)
+  // 分叉：topic 上两个提交，然后合并回 main —— 于是历史里有一个合并提交（两个父提交）。
+  //
+  // 分支叫 `topic` 而不是 `feature`：git 不允许**同时**存在 `refs/heads/feature` 与
+  // `refs/heads/feature/foo`（一个是另一个的目录前缀），而本轮要用 `feature/foo` 做
+  // "带斜杠的本地分支"回归（需求 52/53）。
+  await git(['switch', '-q', '-c', 'topic'], repo)
   writeFileSync(join(repo, 'b.txt'), 'feature one\n')
   await git(['add', '.'], repo)
   await git(['commit', '-q', '-m', 'feature: one'], repo)
@@ -76,7 +80,7 @@ try {
   writeFileSync(join(repo, 'd.txt'), 'main side\n')
   await git(['add', '.'], repo)
   await git(['commit', '-q', '-m', 'main: side'], repo)
-  await git(['merge', '-q', '--no-ff', '--no-edit', 'feature'], repo)
+  await git(['merge', '-q', '--no-ff', '--no-edit', 'topic'], repo)
 
   // 用于"已跟踪改动"与"未跟踪文件"的两种状态。
   writeFileSync(join(repo, 'a.txt'), 'changed\n')
@@ -90,6 +94,21 @@ try {
   const rootHash = (await git(['rev-list', '--max-parents=0', 'HEAD'], repo)).trim()
   /** 宿主推导出的仓库根：`repositoryRoot` 的期望值（realpath，反斜杠风格）。 */
   const repoReal = realpathSync.native(repo)
+
+  /**
+   * 带 `/` 的**本地**分支 + 一个远端跟踪引用 + 一个符号远端 HEAD（需求 52/53/16）。
+   *
+   * 这三个本地分支名都必须被归到 `refs/heads/*`：它们以前会因为"名字里有斜杠"被判成远端
+   * 分支（于是「本地」一栏可能是空的，而「远程」里冒出一堆本地分支）。
+   * `legacy/support` 的尖端是**根提交**——第一页提交的 decoration 里不会出现它（需求 54）。
+   */
+  await git(['branch', 'feature/foo', rootHash], repo)
+  await git(['branch', 'release/1.6.4', rootHash], repo)
+  await git(['branch', 'bugfix/windows/path', rootHash], repo)
+  await git(['branch', 'legacy/support', rootHash], repo)
+  await git(['tag', 'v0.2.0'], repo)
+  await git(['update-ref', 'refs/remotes/origin/main', headFull], repo)
+  await git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'], repo)
 
   console.log('临时仓库:', repo)
   console.log(`  HEAD=${headShort} 合并提交数=${mergeCount}`)
@@ -179,10 +198,56 @@ try {
   // 首提交没有父提交。
   const rootCommit = commits.find((c) => c.parents.length === 0)
   checkTrue('   含无父提交的根提交', rootCommit !== undefined)
-  // refs：HEAD 指向 main，标签落在根提交上，feature 分支还指向它那两个提交。
+  // refs：HEAD 指向 main，标签落在根提交上，topic 分支还指向它那两个提交。
   checkTrue('   HEAD 那条带 headBranch=main', commits.some((c) => c.headBranch === 'main'))
   checkTrue('   根提交带标签 v0.1.0', commits.some((c) => c.tags.includes('v0.1.0')))
-  checkTrue('   feature 分支出现在 localBranches 里', commits.some((c) => c.localBranches.includes('feature')))
+  checkTrue('   topic 分支出现在 localBranches 里', commits.some((c) => c.localBranches.includes('topic')))
+
+  // ---- 分类只看 namespace（需求 52/53/16）------------------------------------
+  //
+  // 这是本轮修的 bug：旧实现用 `name.includes('/') ? 'remote' : 'branch'` 猜分类，于是
+  // `feature/foo` / `release/1.6.4` / `bugfix/windows/path` 全被判成**远端**分支。
+  {
+    const deco = await get('graph', '&limit=100')
+    /** 某条提交上某个 ref 的 kind。 */
+    const kindOf = (name) => {
+      for (const commit of deco.body.commits) {
+        const hit = (commit.refs ?? []).find((ref) => ref.name === name)
+        if (hit !== undefined) return hit.kind
+      }
+      return '(missing)'
+    }
+    // 三个本地分支都指向 HEAD，因此它们都出现在 HEAD 那条提交的 decoration 里。
+    check('4a) feature/foo 的 kind 是本地 branch', kindOf('feature/foo'), 'branch')
+    check('   release/1.6.4 的 kind 是本地 branch', kindOf('release/1.6.4'), 'branch')
+    check('   bugfix/windows/path 的 kind 是本地 branch', kindOf('bugfix/windows/path'), 'branch')
+    check('   origin/main 的 kind 是 remote', kindOf('origin/main'), 'remote')
+    check('   标签的 kind 是 tag', kindOf('v0.1.0'), 'tag')
+    // 符号引用 `refs/remotes/origin/HEAD` 不该以 `origin/HEAD` 的名字出现在徽标里（需求 16）。
+    const allRefNames = deco.body.commits.flatMap((c) => (c.refs ?? []).map((ref) => ref.name))
+    check('   origin/HEAD 不出现（符号引用被跳过）', allRefNames.includes('origin/HEAD'), false)
+    // refs 里的名字都是**短名**（strip 掉 namespace 前缀）。
+    checkTrue('   refs 里没有 refs/ 前缀', allRefNames.every((name) => !name.startsWith('refs/')))
+    // 分类不再看斜杠：远端集合里一个本地分支都不该有。
+    const remotes = deco.body.commits.flatMap((c) => c.remoteBranches ?? [])
+    check('4a) 远端集合里没有带斜杠的本地分支', remotes.filter((name) => ['feature/foo', 'release/1.6.4', 'bugfix/windows/path'].includes(name)).length, 0)
+    // `legacy/support` 的尖端是根提交：第一页（limit=3）里看不到它，但权威清单（gitbar 的
+    // `/branches`）必须仍然列出它——这正是"左栏不能从已加载提交聚合"的原因（需求 54）。
+    const page1Only = await get('graph', '&limit=3')
+    const inFirstPage = page1Only.body.commits.flatMap((c) => c.localBranches ?? [])
+    check('   legacy/support 不在第一页的 decoration 里（前提成立）', inFirstPage.includes('legacy/support'), false)
+    const branches = await (await fetch(`${base}/dsh-desktop/gitbar/branches?cwd=${encodeURIComponent(repo)}`)).json()
+    const names = (branches.branches ?? []).map((entry) => entry.name)
+    checkTrue('   权威清单里仍然有 legacy/support', names.includes('legacy/support'))
+    // 权威清单里的分类同样按 namespace：三个带斜杠的都是本地。
+    for (const name of ['feature/foo', 'release/1.6.4', 'bugfix/windows/path']) {
+      const entry = (branches.branches ?? []).find((item) => item.name === name)
+      check(`   权威清单里 ${name} isRemote=false`, entry?.isRemote, false)
+    }
+    check('   权威清单里 origin/main isRemote=true', (branches.branches ?? []).find((item) => item.name === 'origin/main')?.isRemote, true)
+    check('   权威清单里当前分支被标记', (branches.branches ?? []).find((item) => item.name === 'main')?.current, true)
+    check('   权威清单不列符号引用 origin/HEAD', names.includes('origin/HEAD'), false)
+  }
   // 每条提交都要有画图需要的字段。
   const first = commits[0]
   checkTrue('   有短哈希', /^[0-9a-f]{4,}$/u.test(first.short))
@@ -275,9 +340,9 @@ try {
 
   console.log('')
   console.log('=== 4. ref 筛选 ===')
-  const featureOnly = await get('graph', '&ref=feature')
+  const featureOnly = await get('graph', '&ref=topic')
   check('4) 200', featureOnly.status, 200)
-  checkTrue('   feature 只有自己那条线（提交数少于全量）', featureOnly.body.commits.length < total)
+  checkTrue('   topic 只有自己那条线（提交数少于全量）', featureOnly.body.commits.length < total)
   checkTrue('   不含合并提交', !featureOnly.body.commits.some((c) => c.parents.length === 2))
   // 不带 ref 时必须看全部分支，否则图上永远只有一个分支、看不到分叉。
   checkTrue('   全量视图里含 feature 的提交', commits.some((c) => c.subject === 'feature: two'))
@@ -437,26 +502,27 @@ try {
 
   console.log('')
   console.log('=== 10b. "在 N 个分支中"：真正的多分支可达 ===')
-  // feature 的尖端是**在 main 上创建的合并提交**，因此它本来就同时可达于
-  // feature / feature2（同一个提交两个名字）与 main。用一个"只属于一个分支"的提交
-  // 反而验不出参数顺序写反的 bug——那正是这条断言的用处：它要求三个名字都出现。
-  await git(['branch', 'feature2', 'feature'], repo)
-  const featureTip = (await git(['rev-parse', 'feature'], repo)).trim()
+  // topic 的尖端（`feature: two`）在合并之后可达于 topic / topic2（同一个提交两个名字）与
+  // main。用一个"只属于一个分支"的提交反而验不出参数顺序写反的 bug——那正是这条断言的用处：
+  // 它要求三个名字都出现。
+  await git(['branch', 'topic2', 'topic'], repo)
+  const featureTip = (await git(['rev-parse', 'topic'], repo)).trim()
   res = await get('commit-detail', `&revision=${featureTip}`)
   check('10b) 200', res.status, 200)
   check(
-    '   feature 尖端可达于三个分支（含两个同指一个提交的名字）',
+    '   topic 尖端可达于三个分支（含两个同指一个提交的名字）',
     res.body.containingBranches.slice().sort().join(','),
-    'feature,feature2,main',
+    'main,topic,topic2',
   )
-  // 根提交在合并之后可达于全部三个分支，且 `main` 在合并前就含它。
+  // 根提交可达于**全部**分支：合并之后 main 也含它，而后面为"带斜杠的本地分支"造的那几个
+  // 分支都指向根提交（需求 52），因此期望集合就是完整的分支名列表（按字母序）。
   check(
-    '   根提交可达于全部三个分支',
+    '   根提交可达于全部分支',
     (await get('commit-detail', `&revision=${rootHash}`)).body.containingBranches.slice().sort().join(','),
-    'feature,feature2,main',
+    'bugfix/windows/path,feature/foo,legacy/support,main,release/1.6.4,topic,topic2',
   )
-  // 只有 feature 走线才有的提交：可达于 feature / feature2，**不含 main 的走线**？不对——
-  // 它已被合并进 main，因此 main 也含它。反过来，`main: side` 那个提交不在 feature 上，
+  // 只有 topic 走线才有的提交：可达于 topic / topic2，**不含 main 的走线**？不对——
+  // 它已被合并进 main，因此 main 也含它。反过来，`main: side` 那个提交不在 topic 上，
   // 于是它只可达于 main —— 这一条才真正区分"两个方向"。
   const sideHash = (await git(['rev-list', '--max-count=1', '--grep=main: side', 'HEAD'], repo)).trim()
   checkTrue('   找到 main: side 提交', sideHash.length === 40)

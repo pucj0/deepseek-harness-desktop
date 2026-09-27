@@ -489,17 +489,61 @@ window.__ModuleLoader__.load({
     /** 常驻面板开关的持久化键（按应用而非按会话记忆）。 */
     const PANEL_KEY = 'dsh.review.panelOpen'
 
-    /** 抽屉宽度的持久化键。 */
-    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'
+    /**
+     * 抽屉宽度的持久化键（**v2**）。
+     *
+     * 为什么要换键而不是复用 `dsh.review.panelWidth`：那个键里存的是旧版本默认值下用户拖出来
+     * 的宽度（600 / 700 / 800…），而本版把默认值改成了视口的 80%。若继续读旧键，"默认 80%"
+     * 就永远不生效——用户看到的是"源码明明写着 80%，打开还是那么窄"。**旧像素值一律不迁移**：
+     * 它是在另一套默认值下做出的选择，把它当成新默认值的替代品是错的（需求 38）。
+     *
+     * 新键不存在时用 80%；用户手动拖过一次之后才写新键，之后一直尊重它。
+     */
+    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth.v2'
 
     /**
-     * 抽屉宽度的下限。
+     * 抽屉宽度占视口的比例（默认值与上限都是它）。
      *
-     * **刻意没有像素上限**：比例上限（视口 80%）本身就是"不能把主界面吃掉"的保护，
-     * 再叠一个固定像素数会让宽屏上的 80% 变成一句空话——2560 的屏幕算出来 2048，
-     * 却被 `PANEL_WIDTH_MAX = 1600` 夹回 62%。这里曾经有那个常量，已删除。
+     * 用比例而不是像素：这块抽屉要装下"文件列表 + 逐行差异"，像素宽度在 1366 的笔记本和
+     * 2560 的显示器上是完全不同的两件事。80% 仍然留出左侧主界面可见（知道自己在哪个项目），
+     * 与"点外部就关"一起构成"宽但不遮挡"。
      */
-    const PANEL_WIDTH_MIN = 320
+    const PANEL_WIDTH_RATIO = 0.8
+
+    /**
+     * 抽屉宽度的下限（px）。
+     *
+     * 500 而不是早先的 320：抽屉里是"分支树 + 提交图 + 详情"三栏，320px 时中间那栏只剩
+     * 100px 出头，提交标题被截得只剩几个字——那是"打开了但没法用"。
+     *
+     * **视口比它还窄时不做这个下限**（见 panelWidthBounds）：否则 `min-width: 500px` 会让
+     * 整个页面横向溢出，用户连关闭按钮都点不到（需求 35）。
+     */
+    const PANEL_WIDTH_MIN = 500
+
+    /**
+     * 抽屉宽度在某个视口下的**唯一**取值范围。
+     *
+     * 只有一个实现，是为了让"默认值 / 上限 / 下限"再也不各算各的：此前
+     * `panelWidthDefault()` 与 `panelWidthMax()` 各自夹一次边界，于是"默认 80%"与"上限
+     * min(1600, 80%)"能互相矛盾（宽屏上默认 2048 被夹回 1600）。initial、读持久化值、
+     * 拖动、窗口 resize、双击复位**全部**经过这里。
+     *
+     * @param viewport - 视口宽度（px）。
+     * @returns `{ min, max, default }`（px）。
+     */
+    function panelWidthBounds(viewport) {
+      const width = Number.isFinite(viewport) && viewport > 0 ? Math.round(viewport) : 1440
+      // 视口比最小宽度还窄（分屏、很小的窗口）：抽屉占满视口，绝不横向溢出。
+      if (width < PANEL_WIDTH_MIN) return { min: width, max: width, default: width }
+      const ratio = Math.max(PANEL_WIDTH_MIN, Math.round(width * PANEL_WIDTH_RATIO))
+      return { min: PANEL_WIDTH_MIN, max: ratio, default: ratio }
+    }
+
+    /** 当前视口宽度（拿不到 window 时按 1440 算，与测试环境一致）。 */
+    function viewportWidth() {
+      return typeof window === 'undefined' ? 1440 : window.innerWidth
+    }
 
     /** 键盘调整宽度时的步长（方向键）。 */
     const PANEL_WIDTH_STEP = 24
@@ -508,9 +552,16 @@ window.__ModuleLoader__.load({
     const TAB_SLOT = 'sidebar.right.pane.tab'
     const TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
 
-    /** 提交图的侧栏图标槽（list / root）与主区域内容槽（keyed / root）。 */
-    const PANEL_SLOT = 'sidebar.panellist'
-    const MAIN_SLOT = 'main'
+    /**
+     * 项目级 Git 抽屉的页签。
+     *
+     * `'changes' | 'log'`。抽屉是**唯一**的 Git 主界面：早先还有一个独立的「提交图」
+     * 侧栏入口（`sidebar.panellist` + `main` 两处注册）画同一个 `CommitGraphView`，与抽屉的
+     * Log 页签完全重复——用户在主界面左侧看到两个入口，点哪一个都是"提交图"。那个入口已经
+     * 删除，提交图只留在抽屉的 Log 页签里（需求 A/1-3）。
+     */
+    const TAB_CHANGES = 'changes'
+    const TAB_LOG = 'log'
 
     /** 标签类型标识：同时作为两个槽位的 key。 */
     const KIND = 'review-changes'
@@ -1123,18 +1174,17 @@ window.__ModuleLoader__.load({
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
       sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
       // ---- 提交图（主区域的独立面板）----
-      graphPanelLabel: '提交图',
       graphTitle: '提交图',
-      graphHead: 'HEAD（当前分支）',
       graphLocal: '本地',
       graphRemote: '远程',
       graphTags: '标签',
       graphNoCommits: '这个仓库还没有任何提交。',
       graphLoadMore: '加载更多',
       graphLoadingMore: '正在加载更多…',
-      // 左栏（分支树）的一句事实说明：它来自**最近加载的那一页**提交，更深历史里的分支
-      // 不会自动补进来（分页只追加中栏，见 loadMore）。
-      graphTreePartial: '分支来自已加载的提交；更早历史里的分支可能未列出。',
+      // 左栏（分支筛选）的两句状态说明：清单来自 gitbar 的 for-each-ref（权威），
+      // 因此"读不到"要明说，而不是让三段各显示一个 `—`（那会被读成"没有本地分支"）。
+      graphTreeLoading: '正在读取分支清单…',
+      graphTreeError: '分支清单读取失败，点上方刷新重试。',
       graphLoading: '正在读取提交历史…',
       graphRefreshing: '正在加载…',
       graphRefreshFailed: '刷新失败：{detail}',
@@ -1616,18 +1666,17 @@ window.__ModuleLoader__.load({
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
       sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
       // ---- Commit graph (its own main-area panel) ----
-      graphPanelLabel: 'Commit graph',
       graphTitle: 'Commit graph',
-      graphHead: 'HEAD (current branch)',
       graphLocal: 'Local',
       graphRemote: 'Remote',
       graphTags: 'Tags',
       graphNoCommits: 'This repository has no commits yet.',
       graphLoadMore: 'Load more',
       graphLoadingMore: 'Loading more…',
-      // A statement of fact, not an affordance: the branch tree is built from the loaded
-      // page of commits, and paging only appends to the middle column.
-      graphTreePartial: 'Branches come from the loaded commits; earlier branches may be missing.',
+      // The left column reads an authoritative ref list (gitbar's for-each-ref), so
+      // "could not read it" must be said out loud instead of showing three empty sections.
+      graphTreeLoading: 'Reading the branch list…',
+      graphTreeError: 'Could not read the branch list. Use refresh above to retry.',
       graphLoading: 'Reading commit history…',
       graphRefreshing: 'Loading…',
       graphRefreshFailed: 'Refresh failed: {detail}',
@@ -1877,6 +1926,48 @@ window.__ModuleLoader__.load({
       return react.useSyncExternalStore(panelStore.subscribe, panelStore.get, () => false)
     }
 
+    /**
+     * 一次性意图：「把抽屉打开，并切到 Log 页签」。
+     *
+     * 存在的理由：跨插件的「与当前比较」（gitbar 的分支菜单）原先靠
+     * `ctx.layout.selectPanel('git-graph')` 把主区域切到**独立提交图面板**。那个入口已经删除
+     * （它与抽屉的 Log 页签重复，见 apply 里那段说明），比较视图改成在**抽屉的 Log 页签**里
+     * 打开——于是需要一种"把抽屉打开、并让它落在 Log 上"的机制。
+     *
+     * 为什么是**一次性意图**而不是持久化的页签偏好：用户自己停在 Changes 页签是**当前意图**，
+     * 不该被一次外部请求永久改掉。因此这里没有 localStorage，只有"挂起一次、被消费掉"。
+     */
+    const panelLogIntent = (() => {
+      const listeners = new Set()
+      let pending = false
+      return {
+        /** 请求"打开抽屉并切到 Log"（同时把抽屉打开）。 */
+        request: () => {
+          pending = true
+          panelStore.set(true)
+          for (const listener of listeners) listener()
+        },
+        /** 是否还有未被消费的请求。 */
+        peek: () => pending,
+        /** 消费掉请求（抽屉已经切到 Log）。 */
+        consume: () => {
+          pending = false
+        },
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    })()
+
+    /**
+     * 订阅「打开抽屉并切到 Log」的意图。
+     * @returns 是否有待消费的请求。
+     */
+    function usePanelLogIntent() {
+      return react.useSyncExternalStore(panelLogIntent.subscribe, panelLogIntent.peek, () => false)
+    }
+
     /** 「差异自动换行」偏好的持久化键。 */
     const DIFF_WRAP_KEY = 'dsh.review.diffWrap'
 
@@ -1986,13 +2077,16 @@ window.__ModuleLoader__.load({
      * 与开关一样存在模块级 + localStorage：面板在两个槽位下是两个组件实例，而宽度是
      * **用户对这块面板的偏好**，关掉再打开、甚至重启应用都该保持。
      *
-     * 上限随视口走：抽屉太宽会把主界面挤没，而"多宽算合适"取决于屏幕，因此不写死。
+     * 读值只认 **v2 键**（见 PANEL_WIDTH_KEY）；没有记录时用 `panelWidthBounds().default`
+     * （视口 80%），有记录时按同一套边界夹取。
      */
     const panelWidthStore = (() => {
       const read = () => {
         try {
           const stored = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
-          return Number.isFinite(stored) && stored > 0 ? stored : panelWidthDefault()
+          // `Number(null)` 是 0（有限值！），必须排除非正数——否则"没有记录"会被当成
+          // "用户想要 0 宽"（早先这里踩过：新用户第一次打开时抽屉贴到最窄）。
+          return Number.isFinite(stored) && stored > 0 ? clampPanelWidth(stored) : panelWidthDefault()
         } catch {
           return panelWidthDefault()
         }
@@ -2016,39 +2110,27 @@ window.__ModuleLoader__.load({
       }
     })()
 
-    /** 把任意宽度夹到允许区间。 */
+    /**
+     * 把任意宽度夹到当前视口允许的区间（拖动、resize、读取持久化值都走它）。
+     * @param value - 期望宽度（px）。
+     * @returns 夹取后的宽度（px）。
+     */
     function clampPanelWidth(value) {
-      const max = panelWidthMax()
-      return Math.round(Math.min(Math.max(value, PANEL_WIDTH_MIN), max))
+      const bounds = panelWidthBounds(viewportWidth())
+      const raw = Number.isFinite(value) ? value : bounds.default
+      return Math.round(Math.min(Math.max(raw, bounds.min), bounds.max))
     }
 
     /**
-     * 默认宽度：视口的 **80%**。
-     *
-     * 用比例而不是像素：这块抽屉要装下"文件列表 + 逐行差异"，像素宽度在 1366 的笔记本
-     * 和 2560 的显示器上是完全不同的两件事。
+     * 默认宽度：视口的 **80%**（视口比下限还窄时就是视口本身）。
      *
      * 从 50% 提到 80%：50% 下"文件列表 + 差异"两栏都太窄，逐行差异几乎每行都要横向滚动，
      * 用户于是每次都要先把抽屉拖宽——默认值应该是可用的值，而不是每次都要调的值。
-     * 80% 仍然留出左侧主界面可见（知道自己在哪个项目、侧栏内容还在），与"点外部就关"的
-     * 行为一起构成"宽但不遮挡"的默认体验。
+     *
+     * @returns 默认宽度（px）。
      */
     function panelWidthDefault() {
-      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      return clampPanelWidth(Math.round(viewport * 0.8))
-    }
-
-    /**
-     * 当前允许的最大宽度：视口的 **80%**，且**不设像素上限**。
-     *
-     * 这里曾经是 `min(1600, viewport * 0.8)`。那个 1600 与"默认 80%"是直接冲突的：
-     * 视口 2560 时默认值算出来是 2048，却被夹回 1600（只有 62%），于是"宽屏上默认不是
-     * 80%"变成一条只在宽屏上出现的怪现象。像素上限没有真正的保护对象——真正需要保护的是
-     * "左侧主界面不能被完全吃掉"，而那正好就是 80% 这个比例本身（留 20%）。
-     */
-    function panelWidthMax() {
-      const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      return Math.max(PANEL_WIDTH_MIN, Math.round(viewport * 0.8))
+      return panelWidthBounds(viewportWidth()).default
     }
 
     /**
@@ -4583,7 +4665,18 @@ window.__ModuleLoader__.load({
        * 在原位置手风琴式展开——文件一多就要滚很久才能看到历史，而历史一展开又把文件列表
        * 挤下去。两个页签把这两件事彻底分开。
        */
-      const [tab, setTab] = react.useState('changes')
+      const [tab, setTab] = react.useState(TAB_CHANGES)
+      /**
+       * 「打开抽屉并切到 Log」的外部请求（跨插件的「与当前比较」）。
+       *
+       * 消费即清（见 panelLogIntent）：用户随后自己切回 Changes 不会被它再拽回去。
+       */
+      const logRequested = usePanelLogIntent()
+      react.useEffect(() => {
+        if (logRequested !== true) return
+        setTab(TAB_LOG)
+        panelLogIntent.consume()
+      }, [logRequested])
       /**
        * 提交成功后用来把 Log 页签里的提交图顶一页新的。
        *
@@ -4769,7 +4862,11 @@ window.__ModuleLoader__.load({
             zIndex: 9998,
             // 宽度可拖动（见下面的 resizer）；上限随视口收窄，避免把主界面挤没。
             width: `${width}px`,
-            maxWidth: 'calc(100vw - 64px)',
+            // 上限就是**视口本身**（需求 35/63）：宽度已经由 `panelWidthBounds` 唯一的
+            // 一处算好了（视口 < 500 时就是 `100vw`），这里再减 64px 会让窄窗口里的抽屉
+            // 比"代码算出来的宽度"窄一截——屏幕上表现为右侧留出一条谁也点不到的缝，
+            // 而测试断言的是代码算出的值，两边对不上。
+            maxWidth: '100vw',
             display: 'flex',
             flexDirection: 'column',
             borderLeft: '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
@@ -4903,10 +5000,10 @@ window.__ModuleLoader__.load({
                   'data-review-tablist': '',
                   style: { display: 'flex', alignItems: 'center', gap: '2px', padding: '0 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 },
                 },
-                tabButton('changes', t('changesTab')),
-                tabButton('log', t('logTab')),
+                tabButton(TAB_CHANGES, t('changesTab')),
+                tabButton(TAB_LOG, t('logTab')),
               ),
-              tab === 'log'
+              tab === TAB_LOG
                 ? react.createElement(
                     'div',
                     {
@@ -12533,11 +12630,8 @@ window.__ModuleLoader__.load({
     }
 
     // =========================================================================
-    // 提交图（主区域的三栏视图）
+    // 提交图（项目级 Git 抽屉 → Log 页签的三栏视图）
     // =========================================================================
-
-    /** 提交图面板在 `sidebar.panellist` 与 `main` 两个槽位共用的 id。 */
-    const GRAPH_ID = 'git-graph'
 
     /**
      * 跨插件的「打开比较」请求（一次性的）。
@@ -12633,6 +12727,79 @@ window.__ModuleLoader__.load({
 
     /** 提交图上的取色：与泳道无关的常规色。 */
     const GRAPH_DIM = 'var(--dsw-alias-label-tertiary, #9aa0a6)'
+
+    /**
+     * 左栏「分支筛选」的数据源：**权威 refs 清单**。
+     *
+     * ## 为什么不能用提交里的 decoration 聚合
+     *
+     * 早先左栏是从"当前已加载的提交"里的 `%D` 装饰聚合出来的（`treeCommits → commit.refs`）。
+     * 那不是分支清单，只是"最近这一页提交上恰好有哪些 ref"：
+     *   * 第一页只有 `GRAPH_PAGE_SIZE`（80）条提交，而 `legacy/support` 这类分支的尖端可能
+     *     在 300 条之前——它在第一页里**根本不出现**，于是左栏里看不到这个真实存在的分支；
+     *   * 页面一过滤（点某个分支）左栏还会跟着变，用户会以为"分支只有这些"。
+     *
+     * 因此分支筛选改用**权威清单**：gitbar 宿主的 `GET /branches`（`for-each-ref refs/heads/
+     * refs/remotes/`，按 namespace 分类、跳过符号引用 `origin/HEAD`）与 `GET /tags`
+     * （`for-each-ref refs/tags`）。**不复制任何 git 逻辑**，只是换一个消费者。
+     *
+     * 它和"提交行上的徽标"是两个不同的数据源（需求 17）：徽标来自 `%D`，表达"这条提交上有
+     * 哪些 ref"；清单表达"这个仓库里有哪些 ref"。
+     */
+
+    /**
+     * 规范化 refs 清单（分支 + 标签）。
+     *
+     * host 给的东西一律当不可信输入：形状不对的条目直接丢掉，绝不把它带进渲染层
+     * （左栏与提交列表都在抽屉里，一次 TypeError 会把整个抽屉卸掉）。
+     *
+     * @param branchesPayload - `GET /branches` 的响应（`{ branches: [{name, isRemote, current, hash}] }`）。
+     * @param tagsPayload - `GET /tags` 的响应（`{ tags: [{name, sha}] }`）。
+     * @returns `{ current, local, remote, tags }`；每项都是 `{ name, hash, current }`。
+     */
+    function normalizeRefInventory(branchesPayload, tagsPayload) {
+      const local = []
+      const remote = []
+      let current = ''
+      for (const raw of asArray(branchesPayload?.branches)) {
+        if (raw === null || typeof raw !== 'object') continue
+        const name = asText(raw.name).trim()
+        if (name === '') continue
+        // `origin/HEAD` 是**符号引用**，不是可切换的分支（宿主已经用 `%(symref)` 过滤掉了）。
+        // 这里再挡一次：面板把 host 当不可信输入，少给一个字段比多出一行"能点但点了没反应
+        // 的分支"好得多——而且这条规则与宿主逐字一致（需求 16）。
+        if (name.endsWith('/HEAD')) continue
+        // 分类只看 host 给的 `isRemote`——它来自 `refs/heads/` 与 `refs/remotes/` 两个
+        // namespace，而不是"名字里有没有 `/`"。
+        const isRemote = raw.isRemote === true
+        const isCurrent = raw.current === true && isRemote === false
+        if (isCurrent) current = name
+        const row = { name, hash: asText(raw.hash).trim(), current: isCurrent }
+        ;(isRemote ? remote : local).push(row)
+      }
+      const tags = []
+      for (const raw of asArray(tagsPayload?.tags)) {
+        if (raw === null || typeof raw !== 'object') continue
+        const name = asText(raw.name).trim()
+        if (name === '') continue
+        // 标签的哈希字段在 gitbar 那边叫 `sha`；两种都认，免得一个改名就让列表全空。
+        tags.push({ name, hash: asText(raw.sha ?? raw.hash).trim(), current: false })
+      }
+      return { current, local, remote, tags }
+    }
+
+    /**
+     * 拉一次权威 refs 清单（gitbar 宿主的两个只读路由，并发发出去）。
+     * @param workspace - 工作区路径。
+     * @returns `{ current, local, remote, tags }`。
+     */
+    async function fetchRefInventory(workspace) {
+      const [branches, tags] = await Promise.all([
+        callGitbarGet('branches', { workspace }),
+        callGitbarGet('tags', { workspace }),
+      ])
+      return normalizeRefInventory(branches, tags)
+    }
 
     /** 把任意值规范成字符串（渲染层不许出现 `undefined.slice` 这类崩溃）。 */
     function asText(value) {
@@ -12831,39 +12998,36 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 分支树：HEAD / 本地 / 远程 / 标签 四段。
+     * 左栏：分支筛选（本地 / 远程 / 标签）。
      *
-     * 数据直接从**当前已加载的提交**里聚合出来，而不是再问一次 host：`%D` 已经带了每个
-     * ref 落在哪条提交上，聚合是纯本地计算。代价是"只加载了一页时，更早的分支看不见"，
-     * 因此每段末尾在还有下一页时给一个提示——比让用户以为"分支就这么多"要好。
+     * ## 数据源是**权威 refs 清单**，不是已加载的提交
      *
-     * @param props - `{ t, commits, loading, hasMore, ref, onPickRef }`。
+     * 清单来自 gitbar 的 `GET /branches` + `GET /tags`（`for-each-ref`），因此：
+     *   * 分类按 namespace（`refs/heads` / `refs/remotes` / `refs/tags`），**不看名字里有没有
+     *     `/`**——`feature/foo`、`release/1.6.4`、`bugfix/windows/path` 都是本地分支；
+     *   * 一个尖端在 300 条提交之前的分支照样在这里列出来（旧实现从第一页的 `%D` 聚合，
+     *     那种分支在第一页里根本不存在）；
+     *   * 点某个分支筛选、或者加载更多提交，都**不会**改变左栏的内容。
+     *
+     * ## 没有单独的 HEAD 分组
+     *
+     * 早先是 `HEAD / 本地 / 远程 / 标签` 四段，而"当前分支"被单独放进 HEAD 那一段之后，
+     * 「本地」在只有当前分支的仓库里就是空的（显示一个 `—`）——用户看到的是"我的本地分支
+     * 没取到"。现在当前分支**留在本地列表里**，前面加一个 ✓ 并高亮（需求 6/7）。
+     *
+     * 注意：这里刻意**不用 `ref` 命名"当前筛选的分支名"**——`ref` 是 React 在 createElement
+     * 里的保留键，它永远不会进 props（`props.ref` 恒为 undefined），而传字符串更会触发
+     * Minified React error #290。业务字段一律换名（`selectedRef`）。
+     *
+     * @param props - `{ t, refs, loading, error, selectedRef, onPickRef }`；
+     *   `refs` 是 `{ local, remote, tags }`（每项 `{ name, hash, current }`）或 null。
      * @returns React 元素。
      */
     function GraphBranchTree(props) {
-      // **不能用 `ref` 当这个"当前筛选的分支名"**：`ref` 是 React 在 createElement 里的保留键，
-      // 它永远不会进 props（`props.ref` 恒为 undefined），于是高亮判定 `ref === row.name`
-      // 永远为假——筛选生效后分支树上看不出选中的是哪一行；而传字符串更会触发
-      // "Element ref was specified as a string but no owner was set"（生产包里就是
-      // Minified React error #290）。业务字段一律换名。
-      const { t, commits, hasMore, selectedRef, onPickRef } = props
-      const head = []
-      const local = []
-      const remote = []
-      const tags = []
-      const seen = new Set()
-      for (const commit of commits) {
-        for (const entry of refListOf(commit)) {
-          const key = `${entry.kind}:${entry.name}`
-          if (seen.has(key)) continue
-          seen.add(key)
-          const row = { name: entry.name, hash: commit.hash, subject: commit.subject }
-          if (entry.isHead === true && entry.kind === 'branch') head.push(row)
-          else if (entry.kind === 'tag') tags.push(row)
-          else if (entry.kind === 'remote') remote.push(row)
-          else if (entry.kind === 'branch') local.push(row)
-        }
-      }
+      const { t, refs, loading, error, selectedRef, onPickRef } = props
+      const local = asArray(refs?.local)
+      const remote = asArray(refs?.remote)
+      const tags = asArray(refs?.tags)
 
       const section = (key, label, rows) =>
         react.createElement(
@@ -12883,12 +13047,15 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     key: `${key}:${row.name}`,
                     'data-graph-tree-row': row.name,
+                    // 当前分支：`✓` 前缀 + accent 色。用它表达"我在这个分支上"，
+                    // 而不是把它从本地列表里搬走（需求 7）。
+                    'data-graph-tree-current': row.current === true ? 'true' : 'false',
                     // 选中态同时用 ARIA 与一个 data 标记表达：ARIA 是给读屏与脚本用的稳定契约
                     // （视觉上只有背景色差异，靠样式断言很容易写成"看起来像"）。
                     'aria-selected': selectedRef === row.name,
                     'data-graph-tree-selected': selectedRef === row.name ? 'true' : 'false',
                     onClick: () => onPickRef(row.name),
-                    title: `${row.name}\n${textSlice(row.hash, 8)} ${row.subject}`,
+                    title: row.hash === '' ? row.name : `${row.name}\n${textSlice(row.hash, 8)}`,
                     style: {
                       display: 'block',
                       boxSizing: 'border-box',
@@ -12897,9 +13064,10 @@ window.__ModuleLoader__.load({
                       border: 'none',
                       borderRadius: '5px',
                       background: selectedRef === row.name ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
-                      color: selectedRef === row.name ? ACCENT : 'inherit',
+                      color: selectedRef === row.name || row.current === true ? ACCENT : 'inherit',
                       fontFamily: UI_FONT,
                       fontSize: uiPx(12.5),
+                      fontWeight: row.current === true ? 600 : 400,
                       textAlign: 'left',
                       whiteSpace: 'nowrap',
                       overflow: 'hidden',
@@ -12907,7 +13075,7 @@ window.__ModuleLoader__.load({
                       cursor: 'pointer',
                     },
                   },
-                  row.name,
+                  row.current === true ? `\u2713 ${row.name}` : row.name,
                 ),
               ),
         )
@@ -12915,20 +13083,25 @@ window.__ModuleLoader__.load({
       return react.createElement(
         'div',
         { 'data-graph-tree': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', fontFamily: UI_FONT } },
-        section('head', t('graphHead'), head),
+        // 清单还没到手 / 拉失败时给一句**事实说明**，而不是让三段各显示一个 `—`
+        // ——那正是"本地分支没取到"的观感来源。
+        loading === true && refs === null
+          ? react.createElement(
+              'div',
+              { 'data-graph-tree-loading': '', role: 'status', style: { padding: '10px', fontSize: uiPx(11.5), color: GRAPH_DIM } },
+              t('graphTreeLoading'),
+            )
+          : null,
+        error !== undefined && error !== ''
+          ? react.createElement(
+              'div',
+              { 'data-graph-tree-error': '', role: 'alert', title: error, style: { padding: '10px', fontSize: uiPx(11.5), color: REMOVED, lineHeight: 1.5 } },
+              t('graphTreeError'),
+            )
+          : null,
         section('local', t('graphLocal'), local),
         section('remote', t('graphRemote'), remote),
         section('tags', t('graphTags'), tags),
-        // 左栏**不是**"点这里加载更多"：它的数据源是未过滤的第一页（`treeCommits`），
-        // 分页只追加中栏（见 `loadMore`）。因此这里说的必须是一句**事实说明**，
-        // 而不是一个按不动的"加载更多"（早先就是这个歧义）。
-        hasMore
-          ? react.createElement(
-              'div',
-              { 'data-graph-tree-partial': '', style: { padding: '8px 10px', fontSize: uiPx(11.5), color: GRAPH_DIM, lineHeight: 1.5 } },
-              t('graphTreePartial'),
-            )
-          : null,
       )
     }
 
@@ -13523,8 +13696,16 @@ window.__ModuleLoader__.load({
     const GRAPH_DETAIL_WIDTH_KEY = 'dsh.review.graphDetailWidth'
     /** Diff Preview 高度的持久化键（px；没写过时用百分比默认值，见 graphDiffStore）。 */
     const GRAPH_DIFF_HEIGHT_KEY = 'dsh.review.graphDiffHeight'
-    /** 分栏宽度的取值范围。上限随视口收窄（见 clampGraphPane），避免把中间那栏挤没。 */
-    const GRAPH_TREE_MIN = 120
+    /**
+     * 左栏（分支筛选）的宽度范围。
+     *
+     * 默认 200：分支名一般十几到三十几个字符，200px 足够，**不动**它也不该占掉主区。
+     * 下限 160：再窄就只能看到 `feat…`，分支名之间分不出来。
+     * 上限 360：它只是筛选器，不是内容区；给到 420（早先的值）会让"提交图 + 详情"两边
+     * 同时变窄，而那两栏才是用户在看的东西。
+     */
+    const GRAPH_TREE_MIN = 160
+    const GRAPH_TREE_MAX = 360
     /** 右侧详情：默认 340（需求给的 320~360），下限 200。 */
     const GRAPH_DETAIL_MIN = 200
     const GRAPH_TREE_DEFAULT = 200
@@ -13555,11 +13736,12 @@ window.__ModuleLoader__.load({
       const min = which === 'tree' ? GRAPH_TREE_MIN : GRAPH_DETAIL_MIN
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
       // 上限按用途分开：
-      //   * 左栏（分支树）只放分支名，`viewport / 3` 足够，再宽只是空白；
+      //   * 左栏（分支筛选）是 `min(GRAPH_TREE_MAX, viewport / 3)`——固定上限保证它不会
+      //     把中间那栏挤没，随视口收窄则保证小窗口下三栏都还读得下去；
       //   * **右栏（详情）不再死卡 420**：完整 diff 已经移走，右栏只剩元信息与文件名，但
       //     长文件名与 commit body 仍然需要空间。因此允许用户主动向左拖到
       //     `min(600, viewport * 0.4)`——默认值（340）不变，只是上限放开了。
-      const max = which === 'tree' ? Math.min(420, Math.round(viewport / 3)) : Math.min(600, Math.round(viewport * 0.4))
+      const max = which === 'tree' ? Math.min(GRAPH_TREE_MAX, Math.round(viewport / 3)) : Math.min(600, Math.round(viewport * 0.4))
       const raw = Number.isFinite(value) ? value : (which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
       return Math.max(min, Math.min(Math.max(min, max), Math.round(raw)))
     }
@@ -14464,11 +14646,11 @@ window.__ModuleLoader__.load({
        * 也不会带着上一个项目的过滤条件去请求。
        *
        * 这里的字段分成**三组互不相同的用途**，混淆它们正是这一版要修的 bug：
-       *   * `treeCommits` / `treeHasMore` —— **左栏分支树**的数据源。只由 `ref === ''`
-       *     的响应写入，永远不受"按分支过滤"的影响；否则点一下 `develop`，中栏被替换成
-       *     过滤后的提交，左栏又从这些提交里聚合 refs，于是其它分支全部消失。
+       *   * `refs` / `refsLoading` / `refsError` —— **左栏分支筛选**的数据源：来自 gitbar 的
+       *     **权威 refs 清单**（`refs/heads` / `refs/remotes` / `refs/tags`），与"当前加载了
+       *     多少条提交"完全无关。因此一个尖端在 300 条之前的分支照样出现在左栏。
        *   * `commits` / `hasMore` —— **中栏提交列表**当前显示的数据（可能来自某个 ref 的
-       *     过滤结果）。分页只追加到这里，并且**不碰** `treeCommits`。
+       *     过滤结果）。分页只追加到这里。
        *   * `ref` / `selected` —— 过滤条件与当前选中的提交。
        *
        * `phase` 与 `refreshing` 也刻意分开：
@@ -14481,15 +14663,23 @@ window.__ModuleLoader__.load({
         phase: 'idle',
         refreshing: false,
         commits: [],
-        treeCommits: [],
+        refs: null,
+        refsLoading: false,
+        refsError: '',
         hasMore: false,
-        treeHasMore: false,
         // 分页（"加载更多"）自己的两个状态，与整页 `phase` / `refreshing` **刻意分开**：
         // 追加下一页绝不能把界面变回整页 loading（那会在滚到底时白屏一下），也不该复用
         // `refreshing`（那个字段的含义是"手上这份是上一次的结果，马上换掉"，与"往后面接
         // 一段"是两件事，混用会让列表被压暗）。
         loadingMore: false,
         loadMoreError: '',
+        /**
+         * 「自动补足」是否已被判定为无效（后端说还有更多、但一页什么都没给）。
+         *
+         * 一旦置位，自动补足就**再也不发请求**，避免 `hasMore === true` + 空页造成的无限
+         * 请求循环；手动「加载更多」按钮仍然可用（需求 30 / 32）。
+         */
+        autoFillStopped: false,
         error: '',
         refreshError: '',
         ref: '',
@@ -14501,11 +14691,13 @@ window.__ModuleLoader__.load({
         phase: 'loading',
         refreshing: false,
         commits: [],
-        treeCommits: [],
+        refs: null,
+        refsLoading: false,
+        refsError: '',
         hasMore: false,
-        treeHasMore: false,
         loadingMore: false,
         loadMoreError: '',
+        autoFillStopped: false,
         error: '',
         refreshError: '',
         ref: '',
@@ -14791,7 +14983,7 @@ window.__ModuleLoader__.load({
             return
           }
           if (result?.isRepo === false) {
-            update({ phase: 'notRepo', commits: [], treeCommits: [], hasMore: false, treeHasMore: false, refreshing: false })
+            update({ phase: 'notRepo', commits: [], hasMore: false, refreshing: false })
             return
           }
           const commits = result.commits ?? []
@@ -14801,13 +14993,13 @@ window.__ModuleLoader__.load({
             refreshing: false,
             loadingMore: false,
             loadMoreError: '',
+            // 新的一页（哪怕只是刷新）意味着"这一份列表重新开始了"：自动补足的停闸也一起复位。
+            autoFillStopped: false,
             error: '',
             refreshError: '',
             ref: filterRef,
             commits,
             hasMore,
-            // **左栏只在未过滤的响应上更新**：过滤结果绝不允许改写分支树的数据源。
-            ...(filterRef === '' ? { treeCommits: commits, treeHasMore: hasMore } : {}),
             // 选中的提交不在新结果里 → 清掉（右栏会回到"选一条提交"）。留着会出现
             // "列表里没有这一条、右栏却显示它的详情"。
             ...(prev.selected !== '' && !commits.some((commit) => commit.hash === prev.selected) ? { selected: '' } : {}),
@@ -14816,11 +15008,59 @@ window.__ModuleLoader__.load({
         [gate, workspace, update, refreshToken, writeCachedPage],
       )
 
+      /**
+       * 拉一次**权威 refs 清单**（左栏分支筛选的数据源）。
+       *
+       * 三条与 `reload` 一致的性质：按代际丢弃（切项目后回来的响应不算）、`slices: ['refs']`
+       * 独立于 `graph` 分片（因此分页/刷新不会把清单一起作废，反之亦然）、`coalesce` 同一时刻
+       * 只有一个请求在飞。
+       *
+       * **它只在需要时发**（需求 71）：挂载、`refreshToken` 变化（提交等外部事件）、写操作
+       * 成功之后（见 `refreshGraph`）。它不在 render 里、也不跟着每次滚动或每次过滤重发。
+       */
+      const loadRefs = react.useCallback(async () => {
+        if (workspace === undefined) return
+        const { ticket, promise } = gate.run('refs', () => fetchRefInventory(workspace), {
+          coalesce: true,
+          slices: ['refs'],
+        })
+        if (!gate.isCurrent(ticket)) return
+        update({ refsLoading: true, refsError: '' })
+        const outcome = await promise
+        if (!gate.accept(ticket)) return
+        if (!outcome.ok) {
+          const error = outcome.cause
+          update({
+            refsLoading: false,
+            refsError: String(error?.detail ?? error?.message ?? error),
+          })
+          return
+        }
+        update({ refs: outcome.value, refsLoading: false, refsError: '' })
+      }, [gate, workspace, update])
+
+      /**
+       * 一次"刷新这个视图"：**提交榜与 refs 清单都要重拉**。
+       *
+       * 所有会改变 refs 的写操作（建分支 / 建标记 / 重置 / 摘取 / 还原 / 交互式变基）成功
+       * 之后都走它，这样左栏不会停在写操作之前的清单上（需求 72）。
+       */
+      const refreshGraph = react.useCallback(() => {
+        void loadRefs()
+        void reload(fresh.ref)
+      }, [loadRefs, reload, fresh.ref])
+
       react.useEffect(() => {
         // 过滤条件与刷新信号变化都会重拉第一页。
         void reload(fresh.ref)
         // `fresh.ref` 与 `refreshToken` 一起构成"什么时候该重拉"。
       }, [reload, fresh.ref, refreshToken])
+
+      react.useEffect(() => {
+        // refs 清单**不跟着过滤条件走**（那只是换一页提交），只在挂载 / 外部刷新信号 /
+        // 换工作区（`loadRefs` 的依赖里带 workspace）时重拉。
+        void loadRefs()
+      }, [loadRefs, refreshToken])
 
       /**
        * 打开/刷新比较视图。
@@ -14883,7 +15123,8 @@ window.__ModuleLoader__.load({
             // `repositoryRoot` prop；而项目作用域是全局共享的，多仓库时它才是权威）。
             const result = await callGitbarRoute(route, { workspace, ...body })
             await gitSnapshots.invalidate(workspace).catch(() => undefined)
-            void reload(fresh.ref)
+            // 建分支 / 建标记 / 摘取 / 还原都会改变 refs：清单与提交榜一起刷新。
+            refreshGraph()
             const short = String(body?.short ?? body?.revision ?? '').slice(0, 7)
             // 冲突：说清"去哪儿继续"，而不是报一个"失败"。
             if (result?.conflicted === true) {
@@ -14909,7 +15150,7 @@ window.__ModuleLoader__.load({
             setMenuBusy(false)
           }
         },
-        [workspace, t, reload, fresh.ref],
+        [workspace, t, refreshGraph],
       )
 
       /**
@@ -14992,7 +15233,8 @@ window.__ModuleLoader__.load({
           // 分支位置变了：提交图与变更面板都要重取。
           await gitSnapshots.invalidate(workspace).catch(() => undefined)
           setResetResult({ ...result?.reset, subject: String(request.commit?.subject ?? '') })
-          void reload(fresh.ref)
+          // 分支被移动了：refs 清单（分支尖端）与提交榜都要重取。
+          refreshGraph()
           return result
         } catch (cause) {
           setResetBusy(false)
@@ -15000,7 +15242,7 @@ window.__ModuleLoader__.load({
           setResetPreviewError(String(error.detail ?? error.message))
           return undefined
         }
-      }, [resetRequest, workspace, resetMode, reload, fresh.ref])
+      }, [resetRequest, workspace, resetMode, refreshGraph])
 
       /**
        * 撤销这次重置：把分支移回重置之前的位置。
@@ -15106,7 +15348,7 @@ window.__ModuleLoader__.load({
             setRebasePlan(null)
             await gitSnapshots.invalidate(workspace).catch(() => undefined)
             await refreshRebaseStatus()
-            void reload(fresh.ref)
+            refreshGraph()
             /**
              * 提示挂在哪里取决于变基**还有没有在跑**：停在 edit 停点时挂横幅上，直接跑完时挂
              * 常驻提示行——横幅在变基结束那一刻就消失了，挂它上面等于什么都没说。
@@ -15132,14 +15374,14 @@ window.__ModuleLoader__.load({
               setRebaseNotice(t('rebaseConflictNotice'))
               await gitSnapshots.invalidate(workspace).catch(() => undefined)
               await refreshRebaseStatus()
-              void reload(fresh.ref)
+              refreshGraph()
               return
             }
             setRebaseBusy(false)
             setRebaseError(code === '' ? String(error.detail ?? error.message) : `${t('rebaseFailed', { detail: String(error.detail ?? error.message) })}`)
           }
         },
-        [workspace, rebasePlan, t, reload, fresh.ref, refreshRebaseStatus],
+        [workspace, rebasePlan, t, refreshGraph, refreshRebaseStatus],
       )
 
       /**
@@ -15163,7 +15405,8 @@ window.__ModuleLoader__.load({
             setRebaseBusy(false)
             await gitSnapshots.invalidate(workspace).catch(() => undefined)
             await refreshRebaseStatus()
-            void reload(fresh.ref)
+            // 继续 / 跳过 / 中止 / amend 都可能把分支推到新的提交上：清单一起刷。
+            refreshGraph()
             const notice = typeof describe === 'function' ? describe(result) : ''
             if (notice !== '') {
               // 变基还在跑 → 横幅；已经结束（完成 / 中止）→ 常驻提示行（横幅马上会消失）。
@@ -15196,7 +15439,7 @@ window.__ModuleLoader__.load({
             return undefined
           }
         },
-        [workspace, t, reload, fresh.ref, refreshRebaseStatus],
+        [workspace, t, refreshGraph, refreshRebaseStatus],
       )
 
       const onRebaseContinue = react.useCallback(() => {
@@ -15315,16 +15558,17 @@ window.__ModuleLoader__.load({
        * 追加下一页。
        *
        * 三条硬规则：
-       *   * 追加**只写 `commits`（中栏）**。`treeCommits`（左栏分支树）永远只由未过滤的
-       *     第一页写入——分页绝不能碰它。早先未过滤时会把并入的下一页一起写进 `treeCommits`
-       *     （本意是"让左栏看到更深历史里的分支"），但那条路有个更坏的后果：左栏的"加载
-       *     更多"提示会永远亮着、而它每次都不是用户点出来的，于是左栏内容会在滚动中悄悄
-       *     变化。现在左栏的语义被钉死为"最近 N 条提交里出现的 ref"，要完整分支列表得靠
-       *     host 侧的 refs 快照（见 `graphTreePartial` 的说明）。
+       *   * 追加**只写 `commits`（中栏）**。左栏是**权威 refs 清单**（`fresh.refs`），
+       *     与提交分页毫无关系——分页既不改它、也不需要它。早先未过滤时会把并入的下一页
+       *     一起写进 `treeCommits`（本意是"让左栏看到更深历史里的分支"），结果是左栏内容
+       *     在滚动中悄悄变化；现在两者彻底分开（见 GraphBranchTree）。
        *   * `prev.ref` 与本次请求的 ref 不一致时直接丢弃：用户已经切到别的 ref 了。
        *   * 同一 `ref + skip` 只允许一个请求在飞（`moreInFlight`）。只靠 state 挡不住：两次
        *     滚动事件在同一帧里读到的都是更新前的 `hasMore`/`commits.length`，会各发一次
        *     相同的请求。用 ref 是同步的，因此是真正的一次。
+       *
+       * **没有进展就停闸**（需求 30）：后端若回 `hasMore: true` 却一页都不给，自动补足会
+       * 无限请求下去。这里把它记进 `autoFillStopped`，此后只有手动按钮还能再试。
        */
       const moreInFlight = react.useRef('')
       const loadMore = react.useCallback(async () => {
@@ -15358,15 +15602,19 @@ window.__ModuleLoader__.load({
             return
           }
           const more = outcome.value?.commits ?? []
+          const hasMore = outcome.value?.hasMore === true
           update((prev) => {
             // 期间用户换了 ref：这一页属于上一个条件，丢弃。
             if (prev.ref !== filterRef) return {}
+            const stalled = more.length === 0 && hasMore
             return {
               commits: [...prev.commits, ...more],
-              hasMore: outcome.value?.hasMore === true,
+              hasMore,
               loadingMore: false,
               loadMoreError: '',
-              // 注意：**这里没有 `treeCommits`**。分页不写左栏（见上面的说明）。
+              // 有进展就解除停闸（用户手动点「加载更多」拿到数据之后，自动补足可以继续）；
+              // 没有进展且后端还说有更多 → 停闸，绝不无限请求。
+              autoFillStopped: stalled ? true : false,
             }
           })
         } finally {
@@ -15427,8 +15675,8 @@ window.__ModuleLoader__.load({
       /**
        * 距底多少像素内就自动追加下一页。
        *
-       * 320px 落在需求给的 200~400px 区间里：小到"用户确实滚到了底"，大到——行高 22px 的
-       * 情况下——大约还有 14 行没露出来时就提前发请求，因此正常情况下用户看不到"到底了
+       * 320px 落在需求给的 200~400px 区间里：小到"用户确实滚到了底"，大到——行高 24px 的
+       * 情况下——大约还有 13 行没露出来时就提前发请求，因此正常情况下用户看不到"到底了
        * 还要等"。触发必须幂等：滚动事件每帧都会来，靠 `loadMore` 内部的
        * `loadingMore` / `moreInFlight` 挡住重复请求，这里只负责"够近了就叫一次"。
        */
@@ -15436,13 +15684,95 @@ window.__ModuleLoader__.load({
         (event) => {
           const target = event.target
           setScrollTop(target.scrollTop)
-          setViewport(target.clientHeight)
+          // 滚动时顺手校准一次视口高度（尺寸变化主要由 ResizeObserver 负责，这里只是
+          // 零成本的第二次机会：某些环境下 ResizeObserver 不可用）。
+          const height = Number(target.clientHeight)
+          if (Number.isFinite(height) && height > 0) setViewport((prev) => (prev === Math.round(height) ? prev : Math.round(height)))
           const remaining = (target.scrollHeight ?? 0) - target.scrollTop - target.clientHeight
           if (remaining > GRAPH_LOAD_MORE_THRESHOLD) return
           void loadMore()
         },
         [loadMore],
       )
+
+      /**
+       * 真视口高度：**挂载后立刻量一次**，之后由 ResizeObserver 跟着变。
+       *
+       * 早先 `viewport` 的初值是 600，而它**只在 `onScroll` 里更新**。大窗口（Log 高度
+       * 1100px 以上）首次打开时，虚拟列表按 600px 算可见行数，于是下面一大片空白——用户
+       * 看到的是"提交图没画完"，而且**不滚一下永远不会自己补上**（需求 21 / 22）。
+       *
+       * 600 只是"还没有 DOM 可量"时的兜底（测试桩、首次 render），真实 DOM 一挂上就必须
+       * 被真实值覆盖。
+       */
+      const measureViewport = react.useCallback(() => {
+        const node = scrollRef.current
+        if (node === null || node === undefined) return
+        const height = Number(node.clientHeight)
+        if (!Number.isFinite(height) || height <= 0) return
+        const rounded = Math.round(height)
+        // 只有真的变了才 setState：拖动分栏时 ResizeObserver 会被高频调用。
+        setViewport((prev) => (prev === rounded ? prev : rounded))
+      }, [])
+
+      /**
+       * 观察滚动容器的尺寸变化。
+       *
+       * 这些操作都会改变它的高度：窗口最大化 / 缩放、抽屉 resize、Diff Preview 展开 / 收起 /
+       * 拖动、顶部横幅出现 / 消失。少了它，高度变大之后就必须等用户滚一下才会重算可见行数
+       * （而且那时也不会自动补数据）。
+       *
+       * 环境里没有 `ResizeObserver`（旧内核、测试桩）时退化成"跟着窗口 resize 走"：大屏
+       * 首次打开那一条已经由上面那次同步测量解决。
+       */
+      react.useEffect(() => {
+        measureViewport()
+        const node = scrollRef.current
+        const onWindowResize = () => measureViewport()
+        window.addEventListener('resize', onWindowResize)
+        if (node === null || node === undefined || typeof ResizeObserver === 'undefined') {
+          return () => window.removeEventListener('resize', onWindowResize)
+        }
+        const observer = new ResizeObserver(() => measureViewport())
+        observer.observe(node)
+        return () => {
+          observer.disconnect()
+          window.removeEventListener('resize', onWindowResize)
+        }
+        // 依赖里带上"这个节点什么时候才存在"：整页 loading / notRepo 时它还没渲染出来，
+        // 从 loading 变成 ready 之后必须重新观察。
+      }, [measureViewport, fresh.phase, collapsed.tree, collapsed.detail, diffVisible])
+
+      /**
+       * 自动补足：**不依赖用户滚动**，只要底部余量不够就继续要下一页。
+       *
+       * 为什么必须有它：自动分页原来只在 `onScroll` 里触发，而"第一页填不满视口"时根本
+       * **没有滚动条**，用户无法触发 scroll——`hasMore === true` 却永远不请求第二页
+       * （需求 26）。同理，窗口从 700 拉到 1400 之后也不会自动补数据。
+       *
+       * 触发点（每轮都是"请求 → 响应 → 渲染 → 测量 → 再判断"，**没有 while 循环**）：
+       *   * 首屏到位（`phase` 变 ready）；
+       *   * 追加一页之后（`commits.length` 变化）；
+       *   * 视口尺寸变化（ResizeObserver / 窗口 resize）；
+       *   * 换 ref（过滤之后那一份可能同样填不满）。
+       *
+       * 三个闸门保证同一时刻只可能有一份请求在飞：`moreInFlight`（同条件单飞）、
+       * `loadingMore`、`hasMore`。`autoFillStopped` 是"没有进展"的停闸（需求 30）。
+       */
+      const autoFill = react.useCallback(() => {
+        const node = scrollRef.current
+        if (node === null || node === undefined) return
+        if (fresh.hasMore !== true || fresh.loadingMore === true || fresh.refreshing === true) return
+        if (fresh.autoFillStopped === true) return
+        if (moreInFlight.current !== '') return
+        const remaining = (node.scrollHeight ?? 0) - node.scrollTop - node.clientHeight
+        if (remaining > GRAPH_LOAD_MORE_THRESHOLD) return
+        void loadMore()
+      }, [fresh.hasMore, fresh.loadingMore, fresh.refreshing, fresh.autoFillStopped, loadMore])
+
+      react.useEffect(() => {
+        autoFill()
+      }, [autoFill, fresh.commits.length, fresh.phase, fresh.ref, viewport])
 
       /**
        * 整页状态只在**手上没有可展示数据**时才出现。
@@ -15548,11 +15878,11 @@ window.__ModuleLoader__.load({
               { 'data-graph-pane': 'tree', style: { flex: `0 0 ${treeWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${BORDER}` } },
               react.createElement(GraphBranchTree, {
                 t,
-                // **左栏的数据源是中栏之外的 treeCommits**：它只由"未过滤"的 `/graph`
-                // 响应写入，因此选中某个分支把中栏换成过滤结果时，左栏一点都不会变
-                // （以前传 `fresh.commits`，于是点 develop 之后左栏只剩 develop 附近的 refs）。
-                commits: fresh.treeCommits,
-                hasMore: fresh.treeHasMore,
+                // **权威 refs 清单**（gitbar 的 for-each-ref），与"当前加载了多少条提交"
+                // 无关：因此点某个分支筛选、或者加载更多提交，左栏都不会变（见 GraphBranchTree）。
+                refs: fresh.refs,
+                loading: fresh.refsLoading === true,
+                error: fresh.refsError,
                 // 名字里带 ref 但**不是** React 的 ref（见 GraphBranchTree 的说明）。
                 selectedRef: fresh.ref,
                 onPickRef: pickRef,
@@ -15690,7 +16020,7 @@ window.__ModuleLoader__.load({
               toolIcon('M2.5 3.5h11v9h-11z M2.5 9.5h11'),
               diffVisible === true && selectedDiffFile !== null,
             ),
-            iconButton('refresh', t('refresh'), () => void reload(fresh.ref), refreshGlyph),
+            iconButton('refresh', t('refresh'), () => refreshGraph(), refreshGlyph),
           ),
           /**
            * 重置结果 + **撤销入口**（安全的历史恢复）。
@@ -16105,29 +16435,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 侧栏里的提交图图标。
-     *
-     * `sidebar.panellist` 的每个 list id 对应 `main` 槽的**同名 key**：侧栏负责画按钮，
-     * 主区域负责在有这个 key 时渲染内容。因此这里只需要一个图标。
-     *
-     * @param props - `{ size, active }`。
-     * @returns React 元素。
-     */
-    function GraphPanelIcon(props) {
-      const size = typeof props?.size === 'number' ? props.size : 16
-      const stroke = props?.active === true ? ACCENT : 'currentColor'
-      // 一个"分叉的线 + 三个点"的图形：与提交图的语义一致，且在小尺寸下仍然分得清。
-      return react.createElement(
-        'svg',
-        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke, strokeWidth: 1.5, 'aria-hidden': 'true', 'data-graph-icon': '' },
-        react.createElement('path', { d: 'M4 3.5v9M4 7h4.5a3 3 0 0 0 3-3', strokeLinecap: 'round' }),
-        react.createElement('circle', { cx: 4, cy: 2.5, r: 1.6 }),
-        react.createElement('circle', { cx: 4, cy: 13.5, r: 1.6 }),
-        react.createElement('circle', { cx: 12, cy: 4, r: 1.6 }),
-      )
-    }
-
-    /**
      * 输入框上方的改动概览入口：显示本轮改动文件数，点击在侧边栏查看详情。
      *
      * 同时负责**记录基线**：观察到会话由"未运行"转为"运行"时记一次，那一轮结束后的
@@ -16321,13 +16628,16 @@ window.__ModuleLoader__.load({
        * 跨插件的「打开比较」入口。
        *
        * gitbar 的分支列表有自己的右键菜单（需求里的"Branch Context Menu: Compare with
-       * Current"），而比较视图（文件清单 + 点文件看差异）必须在**提交图**面板里——那里有
-       * 主区域的宽度和现成的差异渲染器。两个插件各自独立打包，因此用 window 上一个带插件
-       * 前缀的键对接，与上面的快照桥同一个做法：**只有一个方法**，契约最小。
+       * Current"），而比较视图（文件清单 + 点文件看差异）必须在**提交图**里——那里有现成的
+       * 差异渲染器与分支筛选。两个插件各自独立打包，因此用 window 上一个带插件前缀的键对接，
+       * 与上面的快照桥同一个做法：**只有一个方法**，契约最小。
        *
        * 调用方（gitbar）用可选链，本插件没加载时它什么也不会发生。
-       * `ctx.layout.selectPanel(GRAPH_ID)` 把主区域切到提交图——这正是侧栏图标点击时走的
-       * 那条路（见下面注册处的说明），因此不额外发明导航机制。
+       *
+       * **导航方式**：提交图现在只在项目级 Git 抽屉的 Log 页签里（独立的侧栏入口已删除），
+       * 因此这里不再 `ctx.layout.selectPanel(...)`，而是下一条"打开抽屉并切到 Log"的一次性
+       * 意图（见 panelLogIntent）。抽屉打开、Log 挂载之后，`CommitGraphView` 会消费
+       * `compareRequest` 并把比较视图显示出来。
        */
       if (typeof window !== 'undefined') {
         const previousCompare = window.__dshDesktopReviewCompare
@@ -16343,11 +16653,9 @@ window.__ModuleLoader__.load({
               b,
               fromBranch: typeof request.fromBranch === 'string' ? request.fromBranch : '',
             })
-            try {
-              ctx.layout?.selectPanel?.(GRAPH_ID)
-            } catch {
-              // 布局服务不可用（例如面板已被收起）：请求仍然留着，用户切到提交图时会消费它。
-            }
+            // 打开抽屉并落在 Log 页签：不这么做的话，请求会一直挂到用户自己切到 Log 为止
+            // （旧行为），用户点「与当前比较」之后看起来"什么都没发生"。
+            panelLogIntent.request()
           },
         }
         ctx.effect(() => () => {
@@ -16463,51 +16771,16 @@ window.__ModuleLoader__.load({
         'dsh-client-ui-review: review tab title',
       )
 
-      // 提交图：**两处注册缺一不可**。
+      // 提交图**不再单独注册成一个面板**。
       //
-      //   `sidebar.panellist`（list / root）——侧栏那一列图标，`id` 就是主区域的 key；
-      //   `main`（keyed / root）——按同一个 key 渲染内容，由布局侧 `ctx.layout.selectPanel(id)` 切换。
+      // 早先这里是两处注册：`sidebar.panellist`（主界面左侧那一列图标里的「提交图」入口）与
+      // `main`（按同一个 key 渲染内容）。它与**项目级 Git 抽屉的 Log 页签**画的是同一个
+      // `CommitGraphView`，因此用户在左侧多看到一个重复入口——点它打开的"独立提交图页面"
+      // 与抽屉里的 Log 没有任何区别。现在两处注册都删掉，提交图只由抽屉的 Log 页签渲染
+      // （见 `data-review-tab-body: 'log'` 那一段）。
       //
-      // 与项目改动抽屉（shell.overlay 上的自绘浮层）是两条独立路径：抽屉最多 980px 宽，
-      // 画不下"分支树 + 提交列表 + 详情"三栏；这个视图要整块主区域。
-      ctx.effect(
-        () =>
-          ctx.slots.inject(PANEL_SLOT, () =>
-            ctx.slots.register(
-              {
-                name: PANEL_SLOT,
-                id: GRAPH_ID,
-                // 排在官方那些图标之后。
-                order: 80,
-                // label 支持 thunk：语言切换时由 owner 重新读取，不需要重新注册。
-                label: () => ctx.locale.bind(NS)('graphPanelLabel'),
-              },
-              GraphPanelIcon,
-            ),
-          ),
-        'dsh-client-ui-review: graph panel icon',
-      )
-
-      ctx.effect(
-        () =>
-          ctx.slots.inject(MAIN_SLOT, () =>
-            ctx.slots.register(
-              {
-                name: MAIN_SLOT,
-                key: GRAPH_ID,
-                locale: NS,
-                // 只注入文案函数。**绝不能注入 useSessions / usePanelInfo。**
-                // 这两个是渲染器提供给 root 槽位的标准钩子，而渲染器合并 props 的顺序是
-                // `{ ...kit, ...injected, ... }`——inject 会盖掉 kit，且 `bindInjectSources`
-                // 不剔除 undefined。1.3.5 修过一次同样的坑（那时是项目级面板拿不到当前会话），
-                // 这里不能再犯。
-                inject: () => ({ t: ctx.locale.bind(NS) }),
-              },
-              CommitGraphView,
-            ),
-          ),
-        'dsh-client-ui-review: commit graph view',
-      )
+      // 删掉的只是**入口**：`CommitGraphView`（含泳道 / 分支筛选 / 详情 / Diff Preview）
+      // 一个字都没动。
     }
 
     exports.name = name
@@ -16522,6 +16795,16 @@ window.__ModuleLoader__.load({
     // 因此把这两个引用挂到导出上。它们不是公开 API，也不被 `apply` 使用；命名带
     // `ForTest` 后缀，避免被误当成插件契约的一部分。
     exports.__graphLayoutForTest = layoutGraph
+    /**
+     * 提交图视图本身（只给测试用）。
+     *
+     * 它原本可以通过 `main:git-graph` 那个槽位注册取到，而那个注册已经删除（独立入口与抽屉
+     * 的 Log 页签重复）。抽屉那条路是**集成**路径（要渲染 hero 入口、打开抽屉、点 Log 页签），
+     * 由 `scripts/test-review-graph-entry.mjs` 覆盖；而这个钩子让
+     * `scripts/test-review-graph-view.mjs` 继续直接驱动同一个组件（三栏 / 泳道 / 详情 /
+     * 分页 / Diff Preview 的全部行为断言都在那里）。
+     */
+    exports.__commitGraphViewForTest = CommitGraphView
     // 注入的样式表文本也导出给测试：字号全部改成 `uiPx(N)` 之后，"**每个位置的设计值
     // 与改造前逐一相同**"这件事只有把文本拿出来数才能钉住（需求明确禁止"顺手把 12.5
     // 改成 11"）。它是纯字符串，没有任何副作用。
