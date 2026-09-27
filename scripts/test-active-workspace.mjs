@@ -70,28 +70,48 @@ const real = (value) => workspaceIdentity(value)
 
 /**
  * 一个受控的控制器环境：注册表与目录存在性是显式给出的集合。
- * @param options - `{ startup, registered, directories, home, userDataDir }`。
- * @returns `{ active, persisted, fallbacks }`。
+ *
+ * 两个注册集合分开，对应生产代码里刻意分开的两件事：
+ *   * `registered`        严格判定（渲染进程上报的准入校验 / 安全边界）；
+ *   * `stillRegistered`   宽松判定（点击菜单时的有效性检查，测试可以直接删一项来模拟
+ *                         "Harness 里把工作区删掉了"）。
+ *
+ * @param options - `{ startup, registered, stillRegistered, directories, home, userDataDir }`。
+ * @returns `{ active, persisted, fallbacks, registered, stillRegistered, directories }`。
  */
 function environment(options) {
   const registered = new Set((options.registered ?? []).map(real))
+  /** 宽松判定的集合（身份形态）；测试可以从中删一项来模拟"Harness 里删掉了它"。 */
+  const stillRegistered = new Set((options.stillRegistered ?? options.registered ?? []).map(real))
+  /** 身份 → 用户写法：回退时要给出**原始**路径，不能被 identity 的折叠大小写改掉显示。 */
+  const display = new Map((options.stillRegistered ?? options.registered ?? []).map((p) => [real(p), p]))
   const directories = new Set((options.directories ?? []).map(real))
   const persisted = []
   const fallbacks = []
   const active = new ActiveWorkspaceController({
     startup: { path: options.startup, source: options.source ?? 'remembered' },
     isRegistered: (path) => registered.has(real(path)),
+    isStillRegistered: (path) => {
+      // 与 index.ts 的注入实现同一条规则：读不到 / 注册表为空时不判定为失效。
+      if (options.registryReadable === false || options.registryEmpty === true) return true
+      return stillRegistered.has(real(path))
+    },
     isDirectory: (path) => directories.has(real(path)),
     fallback: (exclude) => {
       fallbacks.push(exclude)
-      return options.home
+      // 与生产的回退优先级一致：注册表里最近的**有效**工作区（排除失效的那个）→ 主目录。
+      // 替身如果只会回一个写死的 home，"回退到了另一个已注册工作区"这条断言就测不到。
+      const usable = [...stillRegistered].find(
+        (entry) => directories.has(entry) && (exclude === undefined || entry !== real(exclude)),
+      )
+      return usable === undefined ? options.home : (display.get(usable) ?? usable)
     },
     persist: (path) => {
       persisted.push(path)
       if (options.userDataDir !== undefined) switchWorkspace(options.userDataDir, path)
     },
   })
-  return { active, persisted, fallbacks, registered, directories }
+  return { active, persisted, fallbacks, registered, stillRegistered, directories }
 }
 
 try {
@@ -188,12 +208,13 @@ try {
 
     // 用户在 Harness 里把 B 移除：注册表里不再有 B，下一次上报会被拒。
     env.registered.delete(real(b))
+    env.stillRegistered.delete(real(b))
     await check('B 不再注册 → 上报被拒', () => assert.equal(env.active.reportFromHarness(b), 'rejected'))
     await check('被拒的正好是当前值 → 立刻回退（不能继续操作已移除的工作区）', () =>
-      assert.equal(env.active.get(), home))
+      assert.equal(env.active.get(), a))
     await check('回退时排除了失效的那个路径', () => assert.deepEqual(env.fallbacks, [b]))
     await check('回退结果已落盘到 settings.workspace', () =>
-      assert.equal(readSettings(userDataDir).workspace, home))
+      assert.equal(readSettings(userDataDir).workspace, a))
 
     // 非当前值被拒：什么都不该发生。
     const c = makeDir('drop-c')
@@ -207,7 +228,7 @@ try {
 
   // =====================================================================
   console.log('')
-  console.log('=== 4. 控制器：目录被删（点击时才发现）→ reportMissing 对账 ===')
+  console.log('=== 4. 控制器：点击时才发现失效 → isCurrentUsable / invalidateCurrent ===')
   // =====================================================================
   {
     const a = makeDir('miss-a')
@@ -220,14 +241,68 @@ try {
       home,
       userDataDir,
     })
-    await check('目录还在时 isUsable() 为真', () => assert.equal(env.active.isUsable(), true))
+    await check('目录还在且已注册时 isCurrentUsable() 为真', () => assert.equal(env.active.isCurrentUsable(), true))
     env.directories.delete(real(a))
-    await check('目录消失后 isUsable() 为假', () => assert.equal(env.active.isUsable(), false))
-    await check('reportMissing 触发对账并返回 true', () => assert.equal(env.active.reportMissing(a), true))
+    await check('目录消失后 isCurrentUsable() 为假', () => assert.equal(env.active.isCurrentUsable(), false))
+    await check('invalidateCurrent 触发对账并返回 true', () => assert.equal(env.active.invalidateCurrent(), true))
     await check('对账后 active 是一个仍然存在的目录', () => assert.equal(env.active.get(), home))
     await check('对账结果落盘', () => assert.equal(readSettings(userDataDir).workspace, home))
-    await check('对一个不是当前值的路径调用 reportMissing 什么都不做', () =>
-      assert.equal(env.active.reportMissing(join(scratch, 'never-was')), false))
+  }
+
+  // =====================================================================
+  console.log('')
+  console.log('=== 4b. 目录还在、但 Harness 里已经删掉了它（需求 42 的拉取路径） ===')
+  // =====================================================================
+  {
+    const a = makeDir('unreg-a')
+    const b = makeDir('unreg-b')
+    const home = makeDir('unreg-home')
+    const userDataDir = freshUserData()
+    const env = environment({
+      startup: b,
+      registered: [a, b],
+      directories: [a, b, home],
+      home,
+      userDataDir,
+    })
+    await check('前置：B 仍注册 → isCurrentUsable() 为真', () => assert.equal(env.active.isCurrentUsable(), true))
+
+    // 用户在 Harness 里删除了 B：注册表里没有它了，但磁盘目录**还在**。
+    env.stillRegistered.delete(real(b))
+    await check('不再注册 → isCurrentUsable() 为假（即使目录还在）', () =>
+      assert.equal(env.active.isCurrentUsable(), false))
+    await check('目录存在性本身没有变（证明是注册判定起了作用）', () =>
+      assert.equal(env.active.isUsable(), true))
+    env.active.invalidateCurrent()
+    await check('对账后 active 换成了仍然注册的工作区', () => assert.equal(env.active.get(), a))
+    await check('对账结果落盘（需求 39）', () => assert.equal(readSettings(userDataDir).workspace, a))
+    await check('回退时排除了那个已移除的路径', () => assert.deepEqual(env.fallbacks, [b]))
+  }
+
+  // =====================================================================
+  console.log('')
+  console.log('=== 4c. 读不到注册表时不误判（"不知道" ≠ "被删了"） ===')
+  // =====================================================================
+  {
+    const a = makeDir('blind-a')
+    const env = environment({
+      startup: a,
+      registered: [a],
+      directories: [a],
+      home: a,
+      // 注册表读不到：宽松判定必须返回 true，而不是把当前工作区判成失效。
+      registryReadable: false,
+    })
+    await check('注册表读不到时 isCurrentUsable() 仍为真', () => assert.equal(env.active.isCurrentUsable(), true))
+    const empty = environment({
+      startup: a,
+      registered: [a],
+      directories: [a],
+      home: a,
+      // 注册表可读、但一个文件系统工作区都没有（例如引导期）：同样不判失效。
+      registryEmpty: true,
+    })
+    await check('注册表里一个工作区都没有时也不判失效', () => assert.equal(empty.active.isCurrentUsable(), true))
   }
 
   // =====================================================================
@@ -390,12 +465,95 @@ try {
     await check('对账后 active 已换成一个仍然存在的目录', () => assert.equal(env.active.get(), home))
     await check('对账已落盘', () => assert.equal(readSettings(userDataDir).workspace, home))
 
-    await check('Copy：不复制 stale 路径', () => {
+    await check('再一次点击（对账之后）复制的是对账后的工作区', () => {
       actions.copyWorkspacePath()
-      // 对账之后 active 已经是 home，所以复制的是 home —— 关键是绝不复制那个不存在的目录。
-      assert.ok(!calls.copied.includes(a), JSON.stringify(calls.copied))
       assert.equal(calls.copied.at(-1), home)
     })
+  }
+
+  // =====================================================================
+  console.log('')
+  console.log('=== 7b. 目录还在、但 Harness 里已移除 → 三个菜单入口都不再操作它（需求 42） ===')
+  // =====================================================================
+  {
+    const a = makeDir('gone-reg-a')
+    const b = makeDir('gone-reg-b')
+    const userDataDir = freshUserData()
+    const env = environment({
+      startup: a,
+      registered: [a, b],
+      directories: [a, b],
+      home: b,
+      userDataDir,
+    })
+    const calls = { revealed: [], copied: [], projectInfo: [], alerts: [], refreshed: 0 }
+    const actions = createWorkspaceActions({
+      active: env.active,
+      userDataDir,
+      strings: catalogFor('zh-CN'),
+      effects: {
+        pickDirectory: () => undefined,
+        confirmSwitch: () => true,
+        confirmForget: () => true,
+        revealPath: (path) => calls.revealed.push(path),
+        copyText: (text) => calls.copied.push(text),
+        alert: (message) => calls.alerts.push(message),
+        refreshRecent: () => {
+          calls.refreshed += 1
+        },
+      },
+      onSwitchWorkspace: () => {},
+      onForgetWorkspace: () => {},
+      onProjectInfo: (workspace) => calls.projectInfo.push(workspace),
+    })
+
+    // 先确认在"仍然注册"时它确实会操作 A（否则下面的断言可能因为别的原因通过）。
+    actions.copyWorkspacePath()
+    await check('前置：仍然注册时 Copy 复制的是 A', () => assert.equal(calls.copied.at(-1), a))
+    /** 删除之前已经发生的调用数：下面的断言只看**之后**新增的那些。 */
+    const baseline = {
+      projectInfo: calls.projectInfo.length,
+      revealed: calls.revealed.length,
+      copied: calls.copied.length,
+      alerts: calls.alerts.length,
+    }
+    const since = (list, from) => list.slice(from)
+
+    // 用户在 Harness UI 里删除了 A —— 磁盘目录一个字节都没动。
+    env.stillRegistered.delete(real(a))
+    await check('前置：目录还在', () => assert.equal(existsSync(a), true))
+
+    // 第一次点击：外壳必须**拒绝**操作 A，给出提示并就地回退。
+    // 只点 Copy 一次 —— 后续两次点击作用的是**对账之后**的当前工作区，不是"失效的那一次"。
+    actions.copyWorkspacePath()
+    await check('Copy 没有复制 A（"绝对不能继续操作 A"）', () =>
+      assert.ok(!since(calls.copied, baseline.copied).includes(a)))
+    await check('失效的那一次不复制任何路径，而是给出提示', () => {
+      assert.deepEqual(since(calls.copied, baseline.copied), [], `copied=${JSON.stringify(calls.copied)}`)
+      const fresh = since(calls.alerts, baseline.alerts)
+      assert.equal(fresh.length, 1, JSON.stringify(fresh.map((a) => a.title)))
+      assert.ok(fresh[0].title.includes('工作区已不存在'), fresh[0].title)
+      assert.ok(fresh[0].detail.includes(a), '提示里应点名那个路径')
+    })
+    await check('已对账到仍然注册的 B 并落盘（需求 39）', () => {
+      assert.equal(env.active.get(), b)
+      assert.equal(readSettings(userDataDir).workspace, b)
+    })
+    await check('菜单已重建（「最近打开」/提示随之更新）', () => assert.equal(calls.refreshed, 1))
+
+    // 之后再点：三个入口都作用在对账后的 B 上，A 从头到尾没被操作过。
+    actions.projectInfo()
+    actions.revealWorkspace()
+    actions.copyWorkspacePath()
+    await check('再一次点击时三个入口都指向 B', () => {
+      assert.equal(calls.projectInfo.at(-1), b)
+      assert.equal(calls.revealed.at(-1), b)
+      assert.equal(calls.copied.at(-1), b)
+    })
+    await check('第二次点击之后仍然没有一次操作过 A', () =>
+      assert.ok(!since(calls.projectInfo, baseline.projectInfo).includes(a) &&
+        !since(calls.revealed, baseline.revealed).includes(a) &&
+        !since(calls.copied, baseline.copied).includes(a)))
   }
 
   // =====================================================================

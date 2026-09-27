@@ -57,8 +57,25 @@ export type ActiveWorkspaceReport =
 export interface ActiveWorkspaceOptions {
   /** 启动期解析出的工作区与来源。 */
   startup: WorkspaceResolution
-  /** 这个路径是不是 Harness 注册表里的工作区（安全校验，每次现读）。 */
+  /**
+   * **严格**判定：这个路径现在是不是 Harness 注册表里的工作区。
+   *
+   * 只用于 {@link ActiveWorkspaceController.reportFromHarness} 的准入校验（安全边界：
+   * 渲染进程送来的路径必须已经登记过才可能成为 active）。
+   */
   isRegistered: (path: string) => boolean
+  /**
+   * **宽松**判定：还能不能证明这个路径**不再**是注册过的工作区。
+   *
+   * 用在点击菜单时的有效性检查上，因此必须偏向"不要误判为失效"：
+   *   * 读不到注册表（首次启动、文件正在被服务端重写）→ 返回 **true**（"不知道"≠"被删了"）；
+   *   * 注册表里一个文件系统工作区都没有 → 返回 **true**（那不是"你删了它"）；
+   *   * 只有在**确实读到注册表、且里面没有这条记录**时才返回 false。
+   *
+   * 与 {@link isRegistered} 分开是刻意的：把这两件事合成一个谓词，要么让安全校验在
+   * 注册表读不到时放行任意路径，要么让菜单项在启动瞬间误判自己的工作区已失效。
+   */
+  isStillRegistered: (path: string) => boolean
   /** 这个路径是不是当前存在的目录。 */
   isDirectory: (path: string) => boolean
   /** 计算一个仍然有效的回退工作区（排除某个已失效的路径）。 */
@@ -159,23 +176,46 @@ export class ActiveWorkspaceController {
   }
 
   /**
-   * 点击菜单时发现当前工作区已经不在了（目录被删）。
+   * 点击菜单时发现当前工作区已经失效：目录被删，**或者**它已经不在 Harness 注册表里。
    *
-   * 由项目信息 / 在文件管理器中打开 / 复制路径三处在操作前调用。绝不静默失败：调用方
-   * 据此给出"工作区已不存在"的提示，并且这里已经把状态对账到一个仍然有效的工作区。
+   * 由项目信息 / 在文件管理器中打开 / 复制路径三处在操作前调用（见
+   * {@link ActiveWorkspaceController.isCurrentUsable}）。绝不静默失败：调用方据此给出
+   * "工作区已不存在"的提示，并且这里已经把状态对账到一个仍然有效的工作区。
    *
-   * @param path - 发现失效的路径（通常是 `get()` 的返回值）。
+   * 为什么"不再注册"也要走这里（需求 42 的**拉取路径**）：Harness 里删除工作区之后，
+   * 推送路径（bridge 重新上报 → 被拒 → 回退）通常很快就会到达，但外壳不能**依赖**它——
+   * 用户完全可能在那一刻就点了「复制工作区路径」。因此点击时的有效性检查必须自己问一次
+   * 注册表，而不是只看目录还在不在。
+   *
    * @returns 是否真的发生了对账（true = 状态已改变）。
    */
-  reportMissing(path: string): boolean {
-    if (!samePath(path, this.current)) return false
-    this.adopt(this.options.fallback(path), 'fallback')
+  invalidateCurrent(): boolean {
+    this.adopt(this.options.fallback(this.current), 'fallback')
     return true
   }
 
   /**
-   * 当前工作区是否还是一个可用的目录。
-   * @returns 可用则 true。
+   * 当前工作区**是否仍然有效**：目录存在，且仍然（能确认为）Harness 注册过的工作区。
+   *
+   * 两种 `origin` 不参与注册判定：
+   *   * `harness` 之外由**外壳自己**回退选出的值（`origin === 'fallback'`）——它之所以被选出来，
+   *     正是因为注册表里已经没有可用的了（注册表里最近的失效工作区 → 主目录）。回头再拿
+   *     "必须在注册表里"去卡它，就会变成一个**死循环**：每次点击都提示失效、回退到同一个值、
+   *     永远不执行任何操作，用户连"复制主目录路径"都做不到。
+   *   * 具体"能不能确认它不再注册"由注入的宽松判定负责（读不到注册表时不会误判，见
+   *     {@link ActiveWorkspaceOptions.isStillRegistered}）。
+   *
+   * @returns 有效则 true。
+   */
+  isCurrentUsable(): boolean {
+    if (!this.options.isDirectory(this.current)) return false
+    if (this.origin === 'fallback') return true
+    return this.options.isStillRegistered(this.current)
+  }
+
+  /**
+   * 当前工作区是否还是一个存在的目录。
+   * @returns 存在则 true。
    */
   isUsable(): boolean {
     return this.options.isDirectory(this.current)

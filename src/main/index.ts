@@ -176,10 +176,20 @@ async function main(): Promise<void> {
    */
   const active = new ActiveWorkspaceController({
     startup: { path: workspace, source: startupWorkspace.source },
-    // 安全边界：只接受 Harness 注册表里已有的工作区。渲染进程无法凭一条 IPC 让外壳去
-    // 打开任意路径（例如 C:\Windows）。
+    // 安全边界（**严格**）：只接受 Harness 注册表里已有的工作区。渲染进程无法凭一条 IPC
+    // 让外壳去打开任意路径（例如 C:\Windows）。
     isRegistered: (path) => {
       const view = registryView()
+      return view.entries.some((entry) => workspaceIdentity(entry.path) === workspaceIdentity(path))
+    },
+    // 点击时的有效性检查（**宽松**，方向相反：宁可认为它还有效）。
+    //   * 读不到注册表 → 不能证明它被删了；
+    //   * 注册表里一个文件系统工作区都没有 → 那不是"你删了它"（例如注册失败/引导期）；
+    // 只有"确实读到注册表、且里面没有这条记录"才算失效。这正是 Harness 里删除工作区之后
+    // 外壳必须立刻停止使用它的那条判定（需求 42）。
+    isStillRegistered: (path) => {
+      const view = registryView()
+      if (!view.readable || view.entries.length === 0) return true
       return view.entries.some((entry) => workspaceIdentity(entry.path) === workspaceIdentity(path))
     },
     isDirectory: isUsableDirectory,

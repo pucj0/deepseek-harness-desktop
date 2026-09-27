@@ -194,6 +194,13 @@ async function run() {
   const active = new ActiveWorkspaceController({
     startup: { path: workspaceA, source: 'remembered' },
     isRegistered: (path) => registryView().entries.some((entry) => real(entry.path) === real(path)),
+    // 与 index.ts 注入的实现逐字一致：读不到注册表 / 注册表里一个文件系统工作区都没有时，
+    // 不判定为失效（"不知道" ≠ "被删了"）。
+    isStillRegistered: (path) => {
+      const view = registryView()
+      if (!view.readable || view.entries.length === 0) return true
+      return view.entries.some((entry) => real(entry.path) === real(path))
+    },
     isDirectory,
     fallback: (exclude) => {
       const view = registryView()
@@ -397,7 +404,109 @@ async function run() {
     assert.deepEqual(errors.filter((message) => /Minified React error|already has a registration/.test(message)), []))
   console.log(`RENDERER_ERRORS ${JSON.stringify(errors.sort())}`)
 
-  // --- 7) Git 插件那一层：为什么它本来就跟着 Harness 走（需求 23） ----------
+  // --- 7) 运行中把**当前**工作区从 Harness 里移除（需求 42） -----------------
+  //
+  // 删除本身走官方 API：再起一个服务端、带 `forgetWorkspaces: [A]`（这正是「移除工作区」
+  // 那条菜单项与 Harness UI 的删除按钮最终调用 `workspaceRegistry.delete(id)` 的同一入口）。
+  // 之所以在这里停一次应用的服务端：注册表由服务端进程独占，两个进程同时写同一份
+  // workspace.json 不是受支持的状态。
+  //
+  // 随后**不重启 Desktop**（同一个窗口、同一个控制器），只是把服务端重新起起来并导航——
+  // 于是 A 从注册表与侧栏里都消失了，而外壳手里仍然是 A：这正是"半同步"最容易出错的瞬间。
+  const beforeDelete = active.get()
+  await server.stop(3000)
+  const forgetServer = new DshServer({
+    runtime,
+    dshHome,
+    workspace: workspaceB,
+    registerWorkspace: false,
+    forgetWorkspaces: [workspaceA],
+  })
+  await forgetServer.start()
+  await forgetServer.stop(3000)
+
+  check('官方 API 删除后：A 不在注册表里了', () =>
+    assert.ok(!registryPaths().map(real).includes(real(workspaceA)), JSON.stringify(registryPaths())))
+  check('删除工作区**不**删磁盘目录（移除 ≠ 删除）', () => assert.ok(isDirectory(workspaceA)))
+
+  const server2 = new DshServer({ runtime, dshHome, workspace: workspaceA, registerWorkspace: false })
+  await server2.start()
+  await mainWindow.navigate(server2.ready)
+  const sidebarAfterDelete = await waitFor(
+    contents,
+    SIDEBAR_QUERY,
+    // 等到"侧栏里确实有 B、且没有 A"为止。**不能**只写"没有 A"：加载途中的空列表也满足它，
+    // 于是断言会在侧栏还没渲染出来时就通过（实测过）。
+    (value) =>
+      value.rows.some((text) => text.includes('project-beta')) &&
+      !value.rows.some((text) => text.includes('project-alpha')),
+    '删除 A 之后侧栏应当只剩 project-beta',
+  )
+  console.log(`  删除 A 之后侧栏: ${JSON.stringify(sidebarAfterDelete)}`)
+  check('侧栏里只剩 B', () => {
+    assert.ok(sidebarAfterDelete.rows.some((text) => text.includes('project-beta')))
+    assert.ok(!sidebarAfterDelete.rows.some((text) => text.includes('project-alpha')))
+  })
+  check('前置：A 的目录还在，所以"失效"不可能是因为目录被删', () =>
+    assert.equal(isDirectory(workspaceA), true))
+
+  // 需求 42 的第一种结局（实测就是这一种）：Harness 侧自己落到了仍然存在的 B（侧栏
+  // `active` = project-beta），于是 bridge 上报 B，**外壳不必重启就跟随**了过去。
+  const followedDeadline = Date.now() + 30000
+  while (Date.now() < followedDeadline && real(active.get()) !== real(workspaceB)) await wait(200)
+  check('外壳 active 跟随到 B（Desktop 进程与控制器都没有重启）', () =>
+    assert.equal(real(active.get()), real(workspaceB)))
+  check('侧栏里"当前项目"就是 B', () => assert.ok(String(sidebarAfterDelete.active).includes('project-beta')))
+  check('对账结果落盘：Desktop current 不再是 A', () =>
+    assert.equal(real(readSettings(scratch).workspace), real(workspaceB)))
+
+  // A 已经不再是合法的 active workspace —— 拿它去上报必须被拒，且不能改变当前值。
+  // 这条断言用的是**真实注册表**（不是替身），因此它同时钉住"删除确实生效"与
+  // "外壳不接受一个已移除的工作区"。
+  check('A 已不是合法 active workspace：上报被拒，active 不变', () => {
+    const outcome = applyHarnessReport(active, { path: workspaceA }, registryView)
+    assert.equal(outcome, 'rejected')
+    assert.equal(real(active.get()), real(workspaceB))
+  })
+
+  // 三个菜单入口：都指向 B，A 一次都没被操作。
+  const afterDeleteCalls = { copied: [], revealed: [], projectInfo: [], alerts: [], refreshed: 0 }
+  const deleteActions = createWorkspaceActions({
+    active,
+    userDataDir: scratch,
+    strings: catalogFor('zh-CN'),
+    effects: {
+      pickDirectory: () => undefined,
+      confirmSwitch: () => true,
+      confirmForget: () => true,
+      revealPath: (path) => afterDeleteCalls.revealed.push(path),
+      copyText: (text) => afterDeleteCalls.copied.push(text),
+      alert: (message) => afterDeleteCalls.alerts.push(message),
+      refreshRecent: () => {
+        afterDeleteCalls.refreshed += 1
+      },
+    },
+    onSwitchWorkspace: () => {},
+    onForgetWorkspace: () => {},
+    onProjectInfo: (workspace) => afterDeleteCalls.projectInfo.push(workspace),
+  })
+
+  deleteActions.projectInfo()
+  deleteActions.revealWorkspace()
+  deleteActions.copyWorkspacePath()
+  check('三个入口都指向 B，A 一次都没被操作', () => {
+    assert.equal(real(afterDeleteCalls.projectInfo.at(-1)), real(workspaceB))
+    assert.equal(real(afterDeleteCalls.revealed.at(-1)), real(workspaceB))
+    assert.equal(real(afterDeleteCalls.copied.at(-1)), real(workspaceB))
+    for (const list of [afterDeleteCalls.projectInfo, afterDeleteCalls.revealed, afterDeleteCalls.copied]) {
+      assert.ok(!list.some((entry) => real(entry) === real(workspaceA)), JSON.stringify(list))
+    }
+  })
+  check('删除 A 之后它的磁盘目录依然完好', () => assert.ok(isDirectory(workspaceA)))
+  check('beforeDelete 与 A 一致（前置状态确实是"active = A"）', () =>
+    assert.equal(real(beforeDelete), real(workspaceA)))
+
+  // --- 8) Git 插件那一层：为什么它本来就跟着 Harness 走（需求 23） ----------
   //
   // `DSH_DESKTOP_WORKSPACE` 是**进程级**上下文（启动工作区，本次进程内不变），它只被
   // gitbar/review 的 **host** 半边用作"允许的根"的一份种子；允许集合的另一半是
@@ -405,7 +514,7 @@ async function run() {
   // 当前会话的 cwd 决定（`useSessions` → `sessions.current.cwd`，见两个插件的
   // `useWorkspaceGate`）。因此 Harness 里切到 B 之后，Git 面板请求的 cwd 是 B，
   // 而 B 已经在允许集合里 —— 不会出现"Harness = B、Git = A"。
-  const roots = await fetch(`${server.ready.url}/dsh-desktop/review/roots`).then((response) => response.json())
+  const roots = await fetch(`${server2.ready.url}/dsh-desktop/review/roots`).then((response) => response.json())
   check('git host 的允许根包含 A 与 B（切到 B 之后仍能对 B 跑 git）', () => {
     const allowed = roots.roots.map(real)
     assert.ok(allowed.includes(real(workspaceA)), JSON.stringify(roots.roots))
@@ -414,7 +523,7 @@ async function run() {
   check('git host 的进程级上下文仍是启动工作区（它只是上下文，不是"当前项目"）', () =>
     assert.equal(real(roots.current), real(workspaceA)))
 
-  await server.stop(3000)
+  await server2.stop(3000)
   mainWindow.close()
 }
 

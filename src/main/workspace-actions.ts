@@ -104,11 +104,17 @@ const usableDirectory = (dir: string): boolean => pruneRecent([dir]).length === 
 export function createWorkspaceActions(deps: WorkspaceActionsDeps): WorkspaceActions {
   const { active, userDataDir, effects, strings: s } = deps
 
-  /** 点击时发现当前工作区已经不存在：对账 + 提示 + 重建菜单，绝不静默失败。 */
+  /**
+   * 点击时确认当前工作区仍然有效：目录还在，**并且**仍然在 Harness 注册表里。
+   *
+   * 第二半不能省（需求 42）：Harness 里删掉当前工作区之后，bridge 的上报会被外壳拒绝并回退，
+   * 但外壳不能依赖那次上报的时机——用户完全可能在同一瞬间就点了「复制工作区路径」。
+   * 因此这里自己问一次：不再有效就地对账、提示、重建菜单，**绝不**继续操作那个工作区。
+   */
   const guardCurrent = (): boolean => {
     const current = active.get()
-    if (usableDirectory(current)) return true
-    active.reportMissing(current)
+    if (active.isCurrentUsable()) return true
+    active.invalidateCurrent()
     effects.refreshRecent()
     effects.alert({
       type: 'warning',
