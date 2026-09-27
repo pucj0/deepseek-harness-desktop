@@ -72,12 +72,29 @@ const react = {
   },
   useEffect(fn, deps) {
     const slot = renderIndex++
-    const prev = hookSlots[slot]
+    const slots = hookSlots
+    const prev = slots[slot]
     const changed = prev === undefined || deps === undefined || prev.deps === undefined || deps.some((d, i) => !Object.is(d, prev.deps[i]))
-    if (changed) {
-      hookSlots[slot] = { deps }
-      effectQueue.push(fn)
+    if (!changed) return
+    // 依赖变了要先跑上一次的清理，再排队新的——真实 React 就是这个顺序。少了这一步，
+    // document 上的旧监听会**一直挂着**：面板的 Esc 处理器依赖当前的菜单状态，于是
+    // "二级菜单已打开"的新处理器和"当时没有二级菜单"的旧处理器会同时收到 Esc，后者直接
+    // 把整个面板关掉，逐层退出的顺序就永远测不出来（另一个交互测试踩过这个坑，见
+    // scripts/test-gitbar-branch-interaction.mjs 里同一段假 React 的说明）。
+    if (typeof prev?.cleanup === 'function') {
+      try {
+        prev.cleanup()
+      } catch {
+        // 清理函数里抛错不该影响渲染：真实 React 也只是把它报出来。
+      }
     }
+    slots[slot] = { deps }
+    // 排队的必须是一个"跑 fn 并把返回值记成 cleanup"的包装：effect 真正执行的时刻在本次
+    // 渲染结束之后，那时模块级的 hookSlots 已经切回别的组件，所以这里捕获本组件的槽数组。
+    effectQueue.push(() => {
+      const cleanup = fn()
+      slots[slot] = { deps, cleanup }
+    })
   },
   useSyncExternalStore(subscribe, getSnapshot) {
     const slot = renderIndex++
@@ -214,6 +231,42 @@ globalThis.window = {
 }
 globalThis.setInterval = () => 0
 globalThis.clearInterval = () => {}
+/**
+ * 记录"普通提示自动消失"用的那个定时器。
+ *
+ * 真的 `setTimeout` 照常排（`settle()` 靠 `setTimeout(…, 0)` 让异步落地），这里只是在
+ * 旁边记一份：只有延迟等于插件导出的 `noticeDismissMs` 的才记。于是测试既能断言"排了
+ * 这个定时器"，也能断言"actionable 的提示根本没排"——而不必真的等三秒。
+ */
+const noticeTimers = []
+const realSetTimeout = globalThis.setTimeout
+const realClearTimeout = globalThis.clearTimeout
+/** 提示定时时长（由插件导出，读到之前先用 3000 占位）。 */
+let NOTICE_DISMISS_MS = 3000
+globalThis.setTimeout = (fn, delay, ...rest) => {
+  const handle = realSetTimeout(fn, delay, ...rest)
+  if (delay === NOTICE_DISMISS_MS) noticeTimers.push({ fn, delay, handle, cancelled: false })
+  return handle
+}
+globalThis.clearTimeout = (handle) => {
+  for (const entry of noticeTimers) if (entry.handle === handle) entry.cancelled = true
+  return realClearTimeout(handle)
+}
+/** 最近一条**未被取消**的提示定时器（null = 没有）。 */
+const liveNoticeTimer = () => {
+  for (let index = noticeTimers.length - 1; index >= 0; index -= 1) {
+    if (!noticeTimers[index].cancelled) return noticeTimers[index]
+  }
+  return null
+}
+/** 手动触发最近一条未被取消的提示定时器（等价于"时间到了"）。 */
+async function fireNoticeTimer() {
+  const entry = liveNoticeTimer()
+  if (entry === null) return false
+  entry.cancelled = true
+  entry.fn()
+  return true
+}
 
 // ---- 假 host ---------------------------------------------------------------------
 //
@@ -347,6 +400,9 @@ globalThis.fetch = async (url, init) => {
 // ---- 加载插件 -------------------------------------------------------------------
 let loaded
 await import(PLUGIN)
+/** 面板的两个数值契约（高度上界 / 提示定时）：断言用的是插件里真实生效的那一份。 */
+const LIMITS = loaded.__sourcePanelLimitsForTest
+NOTICE_DISMISS_MS = LIMITS.noticeDismissMs
 
 // ---- 挂载插件，取出 conversation.input.dock 那个入口 ----------------------------
 const entries = new Map()
@@ -619,6 +675,54 @@ async function mount() {
   /** 面板是否已打开（徽章上的 aria-expanded 是 open 状态的直接体现）。 */
   const panelOpen = () => badgeButton()?.props?.['aria-expanded'] === true
 
+  /**
+   * 打开一级面板里的一个**分组二级菜单**（「分支与版本」/「储藏」）。
+   *
+   * 一级现在只有三个工具条动作 + 这两个入口；被合并进来的动作（新建分支、签出修订、
+   * 新建标记、储藏、带选项储藏）都在这一层下面，因此凡是要点它们的用例都得先走这里。
+   *
+   * @param kind - `'branches'` | `'stash'`。
+   * @returns 菜单是否打开。
+   */
+  const openSection = async (kind) => {
+    if (find('data-desktop-sc-groupmenu', kind) !== null) return true
+    const entry = findNow('data-desktop-sc-section-menu', kind)
+    if (entry === null || typeof entry.props?.onClick !== 'function') return false
+    // currentTarget 给 null：桩里没有真实布局，定位会退化成视口角落，再由纯函数收进视口。
+    entry.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+    await settle()
+    return find('data-desktop-sc-groupmenu', kind) !== null
+  }
+
+  /** 关掉分组二级菜单（再点它自己那一条入口 = toggle）。 */
+  const closeSection = async (kind) => {
+    if (find('data-desktop-sc-groupmenu', kind) === null) return true
+    const entry = findNow('data-desktop-sc-section-menu', kind)
+    if (entry === null || typeof entry.props?.onClick !== 'function') return false
+    entry.props.onClick({ stopPropagation() {}, preventDefault() {}, currentTarget: null })
+    await settle()
+    return find('data-desktop-sc-groupmenu', kind) === null
+  }
+
+  /** 分组二级菜单里的条目 key（按渲染顺序）。 */
+  const sectionItems = (kind) => {
+    const container = find('data-desktop-sc-groupmenu', kind)
+    if (container === null) return []
+    return collectHostNodes(container, 'section')
+      .filter((node) => node.props?.['data-desktop-sc-menuitem'] !== undefined)
+      .map((node) => node.props['data-desktop-sc-menuitem'])
+  }
+
+  /** 点开分组二级菜单并点其中一项。 */
+  const clickSectionItem = async (kind, key) => {
+    if (!(await openSection(kind))) return false
+    const item = within('data-desktop-sc-groupmenu', kind, (node) => node.props?.['data-desktop-sc-menuitem'] === key)
+    if (item === null || typeof item.props?.onClick !== 'function') return false
+    item.props.onClick({ stopPropagation() {}, preventDefault() {} })
+    await settle()
+    return true
+  }
+
   await settle()
   return {
     nodes,
@@ -639,6 +743,10 @@ async function mount() {
     contextMenu,
     closeContextMenu,
     escape,
+    openSection,
+    closeSection,
+    sectionItems,
+    clickSectionItem,
     settle,
   }
 }
@@ -657,13 +765,30 @@ check('   panelOpen 初始为 false', ui.panelOpen(), false)
 
 
 console.log('')
-console.log('=== 2. 打开面板：搜索、快捷操作、三段分组 ===')
+console.log('=== 2. 打开面板：搜索、工具条、两个分组入口、四段列表 ===')
 await ui.clickBadge()
 check('2) 点徽章后 open 变成 true', ui.panelOpen(), true)
 check('   面板已打开', ui.panelOpen(), true)
-for (const key of ['update', 'commit', 'push', 'new', 'tag']) {
-  check(`   快捷操作 ${key}`, ui.find('data-desktop-sc-action', key) === null, 'false')
+// 一级只剩三个高频动作：更新 / 提交 / 推送（纵向的三条整行菜单已经合并成一行工具条）。
+for (const key of ['update', 'commit', 'push']) {
+  check(`   工具条动作 ${key}`, ui.find('data-desktop-sc-action', key) === null, 'false')
 }
+// 旧的一级整行动作必须**消失**：它们已经收进两个二级分组菜单。
+for (const key of ['new', 'tag', 'stash', 'stash-options', 'create-tag']) {
+  check(`   一级不再有 ${key}（已收进二级分组）`, ui.find('data-desktop-sc-action', key) === null, 'true')
+}
+// 工具条就是这三个，顺序固定（用户靠位置记忆点击）。
+check(
+  '   工具条就是这三个，顺序固定',
+  ui.findAll('data-desktop-sc-action').map((node) => node.props['data-desktop-sc-action']).join(','),
+  'update,commit,push',
+)
+// 两个分组入口：分支与版本 / 储藏。
+check(
+  '   两个分组入口（分支与版本、储藏）',
+  ui.findAll('data-desktop-sc-section-menu').map((node) => node.props['data-desktop-sc-section-menu']).join(','),
+  'branches,stash',
+)
 const sections = ui.findAll('data-desktop-sc-section').map((node) => node.props['data-desktop-sc-section'])
 // 分组顺序：最近在前，其后本地、远程，最后是标签（标签在分支之后：它是"版本锚点"，
 // 而用户打开这个面板多数时候是在找分支）。
@@ -824,7 +949,7 @@ console.log('')
 console.log('=== 10. 新建分支对话框：请求体与校验 ===')
 posts.length = 0
 await ui.openPanel()
-await ui.click('data-desktop-sc-action', 'new')
+await ui.clickSectionItem('branches', 'new')
 check('10) 对话框已打开', ui.find('data-desktop-sc-dialog', 'create') === null, 'false')
 // 名字为空时确定按钮必须禁用——否则会发一个必然 400 的请求。
 check('   空名字时确定被禁用', ui.find('data-desktop-sc-button', 'confirm')?.props?.disabled, true)
@@ -942,7 +1067,7 @@ console.log('')
 console.log('=== 16. 「签出标记或修订」===')
 posts.length = 0
 await ui.openPanel()
-await ui.click('data-desktop-sc-action', 'tag')
+await ui.clickSectionItem('branches', 'tag')
 check('16) 对话框已打开', ui.find('data-desktop-sc-dialog', 'checkout-ref') === null, 'false')
 check('   空值时确定被禁用', ui.find('data-desktop-sc-button', 'confirm')?.props?.disabled, true)
 await ui.type('data-desktop-sc-field', 'ref', 'v1.0.0')
@@ -985,17 +1110,19 @@ writeErrorAlways = null
 statusOverride = {}
 ui = await mount()
 await ui.clickBadge()
-check('19) 快捷操作里有「储藏」与「带选项储藏」两条', ui.find('data-desktop-sc-action', 'stash') === null, 'false')
-check('   带选项那条也在', ui.find('data-desktop-sc-action', 'stash-options') === null, 'false')
+check('19) 一级没有「储藏」整行（已收进二级分组）', ui.find('data-desktop-sc-action', 'stash') === null, 'true')
+check('   一级也没有「带选项储藏」整行', ui.find('data-desktop-sc-action', 'stash-options') === null, 'true')
+check('   打开「储藏」二级菜单', await ui.openSection('stash'), true)
+check('   二级条目是「储藏改动 / 带选项储藏…」', ui.sectionItems('stash').join(','), 'stash,stash-options')
 posts.length = 0
-await ui.click('data-desktop-sc-action', 'stash')
+await ui.clickSectionItem('stash', 'stash')
 check('   直接储藏：一步发 stash/push', posts.map((p) => p.route).join(','), 'stash/push')
 // 不带消息 = 让 git 写它自己的 WIP 主题；也不动未跟踪文件（那是要用户明说的）。
 check('   不带消息', posts[0]?.body?.message, undefined)
 check('   默认不含未跟踪', posts[0]?.body?.includeUntracked, undefined)
 
 posts.length = 0
-await ui.click('data-desktop-sc-action', 'stash-options')
+await ui.clickSectionItem('stash', 'stash-options')
 check('   带选项储藏打开对话框', ui.find('data-desktop-sc-dialog', 'stash') === null, 'false')
 check('   未跟踪默认不勾选', ui.find('data-desktop-sc-check', 'stash-untracked')?.props?.checked, false)
 await ui.type('data-desktop-sc-field', 'stash-message', 'WIP: feature login')
@@ -1132,10 +1259,10 @@ check('   起点预填标签名', ui.find('data-desktop-sc-field', 'from')?.prop
   globalThis.window.__dshDesktopReviewCompare = previous
 }
 
-// 快速操作里的「新建标记…」→ 对话框（附注默认跟随仓库现状：这里已有附注标签 → 默认开）。
+// 二级「分支与版本」里的「新建标记…」→ 对话框（附注默认跟随仓库现状：这里已有附注标签 → 默认开）。
 posts.length = 0
 await ui.openPanel()
-await ui.click('data-desktop-sc-action', 'create-tag')
+await ui.clickSectionItem('branches', 'create-tag')
 check('   新建标记对话框已打开', ui.find('data-desktop-sc-dialog', 'create-tag') === null, 'false')
 check('   仓库有附注标签 → 默认附注', ui.find('data-desktop-sc-check', 'tag-annotated')?.props?.checked, true)
 await ui.type('data-desktop-sc-field', 'tag-name', 'v1.7.0')
@@ -1149,7 +1276,7 @@ check('   带名字与信息（附注）', JSON.stringify(posts[0]?.body), '{"na
 TAGS = [{ name: 'v0.1.0', sha: 'c'.repeat(40), short: 'ccccccc', annotated: false, date: '2025-01-01T10:00:00+08:00', subject: 'first', tagger: '', pointsAtHead: false }]
 ui = await mount()
 await ui.openPanel()
-await ui.click('data-desktop-sc-action', 'create-tag')
+await ui.clickSectionItem('branches', 'create-tag')
 check('   仓库只有轻量标签 → 默认轻量', ui.find('data-desktop-sc-check', 'tag-annotated')?.props?.checked, false)
 check('   轻量时给出类型说明', textOf(ui.find('data-desktop-sc-dialog', 'create-tag')).includes('dialogTagTypeHint'), 'true')
 
@@ -1172,6 +1299,152 @@ posts.length = 0
 await ui.click('data-desktop-sc-branch-from-tag', 'v0.1.0')
 check('   点它打开建分支对话框，起点是那个标签', ui.find('data-desktop-sc-field', 'from')?.props?.value, 'v0.1.0')
 writeExtra = {}
+
+console.log('')
+console.log('=== 23. 二级菜单结构：分支与版本 / 储藏 ===')
+{
+  // 「游离 HEAD」那条提示是 actionable 的（下面第 25 节还会断言它不消失），这里先把它清掉，
+  // 免得干扰本节对菜单结构的读取。
+  ui = await mount()
+  await ui.openPanel()
+  check('23) 一级没有整行的「新建分支…」', ui.find('data-desktop-sc-action', 'new') === null, 'true')
+  check('   打开「分支与版本」二级菜单', await ui.openSection('branches'), true)
+  check(
+    '   二级条目：新建分支… / 签出标记或修订… / 新建标记…',
+    ui.sectionItems('branches').join(','),
+    'new,tag,create-tag',
+  )
+  // 二级菜单的容器信息：级联方向来自纯函数，几何与另外两个菜单是同一份实现。
+  const groupMenu = ui.find('data-desktop-sc-groupmenu', 'branches')
+  check('   二级菜单自带级联方向标记', groupMenu?.props?.['data-desktop-sc-cascade'], 'right')
+  check('   使用了共享的级联样式（fixed 定位）', groupMenu?.props?.style?.position, 'fixed')
+  // 再点同一个入口 = 关掉（IDEA 风格 toggle）。
+  check('   再点同一个入口关掉二级菜单', await ui.closeSection('branches'), true)
+  check('   关掉后一级面板仍然开着', ui.panelOpen(), true)
+
+  // 两个入口互斥：打开「储藏」必须把「分支与版本」收掉。
+  await ui.openSection('branches')
+  await ui.openSection('stash')
+  check('   打开「储藏」后「分支与版本」已收', ui.find('data-desktop-sc-groupmenu', 'branches') === null, 'true')
+  check('   「储藏」二级条目', ui.sectionItems('stash').join(','), 'stash,stash-options')
+}
+
+console.log('')
+console.log('=== 24. 布局契约：高度上界 620、列表吃掉剩余空间、面板自己不滚 ===')
+{
+  ui = await mount()
+  await ui.openPanel()
+  check('24) 高度上界就是插件里生效的那个数（620）', LIMITS.maxHeight, 620)
+  const panel = ui.find('data-desktop-branch-menu')
+  // anchor 未测量到时的兜底：min(620px, calc(100vh - 24px))——小窗口里不会越界。
+  check('   面板兜底 maxHeight 用同一个常量', panel?.props?.style?.maxHeight, `min(${LIMITS.maxHeight}px, calc(100vh - 24px))`)
+  check('   面板整体不滚动（只有列表滚）', panel?.props?.style?.overflow, 'hidden')
+  const list = ui.find('data-desktop-branch-list')
+  check('   列表 flex-grow', list?.props?.style?.flex, '1 1 auto')
+  check('   列表 minHeight 归零（flex 子项才能收缩）', list?.props?.style?.minHeight, 0)
+  check('   列表自己滚', list?.props?.style?.overflowY, 'auto')
+  // 固定区：搜索框、工具条、两个分组入口都在列表**之外**（列表是最后一个孩子）。
+  const children = panel?.props?.children
+  const last = Array.isArray(children) ? children[children.length - 1] : children
+  check('   列表是面板的最后一个孩子（固定区都在它上面）', last?.props?.['data-desktop-branch-list'], '')
+  check('   工具条独立成一行', ui.find('data-desktop-sc-toolbar')?.props?.style?.flexDirection, 'row')
+  check('   工具条高度 30px 量级（不是大卡片）', ui.find('data-desktop-sc-toolbar')?.props?.style?.paddingBottom, '6px')
+  // 标签是结果列表的一份子，必须跟着列表滚——它若作为"不滚的兄弟节点"，100 个标签的仓库里
+  // 它会把面板撑高、把分支列表压成零高度（"列表区被挤得很小"的另一种形态）。
+  check(
+    '   标签分组在滚动区**里面**（跟着列表滚，不抢固定区的高度）',
+    ui.within('data-desktop-branch-list', undefined, (node) => node.props?.['data-desktop-sc-section'] === 'tags') === null,
+    'false',
+  )
+  check(
+    '   四段结果（最近/本地/远程/标签）都在滚动区里',
+    ui.within('data-desktop-branch-list', undefined, (node) => node.props?.['data-desktop-sc-section'] === 'local') === null,
+    'false',
+  )
+}
+
+console.log('')
+console.log('=== 25. 提示生命周期：普通成功 3 秒消失，actionable / 错误 / 操作状态不消失 ===')
+{
+  // (1) 普通成功回执：更新项目 → 「已更新」，ephemeral，且排了一个 3 秒定时器。
+  writeErrorAlways = null
+  statusOverride = {}
+  writeExtra = {}
+  ui = await mount()
+  await ui.openPanel()
+  noticeTimers.length = 0
+  posts.length = 0
+  await ui.click('data-desktop-sc-action', 'update')
+  check('25) 「更新」是直连的（fetch + pull 两个请求）', posts.map((p) => p.route).join(','), 'remote,remote')
+  const notice = ui.find('data-desktop-sc-notice')
+  check('   更新成功后出现提示', notice === null, 'false')
+  check('   文案是「已更新」（字典键，前面只多一个 ✓ 标记）', textOf(ui.find('data-desktop-sc-notice-text')), '\u2713updated')
+  check('   类别是 ephemeral', notice?.props?.['data-desktop-sc-notice-persistence'], 'ephemeral')
+  check('   排了自动消失定时器', liveNoticeTimer()?.delay, LIMITS.noticeDismissMs)
+  // 到点之后自己消失（测试不必真的等三秒：直接触发那个回调）。
+  check('   触发定时器', await fireNoticeTimer(), true)
+  await ui.settle()
+  check('   到点后提示消失', ui.find('data-desktop-sc-notice') === null, 'true')
+
+  // (2) actionable：切到某个标签进入游离 HEAD → 提示带「从这里新建分支」入口，不排定时器。
+  noticeTimers.length = 0
+  writeExtra = { detached: true }
+  await ui.openPanel()
+  {
+    const row = ui.find('data-desktop-tag-name', 'v0.1.0')
+    row.props.onDoubleClick({ stopPropagation() {}, preventDefault() {} })
+    await ui.settle()
+  }
+  await ui.openPanel()
+  const detachedNotice = ui.find('data-desktop-sc-notice')
+  check('   游离 HEAD 提示：类别是 actionable', detachedNotice?.props?.['data-desktop-sc-notice-persistence'], 'actionable')
+  check('   它不排自动消失定时器', liveNoticeTimer() === null, 'true')
+  check('   并带着动作入口', ui.find('data-desktop-sc-branch-from-tag', 'v0.1.0') === null, 'false')
+  writeExtra = {}
+
+  // (3) 错误区与「进行中的操作」卡片不是提示，本来就不受定时器影响。
+  noticeTimers.length = 0
+  // 用**已知**的错误 code：未知 code 会被归一化成 `unknown`（见第 18 节），
+  // 那时按 code 找元素当然找不到——那是测试写错了，不是界面错了。
+  writeErrorAlways = { error: 'boom', code: 'localChanges', detail: 'fatal: boom' }
+  ui = await mount()
+  await ui.openPanel()
+  await ui.dblClickRow('develop')
+  check('   错误仍然显示（不自动消失）', ui.find('data-desktop-sc-error', 'localChanges') === null, 'false')
+  check('   错误不排提示定时器', liveNoticeTimer() === null, 'true')
+  writeErrorAlways = null
+
+  statusOverride = { operation: { type: 'merge', currentLabel: 'HEAD', incomingLabel: 'develop', labelsSwapped: false, markerless: false }, conflictCount: 1 }
+  ui = await mount()
+  await ui.openPanel()
+  check('   进行中的操作卡片仍然显示', ui.find('data-desktop-sc-progress', 'merge') === null, 'false')
+  check('   它也不排提示定时器', liveNoticeTimer() === null, 'true')
+  statusOverride = {}
+}
+
+console.log('')
+console.log('=== 26. Escape 逐层退出：先关二级，再关对话框，最后关面板 ===')
+{
+  ui = await mount()
+  await ui.openPanel()
+  check('26) 面板打开且二级菜单打开', await ui.openSection('branches'), true)
+  // 第一次 Esc：只收二级菜单，面板留着。
+  await ui.escape()
+  check('   第一次 Esc 关掉二级菜单', ui.find('data-desktop-sc-groupmenu', 'branches') === null, 'true')
+  check('   一级面板仍然开着', ui.panelOpen(), true)
+  // 第二次 Esc：关面板。
+  await ui.escape()
+  check('   第二次 Esc 才关面板', ui.panelOpen(), false)
+
+  // 二级菜单 → 点条目 → 打开对话框：关二级不能把对话框一起卸载。
+  await ui.openPanel()
+  await ui.clickSectionItem('branches', 'create-tag')
+  check('   点二级条目后二级菜单消失', ui.find('data-desktop-sc-groupmenu', 'branches') === null, 'true')
+  check('   它开的对话框仍然在（没被一起卸载）', ui.find('data-desktop-sc-dialog', 'create-tag') === null, 'false')
+  await ui.escape()
+  check('   Esc 关掉对话框', ui.find('data-desktop-sc-dialog', 'create-tag') === null, 'true')
+  check('   面板仍开着', ui.panelOpen(), true)
+}
 
 console.log('')
 console.log(failures === 0 ? '全部通过' : `${failures} 项失败`)

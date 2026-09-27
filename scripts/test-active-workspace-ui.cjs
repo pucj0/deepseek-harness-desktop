@@ -43,7 +43,7 @@ const { createMainWindow } = require('../dist/main/window')
 const { DshServer } = require('../dist/main/dsh-server')
 const { ActiveWorkspaceController, applyHarnessReport } = require('../dist/main/active-workspace')
 const { applicationMenuTemplate } = require('../dist/main/menu')
-const { catalogFor, setShellLocale } = require('../dist/main/i18n')
+const { catalogFor, coerceReportedLocale, currentLocale, initShellStrings, setShellLocale } = require('../dist/main/i18n')
 const { readSettings, switchWorkspace } = require('../dist/main/settings')
 const { createWorkspaceActions } = require('../dist/main/workspace-actions')
 const { pickRegisteredFallback } = require('../dist/main/workspace-reconcile')
@@ -190,6 +190,14 @@ async function run() {
 
   /** 上报记录：本测试用它断言 bridge → 主进程这条链路真的通了。 */
   const reports = []
+  /**
+   * 语言上报记录（与工作区同一条 bridge 链路）。
+   *
+   * 冷启动**故意**先按英文起（真实场景里是"读不到 Harness 偏好、回退系统语言"），这样
+   * "运行期上报把语言纠正过来"这件事才看得出来。
+   */
+  const localeReports = []
+  initShellStrings('en')
   const registryView = () => readWorkspaceRegistry(dshHome)
   const active = new ActiveWorkspaceController({
     startup: { path: workspaceA, source: 'remembered' },
@@ -221,6 +229,12 @@ async function run() {
     // 与 index.ts 完全同一条策略入口（applyHarnessReport）。
     onActiveWorkspaceReport: (payload) => {
       applyHarnessReport(active, payload, registryView)
+    },
+    // 与 index.ts 同一条语言策略：归一化之后切换活文案表；不认识的值保持现状。
+    onLocaleReport: (locale) => {
+      localeReports.push(locale)
+      const next = coerceReportedLocale(locale)
+      if (next !== undefined) setShellLocale(next)
     },
   })
   const { window } = mainWindow
@@ -268,6 +282,42 @@ async function run() {
   check('上报链路确实发生过（订阅收到过变化）或至少已标记为来自 Harness', () => {
     assert.ok(reportedA !== null || active.fromHarness === true)
   })
+
+  // --- 1b) 语言：Harness 的**生效语言**同样由这个 bridge 上报 -----------------
+  //
+  // 与"当前项目"同一条链路（官方 runtime → 内置插件 → 真实 preload → 真实 IPC → 主进程），
+  // 而它解决的是另一个真实问题：外壳冷启动只能读 `<harness home>/settings.yaml` 里的
+  // `locale.preference`，用户**从没选过语言**（Harness 用的是从浏览器语言推导的 provisional
+  // 值）或语言由语言包注册时，那份文件给不出答案，于是"Harness 界面已经是中文、外壳菜单却是
+  // 英文"。这里断言的就是"外壳能从运行期拿到它"。
+  //
+  // 判据刻意用官方 runtime 自己写下的 `document.documentElement.lang`（已确认
+  // `@deepseek-ai/dsh-client-locale` 会写它：`active === 'zh' ? 'zh-CN' : active`）做对照，
+  // 而不是猜某台机器的系统语言。
+  {
+    const officialLang = String(
+      await contents
+        .executeJavaScript('document.documentElement.lang')
+        .catch(() => ''),
+    )
+    const deadlineLocale = Date.now() + 30000
+    while (Date.now() < deadlineLocale && localeReports.length === 0) await wait(200)
+    check('1b) 内置 bridge 把 Harness 的生效语言上报到了外壳', () => {
+      assert.ok(localeReports.length > 0, '一次语言上报都没收到')
+    })
+    check('1b) 上报的值是外壳真的带字典的语言（不是页面文字猜出来的）', () => {
+      const coerced = localeReports.map((value) => coerceReportedLocale(value))
+      assert.ok(coerced.every((value) => value !== undefined), `上报了不认识的语言：${JSON.stringify(localeReports)}`)
+      assert.ok(
+        coerced.includes(officialLang === 'zh-CN' ? 'zh-CN' : officialLang),
+        `上报 ${JSON.stringify(localeReports)} 与官方 lang=${officialLang} 对不上`,
+      )
+    })
+    check('1b) 活文案表跟着上报走（与 index.ts 同一条应用路径）', () => {
+      assert.equal(currentLocale(), coerceReportedLocale(localeReports[localeReports.length - 1]))
+    })
+    console.log(`  语言：官方 lang=${officialLang} 上报=${JSON.stringify(localeReports)} 外壳=${currentLocale()}`)
+  }
 
   // --- 2) 在 Harness UI 里切换到 B（不重启应用） -----------------------------
   const clicked = await waitFor(

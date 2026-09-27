@@ -65,12 +65,31 @@ const result = spawnSync(electronBinary, [root, `--user-data-dir=${isolatedUserD
 })
 
 const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-const match = /\[menu\]([\s\S]*?)\[\/menu\]/u.exec(output)
-const dump = match === null ? '' : match[1]
+/**
+ * 这次启动构建了**两份**菜单，两份都要看，因为它们回答的是不同问题：
+ *
+ *   1. **第一份**（建窗口之前装的）：标题栏页面的第一次 `getMenu()` 读到的就是它，因此
+ *      "窗口第一帧就是中文、且没有 Electron 默认菜单里的 Window"由它保证；
+ *   2. **最后一份**（启动流程走完、运行时版本与「最近打开」都就绪之后）：这才是用户在界面上
+ *      真正看到的菜单，清单类断言（每一项都在、最近打开是动态数据）都对着它。
+ */
+const allDumps = [...output.matchAll(/\[menu\]([\s\S]*?)\[\/menu\]/gu)].map((match) => match[1])
+const firstDump = allDumps[0] ?? ''
+const dump = allDumps[allDumps.length - 1] ?? ''
 
 console.log('=== 1. 诊断开关确实输出了菜单 ===')
 await check('应用以 DSH_DESKTOP_DUMP_MENU=1 启动并打印了菜单结构', () => {
   assert.notEqual(dump, '', `未拿到菜单输出；stderr 片段：${output.slice(-400)}`)
+})
+await check('启动期至少构建了两份菜单（先装菜单、后补动态数据）', () => {
+  assert.ok(allDumps.length >= 2, `只拿到 ${allDumps.length} 份菜单`)
+})
+await check('第一份菜单就是中文、且没有 Electron 默认菜单的 Window', () => {
+  for (const label of ['文件', '编辑', '视图', '更新', '帮助']) {
+    assert.ok(new RegExp(`^${label}$`, 'mu').test(firstDump), `第一份菜单里没有 ${label}`)
+  }
+  assert.ok(!/^Window$/mu.test(firstDump), '第一份菜单是 Electron 默认菜单（它有 Window）')
+  assert.ok(!/^File$/mu.test(firstDump), '第一份菜单是英文')
 })
 
 console.log('')
@@ -162,6 +181,37 @@ console.log('=== 6. 语言来自 Harness 的设置，而不是系统语言 ===')
 await check('菜单语言 = Harness 的 locale.preference（本用例固定为 zh）', () => {
   assert.ok(/^\s*文件\s*$/mu.test(dump), '菜单不是中文——说明它没有跟随 Harness 的设置')
   assert.ok(!/^\s*File\s*$/mu.test(dump), '菜单是英文——说明语言没有跟随 Harness 的设置')
+})
+
+console.log('')
+console.log('=== 7. 运行时菜单的身份：顶层是 更新，绝不是 Electron 默认菜单 ===')
+//
+// 这一节防的是"源码改了、dist 没重新 build、测试还全绿"，以及"窗口创建时菜单还没装、
+// 标题栏把 Electron 的默认菜单画了出来"这两件事：
+//   * Electron 自己会在 app ready 时装一份默认菜单 `File / Edit / View / Window / Help`；
+//     `Window` 是它加的，本产品**没有**这一项。顶层出现 Window 只可能来自那份默认菜单。
+//   * 因此"运行时顶层必须是 文件/编辑/视图/更新/帮助"就是一条强断言：源码定义的是「更新」，
+//     运行时也必须是「更新」；出现 Window 一律失败。
+await check('顶层菜单里没有 Window / 窗口（Electron 默认菜单的指纹）', () => {
+  for (const line of dump.split('\n').map((entry) => entry.trim())) {
+    assert.notEqual(line, 'Window', '顶层出现了 Window —— 运行的是 Electron 默认菜单，不是当前的 applicationMenuTemplate')
+    assert.notEqual(line, '窗口', '顶层出现了「窗口」——本产品没有这个菜单')
+  }
+})
+await check('运行时顶层与源码模板一致（同一个顺序、同一个「更新」）', () => {
+  const tops = dump
+    .split('\n')
+    .filter((line) => line !== '' && !/^\s/.test(line))
+    .map((line) => line.trim())
+  assert.deepEqual(tops, ['文件', '编辑', '视图', '更新', '帮助'])
+})
+await check('外壳自带的诊断行给出了版本 / 语言 / 顶层菜单文案', () => {
+  // 需求 15：开发环境必须能看到"跑的这一份 build 到底装了哪些顶层菜单"。
+  const line = output.split(/\r?\n/u).find((entry) => entry.includes('[shell] version='))
+  assert.ok(line !== undefined, `没有 [shell] 诊断行：${output.slice(-400)}`)
+  assert.ok(/locale=zh-CN/u.test(line), `诊断行里的语言不对：${line}`)
+  assert.ok(/menu=文件\|编辑\|视图\|更新\|帮助/u.test(line), `诊断行里的菜单不对：${line}`)
+  assert.ok(!/Window/u.test(line), `诊断行里出现了 Window：${line}`)
 })
 
 try {

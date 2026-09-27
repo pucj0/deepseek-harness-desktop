@@ -101,6 +101,17 @@ interface ShellState {
    * （菜单按钮的文案来自原生菜单，语言一变主进程会重建菜单，页面必须再拉一次才看得到）。
    */
   locale: string
+  /**
+   * 原生菜单的版本号（每次重建 +1）。
+   *
+   * 标题栏画的菜单按钮文案**来自原生菜单**（见 menu.ts 的说明），而原生菜单会在运行中重建
+   * （语言变化、最近打开变化）。页面必须知道"菜单换了一份"，否则它会一直显示第一次
+   * `getMenu()` 拿到的那些按钮——正是这里踩过的坑：窗口创建时菜单还没装上，页面先拿到了
+   * Electron 的**默认菜单**（`File / Edit / View / Window / Help`，其中那个 `Window` 是
+   * Electron 自己加的，本产品没有这一项），随后菜单被换成真正的应用菜单，却没有任何东西
+   * 通知页面，于是标题栏上永远挂着那份默认菜单。
+   */
+  menuRevision: number
   /** 前进/后退按钮的无障碍文案（随语言变化，因此走状态推送而不是只在加载时给一次）。 */
   backLabel: string
   forwardLabel: string
@@ -152,6 +163,13 @@ export interface MainWindowOptions {
      * @returns 是否真的弹出了菜单。
      */
     open: (index: unknown, point: { x: number; y: number }, onClosed: () => void) => boolean
+    /**
+     * 当前菜单的版本号（每次重建递增）。
+     *
+     * 缺省为 0（测试里不关心它时可以不传）。状态推送里带上它，标题栏就知道该不该重新拉一次
+     * 菜单按钮——见 {@link ShellState.menuRevision}。
+     */
+    revision?: () => number
   }
   /**
    * Harness 上报的"当前工作区"（不可信输入，这里只做**形状**校验）。
@@ -161,6 +179,14 @@ export interface MainWindowOptions {
    * 那里才知道 Harness home 与注册表。
    */
   onActiveWorkspaceReport?: (payload: ActiveWorkspaceReportPayload) => void
+  /**
+   * Harness 上报的**当前语言**（不可信输入，这里只做形状校验）。
+   *
+   * 与工作区同一条边界：只有 `appContents` 发来的消息会被转发，其余 renderer（标题栏页面、
+   * 更新窗口）一律丢弃。值的解释（哪些写法算中文、不认识的值怎么办）在 `index.ts` 里，
+   * 因为那需要 `i18n` 的归一化规则。
+   */
+  onLocaleReport?: (locale: string) => void
 }
 
 /** Harness 上报的 active workspace 载荷（归一化之后）。 */
@@ -376,6 +402,8 @@ export function createMainWindow(options: MainWindowOptions): {
     // 语言与它的两个按钮文案都是**当前值**：语言在运行中会变（见 index.ts 的 locale 监听），
     // 标题栏据此写对 <html lang> 并重新取菜单按钮。
     locale: currentLocale(),
+    // 菜单版本：页面拿它判断"菜单按钮要不要重新拉一次"（见 ShellState.menuRevision）。
+    menuRevision: menu?.revision?.() ?? 0,
     backLabel: backLabel(),
     forwardLabel: forwardLabel(),
   })
@@ -586,6 +614,30 @@ export function createMainWindow(options: MainWindowOptions): {
   }
   ipcMain.on('dsh-desktop:active-workspace', onActiveWorkspace)
   window.on('closed', () => ipcMain.off('dsh-desktop:active-workspace', onActiveWorkspace))
+
+  /**
+   * Harness 页面上报"当前语言"（见 preload.ts 的 `reportLocale` 与
+   * dsh-client-ui-shell-bridge 的客户端半边）。
+   *
+   * 与工作区上报同一套边界：
+   *   * **只认这个视图**（`event.sender !== appContents` 一律丢弃）。标题栏页面与其它
+   *     renderer 也跑在同一组 `ipcMain` 上，没有这条判断，它们就能替 Harness 决定语言；
+   *   * **只传字符串**：形状不对（对象、数字、空串）整条丢弃，绝不做任何猜测。
+   *
+   * 值的语义（哪些写法算中文、不认识的语言要不要回退）在 `index.ts` 里解释——那里有
+   * `i18n` 的归一化规则，而且"不认识就不动"这条策略属于应用级决策。
+   *
+   * @param event - IPC 事件（用 sender 做来源校验）。
+   * @param payload - 渲染进程送来的原始值。
+   */
+  const onLocaleReport = (event: Electron.IpcMainEvent, payload: unknown): void => {
+    if (event.sender !== appContents) return
+    if (options.onLocaleReport === undefined) return
+    if (typeof payload !== 'string' || payload === '') return
+    options.onLocaleReport(payload)
+  }
+  ipcMain.on('dsh-desktop:shell-locale', onLocaleReport)
+  window.on('closed', () => ipcMain.off('dsh-desktop:shell-locale', onLocaleReport))
 
   return {
     window,

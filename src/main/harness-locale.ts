@@ -153,16 +153,27 @@ export function readLocalePreference(dshHome: string): string | undefined {
  * 回调只在**值真的变了**的时候触发（宿主重写整个文档时会带上其它小节，那种写入不会打扰
  * 调用方）。返回的 disposer 幂等，并且关掉 watcher 就不再占用句柄。
  *
+ * **装上监听之后会立刻对账一次**，因为"读到偏好"与"装上监听"之间是有时间差的（真实启动里
+ * 是解包运行时 + 起服务端那十几秒）：用户在这段时间里改了语言，只靠"等下一次事件"是等不到
+ * 的——文件的写早就发生过了。因此这里注册完就比一次，没变化时**一个回调都不发**。
+ *
+ * 基准值默认取注册那一刻的现读值，但调用方可以显式传入**它自己已经用过的那个值**
+ * （`baseline`）：这样"外壳启动时读到的"与"监听开始的地方"是同一个基准，中间那次修改才会
+ * 被认出来。注意 `baseline` 传 `undefined` 也是有意义的——它表示"调用方当时没有偏好"，因此
+ * 实现用 `arguments.length` 区分"没传"与"传了 undefined"。
+ *
  * @param dshHome - Harness 主目录。
  * @param onChange - 偏好变化时的回调（参数是新的原始值，可能是 undefined）。
+ * @param baseline - 调用方已经用过的值；省略时以注册那一刻的现读值为基准。
  * @returns 停止监听的函数。
  */
 export function watchLocalePreference(
   dshHome: string,
   onChange: (locale: string | undefined) => void,
+  baseline?: string,
 ): () => void {
   if (typeof dshHome !== 'string' || dshHome === '') return () => {}
-  let last = readLocalePreference(dshHome)
+  let last = arguments.length >= 3 ? baseline : readLocalePreference(dshHome)
   let timer: NodeJS.Timeout | undefined
   let stopped = false
 
@@ -173,8 +184,13 @@ export function watchLocalePreference(
     last = next
     try {
       onChange(next)
-    } catch {
+    } catch (error) {
       // 一个坏掉的消费者不该把监听链（进而把进程）带下来。
+      //
+      // 但**不能连痕迹都不留**：这一条回调是"运行中切换语言"的唯一入口，静默吞掉之后
+      // 现象就是"设置改了、界面没反应"，而没有任何线索说明为什么。因此这里打一行诊断
+      // （只在消费者真的抛错时出现，正常路径一个字节都不写）。
+      process.stderr.write(`[shell] 语言设置变化的消费者抛错: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
     }
   }
   const schedule = (): void => {
@@ -198,6 +214,8 @@ export function watchLocalePreference(
   watchPath(join(dshHome, SETTINGS_FILENAME))
   watchPath(join(dshHome, SETTINGS_JSON_FILENAME))
   watchPath(dshHome)
+  // 立刻对账一次：把"读到偏好"与"装上监听"之间那次修改补回来（见上面的说明）。
+  read()
 
   return () => {
     stopped = true

@@ -18,7 +18,7 @@ import { DshServer } from './dsh-server'
 import type { ServerReady } from './dsh-server'
 import { formatGitBadge, readGitInfo } from './git'
 import { readLocalePreference, watchLocalePreference } from './harness-locale'
-import { format, initShellStrings, resolveShellLocale, setShellLocale, t } from './i18n'
+import { coerceReportedLocale, currentLocale, format, initShellStrings, resolveShellLocale, setShellLocale, t } from './i18n'
 import { healModuleFallback } from './module-heal'
 import { applicationMenuTemplate, dumpMenuTemplate, menuBarEntries, openMenuAt } from './menu'
 import type { ApplicationMenuDeps } from './menu'
@@ -215,7 +215,162 @@ async function main(): Promise<void> {
   // exactly Harness's own browser-derived fallback. Every shell-owned string (menus, tray,
   // dialogs) reads from this same table; `applyShellLocale` refreshes what is built rather than
   // read per use.
-  const strings = initShellStrings(readLocalePreference(dshHome))
+  //
+  // 这份值还决定了诊断行里 `pref=` 那一项：它把"读到文件"与"回退系统语言"区分开——两者
+  // 在中文机器上都会显示 `locale=zh-CN`，只看语言是分不出来的（排查时真的被它绕过一次）。
+  const localePreference = readLocalePreference(dshHome)
+  const strings = initShellStrings(localePreference)
+
+  /**
+   * 启动期就要能装好的菜单：**必须在建窗口之前**。
+   *
+   * 顺序为什么重要：标题栏页面（窗口自身的文档）在加载时就会 `getMenu()`，而那个 IPC 读的
+   * 是 `Menu.getApplicationMenu()`。菜单此时若还没装，Electron 会给出它自己的**默认菜单**
+   * ——`File / Edit / View / Window / Help`，其中那个 `Window` 是 Electron 加的、本产品根本
+   * 没有这一项。这正是"源码里顶层是『更新』，界面上却出现『Window』"的来源：菜单是在服务端
+   * 就绪之后（十几秒）才装的，而窗口早就可见了，标题栏在这段时间里已经把默认菜单画了出来，
+   * 之后又没有任何东西通知它"菜单换了"（见 ShellState.menuRevision）。
+   *
+   * 这些回调**延迟绑定**：`actions`（工作区动作）与 `openUpdatesEntry`（检查更新）都要等
+   * 启动流程更靠后才会赋值，而菜单现在就得构建出来。回调在点击那一刻才解析，因此"命令"
+   * 永远是当时那一份实现——这与"重建菜单只换文案、不换命令"是同一条约束。
+   */
+  /** 工作区动作（启动流程更靠后赋值；菜单回调在点击时读它）。 */
+  let actions!: WorkspaceActions
+  /** 构造一份新的工作区动作；在 `workspaceActions` 定义之前是 undefined。 */
+  let makeWorkspaceActions: (() => WorkspaceActions) | undefined
+  /** 「检查更新」入口（服务端就绪之后才有）。 */
+  let openUpdatesEntry: (() => void) | undefined
+  /** 智能体运行时版本（帮助菜单里的信息行；解包/解析之后才有真值）。 */
+  let runtimeVersion = 'unknown'
+  /** 菜单版本号：每次重建 +1，标题栏据此重新拉取菜单按钮。 */
+  let menuRevision = 0
+  /** 主窗口（创建之后才有）：菜单重建时要靠它把状态推给标题栏。 */
+  let shellWindow: ReturnType<typeof createMainWindow> | undefined
+  /** 托盘（创建之后才有）：语言变化时要重建它的菜单。 */
+  let tray: Tray | undefined
+  /** 托盘动作（与托盘一起创建）。 */
+  let trayActions: TrayActions | undefined
+  /** 停止监听 Harness 语言设置（退出时收尾）。 */
+  let stopLocaleWatch: (() => void) | undefined
+
+  /**
+   * 组装菜单输入（文案与外壳版本由 `buildApplicationMenu` 补上）。
+   *
+   * 只在**构建那一刻**读 `runtimeVersion` 与「最近打开」快照，其余全是延迟绑定的回调，
+   * 因此这个函数从启动早期（窗口还不存在）到运行期都可以安全调用。
+   *
+   * @returns 交给 `applicationMenuTemplate` 的命令与动态数据。
+   */
+  const applicationMenuDeps = (): Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> => {
+    // 「最近打开」是构建时的快照（`createWorkspaceActions` 读一次 settings），所以每次重建
+    // 菜单都换一份新的动作对象，列表不会停在旧快照上。早期还没有构造器 → 列表为空。
+    if (makeWorkspaceActions !== undefined) actions = makeWorkspaceActions()
+    return {
+      recent: actions?.recent ?? [],
+      runtimeVersion,
+      openFolder: () => actions.openFolder(),
+      openRecent: (path) => actions.openRecent(path),
+      removeRecent: (path) => actions.removeRecent(path),
+      projectInfo: () => actions.projectInfo(),
+      revealWorkspace: () => actions.revealWorkspace(),
+      copyWorkspacePath: () => actions.copyWorkspacePath(),
+      forgetWorkspace: () => actions.forgetWorkspace(),
+      openUpdates: () => openUpdatesEntry?.(),
+      openReleases: () => void shell.openExternal(RELEASES_URL),
+    }
+  }
+
+  /**
+   * 重建应用菜单，并把"菜单换了一份"告诉标题栏。
+   *
+   * 三件事必须一起做，缺一不可：
+   *   1. `menuRevision += 1`——页面据此知道菜单按钮要重拉；
+   *   2. `Menu.setApplicationMenu(...)`——原生菜单与标题栏按钮的文案都来自它；
+   *   3. `publishShellState()`——推一次状态，页面才会真的去重拉。
+   *
+   * 第 3 步早先是漏掉的：菜单被换成真正的应用菜单之后没有任何通知，标题栏于是永远停在
+   * 窗口创建那一刻拿到的 Electron 默认菜单上（`… / Window / …`）。
+   *
+   * 两处调用：语言变化（换文案，命令必须不变）与「最近打开」变化（换数据）。
+   */
+  const refreshApplicationMenu = (): void => {
+    menuRevision += 1
+    const template = buildApplicationMenu(applicationMenuDeps())
+    // 开发诊断：外壳版本 / 当前语言 / 顶层菜单文案。
+    //
+    // 存在的理由：菜单在主进程里，渲染进程的 CDP 读不到，"跑的这一份 build 到底装了哪些
+    // 顶层菜单"就只能靠人肉截图猜。打包后的生产运行不打印（这里没有敏感路径，但也没必要
+    // 往用户机器上写日志）；`DSH_DESKTOP_DUMP_MENU=1` 时无论如何都打印，供测试断言。
+    if (!app.isPackaged || process.env.DSH_DESKTOP_DUMP_MENU === '1') {
+      process.stderr.write(
+        `[shell] version=${SHELL_VERSION} electron=${process.versions.electron ?? '—'} locale=${currentLocale()} pref=${localePreference ?? '(none)'} menuRevision=${menuRevision} menu=${template
+          .map((item) => item.label ?? '(分隔)')
+          .join('|')}\n`,
+      )
+    }
+    shellWindow?.publishShellState()
+  }
+
+  // 先把菜单装上，再建窗口：标题栏的第一次 getMenu() 因此就是真实菜单（不是 Electron 默认菜单）。
+  refreshApplicationMenu()
+
+  /**
+   * 把"Harness 的语言变了"应用到已经构建出来的界面上。
+   *
+   * 三件事，缺一不可：
+   *   * 应用菜单——重建它（标题栏的菜单按钮与原生下拉的文案都来自它），并把这次重建推给
+   *     标题栏（`refreshApplicationMenu` 自己会 `publishShellState`）；
+   *   * 托盘菜单——它是启动时构建的，不重建就会留在旧语言；
+   *   * 标题栏状态——推一次状态，页面据此改写 `<html lang>`、导航按钮文案并重新取菜单按钮。
+   *
+   * 对话框、项目信息窗口、更新窗口不在这里：它们拿的是同一份**活**文案表（`strings`），
+   * 读的时候已经是新语言。
+   *
+   * 重建**不会**把工作区带回启动值：菜单项都在点击时读 `active.get()`，重建只换文案与
+   * 「最近打开」的数据，不换"当前项目"的判定来源（见 workspace-actions.ts 的说明）。
+   *
+   * 它刻意在**启动最早期**就能安全调用（窗口、托盘、工作区动作都还可能是 undefined）：
+   * 语言设置的监听从这一刻起就生效，用户不需要等到服务端起来才能切语言。
+   *
+   * @param locale - 新的语言偏好（原始值；undefined 表示偏好被清空 → 回退系统语言）。
+   */
+  const applyShellLocale = (locale: string | undefined): void => {
+    // 没有偏好（第一次使用，或用户把设置清空）时回退系统语言——与启动路径同一个判定。
+    if (!setShellLocale(resolveShellLocale(locale))) return
+    refreshApplicationMenu()
+    if (tray !== undefined && trayActions !== undefined) refreshTray(tray, trayActions)
+  }
+
+  /**
+   * 处理 Harness **运行期上报**的生效语言（见 shell-bridge 的客户端半边）。
+   *
+   * 与语言设置的**文件监听**（`watchLocalePreference` → `applyShellLocale`）是互补的两条路：
+   *   * 文件里是"用户显式选过的偏好"，冷启动只有它可读；
+   *   * 这条上报是"Harness 此刻真正在用的语言"，覆盖"从没选过"（provisional 值来自浏览器语言）
+   *     与"语言包注册的自定义 id"两种情况——那两种情况下文件里什么都没有。
+   *
+   * 规则：`coerceReportedLocale` 只认这个外壳真的带字典的语言（`zh*` / `en*` 的各种写法）。
+   * **不认识的值保持现状**，不回退到系统语言——这条上报是**纠正**，不是"用户清空了偏好"。
+   *
+   * @param raw - preload 送来的原始语言值（已确认来自 Harness 视图且是字符串）。
+   */
+  const applyHarnessLocaleReport = (raw: string): void => {
+    const next = coerceReportedLocale(raw)
+    if (next === undefined) return
+    if (next === currentLocale()) return
+    process.stderr.write(`[shell] 语言跟随 Harness 运行期上报: ${raw} → ${next}\n`)
+    applyShellLocale(next)
+  }
+
+  // 跟随 Harness 的语言设置：宿主把用户选择写进 `<dshHome>/settings.yaml` 的
+  // `locale.preference`，这里盯着同一个文件，改了就重建菜单/托盘并刷标题栏——**不重启应用**。
+  //
+  // 注册得**越早越好**（就在冷启动读完之后），并把冷启动读到的那个值作为基准：
+  //   * "读到偏好"与"起服务端"之间隔着十几秒（首次启动还要解包运行时），用户完全可能在
+  //     这段时间里改语言；只在服务端就绪之后才注册监听，那次修改就永远等不到事件；
+  //   * 基准显式传进去，因此这几秒里的修改会在注册后的第一次对账里被认出来。
+  stopLocaleWatch = watchLocalePreference(dshHome, applyShellLocale, localePreference)
 
   const credentials = new CredentialStore(userDataDir)
 
@@ -230,15 +385,27 @@ async function main(): Promise<void> {
     ...(iconPath !== undefined ? { iconPath } : {}),
     splashTitle: strings.splashTitle,
     splashHint: strings.splashHint,
-    backLabel: strings.titlebarBack,
-    forwardLabel: strings.titlebarForward,
+    // 导航按钮的无障碍文案**刻意不在这里传**：它是动态 i18n，而 `createMainWindow` 只在创建
+    // 时读一次参数，传进来等于把它冻在启动时的语言上（语言一变，「返回 / 前进」还停在旧语言）。
+    // 默认实现每次 `currentState()` 都从活文案表 `t()` 取当前值（见 window.ts）。
     // Harness 上报的"当前工作区"。这里是**第一道**门槛：只做形状校验，且只认来自
     // Harness 子视图的消息（见 window.ts）。语义校验（绝对路径、目录存在、是否已注册）
     // 在下面 applyActiveWorkspaceReport 里做——那里才知道注册表。
     onActiveWorkspaceReport: (payload) => {
       applyActiveWorkspaceReport(payload)
     },
-    // 标题栏里的菜单按钮与"点哪个弹哪个"都来自**同一份原生菜单**（下面构建的那个）。
+    /**
+     * Harness **运行期上报**的生效语言（见 preload.ts 的 reportLocale 与
+     * dsh-client-ui-shell-bridge 的客户端半边）。
+     *
+     * 它是冷启动"读配置文件"那条路之外的**第三条**来源：用户从没选过语言（Harness 用的是
+     * 从浏览器语言推导的 provisional 值）或语言由语言包注册时，settings.yaml 给不出答案，
+     * 而 Harness 界面自己知道。没有这一条，就会出现"Harness 已经是中文、外壳菜单还是英文"。
+     */
+    onLocaleReport: (locale) => {
+      applyHarnessLocaleReport(locale)
+    },
+    // 标题栏里的菜单按钮与"点哪个弹哪个"都来自**同一份原生菜单**（上面构建的那个）。
     // 菜单因此只有一份定义：accelerator 仍由它注册，标题栏只是换个地方画标题。
     menu: {
       entries: () => menuBarEntries(Menu.getApplicationMenu() ?? Menu.buildFromTemplate([])),
@@ -247,9 +414,12 @@ async function main(): Promise<void> {
         if (applicationMenu === null) return false
         return openMenuAt(applicationMenu, index, window, point, onClosed)
       },
+      // 菜单每次重建都会 +1；标题栏看到它变了就重新取一次按钮（见 window.ts 的说明）。
+      revision: () => menuRevision,
     },
   })
   const window = mainWindow.window
+  shellWindow = mainWindow
 
   /**
    * 处理一次 Harness 上报（在窗口创建之后定义，因为它要读 `window` 之外的注册表状态）。
@@ -348,7 +518,7 @@ async function main(): Promise<void> {
   })
   for (const line of pluginSync.messages) process.stderr.write(`${line}\n`)
 
-  const runtimeVersion = RuntimeUpdater.readVersion(runtime.dir) ?? runtime.stagedVersion ?? 'unknown'
+  runtimeVersion = RuntimeUpdater.readVersion(runtime.dir) ?? runtime.stagedVersion ?? 'unknown'
   activeRuntime = runtime
   process.env.DSH_DESKTOP_SHELL_VERSION = SHELL_VERSION
   process.env.DSH_DESKTOP_RUNTIME_VERSION = runtimeVersion
@@ -491,7 +661,8 @@ async function main(): Promise<void> {
     })
 
   /** 菜单与托盘共用的工作区动作（托盘只用到 `projectInfo`）。 */
-  let actions: WorkspaceActions
+  // 变量本身在启动早期就声明了（菜单必须在窗口之前装好，见上面 applicationMenuDeps 的说明）。
+  makeWorkspaceActions = workspaceActions
 
   /** Electron 侧的四件事（注入，因此 workspace-actions 可以被离线测试直接驱动）。 */
   const workspaceActionEffects: WorkspaceActionEffects = {
@@ -539,82 +710,6 @@ async function main(): Promise<void> {
   // 先备一份：托盘（早于菜单构建）也要用同一个 `projectInfo`。
   actions = workspaceActions()
 
-  /**
-   * 语言之外的应用菜单输入：命令回调与动态数据。
-   *
-   * 抽成一份可复用的对象，是因为菜单在**语言变化时会被重建**：重建必须换文案、绝不能换命令，
-   * 而复用同一份 deps 正好把这件事变成结构上的保证（测试也直接比对中英两份模板）。
-   *
-   * 注意 `projectInfo` 走的是 `actions.projectInfo`（点击时读 active.get()），而不是一个
-   * 捕获了路径的闭包——1.6.2 之前它闭包捕获了**启动时**的工作区，于是 Harness 里切项目
-   * 之后「项目信息」还显示旧目录（BUG B）。
-   *
-   * @param openUpdates - 「检查更新」入口。
-   * @returns 交给 `applicationMenuTemplate` 的输入（文案与外壳版本由调用方补上）。
-   */
-  const menuDepsFor = (openUpdates: () => void): Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> => {
-    actions = workspaceActions()
-    return {
-      recent: actions.recent,
-      runtimeVersion,
-      openFolder: actions.openFolder,
-      openRecent: actions.openRecent,
-      removeRecent: actions.removeRecent,
-      projectInfo: actions.projectInfo,
-      revealWorkspace: actions.revealWorkspace,
-      copyWorkspacePath: actions.copyWorkspacePath,
-      forgetWorkspace: () => actions.forgetWorkspace(),
-      openUpdates,
-      openReleases: () => void shell.openExternal(RELEASES_URL),
-    }
-  }
-
-  /** 菜单输入（语言变化、或「最近打开」变化时用它重建菜单）。 */
-  let menuDeps: Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> | undefined
-  /** 「检查更新」入口（菜单重建时复用同一份命令）。 */
-  let openUpdatesEntry: (() => void) | undefined
-  /** 停止监听 Harness 语言设置（退出时收尾）。 */
-  let stopLocaleWatch: (() => void) | undefined
-  let tray: Tray | undefined
-  let trayActions: TrayActions | undefined
-
-  /**
-   * 重建应用菜单。
-   *
-   * 两处调用：语言变化（换文案，命令必须不变）与「最近打开」变化（换数据）。
-   * `menuDepsFor()` 每次重新读 settings 里的 recent，因此列表不会停在旧快照上。
-   */
-  const refreshApplicationMenu = (): void => {
-    if (openUpdatesEntry === undefined) return
-    // 诊断模式（DSH_DESKTOP_DUMP_MENU=1）下菜单只是打印出来，没有窗口/托盘依赖，照样走这条路。
-    menuDeps = menuDepsFor(openUpdatesEntry)
-    buildApplicationMenu(menuDeps)
-  }
-
-  /**
-   * 把"Harness 的语言变了"应用到已经构建出来的界面上。
-   *
-   * 三件事，缺一不可：
-   *   * 应用菜单——重建它（标题栏的菜单按钮与原生下拉的文案都来自它）；
-   *   * 托盘菜单——它是启动时构建的，不重建就会留在旧语言；
-   *   * 标题栏状态——推一次状态，页面据此改写 `<html lang>`、导航按钮文案并重新取菜单按钮。
-   *
-   * 对话框、项目信息窗口、更新窗口不在这里：它们拿的是同一份**活**文案表（`strings`），
-   * 读的时候已经是新语言。
-   *
-   * 重建**不会**把工作区带回启动值：菜单项都在点击时读 `active.get()`，重建只换文案与
-   * 「最近打开」的数据，不换"当前项目"的判定来源（见 workspace-actions.ts 的说明）。
-   *
-   * @param locale - 新的语言偏好（原始值；undefined 表示偏好被清空 → 回退系统语言）。
-   */
-  const applyShellLocale = (locale: string | undefined): void => {
-    // 没有偏好（第一次使用，或用户把设置清空）时回退系统语言——与启动路径同一个判定。
-    if (!setShellLocale(resolveShellLocale(locale))) return
-    if (menuDeps !== undefined) refreshApplicationMenu()
-    if (tray !== undefined && trayActions !== undefined) refreshTray(tray, trayActions)
-    mainWindow.publishShellState()
-  }
-
   // 退出时关掉设置文档的监听（两条启动路径都经过这里注册的这一处）。
   app.on('will-quit', () => {
     stopLocaleWatch?.()
@@ -628,10 +723,9 @@ async function main(): Promise<void> {
     refreshApplicationMenu()
     // 诊断实例默认打完就退；`DSH_DESKTOP_MENU_WATCH=1` 时让它活着并跟着语言重建菜单，
     // 于是"运行中切换语言"可以只靠 stderr 就被断言（见 test-shell-locale.mjs）。
-    if (process.env.DSH_DESKTOP_MENU_WATCH === '1') {
-      stopLocaleWatch = watchLocalePreference(dshHome, applyShellLocale)
-      return
-    }
+    // 语言设置的监听**不在这里注册**：它从冷启动那一刻就已经生效了（见上面
+    // watchLocalePreference 的调用），这里再注册一次会得到两条监听链。
+    if (process.env.DSH_DESKTOP_MENU_WATCH === '1') return
     app.exit(0)
     return
   }
@@ -720,9 +814,9 @@ async function main(): Promise<void> {
   refreshApplicationMenu()
   session = { server, window, ...(tray !== undefined ? { tray } : {}), updater, quitting: false }
 
-  // 跟随 Harness 的语言设置：宿主把用户选择写进 `<dshHome>/settings.yaml` 的
-  // `locale.preference`，这里盯着同一个文件，改了就重建菜单/托盘并刷标题栏——**不重启应用**。
-  stopLocaleWatch = watchLocalePreference(dshHome, applyShellLocale)
+  // 语言设置的监听**不在这里**：它在冷启动读到偏好之后立刻就装好了（见上面
+  // `watchLocalePreference` 的调用），并且以那个值为基准。放到这里再装一次的话，
+  // "读偏好"与"起服务端"之间那十几秒里的修改就永远等不到事件了。
 
   // 启动时**不再**静默检查外壳更新。
   //

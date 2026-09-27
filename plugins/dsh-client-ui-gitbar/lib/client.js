@@ -245,6 +245,19 @@ window.__ModuleLoader__.load({
       actionUpdate: '更新项目…',
       actionCommit: '提交…',
       actionPush: '推送…',
+      /**
+       * 工具条上的三个高频动作，以及两个二级分组的入口。
+       *
+       * 它们比 `actionUpdate` / `actionPush` 短：这三个是**一行里的按钮**（不是整行的
+       * 菜单项），旁边的图标已经说明了动作，"更新项目…"那种带省略号的写法会把按钮撑宽。
+       * 省略号同时会误导——「更新」「推送」都是直连执行的，不弹确认框；只有「提交」会开
+       * 对话框，而它在工具条里也不再带省略号（同一行里三个按钮的省略号必须一致）。
+       */
+      toolbarUpdate: '更新',
+      toolbarCommit: '提交',
+      toolbarPush: '推送',
+      toolbarBranches: '分支与版本',
+      toolbarStash: '储藏',
       actionNewBranch: '新建分支…',
       actionCheckoutRef: '签出标记或修订…',
       /** 推送被拒之后的两条出路：先更新（主）或强制推送（需确认）。 */
@@ -453,6 +466,16 @@ window.__ModuleLoader__.load({
       actionUpdate: 'Update project…',
       actionCommit: 'Commit…',
       actionPush: 'Push…',
+      /**
+       * The three frequent actions on the toolbar, plus the two section-menu entries.
+       * Shorter than `actionUpdate`/`actionPush` because they are buttons in one row and the
+       * glyph beside them already names the action.
+       */
+      toolbarUpdate: 'Update',
+      toolbarCommit: 'Commit',
+      toolbarPush: 'Push',
+      toolbarBranches: 'Branches & Versions',
+      toolbarStash: 'Stash',
       actionNewBranch: 'New branch…',
       actionCheckoutRef: 'Checkout tag or revision…',
       /** Two ways out of a rejected push: update first (primary), or force push (asks first). */
@@ -625,6 +648,224 @@ window.__ModuleLoader__.load({
      * 的 measured）。
      */
     const CASCADE_MENU_ESTIMATED_HEIGHT = 360
+
+    /**
+     * 一级面板（SourcePanel）的高度上界。
+     *
+     * 620 而不是早先的 440：面板里现在有标签列表、进行中的操作卡片、错误区与提示区，
+     * 440 会把「最近 / 本地 / 远程 / 标签」四段压成两三行。
+     *
+     * 它只是**上界**：真正生效的值还要跟"这个徽章下方/上方还剩多少视口高度"取小
+     * （见 anchor 的测量），因此小窗口里不会越界，大窗口里也不会长到占满屏幕。
+     */
+    const SOURCE_PANEL_MAX_HEIGHT = 620
+
+    /**
+     * 普通成功提示自动消失的时间（毫秒）。
+     *
+     * 只有 `persistence === 'ephemeral'` 的提示会用到它。带后续动作的提示（恢复储藏、
+     * 从这里新建分支）、仓库状态（游离 HEAD、进行中的合并）与错误**都不**自动消失：
+     * 三秒后自己收掉，用户就永远看不到那个本该点的按钮了。
+     */
+    const NOTICE_DISMISS_MS = 3000
+
+    /**
+     * 一条面板提示：文案 + 它属于哪一类。
+     *
+     * 为什么要带类别而不是只存字符串：早先面板里只存 `notice: '已更新'`，"这条提示该不该
+     * 自动消失"就只能靠**比对文案**来猜（`if (notice === '已更新')`）——换一种语言、或者
+     * 润色一次文案，判定就静默失效。现在类别跟着这条提示一起落进状态，判定与文案无关。
+     *
+     * @param text - 显示文案。
+     * @param persistence - `'actionable'` 表示它带着后续动作或描述仓库状态，必须留着；
+     *   其余（默认）是普通成功回执，到点自己消失。
+     * @returns 提示对象。
+     */
+    function panelNotice(text, persistence) {
+      return { text: String(text ?? ''), persistence: persistence === 'actionable' ? 'actionable' : 'ephemeral' }
+    }
+
+    /**
+     * 一个 DOM 节点在视口里的矩形；拿不到布局时返回 null。
+     *
+     * 供"贴着某一行、开在面板外侧"的定位使用（见 cascadeMenuPosition）。真实浏览器里是
+     * `getBoundingClientRect()`；桩渲染 / SSR 里没有布局，于是这里返回 null，由调用方决定
+     * 退化到什么位置。
+     *
+     * @param node - DOM 节点（可能是 null 或桩对象）。
+     * @returns `{ top, bottom, left, right }`，或 null。
+     */
+    function rectOf(node) {
+      const rect =
+        node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function'
+          ? node.getBoundingClientRect()
+          : null
+      if (rect === null || rect === undefined) return null
+      if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top)) return null
+      return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
+    }
+
+    /**
+     * 视口尺寸。
+     *
+     * 拿不到 `window`（桩渲染 / 非浏览器环境）时给一个保守的默认值：级联定位是纯计算，
+     * 少一个"视口未知"的分支比抛错好。
+     * @returns `{ width, height }`。
+     */
+    function viewportSize() {
+      const width = typeof window === 'undefined' ? 0 : Number(window.innerWidth)
+      const height = typeof window === 'undefined' ? 0 : Number(window.innerHeight)
+      return {
+        width: Number.isFinite(width) && width > 0 ? width : 1280,
+        height: Number.isFinite(height) && height > 0 ? height : 800,
+      }
+    }
+
+    /**
+     * 面板分组入口按钮上的标记属性。
+     *
+     * 值就是分组 kind（`branches` / `stash`），因此"这次 mousedown 点的是哪一个入口"
+     * 在读事件目标时就能判出来（见 panelMenuTriggerOf）。
+     */
+    const PANEL_MENU_TRIGGER_ATTR = 'data-desktop-sc-panelmenu'
+
+    /**
+     * 事件目标落在哪个面板分组入口上？
+     *
+     * 用于把"再点同一个入口 = 关掉菜单"与"点了别处 = 也关掉菜单"这两条区分开：前者的
+     * 关闭由 click 里的 toggle 负责（mousedown 必须放行），后者在 mousedown 里就该收。
+     *
+     * @param target - 事件目标（可能是 null / 桩对象）。
+     * @returns 分组 kind，或空串。
+     */
+    function panelMenuTriggerOf(target) {
+      const node = target !== null && target !== undefined && typeof target.closest === 'function' ? target.closest(`[${PANEL_MENU_TRIGGER_ATTR}]`) : null
+      const kind =
+        node !== null && node !== undefined && typeof node.getAttribute === 'function' ? node.getAttribute(PANEL_MENU_TRIGGER_ATTR) : null
+      return typeof kind === 'string' ? kind : ''
+    }
+
+    /**
+     * 量一次级联菜单的真实高度。
+     *
+     * 首帧没有节点可量（同步渲染里读不到布局），因此一律先返回估算上界；挂载后量到真实值
+     * 再细化位置（见 CASCADE_MENU_ESTIMATED_HEIGHT 的说明）。
+     *
+     * **量到的高度只对量它的那个菜单有效**：同一个位置上的组件实例会被下一个菜单复用，
+     * 长分支名的条目会换行、菜单更高，拿上一个菜单的高度去定位可能把它裁掉。
+     *
+     * @param menuRef - 菜单容器 ref。
+     * @param menu - 当前菜单（身份标识）。
+     * @returns 用于定位的高度。
+     */
+    function useCascadeMenuHeight(menuRef, menu) {
+      const [measured, setMeasured] = react.useState(null)
+      react.useEffect(() => {
+        const node = menuRef === null || menuRef === undefined ? null : menuRef.current
+        const rect =
+          node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function'
+            ? node.getBoundingClientRect()
+            : null
+        const height = rect === null ? Number.NaN : typeof rect.height === 'number' ? rect.height : rect.bottom - rect.top
+        if (!Number.isFinite(height) || height <= 0) return undefined
+        setMeasured((previous) =>
+          previous !== null && previous.menu === menu && Math.abs(previous.height - height) < 1 ? previous : { menu, height },
+        )
+        return undefined
+      }, [menuRef, menu])
+      return measured !== null && measured.menu === menu && measured.height > 0
+        ? measured.height
+        : CASCADE_MENU_ESTIMATED_HEIGHT
+    }
+
+    /**
+     * 级联菜单的定位与样式。
+     *
+     * 三个二级菜单（分支行 / 标签行 / 面板里的「分支与版本」「储藏」）共用它，因此
+     * 位置规则、视口翻转与外观只存在一份——新增一个二级菜单不需要再抄一遍几何。
+     *
+     * @param menuRef - 菜单容器 ref。
+     * @param menu - `{ rowAnchor?, panelAnchor? }`（两个矩形都是打开那一刻量的快照）。
+     * @returns `{ position, style }`：`position` 供测试/诊断断言，`style` 直接挂在容器上。
+     */
+    function useCascadeMenuLayout(menuRef, menu) {
+      const submenuHeight = useCascadeMenuHeight(menuRef, menu)
+      // 两个矩形都拿不到时退到一个视口角落：纯函数会把结果收进视口，因此这里只需给出一个
+      // "合法但可能不准"的形状，不必自己兜底布局。
+      const corner = { top: CASCADE_MENU_MARGIN, bottom: CASCADE_MENU_MARGIN, left: CASCADE_MENU_MARGIN, right: CASCADE_MENU_MARGIN }
+      const rowRect = menu !== null && menu !== undefined && menu.rowAnchor !== null && menu.rowAnchor !== undefined ? menu.rowAnchor : corner
+      const panelRect =
+        menu !== null && menu !== undefined && menu.panelAnchor !== null && menu.panelAnchor !== undefined ? menu.panelAnchor : rowRect
+      const position = cascadeMenuPosition({
+        rowRect,
+        panelRect,
+        submenuWidth: CASCADE_MENU_WIDTH,
+        submenuHeight,
+        viewport: viewportSize(),
+      })
+      return { position, style: cascadeMenuStyle(position) }
+    }
+
+    /**
+     * 级联菜单容器的共享样式。
+     * @param position - `cascadeMenuPosition()` 的结果。
+     * @returns 内联样式对象。
+     */
+    function cascadeMenuStyle(position) {
+      return {
+        position: 'fixed',
+        zIndex: 10000,
+        left: `${position.left}px`,
+        top: `${position.top}px`,
+        width: `${CASCADE_MENU_WIDTH}px`,
+        maxHeight: `min(${CASCADE_MENU_ESTIMATED_HEIGHT}px, calc(100vh - 16px))`,
+        overflowY: 'auto',
+        padding: '5px',
+        borderRadius: '10px',
+        border: `1px solid ${BORDER}`,
+        background: SURFACE,
+        color: 'var(--dsw-alias-label-primary, #202124)',
+        fontFamily: UI_FONT,
+        boxShadow: '0 10px 30px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.06)',
+      }
+    }
+
+    /**
+     * 级联菜单里一个菜单项的共享样式。
+     *
+     * @param options - `{ busy?, disabled?, danger? }`。
+     * @returns 内联样式对象。
+     */
+    function cascadeMenuItemStyle(options) {
+      const busy = options?.busy === true
+      const disabled = options?.disabled === true
+      return {
+        display: 'block',
+        boxSizing: 'border-box',
+        width: '100%',
+        padding: '6px 9px',
+        border: 'none',
+        borderRadius: '6px',
+        background: 'transparent',
+        color: options?.danger === true ? DANGER : 'inherit',
+        fontFamily: UI_FONT,
+        fontSize: '12.5px',
+        lineHeight: 1.5,
+        textAlign: 'left',
+        whiteSpace: 'normal',
+        cursor: busy || disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.45 : busy ? 0.6 : 1,
+      }
+    }
+
+    /**
+     * 级联菜单里的分隔线。
+     * @param key - React key。
+     * @returns 元素。
+     */
+    function cascadeMenuSeparator(key) {
+      return react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
+    }
 
     /**
      * 从渲染出来的分支行里挑出**真正与滚动容器相交**的那些名字。
@@ -1291,7 +1532,14 @@ window.__ModuleLoader__.load({
       const loading = fresh.branchesLoading === true
       const busy = fresh.busy === true
       const error = fresh.error ?? null
-      const notice = fresh.notice ?? ''
+      /**
+       * 面板上那条提示：`{ text, persistence }`；`null` = 不显示。
+       *
+       * 存**对象**而不是字符串：`persistence` 决定它要不要到点自己消失（见 panelNotice）。
+       * 早先只存文案，于是"这条提示该不该消失"只能靠比对文案来判断——换一种语言、或者
+       * 润色一次文案，判定就静默失效，而现象正是「已更新」永远挂在面板上。
+       */
+      const notice = fresh.notice ?? null
       /**
        * 「恢复储藏的改动」这一条入口对应的储藏（null = 不显示）。
        *
@@ -1378,6 +1626,17 @@ window.__ModuleLoader__.load({
        * （`cascadeMenuPosition`）与样式，那两样是纯函数/常量。
        */
       const [tagMenu, setTagMenu] = react.useState(null)
+      /**
+       * 一级面板里的**分组二级菜单**：`{ kind: 'branches' | 'stash', rowAnchor, panelAnchor }`；
+       * `null` 表示未打开。
+       *
+       * 为什么它住在 BranchChip 而不是 SourcePanel：面板是**受控的展示组件**（没有状态、
+       * 没有 fetch），而"Esc 先关二级、再关面板"与"点面板外把所有层一起收掉"这两条判定
+       * 都挂在 BranchChip 的文档级监听上（见下面的 effect）。状态放在面板里，那一层就
+       * 无从知道该先关哪一个。几何（rowAnchor/panelAnchor）与另外两个二级菜单同构，
+       * 因此共用 `useCascadeMenuLayout`。
+       */
+      const [panelMenu, setPanelMenu] = react.useState(null)
       /** 标签列表（与分支列表分开取：`/tags` 是独立的一条只读路由）。 */
       const [tags, setTags] = react.useState([])
       const [tagsLoading, setTagsLoading] = react.useState(false)
@@ -1427,6 +1686,44 @@ window.__ModuleLoader__.load({
       // 卸载时清掉定时器：否则面板已经关了，200ms 后还会 setMenu。
       react.useEffect(() => clearMenuTimer, [clearMenuTimer])
       /**
+       * 普通成功提示的自动消失定时器。
+       *
+       * 与 `menuTimer` **分开**一个 ref：两者的生命周期无关，共用一个句柄会让"清掉菜单
+       * 定时器"顺手取消掉提示的消失（症状就是提示又永远挂着）。
+       */
+      const noticeTimer = react.useRef(0)
+      const clearNoticeTimer = react.useCallback(() => {
+        if (noticeTimer.current !== 0) {
+          clearTimeout(noticeTimer.current)
+          noticeTimer.current = 0
+        }
+      }, [])
+      // 卸载时清掉提示定时器：否则组件已经不在了，3 秒后还会 setState。
+      react.useEffect(() => clearNoticeTimer, [clearNoticeTimer])
+      /**
+       * 普通成功提示到点自己消失。
+       *
+       * 四条清理路径共用这**一个** effect 的清理函数（依赖里带着 notice / generation /
+       * open）：提示被替换、面板关闭、工作区换代、组件卸载，都会先把上一个定时器清掉。
+       * 于是"旧仓库的定时器把新仓库的提示清掉"在结构上不可能发生。
+       *
+       * actionable 的提示**不排**定时器：它要么带着用户此刻必须点的按钮（恢复储藏、
+       * 从这里新建分支），要么描述的是仓库状态（游离 HEAD、进行中的合并）。
+       * 定时器回调再加一道 `prev.notice === notice` 的判定：即使某条路径漏了清理，
+       * 也只会清掉它自己那一条。
+       */
+      react.useEffect(() => {
+        clearNoticeTimer()
+        if (notice === null || notice.persistence !== 'ephemeral') return undefined
+        noticeTimer.current = setTimeout(() => {
+          noticeTimer.current = 0
+          setState((prev) =>
+            prev.generation === generation && prev.notice === notice ? { ...prev, notice: null } : prev,
+          )
+        }, NOTICE_DISMISS_MS)
+        return clearNoticeTimer
+      }, [notice, generation, open, clearNoticeTimer])
+      /**
        * 刚才那次"面板内 mousedown"关掉的是哪个分支的菜单。
        *
        * 存在的理由：document 的 mousedown 是**捕获阶段**、并且发生在 click 之前，所以
@@ -1451,6 +1748,8 @@ window.__ModuleLoader__.load({
         // 标签菜单也是"二级菜单"：面板收起、列表滚动、点别处都必须跟着收（否则它会
         // 悬在一个已经不在那儿的位置上）。
         setTagMenu(null)
+        // 面板里的「分支与版本 / 储藏」同样是二级菜单（它们开在面板外侧，同一条几何）。
+        setPanelMenu(null)
       }, [clearMenuTimer])
 
       /**
@@ -1469,10 +1768,19 @@ window.__ModuleLoader__.load({
        */
       const closePanel = react.useCallback(() => {
         clearMenuTimer()
+        clearNoticeTimer()
         setMenu(null)
+        setTagMenu(null)
+        setPanelMenu(null)
         setDialog(null)
         setOpen(false)
-      }, [clearMenuTimer])
+        // 面板一关，普通的成功回执就没有承载它的地方了：把它从状态里去掉，免得下次打开
+        // 面板时又冒出一句几分钟前的「已更新」。actionable 的提示**留着**——它要么描述的
+        // 是仓库状态（游离 HEAD），要么是一个用户还没处理的入口（恢复储藏）。
+        setState((prev) =>
+          prev.generation === generation && prev.notice?.persistence === 'ephemeral' ? { ...prev, notice: null } : prev,
+        )
+      }, [clearMenuTimer, clearNoticeTimer, generation])
 
       /** 打开对话框：收起操作菜单，并换一个实例序号（见 serial 的说明）。 */
       const openDialog = react.useCallback((next) => {
@@ -1612,7 +1920,10 @@ window.__ModuleLoader__.load({
        * @param route - 写路由（`remote` / `branch/create` / `op/abort`…）。
        * @param body - 表单内容。
        * @param onSuccess - 可选：成功时调用，返回一句**更具体**的结果提示（例如「已更新」
-       *   「已推送」），覆盖下面那几条通用提示；返回空值时保持通用提示不变。
+       *   「已推送」），覆盖下面那几条通用提示；或返回 `{ notice, restore?, persistence? }`
+       *   同时给出提示与后续入口。返回空值时保持通用提示不变。**字符串形式按"普通成功
+       *   回执"处理（到点自己消失）；带 `restore` 的一律被标成 actionable**（见下面的
+       *   结构性规则）。
        */
       const run = react.useCallback(
         async (route, body, onSuccess) => {
@@ -1620,7 +1931,7 @@ window.__ModuleLoader__.load({
             slices: ['status', 'branches'],
           })
           if (!gate.isCurrent(ticket)) return undefined
-          patch(ticket, { busy: true, error: null, notice: '' })
+          patch(ticket, { busy: true, error: null, notice: null })
           const outcome = await promise
           // 工作区已经换了：这次写操作的收尾（包括 busy）一律不写进新的那一份。
           if (!gate.isCurrent(ticket)) return undefined
@@ -1635,7 +1946,10 @@ window.__ModuleLoader__.load({
                 // "切换失败但储藏已经建好"必须说出来：这是用户此刻最需要知道的事实
                 // （否则他会以为自己未提交的改动没了）。同时给出恢复入口。
                 ...(stash?.stashed === true
-                  ? { notice: t('stashCreatedBeforeFailure', { ref: String(stash.ref ?? '') }), restore: stash }
+                  ? {
+                      notice: panelNotice(t('stashCreatedBeforeFailure', { ref: String(stash.ref ?? '') }), 'actionable'),
+                      restore: stash,
+                    }
                   : {}),
               })
             }
@@ -1651,23 +1965,37 @@ window.__ModuleLoader__.load({
             // 是**过去那次**操作，留在面板上会让人以为"点了就能回到那个分支"。
             changes.restore = null
             // 附加信息的提示文案。放在这里而不是每个操作里，是为了让"操作成功但需要
-            // 额外告知"这件事只有一处实现。
-            if (result?.stash?.stashed === true) changes.notice = t('stashed', { ref: result.stash.ref })
-            else if (result?.detached === true) changes.notice = t('detachedNotice')
-            else if (result?.empty === true) changes.notice = t('emptyCherryPick')
-            else if (typeof result?.aborted === 'string') changes.notice = t('aborted')
+            // 额外告知"这件事只有一处实现；**类别也在这里一起定**，而不是留给渲染层去猜。
+            if (result?.stash?.stashed === true) changes.notice = panelNotice(t('stashed', { ref: result.stash.ref }))
+            // 游离 HEAD 是**仓库状态**而不是一次回执：它必须留到用户从这里建出新分支为止。
+            else if (result?.detached === true) changes.notice = panelNotice(t('detachedNotice'), 'actionable')
+            else if (result?.empty === true) changes.notice = panelNotice(t('emptyCherryPick'))
+            else if (typeof result?.aborted === 'string') changes.notice = panelNotice(t('aborted'))
             // 调用方补的那句写在最后，因此能覆盖上面几条：那几条是"成功但需要额外告知"的
             // 通用兜底，而调用方知道的是这次操作**具体**干了什么（更新了、推送了）。
             //
-            // 回调可以返回字符串（只补一句提示），也可以返回 `{ notice?, restore? }`：
-            // 「储藏并切换」需要在同一处同时给出提示与"恢复"入口，而它们必须**同源**
-            // （分成两个 state 就会出现"提示在、按钮不在"这种半截状态）。
+            // 回调可以返回字符串（只补一句提示），也可以返回
+            // `{ notice?, restore?, persistence? }`：「储藏并切换」需要在同一处同时给出提示
+            // 与"恢复"入口，而它们必须**同源**（分成两个 state 就会出现"提示在、按钮不在"
+            // 这种半截状态）。字符串形式按"普通成功回执"处理（到点自己消失）。
             const specific = typeof onSuccess === 'function' ? onSuccess(result) : undefined
             if (typeof specific === 'string' && specific !== '') {
-              changes.notice = specific
+              changes.notice = panelNotice(specific)
             } else if (specific !== null && typeof specific === 'object') {
-              if (typeof specific.notice === 'string' && specific.notice !== '') changes.notice = specific.notice
+              if (typeof specific.notice === 'string' && specific.notice !== '') {
+                changes.notice = panelNotice(specific.notice, specific.persistence)
+              }
               if ('restore' in specific) changes.restore = specific.restore
+            }
+            // **结构性规则**：带着后续动作的提示一律不能自动消失。判定看的是"有没有那个
+            // 入口"，而不是文案——文案会随语言与润色改变，入口不会。
+            if (
+              changes.notice !== undefined &&
+              changes.notice !== null &&
+              changes.restore !== null &&
+              changes.restore !== undefined
+            ) {
+              changes.notice = panelNotice(changes.notice.text, 'actionable')
             }
             patch(ticket, changes)
           } else {
@@ -1789,6 +2117,9 @@ window.__ModuleLoader__.load({
             { ref: entry.ref },
             (payload) => ({
               notice: payload?.conflicted === true ? t('stashRestoreConflicted') : t('stashRestored', { ref: entry.ref }),
+              // 冲突时储藏还在、冲突也还在，这是**仓库状态**，不能三秒后自己消失；
+              // 顺利恢复只是一次回执。
+              persistence: payload?.conflicted === true ? 'actionable' : 'ephemeral',
               restore: null,
             }),
           )
@@ -1959,13 +2290,23 @@ window.__ModuleLoader__.load({
           const width = Math.min(420, window.innerWidth - 24)
           const above = rect.top - 20
           const below = window.innerHeight - rect.bottom - 20
-          const placeBelow = above < 220 && below > above
+          /**
+           * 往上开还是往下开。
+           *
+           * 规则按顺序：上方的空间**装得下整个面板**就往上开（这是原来的行为，面板从徽章
+           * 上方长出来）；否则哪边空间更大就往哪边开。早先写的是 `above < 220 && below >
+           * above`——那个 220 是 440 时代的经验值，面板上界提到 620 之后它会让"上方 300px、
+           * 下方 700px"这种窗口错误地往上开，把面板压在 300px 上。
+           */
+          const placeBelow =
+            above >= SOURCE_PANEL_MAX_HEIGHT ? false : below >= SOURCE_PANEL_MAX_HEIGHT ? true : below > above
           setAnchor({
             width,
             left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
             top: placeBelow ? rect.bottom + 8 : undefined,
             bottom: placeBelow ? undefined : window.innerHeight - rect.top + 8,
-            maxHeight: Math.min(440, Math.max(0, placeBelow ? below : above)),
+            // 上界与实际可用空间取小：620 是"最多这么高"，不是"一定这么高"。
+            maxHeight: Math.min(SOURCE_PANEL_MAX_HEIGHT, Math.max(0, placeBelow ? below : above)),
           })
         }
         measure()
@@ -1991,6 +2332,8 @@ window.__ModuleLoader__.load({
           const node = containerRef.current
           const insidePanel = node !== null && node.contains(event.target)
           const insideContext = menuRef.current !== null && menuRef.current.contains(event.target)
+          // 二级菜单（分支行 / 标签行 / 面板分组）渲染在容器内部但用 fixed 定位，因此对它们
+          // 要豁免"点面板内部"那条收菜单的路径——否则点菜单项会在 click 之前先把菜单关掉。
           if (insideContext) return
           if (!insidePanel) {
             // 点面板外：三层一起收。早先这里只 `setOpen(false)`，于是菜单 state 还是
@@ -2014,12 +2357,16 @@ window.__ModuleLoader__.load({
           setMenu(null)
           // 标签菜单同样要收（它贴着某一行的位置，滚走/点别处之后不该继续浮着）。
           setTagMenu(null)
+          // 面板分组菜单：点到**同一个入口按钮**时不在这里收——那一下点击是"再点一次关掉"，
+          // 要留给 click 里的 toggle 处理（mousedown 先跑，这里收掉的话 click 又会打开，
+          // 表现就是"这个菜单怎么都关不掉"）。点到别处才收。
+          if (panelMenu !== null && panelMenuTriggerOf(event.target) !== panelMenu.kind) setPanelMenu(null)
         }
         const onKeyDown = (event) => {
           if (event.key !== 'Escape') return
-          // Esc 逐层退出：先收二级菜单，再收对话框，最后关面板。一次全关会让用户
-          // 在只想去掉那层小菜单时丢掉整个面板的状态。
-          if (menu !== null || menuTimer.current !== 0) {
+          // Esc 逐层退出：先收二级菜单（分支行 / 标签行 / 面板分组都在这一层），再收对话框，
+          // 最后关面板。一次全关会让用户在只想去掉那层小菜单时丢掉整个面板的状态。
+          if (menu !== null || tagMenu !== null || panelMenu !== null || menuTimer.current !== 0) {
             closeBranchMenu()
           } else if (dialog !== null) setDialog(null)
           else {
@@ -2036,7 +2383,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open, menu, dialog, clearMenuTimer, closeBranchMenu, closePanel])
+      }, [open, menu, tagMenu, panelMenu, dialog, clearMenuTimer, closeBranchMenu, closePanel])
 
       const search = query.trim().toLowerCase()
       const visible = branches.filter((branch) => branch.name.toLowerCase().includes(search))
@@ -2084,6 +2431,19 @@ window.__ModuleLoader__.load({
       /** 为某个分支打开二级菜单，记下"贴着哪一行、在哪块面板外侧"。 */
       const openMenuFor = react.useCallback((branch, rowAnchor, panelAnchor) => {
         setMenu({ branch, rowAnchor, panelAnchor })
+      }, [])
+
+      /**
+       * 面板里的分组入口（「分支与版本」/「储藏」）：**再点一次就关掉**。
+       *
+       * 切换语义放在 click 里，而不是在 mousedown 里直接开：document 的 mousedown
+       * （捕获阶段）先跑，而它"点在同一个入口按钮上"是放行的（见 onPointerDown），
+       * 因此这里看到的 `panelMenu` 仍然是用户点之前的那一份，toggle 成立。
+       *
+       * 两个矩形都由 SourcePanel 当场量好传进来（它手里才有面板根节点的 ref）。
+       */
+      const togglePanelMenu = react.useCallback((kind, rowAnchor, panelAnchor) => {
+        setPanelMenu((prev) => (prev !== null && prev.kind === kind ? null : { kind, rowAnchor, panelAnchor }))
       }, [])
 
       /**
@@ -2353,6 +2713,44 @@ window.__ModuleLoader__.load({
       if (status.ahead > 0) flags.push(`\u2191${status.ahead}`)
       if (status.behind > 0) flags.push(`\u2193${status.behind}`)
 
+      /**
+       * 面板分组（「分支与版本」/「储藏」）二级菜单的条目。
+       *
+       * 一级面板只留三个高频动作 + 这两个入口，合并进来的动作各自成为二级菜单的一项。
+       * 条目的 key 沿用原来那些动作名（`new` / `tag` / `create-tag` / `stash` /
+       * `stash-options`）：它们是**命令**的稳定标识，DOM 标记与测试都按它寻址，因此
+       * 重新组织信息架构不该把命令本身改名。
+       *
+       * 命令回调一个都没变：新建分支走 `openDialog({ kind: 'create' })`、签出修订走
+       * `checkout-ref`、新建标记走原来那个 `createTag`、「储藏改动」还是直连的
+       * `stashQuick`、「带选项储藏…」还是原来那个 stash 对话框。
+       *
+       * 刻意**不用 `useCallback`**：它位于本组件的两个 early return（没有 status /
+       * 不是仓库）之后，而 hook 出现在 early return 之后会让两次渲染的 hook 数量不同
+       * （真实 React 会抛 #310，`scripts/check-react-rules.mjs` 也拦这一条）。它只是
+       * 每次渲染重建一个小数组，没有记忆化的必要。
+       */
+      const panelSectionItems = (kind) => {
+        if (kind === 'branches') {
+          return [
+            { key: 'new', label: t('actionNewBranch'), onClick: () => openDialog({ kind: 'create' }) },
+            { key: 'tag', label: t('actionCheckoutRef'), onClick: () => openDialog({ kind: 'checkout-ref' }) },
+            { key: 'sep-create-tag', separator: true },
+            { key: 'create-tag', label: t('actionCreateTag'), onClick: createTag },
+          ]
+        }
+        if (kind === 'stash') {
+          return [
+            // 「储藏改动」保持**直连**（不带消息、不动未跟踪文件）：日常动作，多一次确认
+            // 只是多一次点击。
+            { key: 'stash', label: directAction === 'stash' ? t('stashingNow') : t('actionStash'), onClick: () => void stashQuick() },
+            // 「带选项储藏…」继续打开原来那个 stash 对话框（消息 + 包含未跟踪）。
+            { key: 'stash-options', label: t('actionStashOptions'), onClick: () => openDialog({ kind: 'stash' }) },
+          ]
+        }
+        return []
+      }
+
       return react.createElement(
         'div',
         // ref 用于"点击外部关闭"的判定：在这个容器内的点击不关菜单。
@@ -2523,6 +2921,14 @@ window.__ModuleLoader__.load({
                * 菜单由本组件持有（SourcePanel 是受控的展示组件），所以这件事必须由这里做。
                */
               onListScroll: closeBranchMenu,
+              /**
+               * 分组二级菜单（「分支与版本」/「储藏」）。
+               *
+               * 面板只负责"画那两个入口、把矩形量好"，开关状态由 BranchChip 持有：Esc 的
+               * 逐层退出与"点面板外全收"两条判定都挂在它的文档级监听上（见上面那个 effect）。
+               */
+              panelMenu,
+              onTogglePanelMenu: togglePanelMenu,
             })
           : null,
 
@@ -2567,7 +2973,18 @@ window.__ModuleLoader__.load({
                   onPushTag: (entry) => void pushTag(entry),
                   onCompare: (entry) => compareWithCurrent(entry.name),
                 })
-              : null,
+              : open === true && panelMenu !== null
+                ? react.createElement(PanelSectionMenu, {
+                    t,
+                    menu: panelMenu,
+                    // 与另外两个二级菜单**共用 menuRef**：屏幕上同时只会有一个菜单，
+                    // 而"点菜单内部不算点别处"那条文档级判定就是按这个 ref 做的。
+                    menuRef,
+                    busy,
+                    items: panelSectionItems(panelMenu.kind),
+                    onClose: () => setPanelMenu(null),
+                  })
+                : null,
         ),
 
         react.createElement(
@@ -2618,7 +3035,7 @@ window.__ModuleLoader__.load({
       const {
         t, status, visible, totalBranches, pendingBranch, search, loading, busy, error, notice, query, setQuery, anchor, remotes,
         selected, onRefresh, onFetch, onSwitch, onStashSwitch, onStashQuick, onDialog, onPick, onActivate, onContextMenu, onAbort, onVisible, onListScroll, panelRef,
-        directAction, onUpdate, onPush, onContinue, restore, onRestore,
+        directAction, onUpdate, onPush, onContinue, restore, onRestore, panelMenu, onTogglePanelMenu,
         tags, tagsLoading, onTagPick, onTagActivate, onTagContextMenu, onCreateTag, detachedFrom, onCreateBranchFromTag,
       } = props
 
@@ -2668,8 +3085,17 @@ window.__ModuleLoader__.load({
         }
       }, [reportVisible])
 
-      /** 一行快捷操作。 */
-      const action = (key, glyph, label, onClick, extra) =>
+      /**
+       * 工具条上的一个高频动作（更新 / 提交 / 推送）。
+       *
+       * 三个按钮**横着排一行**，高度 30px：它们是面板里用得最多的动作，纵排三条会把下面
+       * 的列表区挤小一大截（这正是这次要修的观感问题）。刻意保持"文字按钮"的形状——不做
+       * 大 Card、不加厚阴影、不放大按钮，因此外观与列表里的其它控件仍是同一层次。
+       *
+       * `data-desktop-sc-action` 仍是原来那些 key（`update` / `commit` / `push`）：它们是
+       * **命令**的稳定标识（自动化与测试都按它寻址），重新排版不该改命令名。
+       */
+      const toolbarButton = (key, glyph, label, onClick) =>
         react.createElement(
           'button',
           {
@@ -2678,28 +3104,83 @@ window.__ModuleLoader__.load({
             disabled: busy,
             onClick,
             'data-desktop-sc-action': key,
+            title: label,
             style: {
-              display: 'flex',
+              display: 'inline-flex',
               alignItems: 'center',
-              gap: '8px',
+              justifyContent: 'center',
+              gap: '5px',
+              // flex-basis 0 + grow：三个按钮等宽平分，长文案（英文 "Update"）也不会把
+              // 其中一个挤变形。
+              flex: '1 1 0',
+              minWidth: 0,
+              height: '30px',
               boxSizing: 'border-box',
-              width: '100%',
-              minHeight: '30px',
-              padding: '5px 8px',
+              padding: '0 6px',
               border: 'none',
               borderRadius: '6px',
               background: 'transparent',
               color: 'inherit',
               fontFamily: UI_FONT,
               fontSize: '12.5px',
-              textAlign: 'left',
               cursor: busy ? 'default' : 'pointer',
               opacity: busy ? 0.6 : 1,
             },
           },
           glyph,
+          react.createElement(
+            'span',
+            { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            label,
+          ),
+        )
+
+      /**
+       * 一级面板里的一个**分组入口**（「分支与版本」/「储藏」）。
+       *
+       * 合并进来的动作都收在它下面（见 panelSectionItems）：一级因此只剩五个东西——
+       * 三个高频动作 + 这两个入口，列表区拿回被纵排菜单吃掉的高度。
+       *
+       * 入口上的 `data-desktop-sc-panelmenu` 就是分组 kind：文档级的 mousedown 靠它判断
+       * "点在同一个入口上"（那是 toggle，要留给 click）还是"点在别处"（立刻收菜单）。
+       */
+      const sectionEntry = (kind, label, expanded, onClick) =>
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            key: kind,
+            'data-desktop-sc-section-menu': kind,
+            [PANEL_MENU_TRIGGER_ATTR]: kind,
+            'aria-haspopup': 'menu',
+            'aria-expanded': expanded,
+            title: label,
+            onClick,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              boxSizing: 'border-box',
+              width: '100%',
+              height: '30px',
+              padding: '0 8px',
+              border: 'none',
+              borderRadius: '6px',
+              background: expanded ? `color-mix(in srgb, ${ACCENT} 10%, ${SURFACE})` : 'transparent',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: '12.5px',
+              textAlign: 'left',
+              cursor: 'pointer',
+            },
+          },
           react.createElement('span', { style: { flex: '1 1 auto', minWidth: 0 } }, label),
-          extra ?? null,
+          // 右侧的 ›：说明"这一行还会展开一层"，而不是一个会立刻执行的动作。
+          react.createElement(
+            'span',
+            { style: { flexShrink: 0, display: 'flex', color: TERTIARY, transform: expanded ? 'rotate(90deg)' : 'none' } },
+            react.createElement(ChevronGlyph),
+          ),
         )
 
       /**
@@ -2935,6 +3416,17 @@ window.__ModuleLoader__.load({
         react.createElement('path', { d: 'M4.6 12.5a3.1 3.1 0 0 1-.3-6.2 4 4 0 0 1 7.6 1 2.6 2.6 0 0 1-.5 5.2z', strokeLinecap: 'round', strokeLinejoin: 'round' }),
         react.createElement('path', { d: 'M8 7.2v3.4M6.6 9.2 8 10.6l1.4-1.4', strokeLinecap: 'round', strokeLinejoin: 'round' }),
       )
+      /**
+       * 「提交」的图标：一个对勾。
+       *
+       * 与「更新」（环形箭头）分开：两个按钮**挨着**排在同一个工具条里，用同一个图标会让
+       * 这一行看起来像三个同义按钮，扫读时只能靠读字分辨。
+       */
+      const commitGlyph = react.createElement(
+        'svg',
+        { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': 'true' },
+        react.createElement('path', { d: 'M3 8.4 6.2 11.6 13 4.8', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+      )
       /** 标签图标（与分支图标形状不同：标签行必须一眼认出来）。 */
       const tagGlyph = react.createElement(TagGlyph)
       // 分组
@@ -3074,7 +3566,7 @@ window.__ModuleLoader__.load({
             flexDirection: 'column',
             boxSizing: 'border-box',
             width: anchor?.width ?? 'min(420px, calc(100vw - 24px))',
-            maxHeight: anchor?.maxHeight ?? 'min(440px, calc(100vh - 24px))',
+            maxHeight: anchor?.maxHeight ?? `min(${SOURCE_PANEL_MAX_HEIGHT}px, calc(100vh - 24px))`,
             overflow: 'hidden',
             borderRadius: '14px',
             border: `1px solid ${BORDER}`,
@@ -3111,30 +3603,39 @@ window.__ModuleLoader__.load({
           },
         }),
 
-        // 快速操作。四个都在 host 侧有对应路由，没有一个是装饰。
+        // 高频动作：三条纵排的整行菜单收成**一行工具条**。
         //
-        // 「更新项目」与「推送」**直连**执行：它们是日常动作，弹一次"确定"只是多一次点击。
-        // 进度因此写在动作行上（更新中… / 推送中…），结果写进下面的提示区。
+        // 三个都在 host 侧有对应路由，没有一个是装饰；「更新」与「推送」**直连**执行
+        // （日常动作，多一次确认只是多一次点击），进度写在按钮文案上（更新中… / 推送中…），
+        // 结果写进下面的提示区。「提交」仍是开对话框的那一个动作。
         react.createElement(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', flexShrink: 0, paddingBottom: '4px', borderBottom: `1px solid ${BORDER}` } },
-          action('update', refreshGlyph, directAction === 'update' ? t('updating') : t('actionUpdate'), onUpdate),
-          action('commit', refreshGlyph, t('actionCommit'), () => onDialog({ kind: 'commit' })),
-          action('push', cloudGlyph, directAction === 'push' ? t('pushing') : t('actionPush'), onPush),
+          {
+            'data-desktop-sc-toolbar': '',
+            style: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '4px', flexShrink: 0, paddingBottom: '6px', borderBottom: `1px solid ${BORDER}` },
+          },
+          toolbarButton('update', refreshGlyph, directAction === 'update' ? t('updating') : t('toolbarUpdate'), onUpdate),
+          toolbarButton('commit', commitGlyph, t('toolbarCommit'), () => onDialog({ kind: 'commit' })),
+          toolbarButton('push', cloudGlyph, directAction === 'push' ? t('pushing') : t('toolbarPush'), onPush),
         ),
 
+        // 两个分组入口：合并进来的动作各自展开成二级菜单（开在面板外侧，与分支行/标签行
+        // 的菜单同一套几何）。
+        //
+        // 「储藏改动」的**直连**语义没有变，只是从一级挪进了「储藏」这一层：它仍然是
+        // "一步走完，不弹确认"的那一条，二级菜单里第一项就是它。
         react.createElement(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', flexShrink: 0, paddingTop: '4px', paddingBottom: '4px', borderBottom: `1px solid ${BORDER}` } },
-          action('new', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(PlusGlyph)), t('actionNewBranch'), () => onDialog({ kind: 'create' })),
-          action('tag', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(BranchGlyph)), t('actionCheckoutRef'), () => onDialog({ kind: 'checkout-ref' })),
-          // 储藏：**直接储藏**（不带消息、不动未跟踪文件）与**带选项储藏…**（消息 +
-          // 包含未跟踪）。两条并列而不是藏进二级菜单：写不出消息就放弃储藏是最常见的
-          // 情况，直接那一条必须一眼可见（见字典里 actionStash 的说明）。
-          action('stash', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), directAction === 'stash' ? t('stashingNow') : t('actionStash'), onStashQuick),
-          action('stash-options', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(StashGlyph)), t('actionStashOptions'), () => onDialog({ kind: 'stash' })),
-          // 新建标签：「签出标记或修订…」只负责切换，而"打一个版本"是另一件事。
-          action('create-tag', react.createElement('span', { style: { display: 'flex', width: '15px', color: TERTIARY } }, react.createElement(TagGlyph)), t('actionCreateTag'), onCreateTag),
+          {
+            'data-desktop-sc-section-menus': '',
+            style: { display: 'flex', flexDirection: 'column', flexShrink: 0, paddingTop: '6px', paddingBottom: '6px', borderBottom: `1px solid ${BORDER}` },
+          },
+          sectionEntry('branches', t('toolbarBranches'), panelMenu !== null && panelMenu.kind === 'branches', (event) =>
+            onTogglePanelMenu('branches', rectOf(event?.currentTarget), rectOf(panelRef?.current)),
+          ),
+          sectionEntry('stash', t('toolbarStash'), panelMenu !== null && panelMenu.kind === 'stash', (event) =>
+            onTogglePanelMenu('stash', rectOf(event?.currentTarget), rectOf(panelRef?.current)),
+          ),
         ),
 
         // 进行中的合并/变基/摘取/还原：这是**必须**露出来的一条，因为它表示仓库停在一个
@@ -3313,89 +3814,112 @@ window.__ModuleLoader__.load({
             ),
 
         // 成功后的提示（stash 位置、游离 HEAD、空摘取）。放在错误区之外，因为它是结果。
-        notice === ''
+        //
+        // 外观分两档，判据是**结构化**的 `notice.persistence`（不是比对文案）：
+        //   * `ephemeral`（普通成功回执）：一行紧凑的 `✓ 已更新`，没有卡片背景与边框——
+        //     它只是"刚才那次操作成功了"，占一整块绿色卡片会喧宾夺主，而且它 3 秒后自己消失；
+        //   * `actionable`（带后续动作 / 仓库状态）：仍然是卡片，因为它下面通常还有按钮
+        //     （恢复储藏、从这里新建分支），留白与边框让按钮有落点。
+        notice === null || notice === undefined
           ? null
-          : react.createElement(
-              'div',
-              {
-                'data-desktop-sc-notice': '',
-                style: {
-                  flexShrink: 0,
-                  margin: '6px 2px 0',
-                  padding: '6px 9px',
-                  borderRadius: '6px',
-                  background: `color-mix(in srgb, var(--dsw-alias-state-success-primary, #16834a) 6%, ${SURFACE})`,
-                  border: '1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary, #16834a) 20%, transparent)',
-                  color: 'var(--dsw-alias-state-success-primary, #16834a)',
-                  fontSize: '12px',
-                  lineHeight: 1.5,
+          : (() => {
+              const ephemeral = notice.persistence !== 'actionable'
+              const success = 'var(--dsw-alias-state-success-primary, #16834a)'
+              return react.createElement(
+                'div',
+                {
+                  'data-desktop-sc-notice': '',
+                  /** 类别也落到 DOM 上：自动化与测试据此断言"这一条该不该自己消失"。 */
+                  'data-desktop-sc-notice-persistence': ephemeral ? 'ephemeral' : 'actionable',
+                  style: {
+                    flexShrink: 0,
+                    margin: ephemeral ? '6px 2px 0' : '6px 2px 0',
+                    padding: ephemeral ? '3px 8px' : '6px 9px',
+                    borderRadius: '6px',
+                    background: ephemeral ? 'transparent' : `color-mix(in srgb, ${success} 6%, ${SURFACE})`,
+                    border: ephemeral ? 'none' : `1px solid color-mix(in srgb, ${success} 20%, transparent)`,
+                    color: success,
+                    fontSize: '12px',
+                    lineHeight: 1.5,
+                  },
                 },
-              },
-              notice,
-              // 「储藏并切换」成功之后**就地**给一条恢复入口：用户刚刚离开的分支上还有
-              // 自己没提交的东西，而它现在在储藏列表里——一步能回来的路比"去另一个面板里找"
-              // 更符合此刻的意图（这是需求里那条可选的 Restore）。
-              restore === null || restore === undefined
-                ? null
-                : react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      'data-desktop-sc-restore': restore.ref,
-                      disabled: busy,
-                      onClick: onRestore,
-                      style: {
-                        display: 'block',
-                        marginTop: '6px',
-                        padding: '5px 9px',
-                        borderRadius: '6px',
-                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
-                        background: SURFACE,
-                        color: 'inherit',
-                        fontFamily: UI_FONT,
-                        fontSize: '12px',
-                        cursor: busy ? 'default' : 'pointer',
+                react.createElement(
+                  'div',
+                  { 'data-desktop-sc-notice-text': '', style: { display: 'flex', alignItems: 'baseline', gap: '5px' } },
+                  // 紧凑档只加一个对勾：它把"这是成功回执"说清楚，又不必占一整块绿卡片。
+                  ephemeral ? react.createElement('span', { 'aria-hidden': 'true', style: { flexShrink: 0 } }, '\u2713') : null,
+                  react.createElement('span', { style: { minWidth: 0 } }, notice.text),
+                ),
+                // 「储藏并切换」成功之后**就地**给一条恢复入口：用户刚刚离开的分支上还有
+                // 自己没提交的东西，而它现在在储藏列表里——一步能回来的路比"去另一个面板里找"
+                // 更符合此刻的意图（这是需求里那条可选的 Restore）。
+                restore === null || restore === undefined
+                  ? null
+                  : react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-desktop-sc-restore': restore.ref,
+                        disabled: busy,
+                        onClick: onRestore,
+                        style: {
+                          display: 'block',
+                          marginTop: '6px',
+                          padding: '5px 9px',
+                          borderRadius: '6px',
+                          border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                          background: SURFACE,
+                          color: 'inherit',
+                          fontFamily: UI_FONT,
+                          fontSize: '12px',
+                          cursor: busy ? 'default' : 'pointer',
+                        },
                       },
-                    },
-                    busy ? t('working') : t('stashRestore'),
-                  ),
-              // 签出标签之后的「从这里新建分支…」：游离 HEAD 上的提交不属于任何分支，用户
-              // 想在这里继续工作就必须先建一个分支——把这条路指出来，而不是让他自己发现。
-              detachedFrom === '' || detachedFrom === undefined
-                ? null
-                : react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      'data-desktop-sc-branch-from-tag': detachedFrom,
-                      disabled: busy,
-                      title: t('detachedHint'),
-                      onClick: onCreateBranchFromTag,
-                      style: {
-                        display: 'block',
-                        marginTop: '6px',
-                        padding: '5px 9px',
-                        borderRadius: '6px',
-                        border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
-                        background: SURFACE,
-                        color: 'inherit',
-                        fontFamily: UI_FONT,
-                        fontSize: '12px',
-                        cursor: busy ? 'default' : 'pointer',
+                      busy ? t('working') : t('stashRestore'),
+                    ),
+                // 签出标签之后的「从这里新建分支…」：游离 HEAD 上的提交不属于任何分支，用户
+                // 想在这里继续工作就必须先建一个分支——把这条路指出来，而不是让他自己发现。
+                detachedFrom === '' || detachedFrom === undefined
+                  ? null
+                  : react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-desktop-sc-branch-from-tag': detachedFrom,
+                        disabled: busy,
+                        title: t('detachedHint'),
+                        onClick: onCreateBranchFromTag,
+                        style: {
+                          display: 'block',
+                          marginTop: '6px',
+                          padding: '5px 9px',
+                          borderRadius: '6px',
+                          border: '1px solid color-mix(in srgb, currentColor 30%, transparent)',
+                          background: SURFACE,
+                          color: 'inherit',
+                          fontFamily: UI_FONT,
+                          fontSize: '12px',
+                          cursor: busy ? 'default' : 'pointer',
+                        },
                       },
-                    },
-                    t('createBranchFromTag'),
-                  ),
-            ),
+                      t('createBranchFromTag'),
+                    ),
+              )
+            })(),
 
-        // 只滚动结果列表，搜索框与操作区始终留在顶部。
+        // **只有结果列表滚动**：搜索框、工具条与两个分组入口都是固定区，整个面板不整体滚。
+        //
+        // `flex: 1 1 auto` + `minHeight: 0` 是这次布局修复的关键：面板是纵向 flex 容器，
+        // 列表必须**吃掉剩余高度**。早先只写了 `minHeight: 0`，于是列表按内容高度撑开、
+        // 被面板的 maxHeight 裁掉——固定区占多少，列表就少多少（这正是"列表区被挤得很小"
+        // 的直接原因）。
         // 这个 div 就是"视口"的基准：补算精确领先/落后时，只有与它相交的行才算可见。
         react.createElement(
           'div',
           {
             ref: listRef,
             'data-desktop-branch-list': '',
-            style: { minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', paddingTop: '2px' },
+            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', paddingTop: '2px' },
             'aria-busy': loading || busy,
             // 滚动列表时收起菜单并取消待弹的定时器：菜单是贴着某一行的，滚走之后它就
             // 悬在一个已经不在那儿的分支上。**只收菜单，不关面板**（用户是在列表里找分支）。
@@ -3449,8 +3973,13 @@ window.__ModuleLoader__.load({
                   : null,
               ),
           /**
-           * 标签分组是列表里的**同级一段**（不是分支容器里的孩子）：分支被搜索过滤到空时，
-           * 标签必须还在——用户打的很可能就是标签名，而那时分支一个都不匹配。
+           * 标签分组是滚动区里的**最后一段**（与分支同一层，但不再是一个"不滚的兄弟节点"）。
+           *
+           * 两个要求同时成立：
+           *   * **在滚动区里**——它是结果列表的一份子，100 个标签的仓库里它必须跟着列表滚，
+           *     而不是把面板撑高、把分支列表压成零高度（那正是"列表区被挤得很小"的一种）；
+           *   * **独立于分支的空态**——分支被搜索词过滤到空时它仍然要渲染：用户打的很可能就是
+           *     标签名，而那时分支一个都不匹配（所以它挂在这里而不是塞进上面那个分支容器）。
            */
           tagsSection,
         ),
@@ -3491,24 +4020,8 @@ window.__ModuleLoader__.load({
     function TagContextMenu(props) {
       const { t, menu, menuRef, busy, onClose, onCheckout, onDialog, onPushTag, onCompare } = props
       const entry = menu.tag
-      const [measured, setMeasured] = react.useState(null)
-      react.useEffect(() => {
-        const node = menuRef?.current
-        if (node === null || node === undefined || typeof node.getBoundingClientRect !== 'function') return undefined
-        const rect = node.getBoundingClientRect()
-        const height = typeof rect?.height === 'number' ? rect.height : rect?.bottom - rect?.top
-        if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return undefined
-        setMeasured((previous) => (previous !== null && previous.menu === menu && Math.abs(previous.height - height) < 1 ? previous : { menu, height }))
-        return undefined
-      }, [menuRef, menu])
-      const submenuHeight = measured !== null && measured.menu === menu && measured.height > 0 ? measured.height : CASCADE_MENU_ESTIMATED_HEIGHT
-      const position = cascadeMenuPosition({
-        rowRect: menu.rowAnchor,
-        panelRect: menu.panelAnchor,
-        submenuWidth: CASCADE_MENU_WIDTH,
-        submenuHeight,
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-      })
+      /** 与分支菜单、面板分组菜单同一套定位与外观（见 useCascadeMenuLayout）。 */
+      const { position, style } = useCascadeMenuLayout(menuRef, menu)
       const item = (key, label, onClick, options) =>
         react.createElement(
           'button',
@@ -3522,27 +4035,11 @@ window.__ModuleLoader__.load({
               onClose()
               onClick()
             },
-            style: {
-              display: 'block',
-              boxSizing: 'border-box',
-              width: '100%',
-              padding: '6px 9px',
-              border: 'none',
-              borderRadius: '6px',
-              background: 'transparent',
-              color: options?.danger === true ? DANGER : 'inherit',
-              fontFamily: UI_FONT,
-              fontSize: '12.5px',
-              lineHeight: 1.5,
-              textAlign: 'left',
-              whiteSpace: 'normal',
-              cursor: busy ? 'default' : 'pointer',
-              opacity: busy ? 0.6 : 1,
-            },
+            style: cascadeMenuItemStyle({ busy, disabled: options?.disabled === true, danger: options?.danger === true }),
           },
           label,
         )
-      const separator = (key) => react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
+      const separator = cascadeMenuSeparator
       return react.createElement(
         'div',
         {
@@ -3550,22 +4047,7 @@ window.__ModuleLoader__.load({
           role: 'menu',
           'data-desktop-sc-tagmenu': entry.name,
           'data-desktop-sc-cascade': position.side,
-          style: {
-            position: 'fixed',
-            zIndex: 10000,
-            left: `${position.left}px`,
-            top: `${position.top}px`,
-            width: `${CASCADE_MENU_WIDTH}px`,
-            maxHeight: `min(${CASCADE_MENU_ESTIMATED_HEIGHT}px, calc(100vh - 16px))`,
-            overflowY: 'auto',
-            padding: '5px',
-            borderRadius: '10px',
-            border: `1px solid ${BORDER}`,
-            background: SURFACE,
-            color: 'var(--dsw-alias-label-primary, #202124)',
-            fontFamily: UI_FONT,
-            boxShadow: '0 10px 30px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.06)',
-          },
+          style,
         },
         // 菜单顶部先把"这是标签、不是分支"说清楚（需求：不要让用户误以为 tag 是 branch）。
         react.createElement(
@@ -3581,6 +4063,66 @@ window.__ModuleLoader__.load({
         item('copy', t('menuTagCopy'), () => copyToClipboard(entry.name)),
         separator('sep2'),
         item('delete', t('menuTagDelete'), () => onDialog({ kind: 'delete-tag', tag: entry }), { danger: true }),
+      )
+    }
+
+    /**
+     * 一级面板里的**分组二级菜单**（「分支与版本」/「储藏」）。
+     *
+     * 它与分支行/标签行那两个菜单**共用全部基础设施**：定位规则（cascadeMenuPosition）、
+     * 视口翻转、量高、菜单项样式、分隔线、容器样式，以及"点外部 / Esc 收掉"那条文档级
+     * 判定（都在 BranchChip 里）。这里只有条目本身不同，因此它是一个由 `items` 驱动的
+     * 通用菜单，而不是第三份抄出来的实现。
+     *
+     * 点击条目的顺序是**先关菜单、再执行动作**：其中两条会开对话框（新建分支、新建标记），
+     * 而对话框渲染在**另一个 slot** 上、与菜单互不依赖，因此关掉菜单不会把对话框一起卸载。
+     *
+     * @param props - `{ t, menu, menuRef, busy, items, onClose }`；`items` 是
+     *   `{ key, label, onClick, separator?, disabled?, danger?, title? }[]`。
+     * @returns React 元素。
+     */
+    function PanelSectionMenu(props) {
+      const { t, menu, menuRef, busy, items, onClose } = props
+      const { position, style } = useCascadeMenuLayout(menuRef, menu)
+      const heading = menu.kind === 'branches' ? t('toolbarBranches') : t('toolbarStash')
+      return react.createElement(
+        'div',
+        {
+          ref: menuRef,
+          role: 'menu',
+          // 容器用的标记**不同于**入口按钮上那个（PANEL_MENU_TRIGGER_ATTR）：入口的标记
+          // 要能被"这次 mousedown 点的是哪个入口"读出来，容器上再挂一份会混淆两者。
+          'data-desktop-sc-groupmenu': menu.kind,
+          'data-desktop-sc-cascade': position.side,
+          style,
+        },
+        react.createElement(
+          'div',
+          { style: { padding: '4px 9px 6px', color: TERTIARY, fontSize: '11.5px', lineHeight: 1.5 } },
+          heading,
+        ),
+        ...items.map((item) =>
+          item.separator === true
+            ? cascadeMenuSeparator(item.key)
+            : react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  key: item.key,
+                  'data-desktop-sc-menuitem': item.key,
+                  disabled: busy || item.disabled === true,
+                  title: item.title,
+                  onClick: () => {
+                    if (item.disabled === true) return
+                    // 先关二级菜单，再执行动作（需要对话框的动作会自己开一个）。
+                    onClose()
+                    item.onClick()
+                  },
+                  style: cascadeMenuItemStyle({ busy, disabled: item.disabled === true, danger: item.danger === true }),
+                },
+                item.label,
+              ),
+        ),
       )
     }
 
@@ -3609,53 +4151,11 @@ window.__ModuleLoader__.load({
       const current = status?.branch ?? ''
 
       /**
-       * 挂载后量到的真实高度：`{ menu, height }`（null = 还没量到）。
-       *
-       * `menu` 一起存是有意的：这个组件实例会被**下一个**菜单复用（同一个位置、同一个
-       * 组件类型），如果不认菜单身份，换一个分支时首帧会拿上一个菜单的高度去算位置；
-       * 而长分支名的条目会换行、菜单更高，那一帧就可能被裁掉。因此"量到的高度只对量它的
-       * 那个菜单有效"，其余情况一律回到估算上界 `CASCADE_MENU_ESTIMATED_HEIGHT`。
+       * 级联位置与外观：**整个一级面板的外侧**（右优先，放不下翻到左侧，两侧都放不下才夹
+       * 进视口），纵向对齐被点的那一行并在触底时整体上移。量高、算位与样式都在
+       * `useCascadeMenuLayout` 里——三个二级菜单共用那一份，位置规则因此只有一处实现。
        */
-      const [measured, setMeasured] = react.useState(null)
-      react.useEffect(() => {
-        const node = menuRef?.current
-        if (node === null || node === undefined || typeof node.getBoundingClientRect !== 'function') return undefined
-        const rect = node.getBoundingClientRect()
-        const height = typeof rect?.height === 'number' ? rect.height : rect?.bottom - rect?.top
-        if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return undefined
-        // 只在真的变了的时候更新：否则"量到同一个高度"也会触发一轮重渲染。
-        setMeasured((previous) => (previous !== null && previous.menu === menu && Math.abs(previous.height - height) < 1 ? previous : { menu, height }))
-        return undefined
-      }, [menuRef, menu])
-
-      /**
-       * 级联位置：**整个一级面板的外侧**（右优先，放不下翻到左侧，两侧都放不下才夹进视口），
-       * 纵向对齐被点的那一行并在触底时整体上移。规则本身在纯函数里，这里只负责喂坐标。
-       */
-      const submenuHeight = measured !== null && measured.menu === menu && measured.height > 0 ? measured.height : CASCADE_MENU_ESTIMATED_HEIGHT
-      const position = cascadeMenuPosition({
-        rowRect: menu.rowAnchor,
-        panelRect: menu.panelAnchor,
-        submenuWidth: CASCADE_MENU_WIDTH,
-        submenuHeight,
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-      })
-      const style = {
-        position: 'fixed',
-        zIndex: 10000,
-        left: `${position.left}px`,
-        top: `${position.top}px`,
-        width: `${CASCADE_MENU_WIDTH}px`,
-        maxHeight: `min(${CASCADE_MENU_ESTIMATED_HEIGHT}px, calc(100vh - 16px))`,
-        overflowY: 'auto',
-        padding: '5px',
-        borderRadius: '10px',
-        border: `1px solid ${BORDER}`,
-        background: SURFACE,
-        color: 'var(--dsw-alias-label-primary, #202124)',
-        fontFamily: UI_FONT,
-        boxShadow: '0 10px 30px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.06)',
-      }
+      const { position, style } = useCascadeMenuLayout(menuRef, menu)
 
       /**
        * 包一层"先关菜单、再执行动作"。
@@ -3689,28 +4189,12 @@ window.__ModuleLoader__.load({
               if (options?.disabled === true) return
               onClick()
             },
-            style: {
-              display: 'block',
-              boxSizing: 'border-box',
-              width: '100%',
-              padding: '6px 9px',
-              border: 'none',
-              borderRadius: '6px',
-              background: 'transparent',
-              color: options?.danger === true ? DANGER : 'inherit',
-              fontFamily: UI_FONT,
-              fontSize: '12.5px',
-              lineHeight: 1.5,
-              textAlign: 'left',
-              whiteSpace: 'normal',
-              cursor: busy || options?.disabled === true ? 'default' : 'pointer',
-              opacity: options?.disabled === true ? 0.45 : 1,
-            },
+            style: cascadeMenuItemStyle({ busy, disabled: options?.disabled === true, danger: options?.danger === true }),
           },
           label,
         )
 
-      const separator = (key) => react.createElement('div', { key, style: { height: '1px', margin: '4px 6px', background: BORDER } })
+      const separator = cascadeMenuSeparator
 
       const items = []
       // 「签出」对当前分支**显示但禁用**，而不是隐藏。
@@ -4256,6 +4740,17 @@ window.__ModuleLoader__.load({
     // 二级菜单的级联几何同样只有真实布局才能整体跑到，但规则本身是纯函数。导出它，
     // 测试就能直接喂两个矩形，逐条断言"右开/左开/夹进视口"与纵向翻转。
     exports.__cascadeMenuPositionForTest = cascadeMenuPosition
+    /**
+     * 面板的两个数值契约：高度上界与普通提示的自动消失时间。
+     *
+     * 导出它们是为了让测试断言**真实生效的那个数**，而不是在测试里再抄一份常量——抄一份
+     * 之后把 620 改成别的值，测试照样全绿。
+     */
+    exports.__sourcePanelLimitsForTest = {
+      maxHeight: SOURCE_PANEL_MAX_HEIGHT,
+      noticeDismissMs: NOTICE_DISMISS_MS,
+      cascadeMenuWidth: CASCADE_MENU_WIDTH,
+    }
     // 必须声明 inject：cordis 的服务是懒解析的，不声明就直接读 `ctx.slots` 会抛
     // "cannot get property \"slots\" without inject"，而且这个错误会让**整个界面**
     // 渲染失败（不只是本插件）——排查时页面是全白的，误导性很强。

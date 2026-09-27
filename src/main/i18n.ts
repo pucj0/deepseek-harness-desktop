@@ -511,6 +511,23 @@ export function normalizeLocale(locale: string | undefined): ShellLocale | undef
 }
 
 /**
+ * Validate a locale that arrived from the **Harness runtime** (the live report).
+ *
+ * Two different things can be reported: an explicit preference id (`zh` / `en`) or Harness's
+ * *effective* locale, which may be its browser-derived provisional value. Both are mapped by
+ * {@link normalizeLocale}; anything this shell does not ship (a language pack's `ja`, a
+ * malformed value, a non-string from a renderer) resolves to `undefined` and the caller must
+ * then **keep what it has** rather than fall back to English — the live report is a correction,
+ * never a reason to drop a language the user picked.
+ *
+ * @param raw - the untrusted value from the renderer.
+ * @returns a shipped canonical id, or undefined when nothing should change.
+ */
+export function coerceReportedLocale(raw: unknown): ShellLocale | undefined {
+  return typeof raw === 'string' ? normalizeLocale(raw) : undefined
+}
+
+/**
  * The live string table.
  *
  * A single mutable object rather than "the current catalog": menus, the tray, dialogs and the

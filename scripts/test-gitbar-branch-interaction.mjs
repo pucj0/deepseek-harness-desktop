@@ -779,5 +779,130 @@ console.log('=== 7. 多仓库项目：徽标前的仓库计数 + 选择器（单
 }
 
 console.log('')
+console.log('=== 8. 面板分组二级菜单（分支与版本 / 储藏）：同一套级联几何 + 逐层 Esc ===')
+{
+  const cascade = loaded.__cascadeMenuPositionForTest
+  const LIMITS = loaded.__sourcePanelLimitsForTest
+  check('8) 插件导出了面板的数值契约（高度上界 / 提示定时）', LIMITS.maxHeight, 620)
+  const WIDTH = LIMITS.cascadeMenuWidth
+  const GAP = 6
+  const HEIGHT = 360
+  const viewport = { width: globalThis.window.innerWidth, height: globalThis.window.innerHeight }
+  const panel = { left: 100, right: 520, top: 400, bottom: 700 }
+  const entryRect = { top: 470, bottom: 500, left: 110, right: 510 }
+
+  /** 点开一级面板里的分组入口（真实浏览器里也带 currentTarget 的矩形）。 */
+  const clickSection = (kind, list, rect) => {
+    const entry = find('data-desktop-sc-section-menu', kind, list)
+    if (entry === null) return null
+    entry.props.onClick({
+      stopPropagation() {},
+      preventDefault() {},
+      currentTarget: { getBoundingClientRect: () => rect },
+    })
+    return entry
+  }
+
+  nodes = await ensurePanel()
+  // 先量一份**分支行菜单**的容器样式：后面与分组菜单逐项比对，证明确实共用同一份实现
+  // （而不是"看起来差不多"的两份样式）。
+  const styleKeys = ['width', 'padding', 'borderRadius', 'maxHeight', 'background', 'color', 'fontFamily', 'overflowY', 'zIndex', 'boxShadow', 'border']
+  contextMenuRow(rowOf('develop', nodes))
+  nodes = await settle()
+  const rowMenu = find('data-desktop-sc-menu', 'develop', nodes)
+  checkTrue('   前置：分支行菜单打开（用于比对容器样式）', rowMenu !== null)
+  const rowMenuStyle = styleKeys.map((key) => `${key}=${String(rowMenu?.props?.style?.[key])}`).join('|')
+  nodes = await closeMenu()
+
+  nodes = await ensurePanel()
+  setPanelRect(nodes, panel)
+  clickSection('branches', nodes, entryRect)
+  nodes = await current()
+  const branchesMenu = find('data-desktop-sc-groupmenu', 'branches', nodes)
+  checkTrue('   一级面板里的「分支与版本」展开成二级菜单', branchesMenu !== null)
+  const expected = cascade({ rowRect: entryRect, panelRect: panel, submenuWidth: WIDTH, submenuHeight: HEIGHT, viewport })
+  check('   位置与纯函数一致（left）：贴在面板外侧', branchesMenu?.props?.style?.left, `${expected.left}px`)
+  check('   位置与纯函数一致（top）：对齐被点的那一行', branchesMenu?.props?.style?.top, `${expected.top}px`)
+  check('   方向标记来自同一套规则', branchesMenu?.props?.['data-desktop-sc-cascade'], expected.side)
+  checkTrue('   落在面板右侧而不是压住面板', expected.left >= panel.right)
+  check(
+    '   二级条目：新建分支… / 签出标记或修订… / 新建标记…',
+    (branchesMenu?.props?.children ?? [])
+      .map((child) => child?.props?.['data-desktop-sc-menuitem'])
+      .filter((key) => key !== undefined)
+      .join(','),
+    'new,tag,create-tag',
+  )
+  check(
+    '   容器样式与分支行菜单逐项相同（同一份基础设施）',
+    styleKeys.map((key) => `${key}=${String(branchesMenu?.props?.style?.[key])}`).join('|'),
+    rowMenuStyle,
+  )
+
+  // 面板贴到视口右边时，同一份规则会把分组菜单翻到左侧。
+  nodes = await closeMenu()
+  nodes = await ensurePanel()
+  setPanelRect(nodes, { left: 900, right: 1320, top: 100, bottom: 400 })
+  clickSection('branches', nodes, { top: 150, bottom: 180, left: 910, right: 1310 })
+  nodes = await current()
+  const flipped = find('data-desktop-sc-groupmenu', 'branches', nodes)
+  check('   面板贴右缘时翻到左侧', flipped?.props?.style?.left, `${900 - GAP - WIDTH}px`)
+  check('   方向标记是 left', flipped?.props?.['data-desktop-sc-cascade'], 'left')
+
+  // 再点同一个入口 = 关掉（不给"关不掉的菜单"留后门）。
+  clickSection('branches', nodes, { top: 150, bottom: 180, left: 910, right: 1310 })
+  nodes = await current()
+  check('   再点同一个入口：二级菜单关掉', find('data-desktop-sc-groupmenu', 'branches', nodes), null)
+  check('   一级面板仍然开着', panelOpen(nodes), 'true')
+
+  // 「储藏」二级：条目是"储藏改动 / 带选项储藏…"，第一项保持直连（一步发请求）。
+  nodes = await ensurePanel()
+  clickSection('stash', nodes, entryRect)
+  nodes = await current()
+  const stashMenu = find('data-desktop-sc-groupmenu', 'stash', nodes)
+  checkTrue('   「储藏」也展开成二级菜单', stashMenu !== null)
+  check(
+    '   二级条目：储藏改动 / 带选项储藏…',
+    (stashMenu?.props?.children ?? [])
+      .map((child) => child?.props?.['data-desktop-sc-menuitem'])
+      .filter((key) => key !== undefined)
+      .join(','),
+    'stash,stash-options',
+  )
+  posts.length = 0
+  stashMenu.props.children.find((child) => child?.props?.['data-desktop-sc-menuitem'] === 'stash').props.onClick()
+  nodes = await settle()
+  check('   「储藏改动」仍是一步直连（没有二次确认）', posts.map((post) => post.route).join(','), 'stash/push')
+  check('   点完条目后二级菜单消失', find('data-desktop-sc-groupmenu', 'stash', nodes), null)
+
+  // Esc 逐层：先收分组二级菜单，再关面板。
+  nodes = await ensurePanel()
+  clickSection('branches', nodes, entryRect)
+  nodes = await current()
+  checkTrue('   前置：分组二级菜单开着', find('data-desktop-sc-groupmenu', 'branches', nodes) !== null)
+  document.emitKeydown()
+  nodes = await current()
+  check('   第一次 Esc 只收二级菜单', find('data-desktop-sc-groupmenu', 'branches', nodes), null)
+  check('   面板还在', panelOpen(nodes), 'true')
+  document.emitKeydown()
+  nodes = await current()
+  check('   第二次 Esc 收面板', panelOpen(nodes), 'false')
+  check('   没有孤儿分组菜单', findAll('data-desktop-sc-groupmenu', nodes).length, 0)
+
+  // 点面板外：两层一起收。
+  nodes = await ensurePanel()
+  setContainerContains(nodes, () => false)
+  clickSection('stash', nodes, entryRect)
+  nodes = await current()
+  checkTrue('   前置：分组二级菜单开着', find('data-desktop-sc-groupmenu', 'stash', nodes) !== null)
+  emitPointerDown({})
+  nodes = await current()
+  check('   点面板外：面板关闭', panelOpen(nodes), 'false')
+  check('   分组二级菜单也一起收掉', findAll('data-desktop-sc-groupmenu', nodes).length, 0)
+  setContainerContains(nodes, () => true)
+  nodes = await closeMenu()
+}
+
+console.log('')
 console.log(failures === 0 ? '全部通过' : `${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)

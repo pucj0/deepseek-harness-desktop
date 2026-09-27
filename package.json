@@ -26,7 +26,7 @@
     "dist:all": "npm run build && npm run stage && electron-builder --win --linux --x64",
     "release": "npm run dist:win && electron-builder --publish always",
     "test:i18n": "node scripts/test-i18n.cjs",
-    "test:locale": "npm run build && node scripts/test-shell-locale.mjs && node scripts/test-menu-inventory.mjs && node scripts/test-titlebar-ui.cjs",
+    "test:locale": "npm run build && node scripts/test-shell-locale.mjs && node scripts/test-menu-inventory.mjs && node scripts/test-shell-cold-start.cjs && node scripts/test-titlebar-ui.cjs",
     "test:workspace": "npm run build && node scripts/test-workspace-switch.mjs && node scripts/test-workspace-registration.mjs && node scripts/test-workspace-lifecycle.mjs && node scripts/test-active-workspace.mjs",
     "test:workspace-ui": "npm run build && node scripts/test-active-workspace-ui.cjs && node scripts/test-workspace-restart-ui.cjs && node scripts/test-workspace-switch-ui.cjs",
     "test:git": "node scripts/test-git-amend-reset.mjs && node scripts/test-git-tags-compare.mjs && node scripts/test-git-op-conflicts.mjs && node scripts/test-git-conflict.mjs && node scripts/test-git-stash.mjs && node scripts/test-git-workflow.mjs && node scripts/test-git-interactive-rebase.mjs && node scripts/test-gitbar-branches.mjs && node scripts/test-gitbar-branch-interaction.mjs && node scripts/test-gitbar-source-panel.mjs && node scripts/test-review-conflict.mjs && node scripts/test-review-diff-sbs.mjs && node scripts/test-review-stash.mjs && node scripts/test-review-staging.mjs && node scripts/test-review-graph-view.mjs",

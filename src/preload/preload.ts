@@ -132,6 +132,24 @@ const api = {
         : {}),
     })
   },
+  /**
+   * 上报 Harness **当前生效的语言**（官方 locale runtime 的 `active`）。
+   *
+   * 为什么需要它：外壳的冷启动只能读 `<harness home>/settings.yaml` 里的 `locale.preference`。
+   * 那份文件在两种情况下给不出答案——用户从没选过语言（Harness 用的是从浏览器语言推导出来的
+   * provisional 值），以及语言由**语言包**注册（文件里是个自定义 id）。此时"外壳显示什么语言"
+   * 只能由 Harness 自己在运行期告诉外壳，而不是由外壳去读界面文字猜。
+   *
+   * 这里只做**形状**归一化：只接受非空字符串。归一化（`zh-Hans` → `zh-CN`）、以及"不认识的值
+   * 保持现状"都在主进程里（见 src/main/i18n.ts 的 coerceReportedLocale 与 index.ts）。
+   * 这个桥只暴露这一个方法，绝不暴露 `ipcRenderer` 本身。
+   *
+   * @param locale - Harness 官方 locale runtime 的当前 locale id。
+   */
+  reportLocale: (locale: string): void => {
+    if (typeof locale !== 'string' || locale === '') return
+    ipcRenderer.send('dsh-desktop:shell-locale', locale)
+  },
 }
 
 contextBridge.exposeInMainWorld('dshDesktop', api)

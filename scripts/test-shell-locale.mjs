@@ -2,12 +2,17 @@
 //
 //   npm run build && node scripts/test-shell-locale.mjs
 //
-// 覆盖需求里的六个用例：
-//   A. Harness = zh → 顶部菜单是 文件/编辑/视图/帮助（而不是 File/Edit/View/Help）
+// 覆盖需求里的七个用例：
+//   A. Harness = zh → 顶部菜单是 文件/编辑/视图/更新/帮助（而不是 File/Edit/View/Help）
 //   B. Harness = en → File/Edit/View/Help
 //   C/D. 运行中 zh ⇄ en：**不重启应用**就更新（真实 Electron 实例，靠它自带的菜单诊断输出断言）
 //   E. 切换工作区（写 pending-workspace + relaunch）不会把语言重置
-//   F. locale 归一化：zh / zh-CN / zh_CN → 中文，en / en-US / en_US → 英文
+//   F. locale 归一化：zh / zh-CN / zh_CN → 中文，en / en-US / en_US → 英文；
+//      以及运行期上报的入口 `coerceReportedLocale`（不认识的值必须返回 undefined，
+//      调用方据此"保持现状"而不是回退系统语言）
+//   G. 菜单是**窗口创建之前**就装好的：诊断输出的第一份菜单必须已经是中文——标题栏页面的
+//      第一次 `getMenu()` 读到的就是它，因此"第一帧是中文"在这里就成立（这正是 Electron
+//      默认菜单曾经被画进标题栏的位置）。真窗口的第一帧由 test-shell-cold-start.cjs 断言。
 //
 // 还有一条同样重要的反向要求：**label 可以变，命令不许变**。因此这里直接比对中英两份菜单
 // 模板：位置、role、accelerator 与 click 回调必须逐一相同，只有 label 不同。
@@ -97,6 +102,21 @@ await check('F) 未支持的语言不进中文（回退英文，与 Harness 的�
   for (const value of ['de-DE', 'ja', '', undefined, 'fr_FR']) {
     assert.equal(i18n.normalizeLocale(value), undefined)
     assert.equal(i18n.catalogFor(value).menuFile, 'File')
+  }
+})
+await check('F) 运行期上报的归一化入口（coerceReportedLocale）', () => {
+  // 这一条是 shell-bridge 上报链路唯一的值解释入口。要点有两个：
+  //   1. 认识的语言要归一到本外壳真的带字典的那两个 id；
+  //   2. **不认识的值返回 undefined** —— 调用方据此"保持现状"，而不是回退系统语言
+  //      （这条上报是纠正，不是"用户清空了偏好"）。
+  for (const value of ['zh', 'zh-CN', 'zh_CN', 'zh-Hans', 'zh-Hans-CN', 'zh-TW']) {
+    assert.equal(i18n.coerceReportedLocale(value), 'zh-CN', value)
+  }
+  for (const value of ['en', 'en-US', 'en_US', 'en-GB']) {
+    assert.equal(i18n.coerceReportedLocale(value), 'en-US', value)
+  }
+  for (const value of ['ja', 'de-DE', '', '   ', null, undefined, 42, {}, ['zh']]) {
+    assert.equal(i18n.coerceReportedLocale(value), undefined, JSON.stringify(value))
   }
 })
 await check('F) 归一化是唯一的判断入口（没有别处比较 /^zh/）', () => {
@@ -325,6 +345,37 @@ console.log('=== Case C / D（进程内）: 监视 Harness 设置 → 活文案�
     stop3()
   })
 
+  await check('装上监听**之前**发生的修改会被立刻对账补回来（基准 = 冷启动读到的值）', async () => {
+    // 真实启动里"读到偏好"与"装上监听"之间隔着十几秒（首次启动还要解包运行时）。用户完全
+    // 可能在这段时间里把语言改掉——只靠"等下一次事件"是等不到的，因为那次写早就发生过了。
+    const home4 = freshHome()
+    writeSettingsAtomic(home4, 'locale:\n  preference: zh\n')
+    // 外壳冷启动读到的值：
+    const coldStart = locale.readLocalePreference(home4)
+    assert.equal(coldStart, 'zh')
+    // 用户在"读到"与"装上监听"之间改了语言：
+    writeSettingsAtomic(home4, 'locale:\n  preference: en\n')
+    const values = []
+    const stop4 = locale.watchLocalePreference(home4, (next) => values.push(next), coldStart)
+    await wait(200)
+    assert.deepEqual(values, ['en'], '注册时的对账必须认出这次修改')
+    stop4()
+  })
+
+  await check('没有修改时注册监听**一个回调都不发**（对账只比较、不假设）', async () => {
+    const home5 = freshHome()
+    writeSettingsAtomic(home5, 'locale:\n  preference: zh\n')
+    const values = []
+    const stop5 = locale.watchLocalePreference(home5, (next) => values.push(next), locale.readLocalePreference(home5))
+    await wait(250)
+    assert.deepEqual(values, [], '值没变就不该有回调')
+    // 基准与文件一致时同样如此；之后真的变了才回调。
+    writeSettingsAtomic(home5, 'locale:\n  preference: en\n')
+    const fired = await until(() => values.length === 1 && values[0] === 'en', 3000)
+    assert.ok(fired, `后续变化没有被监听到：${JSON.stringify(values)}`)
+    stop5()
+  })
+
   await check('dispose 之后不再回调（不留下悬挂的 watcher）', async () => {
     stop()
     const before = seen.length
@@ -444,50 +495,88 @@ console.log('=== Case C / D（真实应用）: 运行中切换语言，同一个
   child.stdout.on('data', (chunk) => (output += String(chunk)))
   child.stderr.on('data', (chunk) => (output += String(chunk)))
   const dumps = () => [...output.matchAll(/\[menu\]([\s\S]*?)\[\/menu\]/gu)].map((match) => match[1])
+  /** 最近一份菜单（构建次数是实现细节，断言一律看"最新那一份"）。 */
+  const latestDump = () => dumps()[dumps().length - 1] ?? ''
+  /**
+   * 主进程打出的诊断行（版本 / 语言 / **读到的偏好** / 顶层菜单）。
+   *
+   * `pref=` 那一项是排查这一类问题的关键：中文机器上"读到了 zh"与"回退到系统语言"都会显示
+   * `locale=zh-CN`，只看语言分不出来。断言失败时把这几行一起打出来，省掉一次盲查。
+   */
+  const shellLines = () =>
+    output
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith('[shell] version='))
+      .join('\n')
   const pid = child.pid
+
+  /**
+   * 冷启动完成之后（recent 等动态数据也装好了）的那一份中文菜单。
+   *
+   * 用它做"切回中文之后结构完全一致"的基准：启动时**第一份**菜单是建窗口之前装的那一份
+   * （那时运行时版本还没解析、最近打开还是空的），拿它当基准会把"动态数据不同"误判成
+   * "结构不同"。
+   */
+  let startupDump = ''
 
   await check('C) 应用启动后第一份菜单就是中文（首帧不闪英文）', async () => {
     const ready = await until(() => dumps().length >= 1, 90000, 200)
     assert.ok(ready, `没有拿到菜单输出：${output.slice(-500)}`)
+    // 第一份就是**建窗口之前**装上的那一份：标题栏页面的第一次 getMenu() 读到的就是它，
+    // 因此"第一帧是中文"在这里就成立（这正是 Electron 默认菜单曾经被画出来的位置）。
     const dump = dumps()[0]
     // 顶层菜单独占一行；带加速键的子项后面还会跟 `[CmdOrCtrl+O]`，因此按行首前缀匹配。
     for (const label of ['文件', '编辑', '视图', '更新', '帮助', '打开文件夹…']) {
       assert.ok(new RegExp(`^\\s*${label}`, 'mu').test(dump), `第一份菜单里没有「${label}」\n${dump.slice(0, 300)}`)
     }
     assert.ok(!/^\s*File\s*$/mu.test(dump), '第一份菜单不该是英文')
+    assert.ok(!/^\s*Window\s*$/mu.test(dump), '第一份菜单不该是 Electron 的默认菜单（它有 Window）')
+    assert.ok(/^\s*智能体运行时\s+unknown/mu.test(dump), '第一份菜单应当来自"运行时还没解析出来"的早期构建')
+  })
+
+  await check('C) 启动完成后的菜单仍然是中文，并且最近打开已经换成真实数据', async () => {
+    const ready = await until(() => dumps().length >= 2, 30000, 100)
+    assert.ok(ready, `没有等到启动完成后的那一份菜单：${shellLines()}`)
+    startupDump = latestDump()
+    assert.ok(/^\s*文件\s*$/mu.test(startupDump), `启动完成后菜单不是中文：${startupDump.slice(0, 200)}`)
+    // 早期那份菜单的「最近打开」必然还是空的（动作快照要等启动流程走到后面）；这一份不该还是。
+    assert.ok(!/暂无最近打开的项目/u.test(startupDump), '启动完成后的菜单里最近打开仍然是空的')
   })
 
   await check('C) Harness 设置改成 en → 同一个进程（未重启）里菜单变英文', async () => {
     writeSettingsAtomic(dshHome, 'locale:\n  preference: en\n')
-    const ready = await until(() => dumps().length >= 2, 15000, 100)
-    assert.ok(ready, `没有等到第二份菜单：${output.slice(-500)}`)
-    const dump = dumps()[1]
+    const ready = await until(() => /^\s*File\s*$/mu.test(latestDump()), 20000, 100)
+    assert.ok(ready, `最新一份菜单没有变成英文：${latestDump().slice(0, 300)}\n诊断行：\n${shellLines()}`)
+    const dump = latestDump()
     for (const label of ['File', 'Edit', 'View', 'Update', 'Help', 'Open Folder…']) {
-      assert.ok(new RegExp(`^\\s*${label}`, 'mu').test(dump), `第二份菜单里没有「${label}」\n${dump.slice(0, 300)}`)
+      assert.ok(new RegExp(`^\\s*${label}`, 'mu').test(dump), `英文菜单里没有「${label}」\n${dump.slice(0, 300)}`)
     }
+    assert.ok(!/^\s*Window\s*$/mu.test(dump), '英文菜单里也不该出现 Window')
     assert.equal(child.pid, pid, 'PID 变了说明发生了重启')
     assert.equal(child.exitCode, null, '进程不该退出')
   })
 
   await check('D) 再切回 zh → 菜单立即变回中文（仍无重启）', async () => {
     writeSettingsAtomic(dshHome, 'locale:\n  preference: zh\n')
-    const ready = await until(() => dumps().length >= 3, 15000, 100)
-    assert.ok(ready, `没有等到第三份菜单：${output.slice(-500)}`)
-    const dump = dumps()[2]
+    const ready = await until(() => /^\s*文件\s*$/mu.test(latestDump()), 20000, 100)
+    assert.ok(ready, `最新一份菜单没有变回中文：${latestDump().slice(0, 300)}\n诊断行：\n${shellLines()}`)
+    const dump = latestDump()
     for (const label of ['文件', '编辑', '视图', '帮助']) {
-      assert.ok(new RegExp(`^\\s*${label}\\s*$`, 'mu').test(dump), `第三份菜单里没有「${label}」\n${dump.slice(0, 300)}`)
+      assert.ok(new RegExp(`^\\s*${label}\\s*$`, 'mu').test(dump), `中文菜单里没有「${label}」\n${dump.slice(0, 300)}`)
     }
     assert.equal(child.pid, pid)
     assert.equal(child.exitCode, null)
   })
 
-  await check('D) 重建后的菜单与重启时的结构完全一致（只是文案回到了中文）', () => {
-    assert.equal(dumps()[2], dumps()[0], '同一种语言下两次构建的菜单结构必须逐字一致')
-    const dump = dumps()[2]
+  await check('D) 重建后的菜单与启动完成时逐字一致（只是文案回到了中文）', () => {
+    // 两份都是"启动完成之后、同一种语言、同一份动态数据"下构建的，因此必须**逐字**相同：
+    // 命令、加速键、禁用项、最近打开一个都不能漂。
+    assert.equal(latestDump(), startupDump, '同一种语言下两次构建的菜单必须逐字一致')
+    const dump = latestDump()
     // 带 role 的项在有 label 时不会打出 role=，因此这里断言"清单没丢"：角色项的中文标签、
     // 加速键与禁用占位都还在。
     for (const fragment of ['重新加载', '强制重新加载', '开发者工具', '退出', 'CmdOrCtrl+O', 'CmdOrCtrl+Shift+U', '智能体运行时', '应用外壳']) {
-      assert.ok(dump.includes(fragment), `第三份菜单里缺少「${fragment}」`)
+      assert.ok(dump.includes(fragment), `菜单里缺少「${fragment}」`)
     }
   })
 

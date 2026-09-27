@@ -179,6 +179,16 @@ const SCRIPT = `
   var layout = { custom: true, menus: true }
   // 已经画出来的语言。语言一变，菜单按钮的文案（来自原生菜单）必须重新拉一次。
   var locale = null
+  /**
+   * 已经画出来的**菜单版本**。
+   *
+   * 菜单按钮的文案来自原生菜单，而原生菜单会在运行中重建（语言变化、最近打开变化）。
+   * 只靠"语言变了"是不够的：窗口创建的瞬间菜单可能还没装上，那时 getMenu() 拿到的是
+   * Electron 的**默认菜单**（File / Edit / View / Window / Help），随后真正的菜单被装上，
+   * 语言却没变——页面于是永远显示那份默认菜单（标题栏上的 "Window" 就是这么来的）。
+   * 主进程每次重建菜单都会把这个号 +1，页面看到它变了就重新拉一次按钮。
+   */
+  var menuRevision = null
 
   if (!api) { return }
 
@@ -297,12 +307,26 @@ const SCRIPT = `
     if (!target || !target.closest || target.closest('#menubar') === null) { resetMenus() }
   })
 
+  /**
+   * 菜单按钮的文案要不要重拉？
+   *
+   * 两条判据缺一不可：**语言变了**（同一个菜单版本下文案会换语言）或**菜单版本变了**
+   * （主进程重建了菜单：装了真正的应用菜单、或"最近打开"变了）。
+   */
+  function menuChanged(next) {
+    var revision = typeof next.menuRevision === 'number' ? next.menuRevision : null
+    var changed = revision !== menuRevision
+    menuRevision = revision
+    return changed
+  }
+
   api.onState(function (next) {
     state = next
     applyLayout(next)
     applyTheme(next.theme)
     // 语言变化：菜单按钮的文案在主进程重建菜单之后才更新，因此这里必须再拉一次。
-    if (applyLocale(next)) {
+    var localeChanged = applyLocale(next)
+    if (localeChanged || menuChanged(next)) {
       api.getMenu().then(function (entries) { buildMenubar(entries || []) }).catch(function () {})
     }
     renderState()
@@ -316,6 +340,7 @@ const SCRIPT = `
     applyLayout(initial)
     applyTheme(initial.theme)
     applyLocale(initial)
+    menuChanged(initial)
     renderState()
     return api.getMenu()
   }).then(function (entries) {

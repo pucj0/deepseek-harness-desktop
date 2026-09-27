@@ -162,13 +162,36 @@ await evaluate(`(${findChip}).click()`)
 await wait(700)
 check('   点徽章后菜单打开', await evaluate(menuOpen), 'true')
 
-// ---- 1b. 面板结构：搜索框 + 四个快捷操作 + 三段分组 --------------------------
+// ---- 1b. 面板结构：搜索框 + 一行工具条（更新/提交/推送）+ 两个分组入口 + 分组列表 --
 check('   有搜索框', await evaluate(`document.querySelectorAll('[data-desktop-branch-menu] input[type=search]').length`), '1')
-for (const key of ['update', 'commit', 'push', 'new', 'tag']) {
-  check(`   快捷操作 ${key} 存在`, await evaluate(`Boolean(document.querySelector('[data-desktop-sc-action="${key}"]'))`), 'true')
+for (const key of ['update', 'commit', 'push']) {
+  check(`   工具条动作 ${key} 存在`, await evaluate(`Boolean(document.querySelector('[data-desktop-sc-action="${key}"]'))`), 'true')
+}
+// 被合并进二级分组的动作**不该**再出现在一级：信息架构是这次修复的重点，因此这条也钉住。
+for (const key of ['new', 'tag', 'stash', 'stash-options', 'create-tag']) {
+  check(`   一级不再有 ${key}`, await evaluate(`Boolean(document.querySelector('[data-desktop-sc-action="${key}"]'))`), 'false')
+}
+for (const kind of ['branches', 'stash']) {
+  check(`   分组入口 ${kind} 存在`, await evaluate(`Boolean(document.querySelector('[data-desktop-sc-section-menu="${kind}"]'))`), 'true')
 }
 check('   有「本地」分组', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-section="local"]'))`), 'true')
-check('   当前分支行被标记', await evaluate(`document.querySelectorAll('[data-desktop-branch-mark="current"]').length`), '1')
+// 当前分支在「最近」与「本地」里各出现一次（副本是有意的，见 SourcePanel 的说明），因此这里
+// 断言的是"**去重之后**只有一个分支被标成当前"，而不是 DOM 里只有一个标记节点。
+check(
+  '   当前分支行被标记（按分支名去重后只有一个）',
+  await evaluate(`
+    (() => {
+      const names = new Set(
+        [...document.querySelectorAll('[data-desktop-branch-mark="current"]')]
+          .map((el) => el.closest('[data-desktop-branch-option]'))
+          .filter((row) => row !== null)
+          .map((row) => row.getAttribute('data-desktop-branch-name')),
+      );
+      return JSON.stringify([...names]);
+    })()
+  `).then((json) => JSON.parse(json).length),
+  1,
+)
 
 // ---- 2. 点页面其他地方（真实 mousedown + click）应关闭 ----------------------
 await evaluate(`
@@ -270,9 +293,25 @@ check('   点面板内部只收起右键菜单', await evaluate(`Boolean(documen
 check('   面板仍然打开', await evaluate(menuOpen), 'true')
 
 // ---- 7. 对话框 --------------------------------------------------------------
-await evaluate(clickAttr('data-desktop-sc-action', 'new'))
+// 「新建分支…」现在在「分支与版本」二级菜单里：先点开分组入口，再点条目。
+await evaluate(clickAttr('data-desktop-sc-section-menu', 'branches'))
+await wait(500)
+check('   二级菜单打开（开在面板外侧）', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-groupmenu="branches"]'))`), 'true')
+check(
+  '   二级菜单没有压住一级面板（级联在外侧）',
+  await evaluate(`
+    (() => {
+      const panel = document.querySelector('[data-desktop-branch-menu]').getBoundingClientRect();
+      const group = document.querySelector('[data-desktop-sc-groupmenu="branches"]').getBoundingClientRect();
+      return group.left >= panel.right || group.right <= panel.left;
+    })()
+  `),
+  'true',
+)
+await evaluate(clickAttr('data-desktop-sc-menuitem', 'new'))
 await wait(600)
 check('7) 点「新建分支」打开对话框', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-dialog="create"]'))`), 'true')
+check('   二级菜单已收起', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-groupmenu]'))`), 'false')
 check('   有分支名输入框', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-field="name"]'))`), 'true')
 check('   有起点输入框', await evaluate(`Boolean(document.querySelector('[data-desktop-sc-field="from"]'))`), 'true')
 check('   名字为空时确定被禁用', await evaluate(`(document.querySelector('[data-desktop-sc-button="confirm"]') ?? {}).disabled === true`), 'true')

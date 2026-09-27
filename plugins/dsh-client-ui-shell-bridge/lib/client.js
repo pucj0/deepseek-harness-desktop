@@ -1,4 +1,4 @@
-// shell-bridge 的客户端半边：把「Harness 当前项目」上报给 Electron 外壳。
+// shell-bridge 的客户端半边：把「Harness 当前项目」与「Harness 当前语言」上报给 Electron 外壳。
 //
 // 要解决的问题（BUG B）：外壳里那个 `const workspace = resolveWorkspace(process.argv, …)`
 // 是**启动时**算出来的常量，而用户可以在 Harness UI 里随时切换当前项目——每个会话属于一个
@@ -6,6 +6,12 @@
 //
 //     Harness 当前项目 = B
 //     文件 → 项目信息 / 在文件管理器中打开工作区 / 复制工作区路径 = A   ← 错
+//
+// 同一个形状的问题还有一个：**语言**。外壳冷启动只能读
+// `<harness home>/settings.yaml` 里的 `locale.preference`，而"用户从未选过语言"（Harness
+// 用的是从浏览器语言推导的 provisional 值）或"语言由语言包注册"时，那份文件给不出答案，
+// 于是 Harness 界面已经是中文、外壳菜单却是英文。运行期的**生效语言**只有 Harness 自己
+// 知道，因此也由这里上报（见下面 `ctx.inject(['locale'])` 那段）。
 //
 // ## 为什么必须由渲染进程上报，而不是外壳自己去猜
 //
@@ -79,6 +85,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 官方 locale runtime 里**当前生效**的语言 id。
+     *
+     * 用的是官方数据源：`ctx.locale.getLocale().active`（`@deepseek-ai/dsh-client-locale`
+     * 的 LocaleRuntime 快照，界面文案就是按它查字典的）。刻意**不**读
+     * `document.documentElement.lang`、更不读页面文字——前者不是官方写入的保证，后者换个
+     * 语言或改一次样式就失效（与"当前项目"同一个理由，见文件头）。
+     *
+     * @param locale - `ctx.locale`（可能尚未就绪）。
+     * @returns 语言 id；读不到或形状不对时 undefined。
+     */
+    const readLocale = (locale) => {
+      try {
+        const active = locale?.getLocale?.()?.active
+        return typeof active === 'string' && active !== '' ? active : undefined
+      } catch {
+        return undefined
+      }
+    }
+
+    /**
      * 挂载插件。
      * @param ctx - 客户端 cordis 上下文。
      */
@@ -122,6 +148,40 @@ window.__ModuleLoader__.load({
           }, `shell-bridge: ${service} list`)
         })
       }
+
+      /**
+       * 语言上报：把 Harness 的**生效语言**送给外壳，外壳据此对齐菜单/托盘/标题栏。
+       *
+       * 为什么必须有这一条：外壳冷启动只能读 `<harness home>/settings.yaml` 的
+       * `locale.preference`，而那份文件在"用户从没选过语言"（Harness 用的是从浏览器语言推导
+       * 的 provisional 值）或"语言由语言包注册"时给不出答案。这就是"Harness 界面已经是中文、
+       * 外壳菜单却是英文"的来源——文件里没有值，外壳只能回退系统语言。
+       *
+       * 订阅的是官方 locale runtime（`subscribe` 在切换语言与注册字典时都会通知），因此
+       * `zh → en` / `en → zh` 会立刻上报；重复的报同一值是空操作（外壳侧也会去重）。
+       */
+      ctx.inject(['locale'], (scoped) => {
+        const locale = scoped.get('locale')
+        if (locale === undefined || typeof locale.subscribe !== 'function') return
+        /** 上一次上报的语言：store 的通知很密，重复值不发。 */
+        let lastLocale = ''
+        const reportLocale = () => {
+          const active = readLocale(locale)
+          if (active === undefined || active === lastLocale) return
+          lastLocale = active
+          try {
+            const api = typeof window === 'undefined' ? undefined : window.dshDesktop
+            if (api !== undefined && typeof api.reportLocale === 'function') api.reportLocale(active)
+          } catch {
+            // 同上：上报是尽力而为，外壳读不到时按下一次变化或下一次启动收敛。
+          }
+        }
+        scoped.effect(() => {
+          const unsubscribe = locale.subscribe(reportLocale)
+          reportLocale()
+          return unsubscribe
+        }, 'shell-bridge: locale')
+      })
     }
 
     exports.name = name

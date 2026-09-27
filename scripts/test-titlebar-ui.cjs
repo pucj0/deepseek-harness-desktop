@@ -105,6 +105,14 @@ async function run() {
   // 文案也来自活文案表（生产代码已经不传死文案了），下面的语言用例才能验证它会跟着变。
   initShellStrings('zh')
 
+  /**
+   * 菜单版本号：与 `index.ts` 的 `menuRevision` 同构。
+   *
+   * 标题栏据此判断"菜单按钮要不要重新拉一次"——它画的文案来自原生菜单，而原生菜单会在
+   * 运行中重建（装上真正的应用菜单、语言变化、最近打开变化）。
+   */
+  let menuRevision = 0
+
   const mainWindow = createMainWindow({
     userDataDir: scratch,
     splashTitle: 'DeepSeek Harness',
@@ -118,6 +126,7 @@ async function run() {
         opened.push({ index, label: entry === undefined ? undefined : entry.label, ...point, onClosed })
         return true
       },
+      revision: () => menuRevision,
     },
   })
   const win = mainWindow.window
@@ -431,6 +440,56 @@ async function run() {
     assert.equal(opened[0].index, 0)
     assert.equal(appMenu.items[0].label, '文件')
   })
+
+  // ---- 菜单版本：重建菜单后标题栏必须自己重新拉一次 ---------------------------
+  //
+  // 这一节钉的是那张 "File Edit View Window Help" 的截图：窗口创建的那一刻菜单如果还没装，
+  // 标题栏的第一次 `getMenu()` 读到的就是 **Electron 的默认菜单**（`Window` 是它加的，
+  // 本产品没有这一项）；真正的菜单随后被装上，却没有任何东西通知页面。修复由两半组成，
+  // 这里把两半都断言掉：
+  //   * 状态里带 `menuRevision`（页面据此判断"菜单换了一份"）；
+  //   * 版本号变了之后，页面真的会重取按钮。
+  await check('状态里带着菜单版本号', async () =>
+    assert.equal(typeof (await shellEval(`window.dshTitlebar.getState()`)).menuRevision, 'number'))
+  await check('运行时的菜单就是当前模板（顶层是「更新」，不是 Electron 默认菜单里的 Window）', () => {
+    const running = menuBarEntries(Menu.getApplicationMenu()).map((entry) => entry.label)
+    assert.equal(running.includes('Window'), false, '运行时出现了 Window —— 说明跑的是 Electron 默认菜单')
+    assert.deepEqual(running, ['文件', '编辑', '视图', '更新', '帮助'])
+    // 源码定义的是「更新」，运行时也必须是「更新」：这一条能挡住"源码改了、dist 没重新 build"。
+    const fromTemplate = menuTemplate
+      .applicationMenuTemplate({ ...menuDeps, strings: t(), shellVersion: '1.5.9' })
+      .map((item) => item.label)
+    assert.deepEqual(running, fromTemplate)
+  })
+
+  menuRevision += 1
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(
+      menuTemplate.applicationMenuTemplate({
+        ...menuDeps,
+        strings: { ...t(), menuUpdate: '发布与更新' },
+        shellVersion: '1.5.9',
+      }),
+    ),
+  )
+  mainWindow.publishShellState()
+  await wait(400)
+  await check('重建菜单（版本号 +1）后标题栏自己换成了新文案', async () =>
+    assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '发布与更新', '帮助']))
+  await check('任何时候都不出现 Window（需求 30/36：出现就必须失败）', async () => {
+    const labels = await titlebarLabels()
+    assert.equal(labels.includes('Window'), false, `标题栏出现了 Window：${JSON.stringify(labels)}`)
+    assert.equal(labels.includes('窗口'), false)
+  })
+  // 换回中文的「更新」，避免影响后面的断言（这一段是最后一段，改动只是为了不留下混淆状态）。
+  menuRevision += 1
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(menuTemplate.applicationMenuTemplate({ ...menuDeps, strings: t(), shellVersion: '1.5.9' })),
+  )
+  mainWindow.publishShellState()
+  await wait(300)
+  await check('换回之后又是 文件 / 编辑 / 视图 / 更新 / 帮助', async () =>
+    assert.deepEqual(await titlebarLabels(), ['文件', '编辑', '视图', '更新', '帮助']))
 
   await server.close()
   mainWindow.close()

@@ -47,6 +47,13 @@ export interface ShellState {
    * because their labels come from the native menu that the main process rebuilds.
    */
   locale: string
+  /**
+   * 原生菜单的版本号（每次重建递增）。
+   *
+   * 页面拿它判断"菜单按钮要不要重新拉一次"：菜单的文案与条目都来自原生菜单，而它是会在
+   * 运行中重建的（装上真正的应用菜单、语言变化、最近打开变化）。
+   */
+  menuRevision: number
   /** Accessibility text for the navigation buttons (changes with the language). */
   backLabel: string
   forwardLabel: string
