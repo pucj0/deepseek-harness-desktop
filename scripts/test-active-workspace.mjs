@@ -589,7 +589,9 @@ try {
       strings,
       recent: actions.recent,
       runtimeVersion: '0.1.5-rc.2',
-      shellVersion: '1.6.1',
+      // 占位即可：这里断言的是菜单结构与命令，不涉及版本号本身。写死真实版本会让
+      // 这个文件每发一版就过期一次。
+      shellVersion: '0.0.0',
       openFolder: actions.openFolder,
       openRecent: actions.openRecent,
       removeRecent: actions.removeRecent,
