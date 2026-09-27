@@ -155,7 +155,15 @@ async function run() {
   })
 
   // --- 1) 以工作区 A 启动 -------------------------------------------------
-  let server = new DshServer({ runtime, dshHome: join(scratch, 'home'), workspace: workspaceA })
+  // `registerWorkspace: true` = 显式意图（生产环境里由「打开文件夹 / 最近打开 / 命令行参数」
+  // 决定，见 workspace-reconcile.ts）。没有它服务端不会登记——那正是"Harness 里删掉的
+  // 工作区不会被复活"的机制，由 scripts/test-workspace-lifecycle.mjs 专门断言。
+  let server = new DshServer({
+    runtime,
+    dshHome: join(scratch, 'home'),
+    workspace: workspaceA,
+    registerWorkspace: true,
+  })
   await server.start()
   await mainWindow.navigate(server.ready)
 
@@ -196,7 +204,12 @@ async function run() {
   check('重启后解析到的是 B（旧 argv 没有把它盖掉）', () => assert.equal(resolved, workspaceB))
 
   // --- 4) 用 B 重新起服务端并导航同一个窗口 --------------------------------
-  server = new DshServer({ runtime, dshHome: join(scratch, 'home'), workspace: resolved })
+  server = new DshServer({
+    runtime,
+    dshHome: join(scratch, 'home'),
+    workspace: resolved,
+    registerWorkspace: true,
+  })
   await server.start()
   await mainWindow.navigate(server.ready)
 

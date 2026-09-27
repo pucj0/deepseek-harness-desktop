@@ -96,6 +96,8 @@ export interface ShellStrings {
   itemOpenFolder: string
   itemOpenRecent: string
   itemNoRecent: string
+  itemRemoveFromRecent: string
+  itemForgetWorkspace: string
   itemRevealWorkspace: string
   itemCopyWorkspacePath: string
   dialogOpenFolderTitle: string
@@ -108,6 +110,13 @@ export interface ShellStrings {
   openFolderFailedTitle: string
   copiedPathTitle: string
   copiedPathMessage: string
+  workspaceMissingTitle: string
+  workspaceMissingDetail: string
+  forgetWorkspaceTitle: string
+  forgetWorkspaceMessage: string
+  forgetWorkspaceDetail: string
+  forgetWorkspaceConfirm: string
+  forgetWorkspaceCancel: string
 
   // Project info window / git status
   menuProject: string
@@ -235,6 +244,8 @@ const en: ShellStrings = {
   itemOpenFolder: 'Open Folder…',
   itemOpenRecent: 'Open Recent',
   itemNoRecent: 'No recent folders',
+  itemRemoveFromRecent: 'Remove from Recent',
+  itemForgetWorkspace: 'Forget Workspace…',
   itemRevealWorkspace: 'Reveal Workspace in Explorer',
   itemCopyWorkspacePath: 'Copy Workspace Path',
   dialogOpenFolderTitle: 'Choose a project folder to open',
@@ -248,6 +259,15 @@ const en: ShellStrings = {
   openFolderFailedTitle: 'Could not open the folder',
   copiedPathTitle: 'Path copied',
   copiedPathMessage: 'The workspace path is on the clipboard.',
+  workspaceMissingTitle: 'The workspace no longer exists',
+  workspaceMissingDetail:
+    'That directory is gone, so it is no longer a valid workspace. It has been removed from the recent list and the app switched to a workspace that still exists.',
+  forgetWorkspaceTitle: 'Forget workspace',
+  forgetWorkspaceMessage: 'Remove this workspace from Harness?',
+  forgetWorkspaceDetail:
+    'Only the registration is removed: the folder, its files and its sessions stay exactly as they are. The app restarts so the change goes through the normal startup path. You can open the folder again at any time.',
+  forgetWorkspaceConfirm: 'Forget Workspace',
+  forgetWorkspaceCancel: 'Cancel',
 
   menuProject: 'Project',
   itemProjectInfo: 'Project Info…',
@@ -376,6 +396,8 @@ const zh: ShellStrings = {
   itemOpenFolder: '打开文件夹…',
   itemOpenRecent: '最近打开',
   itemNoRecent: '暂无最近打开的项目',
+  itemRemoveFromRecent: '从最近项目中移除',
+  itemForgetWorkspace: '移除工作区…',
   itemRevealWorkspace: '在文件管理器中打开工作区',
   itemCopyWorkspacePath: '复制工作区路径',
   dialogOpenFolderTitle: '选择要打开的项目文件夹',
@@ -389,6 +411,15 @@ const zh: ShellStrings = {
   openFolderFailedTitle: '无法打开该文件夹',
   copiedPathTitle: '路径已复制',
   copiedPathMessage: '工作区路径已放入剪贴板。',
+  workspaceMissingTitle: '工作区已不存在',
+  workspaceMissingDetail:
+    '这个目录已经被删掉，因此不再是有效的工作区。它已从「最近打开」里移除，应用也已切换到一个仍然存在的工作区。',
+  forgetWorkspaceTitle: '移除工作区',
+  forgetWorkspaceMessage: '把这个工作区从 Harness 里移除？',
+  forgetWorkspaceDetail:
+    '只移除登记：目录、里面的文件和会话都原样保留。应用会重启，让这次改动走正常的启动流程。你随时可以再把这个文件夹打开。',
+  forgetWorkspaceConfirm: '移除工作区',
+  forgetWorkspaceCancel: '取消',
 
   menuProject: '项目',
   itemProjectInfo: '项目信息…',

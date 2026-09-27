@@ -132,6 +132,20 @@ await check('最近打开的条目是可点击项（不是禁用占位）', () =
   assert.ok(index > 0, '没找到最近打开条目')
   assert.ok(!lines[index].includes('(禁用)'), '最近打开条目被禁用了')
 })
+await check('「最近打开」下有「从最近项目中移除」子菜单（两个概念分开）', () => {
+  assert.ok(dump.includes('从最近项目中移除'), '菜单里没有「从最近项目中移除」')
+  const lines = dump.split('\n').map((line) => line.trim())
+  const openRecent = lines.indexOf('最近打开')
+  const remove = lines.indexOf('从最近项目中移除')
+  assert.ok(openRecent > 0 && remove > openRecent, '「从最近项目中移除」应当在「最近打开」之下')
+})
+await check('「移除工作区…」在文件菜单里（与删除目录、移除最近项都不同）', () => {
+  assert.ok(dump.includes('移除工作区…'), '菜单里没有「移除工作区…」')
+  const lines = dump.split('\n').map((line) => line.trim())
+  const copyIndex = lines.indexOf('复制工作区路径')
+  const forgetIndex = lines.indexOf('移除工作区…')
+  assert.ok(forgetIndex > copyIndex, '「移除工作区…」应当紧跟在复制路径之后')
+})
 
 console.log('')
 console.log('=== 5. 版本行仍是不可点击的信息 ===')

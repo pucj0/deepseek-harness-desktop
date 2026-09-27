@@ -31,16 +31,18 @@
  */
 import { existsSync } from 'node:fs'
 import { readSettings, switchWorkspace } from './settings'
+import type { WorkspaceResolution } from './workspace'
 import {
   fallbackWorkspace,
   isSameWorkspace,
+  markPendingForget,
   markPendingWorkspace,
   normalizeWorkspaceArgument,
   takePendingWorkspace,
 } from './workspace'
 
 /**
- * 决定本次启动把哪个目录当作工作区。
+ * 决定本次启动把哪个目录当作工作区，**并保留它的来源**。
  *
  * 优先级：**切换意图 > 命令行参数 > 上次记住的选择 > 用户主目录**。
  *
@@ -49,31 +51,53 @@ import {
  * 用户刚选的新路径会被盖掉（表现为"重启了但还是老目录"，见 c968ab4a）。因此切换时把目标
  * 写进 `pending-workspace`，它在本次启动里优先级最高，读到即删。
  *
+ * 返回 `source` 而不是只返回字符串，是因为"这个路径是怎么来的"决定了服务端是否应该把它
+ * `registry.create()` 进 Harness（见 workspace-reconcile.ts）。旧代码只返回字符串，于是
+ * "上次记住的 A"与"用户明确要打开 A"在服务端看起来一模一样——用户在 Harness 里删掉的
+ * 工作区会在下次启动时被无声地创建回来。
+ *
+ * 本函数**不写任何文件**（除了消费 `pending-workspace` 标记）：落盘由
+ * `reconcileWorkspaceState()` 统一负责，这样"prune + persist"只有一个入口。
+ *
+ * @param argv - 本次启动的 `process.argv`。
+ * @param userDataDir - 应用数据目录。
+ * @returns 工作区路径与来源。
+ */
+export function resolveWorkspaceIntent(argv: string[], userDataDir: string): WorkspaceResolution {
+  const pending = takePendingWorkspace(userDataDir)
+  if (pending !== undefined) return { path: pending, source: 'pending' }
+
+  const fromArgv = argv.slice(1).find((token) => !token.startsWith('--') && !token.startsWith('-'))
+  if (fromArgv !== undefined) {
+    const normalized = normalizeWorkspaceArgument(fromArgv)
+    if (normalized !== undefined) return { path: normalized, source: 'argv' }
+  }
+
+  const remembered = readSettings(userDataDir).workspace
+  if (remembered !== undefined && existsSync(remembered)) return { path: remembered, source: 'remembered' }
+  return { path: fallbackWorkspace(), source: 'fallback' }
+}
+
+/**
+ * 决定本次启动把哪个目录当作工作区（只要路径）。
+ *
+ * 保留这个形状是为了不打断既有调用方与回归测试；启动路径请用
+ * {@link resolveWorkspaceIntent} + `reconcileWorkspaceState()`，因为只有那两个一起
+ * 才能回答"是否允许登记"。
+ *
+ * 这里顺手把**显式意图**记进 settings（`workspace` + `recent`）：命令行打开一个目录同样
+ * 应当进入「最近打开」列表。记住的选择与兜底值不写——它们不是用户的选择。
+ *
  * @param argv - 本次启动的 `process.argv`。
  * @param userDataDir - 应用数据目录。
  * @returns 工作区绝对路径。
  */
 export function resolveWorkspace(argv: string[], userDataDir: string): string {
-  const pending = takePendingWorkspace(userDataDir)
-  if (pending !== undefined) {
-    switchWorkspace(userDataDir, pending)
-    return pending
+  const resolution = resolveWorkspaceIntent(argv, userDataDir)
+  if (resolution.source === 'pending' || resolution.source === 'argv') {
+    switchWorkspace(userDataDir, resolution.path)
   }
-
-  const fromArgv = argv.slice(1).find((token) => !token.startsWith('--') && !token.startsWith('-'))
-  if (fromArgv !== undefined) {
-    const normalized = normalizeWorkspaceArgument(fromArgv)
-    if (normalized !== undefined) {
-      // 走 switchWorkspace 而不是只写 workspace：命令行打开一个目录同样应当
-      // 进入"最近打开"列表。
-      switchWorkspace(userDataDir, normalized)
-      return normalized
-    }
-  }
-
-  const remembered = readSettings(userDataDir).workspace
-  if (remembered !== undefined && existsSync(remembered)) return remembered
-  return fallbackWorkspace()
+  return resolution.path
 }
 
 /** 重启式切换需要的外部动作（由 Electron 侧注入，便于测试）。 */
@@ -133,6 +157,70 @@ export async function restartIntoWorkspace(
   options.relaunch()
   options.exit(0)
   return 'restart'
+}
+
+/**
+ * 「文件 → 移除工作区…」（Forget Workspace）的决策与执行。
+ *
+ * 语义（必须与另外两件事严格区分，见 workspace-actions.ts）：
+ *
+ *     从最近项目中移除  → 只删 Desktop 的 `recent` 记录
+ *     移除工作区        → 只删 **Harness 注册表**里的登记（文件与提交全留着）
+ *     删除目录          → 删磁盘上的文件（本应用**从不**做）
+ *
+ * 为什么它也要重启：注册表由服务端子进程里的 `ctx.workspaceRegistry` 独占，唯一安全的
+ * 写入口是官方 `delete(id)`。让删除跟着**同一条启动路径**走，就不存在"外壳以为删了、
+ * 服务端还留着"的中间态，也不需要为一次删除维护第二条控制通道。
+ *
+ * 当前工作区不能被"移除后留在原地"（需求：不能出现 active 指着已移除工作区的半失效
+ * 状态），因此目标就是当前工作区时，**先**把下一次启动的工作区改成 `nextActive`
+ * （必须是一个仍然存在的目录；调用方按"注册表里最近的有效工作区 → 主目录"给出），
+ * 再留下移除意图。服务端按"先移除、后登记"的顺序执行，两者不会互相打架。
+ *
+ * @param options - 目标工作区、当前工作区、接管者与外部动作。
+ * @returns `'forget'` 表示已记录意图并重启；`'unchanged'` 表示参数无效、什么都没做。
+ */
+export async function forgetWorkspaceAndRestart(
+  options: {
+    userDataDir: string
+    /** 要移除的工作区（任意写法）。 */
+    target: string
+    /** 当前 active workspace。 */
+    current: string
+    /**
+     * 目标就是当前工作区时用来接管的工作区。
+     *
+     * 省略或指向目标本身时用主目录：应用必须有一个工作区，而主目录是文档化的兜底。
+     */
+    nextActive?: string
+  } & WorkspaceSwitchEffects,
+): Promise<'forget' | 'unchanged'> {
+  const { userDataDir, target, current } = options
+  if (target === '') return 'unchanged'
+  const forgettingCurrent = isSameWorkspace(target, current)
+  const candidate = options.nextActive !== undefined && options.nextActive !== '' && !isSameWorkspace(options.nextActive, target)
+    ? options.nextActive
+    : fallbackWorkspace()
+
+  options.beginQuit()
+  if (forgettingCurrent) {
+    // 顺序有意义：先把下一次启动的工作区钉住，再留移除意图。标记是耗材，写失败时
+    // settings 仍然正确（最多退回旧 argv——而旧 argv 正是被移除的那个，因此这里先写
+    // settings 再写标记，与 restartIntoWorkspace 同一个顺序）。
+    switchWorkspace(userDataDir, candidate)
+    markPendingWorkspace(userDataDir, candidate)
+  }
+  markPendingForget(userDataDir, target)
+
+  try {
+    await options.stopServer()
+  } catch (error) {
+    console.warn(`[shell] 移除工作区前停止服务端失败，继续重启: ${String(error)}`)
+  }
+
+  options.relaunch()
+  options.exit(0)
+  return 'forget'
 }
 
 /**

@@ -1,0 +1,3 @@
+- insert:
+    - id: ui-shell-bridge
+      name: dsh-client-ui-shell-bridge

@@ -1,0 +1,21 @@
+{
+  "name": "dsh-client-ui-shell-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Report the Harness active workspace (current session cwd) to the Electron shell over the preload bridge.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": [], "external": [] }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  }
+}

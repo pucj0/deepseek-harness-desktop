@@ -11,7 +11,7 @@
  *
  * 本模块只负责"选"与"记"，不负责重启，也不碰 Electron。
  */
-import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 
@@ -20,6 +20,33 @@ const MAX_RECENT = 8
 
 /** "待切换工作区"标记的文件名（位于应用数据目录）。 */
 export const PENDING_WORKSPACE_FILENAME = 'pending-workspace'
+
+/** "待移除工作区"标记的文件名（位于应用数据目录）。 */
+export const PENDING_FORGET_FILENAME = 'pending-forget-workspaces.json'
+
+/**
+ * 本次启动的工作区是**怎么来的**。
+ *
+ * 这一层 provenance 是本轮修复的核心：`--workspace` 曾经只是一条路径，于是
+ * "用户明确要求打开这个目录"与"上次 Desktop 记着这个目录"在服务端看起来一模一样，
+ * server.mjs 便对两者都调用 `workspaceRegistry.create()`。结果用户在 Harness UI 里
+ * 删掉的工作区，会在下一次 Desktop 启动时被**无声地重新创建**回来。
+ *
+ * 语义：
+ *   * `pending`    「打开文件夹」/「最近打开」写下的切换意图 —— 明确的用户意图；
+ *   * `argv`       命令行里显式给出的目录 —— 明确的用户意图；
+ *   * `remembered` 只是 `<userData>/settings.json` 里上次记住的值 —— **不是**意图；
+ *   * `fallback`   以上都没有可用值，落到主目录 —— **不是**意图。
+ *
+ * 只有前两种允许登记进 Harness 注册表（见 workspace-reconcile.ts）。
+ */
+export type WorkspaceSource = 'pending' | 'argv' | 'remembered' | 'fallback'
+
+/** 一次工作区解析：路径 + 来源。 */
+export interface WorkspaceResolution {
+  path: string
+  source: WorkspaceSource
+}
 
 /** 落盘的工作区相关设置。 */
 export interface WorkspaceSettings {
@@ -154,12 +181,103 @@ export function takePendingWorkspace(userDataDir: string): string | undefined {
  * @returns 是否指向同一个目录。
  */
 export function isSameWorkspace(left: string, right: string): boolean {
-  const canon = (value: string): string => {
-    const absolute = resolve(value)
-    const trimmed = absolute.length > 1 && absolute.endsWith(sep) ? absolute.slice(0, -1) : absolute
-    return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
+  return workspaceIdentity(left) === workspaceIdentity(right)
+}
+
+/**
+ * 路径的**比较形态**（identity）——只用于判断"是不是同一个目录"。
+ *
+ * 与"显示形态"是两件事，必须分开：
+ *   * **显示形态**就是用户看到 / 记住的那个写法（`settings.workspace`、项目信息面板、
+ *     「复制工作区路径」用的都是它）。**不能**拿 realpath 去改写它，否则用户选的是
+ *     链接目录，界面却显示成链接目标，看起来像"路径被偷偷换掉了"。
+ *   * **比较形态**只求"同一个目录得到同一个字符串"：先尽量 realpath（链接、junction、
+ *     8.3 短名、驱动器大小写都由它统一），失败（目录已不存在）再退回
+ *     `resolve` + 去尾部分隔符 + Windows 折叠大小写。
+ *
+ * Harness 注册表里存的正是 realpath 之后的规范路径（见 dsh-workspace 的 `create`），
+ * 因此把"用户写法"与"registry 里的路径"对比时，也必须走这一层。
+ *
+ * @param value - 任意目录路径写法。
+ * @returns 用于比较的字符串。
+ */
+export function workspaceIdentity(value: string): string {
+  let absolute = resolve(value)
+  try {
+    absolute = realpathSync.native(absolute)
+  } catch {
+    // 目录不存在（或没有权限）：退回纯词法规范化，仍然能挡住尾部分隔符与 `..`。
   }
-  return canon(left) === canon(right)
+  const trimmed = absolute.length > 1 && absolute.endsWith(sep) ? absolute.slice(0, -1) : absolute
+  return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
+}
+
+/**
+ * 记下"下次启动时把这些工作区从 Harness 注册表里移除"。
+ *
+ * 为什么也走"标记 + 重启"而不是就地删：注册表由服务端子进程里的
+ * `ctx.workspaceRegistry` 独占（官方 API 是 `delete(id)`），而本进程只是外壳。
+ * 让删除跟着**同一条启动路径**走，就不存在"外壳以为删了、服务端还留着"的中间态，
+ * 也不需要为一次删除维护第二套控制通道。
+ *
+ * 与 settings 的 `recent` **无关**：从注册表移除不等于从「最近打开」移除，更不等于
+ * 删除磁盘目录（见 workspace-actions.ts 的三段语义）。
+ *
+ * @param userDataDir - 应用数据目录。
+ * @param dir - 要移除的工作区路径（用户写法）。
+ */
+export function markPendingForget(userDataDir: string, dir: string): void {
+  // 用**不消费**的读：写入不能先删后写（进程在这两步之间退出就会丢掉整个意图）。
+  const existing = readPendingForgets(userDataDir)
+  if (existing.some((entry) => isSameWorkspace(entry, dir))) return
+  const next = [...existing, dir]
+  try {
+    mkdirSync(userDataDir, { recursive: true })
+    // 原子替换：先写同目录的临时文件再改名，读到的永远是完整 JSON。
+    const target = join(userDataDir, PENDING_FORGET_FILENAME)
+    const temporary = `${target}.tmp`
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`)
+    renameSync(temporary, target)
+  } catch (error) {
+    console.warn(`[shell] 无法写入待移除工作区: ${String(error)}`)
+  }
+}
+
+/**
+ * 读取"待移除工作区"标记（**不**消费）。
+ *
+ * @param userDataDir - 应用数据目录。
+ * @returns 要移除的路径数组；文件缺失或损坏时为空数组。
+ */
+export function readPendingForgets(userDataDir: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(userDataDir, PENDING_FORGET_FILENAME), 'utf8'))
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 读取并**消费**"待移除工作区"标记。
+ *
+ * 读到即删：这些路径只对紧接着的那一次启动有效。坏文件返回空数组并顺手删掉，
+ * 否则一个坏标记会每次启动都被读一遍。
+ *
+ * @param userDataDir - 应用数据目录。
+ * @returns 要移除的路径数组（可能为空）。
+ */
+export function takePendingForgets(userDataDir: string): string[] {
+  const path = join(userDataDir, PENDING_FORGET_FILENAME)
+  if (!existsSync(path)) return []
+  const entries = readPendingForgets(userDataDir)
+  try {
+    rmSync(path, { force: true })
+  } catch {
+    // 删不掉也无妨：下次启动会再移除一遍（`delete` 对未知 id 是幂等的）。
+  }
+  return entries
 }
 
 /**

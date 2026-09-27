@@ -19,7 +19,7 @@
 // 用真的 `DshServer`（而不是自己 spawn）是为了连"把 src/server/server.mjs 同步进
 // runtime 再运行"这一步都走生产代码——否则测试有可能跑在过期的 runtime 副本上。
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DshServer } from '../dist/main/dsh-server.js'
@@ -86,11 +86,23 @@ function readRegistry() {
 
 /**
  * 启动一个真实服务端，跑断言，然后停掉。
+ *
+ * `registerWorkspace` 默认 **true**：本文件测的是"启动期登记这一层确实发生了"，因此模拟的是
+ * 显式意图（「打开文件夹 / 最近打开 / 命令行参数」）。**没有**这个意图时服务端不会登记——
+ * 那正是「Harness 里删掉的工作区不会在下次启动被复活」的机制，由
+ * `scripts/test-workspace-lifecycle.mjs` 专门断言。
+ *
  * @param workspace - 本次启动的工作区。
  * @param body - 拿到服务端与日志后的断言体。
+ * @param options - `{ registerWorkspace }`（默认 true）。
  */
-async function withServer(workspace, body) {
-  const server = new DshServer({ runtime, dshHome: home, workspace })
+async function withServer(workspace, body, options = {}) {
+  const server = new DshServer({
+    runtime,
+    dshHome: home,
+    workspace,
+    registerWorkspace: options.registerWorkspace ?? true,
+  })
   const logs = []
   server.on('log', ({ line }) => logs.push(line))
   try {
@@ -165,6 +177,32 @@ try {
     await check('A 的记录没有被重建（createdAt 不变）', () =>
       assert.equal(registry.records.find((record) => record.path === realA)?.createdAt, createdA))
   })
+
+  console.log('')
+  console.log('=== 启动 4：**没有登记意图**时不能创造记录（BUG C 的机制） ===')
+  await withServer(workspaceB, async ({ logs }) => {
+    const registry = readRegistry()
+    await check('记录数不变', () => assert.equal(registry.count, 2))
+    await check('服务端如实说明"未请求登记"', () =>
+      assert.ok(logs.some((line) => line.includes('registration not requested')), logs.slice(-6).join(' | ')))
+  }, { registerWorkspace: false })
+
+  // 全新 home + 没有登记意图：注册表保持为空（界面因此没有项目），而不是凭空造一个。
+  // 这是"记住的 workspace ≠ 登记意图"在启动链上的直接体现。
+  const emptyHome = join(scratch, 'home-bootstrap')
+  mkdirSync(emptyHome, { recursive: true })
+  const emptyServer = new DshServer({ runtime, dshHome: emptyHome, workspace: workspaceA, registerWorkspace: false })
+  try {
+    await emptyServer.start()
+    await check('没有意图时不登记：新 home 的注册表里一条记录都没有', () => {
+      const file = join(emptyHome, 'storages', 'workspace.json')
+      if (!existsSync(file)) return
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      assert.deepEqual(parsed.global.workspaceIds ?? [], [])
+    })
+  } finally {
+    await emptyServer.stop(3000)
+  }
 } catch (error) {
   failed += 1
   console.error(`测试异常: ${error instanceof Error ? error.message : String(error)}`)

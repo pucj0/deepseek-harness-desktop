@@ -110,6 +110,28 @@ const api = {
     }>,
   /** Open an external URL in the system browser. */
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('dsh-desktop:open-external', url) as Promise<void>,
+  /**
+   * 上报 Harness 当前所在的**工作区**（当前会话的 cwd）。
+   *
+   * 为什么需要它：'当前项目'只存在于 Harness 的客户端状态里（`ctx.sessions.list` 的
+   * `current`），既不在 URL 里也不在服务端，而外壳的「项目信息 / 在文件管理器中打开 /
+   * 复制路径」必须跟随它，不能一直指向启动时那个目录。
+   *
+   * 这里做的是**形状归一化**，不是信任：真正的校验在主进程（类型、绝对路径、目录是否
+   * 存在、是否属于 Harness 已注册的工作区，见 src/main/window.ts 与 active-workspace.ts）。
+   * 这个桥只暴露这一个方法，绝不暴露 `ipcRenderer` 本身。
+   *
+   * @param payload - `{ path, workspaceId? }`；`path: null` 表示此刻没有当前会话。
+   */
+  reportActiveWorkspace: (payload: { path: string | null; workspaceId?: string }): void => {
+    const path = payload?.path
+    ipcRenderer.send('dsh-desktop:active-workspace', {
+      path: typeof path === 'string' && path !== '' ? path : null,
+      ...(typeof payload?.workspaceId === 'string' && payload.workspaceId !== ''
+        ? { workspaceId: payload.workspaceId }
+        : {}),
+    })
+  },
 }
 
 contextBridge.exposeInMainWorld('dshDesktop', api)

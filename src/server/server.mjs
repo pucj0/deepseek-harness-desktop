@@ -54,7 +54,12 @@ const DESKTOP_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
  * 挂载插件。而 dsh 的模块解析要求 bundle 能从安装位置或 profile 目录解析到，所以
  * `linkBundledPlugins` 会把它们链进 profile 的 node_modules。
  */
-const BUNDLED_PLUGINS = ['dsh-client-ui-gitbar', 'dsh-client-ui-review', 'dsh-client-ui-typography']
+const BUNDLED_PLUGINS = [
+  'dsh-client-ui-gitbar',
+  'dsh-client-ui-review',
+  'dsh-client-ui-typography',
+  'dsh-client-ui-shell-bridge',
+]
 
 const PROFILE_ROOT_CONFIG = `# dsh-desktop profile root — an empty entry list.
 #
@@ -74,6 +79,13 @@ const PROFILE_PATCH_TEMPLATE = `# dsh-desktop patch layer, applied after every b
 
 /**
  * Parse this server's own arguments.
+ *
+ * `--workspace` describes **process context** only (the child's cwd and the directory handed
+ * to the plugins). Whether that directory should also be *registered* in Harness is a
+ * separate, explicitly transmitted intent (`--register-workspace`), because the shell cannot
+ * tell "the user asked to open this folder" from "this is what the shell remembered last time"
+ * by looking at a path. Treating the two as one is what made a workspace the user had deleted
+ * in Harness reappear on the next launch.
  * @param argv - arguments after the script path.
  * @returns the resolved options.
  */
@@ -82,14 +94,23 @@ function parseArgs(argv) {
     dshHome: process.env.DSH_HOME,
     installAnchor: undefined,
     workspace: process.cwd(),
+    registerWorkspace: false,
+    forgetWorkspaces: [],
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
+    // 布尔开关不消费下一个参数，因此必须在"取 value"之前判掉——`--register-workspace`
+    // 若排在末尾，旧写法会因为 `value === undefined` 直接 break，静默丢掉后面的所有参数。
+    if (flag === '--register-workspace') {
+      options.registerWorkspace = true
+      continue
+    }
     const value = argv[index + 1]
     if (value === undefined) break
     if (flag === '--dsh-home') options.dshHome = value
     else if (flag === '--install-anchor') options.installAnchor = value
     else if (flag === '--workspace') options.workspace = value
+    else if (flag === '--forget-workspace') options.forgetWorkspaces.push(value)
     else continue
     index += 1
   }
@@ -239,7 +260,15 @@ function ensureProfile(home, installAnchor) {
  * 了这个工作区"，这正是 1.2.0–1.5.8 的 bug。回归测试
  * `scripts/test-workspace-registration.mjs` 同时断言这两层。
  *
- * `create()` 是幂等的：同一个规范路径重复调用会原样返回已有记录，且**不动**列表顺序。
+ * ## 什么时候**才**登记（本轮的修复）
+ *
+ * 只在 `--register-workspace` 出现时调用。`--workspace A` 本身表达的是"本次进程的
+ * workspace context"，**不是**"请把这个目录登记进注册表"——这两件事必须分开，否则用户
+ * 在 Harness UI 里删掉的工作区会在下一次 Desktop 启动时被无声地创建回来（`create()` 对
+ * 不存在的登记就是新增）。决定由外壳的 `reconcileWorkspaceState()` 做出，规则是：
+ * 显式意图（打开文件夹 / 最近打开 / 命令行参数）才登记。
+ *
+ * `create()` 本身是幂等的：同一个规范路径重复调用会原样返回已有记录，且**不动**列表顺序。
  *
  * @param ctx - boot 之后的主机上下文。
  * @param workspace - 本次启动的工作区绝对路径。
@@ -258,6 +287,100 @@ async function registerWorkspace(ctx, workspace) {
       `[dsh-desktop] 警告: 无法登记工作区 ${workspace}: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
+}
+
+/** 一个工作区记录是不是"文件系统工作区"（有可用的绝对路径）。 */
+function isFilesystemWorkspace(workspace) {
+  return typeof workspace?.path === 'string' && workspace.path !== ''
+}
+
+/**
+ * 对账 Harness 工作区注册表：清掉失效登记 + 执行外壳要求的移除。
+ *
+ * ## 为什么用官方 API，而不是直接改 `workspace.json`
+ *
+ * `ctx.workspaceRegistry` 是唯一有资格写这份文件的东西：它自己维护
+ * `global.workspaceIds` 的持久顺序、`initialized` 引导标记、以及"表已写、序未写"
+ * 这类中间态的恢复逻辑（`recoverPendingMutation` / `validateStoredState`）。外壳直接
+ * `JSON.parse` → `splice` → `writeFile` 会绕过全部这些不变量，也会与正在运行的服务端
+ * 抢同一份文件。删除的公开入口是 `registry.delete(id)`——保留目录、保留会话日志，
+ * 只去掉登记，正是我们需要的语义。
+ *
+ * ## 两类清理
+ *
+ *  1. **失效目录**：`status()` 是官方提供的"这个目录现在还在吗"实时检查（不缓存，
+ *     且**不会**因为目录暂时不在就改写记录）。返回 `'missing-dir'` 说明用户把目录删了，
+ *     这条记录留在注册表里只会让一个不存在的工作区一直出现在项目列表里。
+ *  2. **显式移除**：外壳的「移除工作区…」写下的意图。它走的是同一个 API、同一条启动
+ *     路径，因此不存在"外壳以为删了、服务端还留着"的中间态。
+ *
+ * ## 只碰文件系统工作区
+ *
+ * 没有可用 `path` 的记录（将来的远端 / 虚拟工作区，或结构变化后的新形态）**不参与**
+ * 任何自动清理——"字段不像本地目录就删掉"是最危险的猜法。
+ *
+ * 顺序很重要：清理**必须早于**本次的登记。否则「移除 A 并切换到 B」会先 create(B)
+ * 再删掉 A 的记录，中间那一瞬表里同时有两条；更要紧的是，删除失败时我们宁愿什么都没登记，
+ * 也不愿留下一条用户明确要求移除的记录。
+ *
+ * @param ctx - boot 之后的主机上下文。
+ * @param forgetPaths - 外壳要求的移除清单（任意写法）。
+ * @returns 实际被移除的路径数组（诊断与测试断言用）。
+ */
+async function reconcileWorkspaceRegistry(ctx, forgetPaths) {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined) {
+    console.error('[dsh-desktop] 警告: 工作区注册表不可用（dsh-workspace 未挂载），本次不会清理或登记工作区')
+    return []
+  }
+  const removed = []
+  let listed
+  try {
+    listed = registry.list()
+  } catch (error) {
+    console.error(`[dsh-desktop] 警告: 无法列出工作区注册表: ${error instanceof Error ? error.message : String(error)}`)
+    return []
+  }
+  // 用 realpath 比较：命令行/设置里的写法未必与注册表里那份规范路径逐字相同。
+  const normalize = (value) => {
+    try {
+      return realpathSync.native(value)
+    } catch {
+      return resolve(value)
+    }
+  }
+  const wanted = new Set(forgetPaths.filter((entry) => typeof entry === 'string' && entry !== '').map(normalize))
+
+  for (const workspace of listed) {
+    if (!isFilesystemWorkspace(workspace)) continue
+    const explicit = wanted.has(normalize(workspace.path))
+    let missing = false
+    if (!explicit && typeof workspace.status === 'function') {
+      try {
+        missing = (await workspace.status()) === 'missing-dir'
+      } catch (error) {
+        // 状态查询失败（权限等）不等于"目录不存在"，因此什么都不做。
+        console.error(
+          `[dsh-desktop] 警告: 无法检查工作区 ${workspace.path} 是否仍然存在: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
+    if (!explicit && !missing) continue
+    try {
+      const deleted = await registry.delete(workspace.id)
+      if (deleted === true) {
+        removed.push(workspace.path)
+        console.log(
+          `[dsh-desktop] ${explicit ? 'removed' : 'pruned'} workspace ${workspace.path}`,
+        )
+      }
+    } catch (error) {
+      console.error(
+        `[dsh-desktop] 警告: 无法移除工作区 ${workspace.path}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+  return removed
 }
 
 /** How long to wait for the web server to become addressable. */
@@ -368,9 +491,20 @@ async function main() {
   })
   mark('boot 插件树')
 
-  // 登记工作区**必须早于**下面那句 `[dsh-desktop] ready`：父进程一收到它就导航窗口，
-  // 而界面首次拉取工作区列表若早于记录落盘，就又会看到"没有这个工作区"。
-  await registerWorkspace(ctx, workspace)
+  // 顺序：**先清理，后登记**。清理用官方 API（见 reconcileWorkspaceRegistry 的说明），
+  // 而且必须早于下面那句 `[dsh-desktop] ready`：父进程一收到它就导航窗口，界面首次拉取
+  // 工作区列表若早于记录落盘，就又会出现"没有这个工作区"（或反过来，看到一个已经删掉的）。
+  await reconcileWorkspaceRegistry(ctx, options.forgetWorkspaces)
+
+  // 登记**只在明确意图下**发生。`--workspace A` 本身只说明本次进程的 cwd 是 A：
+  //   * 「打开文件夹 / 最近打开 / 命令行参数」→ 外壳带上 --register-workspace；
+  //   * 「上次记住的值」或兜底值 → 不带。
+  // 旧代码无条件 `create(A)`，于是用户在 Harness 里删掉的 A 会在下次启动时被创建回来。
+  if (options.registerWorkspace) {
+    await registerWorkspace(ctx, workspace)
+  } else {
+    console.log('[dsh-desktop] workspace registration not requested; using the existing registry')
+  }
 
   const port = ctx.get('webServer')?.port
   if (port === undefined) throw new Error(`${BIN_NAME}: web server did not start`)

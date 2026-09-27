@@ -55,9 +55,13 @@ export interface ApplicationMenuDeps {
   shellVersion: string
   openFolder: () => void
   openRecent: (path: string) => void
+  /** 只把这个目录从「最近打开」里移除（不碰 Harness 注册表，也不碰磁盘）。 */
+  removeRecent: (path: string) => void
   projectInfo: () => void
   revealWorkspace: () => void
   copyWorkspacePath: () => void
+  /** 从 Harness 工作区注册表里移除当前（或指定）工作区，文件一律保留。 */
+  forgetWorkspace: () => void
   openUpdates: () => void
   openReleases: () => void
 }
@@ -65,31 +69,50 @@ export interface ApplicationMenuDeps {
 /**
  * 组装应用菜单模板。
  *
+ * 「最近打开」是**两层**：顶层每一项点一下就是打开（最常用），下面另有一条
+ * 「从最近项目中移除…」子菜单列出同一批目录。做成两层而不是给每一项挂子菜单，是因为
+ * 后者会让"打开"这一次点击变成两次；而移除是低频动作，值得多走一层。
+ *
  * @param deps - 文案、动态数据与命令回调。
  * @returns 可直接交给 `Menu.buildFromTemplate()` 的模板。
  */
 export function applicationMenuTemplate(deps: ApplicationMenuDeps): MenuItemConstructorOptions[] {
   const s = deps.strings
+  const recentItems: MenuItemConstructorOptions[] =
+    deps.recent.length === 0
+      ? [{ label: s.itemNoRecent, enabled: false }]
+      : deps.recent.map((entry) => ({
+          label: entry.label,
+          toolTip: entry.path,
+          click: () => deps.openRecent(entry.path),
+        }))
+  if (deps.recent.length > 0) {
+    recentItems.push(
+      { type: 'separator' },
+      {
+        label: s.itemRemoveFromRecent,
+        submenu: deps.recent.map((entry) => ({
+          label: entry.label,
+          toolTip: entry.path,
+          click: () => deps.removeRecent(entry.path),
+        })),
+      },
+    )
+  }
   return [
     {
       label: s.menuFile,
       submenu: [
         { label: s.itemOpenFolder, accelerator: 'CmdOrCtrl+O', click: deps.openFolder },
-        {
-          label: s.itemOpenRecent,
-          submenu:
-            deps.recent.length === 0
-              ? [{ label: s.itemNoRecent, enabled: false }]
-              : deps.recent.map((entry) => ({
-                  label: entry.label,
-                  toolTip: entry.path,
-                  click: () => deps.openRecent(entry.path),
-                })),
-        },
+        { label: s.itemOpenRecent, submenu: recentItems },
         { type: 'separator' },
         { label: s.itemProjectInfo, accelerator: 'CmdOrCtrl+I', click: deps.projectInfo },
         { label: s.itemRevealWorkspace, click: deps.revealWorkspace },
         { label: s.itemCopyWorkspacePath, click: deps.copyWorkspacePath },
+        { type: 'separator' },
+        // 「移除工作区」= 只从 Harness 注册表里去掉登记。它**不**删磁盘文件，也**不**动
+        // 「最近打开」——三者是完全不同的操作，菜单里各占一行，绝不互相触发。
+        { label: s.itemForgetWorkspace, click: deps.forgetWorkspace },
         { type: 'separator' },
         { label: s.itemReload, role: 'reload' },
         { label: s.itemForceReload, role: 'forceReload' },

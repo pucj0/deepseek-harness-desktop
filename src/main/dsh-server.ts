@@ -40,6 +40,24 @@ export interface ServerOptions {
   dshHome: string
   /** Workspace root handed to the agent; also the child's cwd. */
   workspace: string
+  /**
+   * 是否允许把这个工作区 `workspaceRegistry.create()` 进 Harness。
+   *
+   * **不能**无条件为 true。`--workspace` 只说明"本次进程的 cwd 是哪里"，它同时被两种
+   * 完全不同的情形使用：
+   *   * 用户明确要求打开这个目录（「打开文件夹」/「最近打开」/ 命令行参数）；
+   *   * 只是上次 Desktop 记住的值（`settings.workspace`）或兜底值。
+   *
+   * 旧代码对两者都登记，于是用户在 Harness UI 里删掉的工作区会在下次启动时被无声地
+   * 创建回来。这个开关只由 `reconcileWorkspaceState()` 的决定打开（见 workspace-reconcile.ts）。
+   */
+  registerWorkspace?: boolean
+  /**
+   * 本次启动要从 Harness 注册表里移除的工作区路径（「移除工作区」的意图）。
+   *
+   * 传空数组表示什么都不移除；省略时由 {@link registerWorkspace} 的默认值决定。
+   */
+  forgetWorkspaces?: readonly string[]
   /** Extra environment for the child, e.g. decrypted credentials. */
   env?: Record<string, string>
   /** Milliseconds to wait for the readiness line before treating boot as failed. */
@@ -125,6 +143,8 @@ export class DshServer extends EventEmitter {
     if (this.child !== undefined) throw new Error('dsh-desktop: server already started')
 
     const { runtime, dshHome, workspace, env, readyTimeoutMs = 120_000 } = this.options
+    const registerWorkspace = this.options.registerWorkspace === true
+    const forgetWorkspaces = this.options.forgetWorkspaces ?? []
 
     // Prefer the pinned Node that ships with the runtime: Electron's own Node may
     // be older than the dsh runtime requires. Falling back to re-executing
@@ -164,6 +184,11 @@ export class DshServer extends EventEmitter {
         runtime.installAnchor,
         '--workspace',
         workspace,
+        // 登记意图**必须**显式传递：只看到 `--workspace A` 就 `create(A)` 正是把
+        // Harness 里已删除的工作区复活的 bug（见 ServerOptions.registerWorkspace）。
+        ...(registerWorkspace ? ['--register-workspace'] : []),
+        // 「移除工作区」的意图：由服务端进程用官方 `workspaceRegistry.delete()` 执行。
+        ...forgetWorkspaces.flatMap((dir) => ['--forget-workspace', dir]),
       ],
       {
         cwd: workspace,

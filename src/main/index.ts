@@ -8,10 +8,11 @@
  * The heavy lifting (sandboxing, tools, sessions, jobs, subagents) all happens in
  * the child; this process is a shell and never runs agent code.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron'
 
+import { ActiveWorkspaceController, applyHarnessReport } from './active-workspace'
 import { CredentialStore } from './credentials'
 import { DshServer } from './dsh-server'
 import type { ServerReady } from './dsh-server'
@@ -27,15 +28,27 @@ import type { RuntimeLocation } from './paths'
 import { syncPluginsAtStartup } from './plugin-sync'
 import { ensureRuntimeUnpacked } from './runtime-unpack'
 import { showProjectInfo } from './project-info'
-import { readSettings } from './settings'
+import { readSettings, switchWorkspace } from './settings'
 import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
 import { RuntimeUpdater, locateNpmCli } from './updater'
 import { createMainWindow } from './window'
-import { pickFolderToOpen, resolveWorkspace, restartIntoWorkspace } from './workspace-switch'
-import { recentLabels, removeSplashFile } from './workspace'
+import type { ActiveWorkspaceReportPayload } from './window'
+import { createWorkspaceActions } from './workspace-actions'
+import type { WorkspaceActionEffects, WorkspaceActions } from './workspace-actions'
+import { pickRegisteredFallback, reconcileWorkspaceState } from './workspace-reconcile'
+import { readWorkspaceRegistry } from './workspace-registry'
+import { forgetWorkspaceAndRestart, resolveWorkspaceIntent, restartIntoWorkspace } from './workspace-switch'
+import {
+  fallbackWorkspace,
+  isSameWorkspace,
+  readPendingForgets,
+  removeSplashFile,
+  takePendingForgets,
+  workspaceIdentity,
+} from './workspace'
 
 const SHELL_VERSION: string = (() => {
   try {
@@ -104,12 +117,86 @@ async function main(): Promise<void> {
   await app.whenReady()
 
   const userDataDir = process.env.DSH_DESKTOP_HOME ?? app.getPath('userData')
-  // 本进程生命周期内不变：切换工作区靠重启应用，而不是就地替换（见 workspace-switch.ts）。
-  const workspace = resolveWorkspace(process.argv, userDataDir)
   // A dedicated harness home keeps this app's sessions and credentials entirely
   // separate from a command-line `dsh` install, so the two can coexist.
   const dshHome = join(userDataDir, 'home')
   mkdirSync(dshHome, { recursive: true })
+
+  /**
+   * 启动期工作区对账。
+   *
+   * 三件事，缺一不可（工作区生命周期的全部入口都在这里对齐）：
+   *   1. **prune + persist**——把 `settings.recent` 里已经不存在的目录真正从磁盘删掉，
+   *      而不是只过滤返回值（BUG A）；
+   *   2. **provenance**——`resolveWorkspaceIntent()` 说明这个路径是"用户明确要打开的"
+   *      还是"上次记住的"，后者**不允许**登记进 Harness 注册表（BUG C：用户在 Harness
+   *      里删掉的工作区会在下次启动时被无声创建回来）；
+   *   3. **冲突时 Harness 胜出**——Desktop 记着的目录不在注册表里时，采用注册表里最近的
+   *      有效工作区，并把 `settings.workspace` 同步过去。
+   *
+   * 这个 `workspace` 是**启动期**（引导）工作区，本次进程内不再改变；运行期的"当前工作区"
+   * 由 `active` 持有（见 ActiveWorkspaceController）。
+   */
+  const startupWorkspace = reconcileWorkspaceState({
+    userDataDir,
+    dshHome,
+    resolution: resolveWorkspaceIntent(process.argv, userDataDir),
+    home: fallbackWorkspace(),
+  })
+  const workspace = startupWorkspace.active
+  for (const removed of startupWorkspace.recentRemoved) {
+    process.stderr.write(`[shell] 已从「最近打开」里清理不存在的目录: ${removed}\n`)
+  }
+  if (startupWorkspace.abandoned !== undefined) {
+    process.stderr.write(
+      `[shell] 工作区对账（${startupWorkspace.reason}）: 放弃 ${startupWorkspace.abandoned}，改用 ${workspace}\n`,
+    )
+  }
+  process.stderr.write(
+    `[shell] 启动工作区: ${workspace}（source=${startupWorkspace.source}，reason=${startupWorkspace.reason}，register=${String(startupWorkspace.register)}）\n`,
+  )
+
+  /** 读一次 Harness 注册表（每次现读：它的写入方是服务端子进程）。 */
+  const registryView = () => readWorkspaceRegistry(dshHome)
+
+  /** 目录存在性判断（active workspace 的回退与校验用）。 */
+  const isUsableDirectory = (dir: string): boolean => {
+    try {
+      return existsSync(dir) && statSync(dir).isDirectory()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 运行期 active workspace：菜单、托盘、项目信息都读它。
+   *
+   * `startup` 只是初值；Harness ready 之后由 `dsh-client-ui-shell-bridge` 上报的
+   * "当前会话所属工作区"接管（见 window.ts 的 IPC 与 active-workspace.ts 的校验）。
+   */
+  const active = new ActiveWorkspaceController({
+    startup: { path: workspace, source: startupWorkspace.source },
+    // 安全边界：只接受 Harness 注册表里已有的工作区。渲染进程无法凭一条 IPC 让外壳去
+    // 打开任意路径（例如 C:\Windows）。
+    isRegistered: (path) => {
+      const view = registryView()
+      return view.entries.some((entry) => workspaceIdentity(entry.path) === workspaceIdentity(path))
+    },
+    isDirectory: isUsableDirectory,
+    // 回退优先级：注册表里最近的有效工作区（注册表自己的顺序就是"最近的在前"，
+    // 官方 UI 用的也是它）→ 用户主目录。
+    fallback: (exclude) => {
+      const view = registryView()
+      const usable = exclude === undefined
+        ? view
+        : { ...view, entries: view.entries.filter((entry) => workspaceIdentity(entry.path) !== workspaceIdentity(exclude)) }
+      return pickRegisteredFallback(usable, isUsableDirectory) ?? fallbackWorkspace()
+    },
+    // 「切换到哪个工作区」的唯一落盘口：settings.workspace + recent 一起更新。
+    persist: (path) => {
+      switchWorkspace(userDataDir, path)
+    },
+  })
 
   // Localization: the source of truth is **Harness's own language setting**, persisted in the
   // host settings document under `locale.preference` (see harness-locale.ts). Read it before the
@@ -135,6 +222,12 @@ async function main(): Promise<void> {
     splashHint: strings.splashHint,
     backLabel: strings.titlebarBack,
     forwardLabel: strings.titlebarForward,
+    // Harness 上报的"当前工作区"。这里是**第一道**门槛：只做形状校验，且只认来自
+    // Harness 子视图的消息（见 window.ts）。语义校验（绝对路径、目录存在、是否已注册）
+    // 在下面 applyActiveWorkspaceReport 里做——那里才知道注册表。
+    onActiveWorkspaceReport: (payload) => {
+      applyActiveWorkspaceReport(payload)
+    },
     // 标题栏里的菜单按钮与"点哪个弹哪个"都来自**同一份原生菜单**（下面构建的那个）。
     // 菜单因此只有一份定义：accelerator 仍由它注册，标题栏只是换个地方画标题。
     menu: {
@@ -147,6 +240,39 @@ async function main(): Promise<void> {
     },
   })
   const window = mainWindow.window
+
+  /**
+   * 处理一次 Harness 上报（在窗口创建之后定义，因为它要读 `window` 之外的注册表状态）。
+   *
+   * 校验链（渲染进程的输入一律不可信）：
+   *   1. `null` 是合法的：语义是"Harness 此刻没有当前会话"，保持上一个已知值；
+   *   2. 带 `workspaceId` 时，先按 id 在注册表里找，找不到、或**它指向的路径与上报的
+   *      路径不一致**，整条丢弃——这比只看路径更强；
+   *   3. 剩下的交给 `ActiveWorkspaceController`：绝对路径 + 目录存在 + 已注册。
+   * 被拒绝的路径如果正好是当前 active，控制器会立刻回退到一个仍然有效的工作区，
+   * 因此不会出现"active 指着已被移除的工作区"的半失效状态。
+   *
+   * @param payload - 已经过形状校验的上报载荷。
+   */
+  const applyActiveWorkspaceReport = (payload: ActiveWorkspaceReportPayload): void => {
+    // 策略本身在 active-workspace.ts 里（可被回归测试直接驱动），这里只负责日志与
+    // "接受之后顺手重建菜单"。
+    const outcome = applyHarnessReport(active, payload, registryView)
+    if (outcome === 'idMismatch') {
+      process.stderr.write(
+        `[shell] 忽略一次 active workspace 上报：workspaceId 与路径对不上（${String(payload.workspaceId)} vs ${String(payload.path)}）\n`,
+      )
+      return
+    }
+    if (outcome === 'accepted') {
+      process.stderr.write(`[shell] active workspace 跟随 Harness: ${active.get()}\n`)
+      // 菜单不需要重建就能跟随项目（项目信息 / 在文件管理器中打开 / 复制路径都在点击时读
+      // active.get()，见 workspace-actions.ts）。但切换工作区会把它写进「最近打开」，
+      // 而那个列表是构建时快照——重建一次让它立刻反映出来。
+      refreshApplicationMenu()
+    }
+  }
+
   void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
 
   // 解包内置运行时（已解过则瞬间返回）。
@@ -230,6 +356,14 @@ async function main(): Promise<void> {
     runtime,
     dshHome,
     workspace,
+    // 登记意图来自启动期对账：只有"用户明确要打开这个目录"或"注册表里一个可用的
+    // 文件系统工作区都没有（引导）"才会带上它。`--workspace` 本身**不**蕴含登记。
+    registerWorkspace: startupWorkspace.register,
+    // 「移除工作区」的意图（上一次会话写下的标记）：由服务端进程用官方
+    // `workspaceRegistry.delete()` 执行，外壳只传路径。这里是**不消费**的读——
+    // 标记要等服务端真的起来（下面 `start()` 成功）之后才算被用掉，否则一次启动失败
+    // 就会把用户的移除意图悄悄丢掉。
+    forgetWorkspaces: readPendingForgets(userDataDir),
     // Decrypted secrets ride the launching environment, which outranks every
     // stored layer in dsh's credential precedence.
     env: credentials.read(),
@@ -275,7 +409,9 @@ async function main(): Promise<void> {
   const onSwitchWorkspace = (dir: string): void => {
     void restartIntoWorkspace({
       userDataDir,
-      current: workspace,
+      // **点击时**读 active，而不是启动时的常量：Harness 里切过项目之后，"选中的就是当前
+      // 目录"必须按新值判断，否则会为一个已经是当前的目录白重启一次。
+      current: active.get(),
       target: dir,
       // 关窗即隐藏到托盘；切换要真的退出进程，先把它关掉。`beginQuit` 只在真的会重启时
       // 被调用，因此"最近打开"里点到当前项目不会把这项行为永久改掉。
@@ -289,39 +425,161 @@ async function main(): Promise<void> {
   }
 
   /**
+   * 「文件 → 移除工作区…」：只从 Harness 注册表里去掉登记（文件、会话一律保留）。
+   *
+   * 目标是当前工作区时，**先**把下一次启动的工作区换成另一个仍然有效的目录，再移除——
+   * 否则会留下"active 指着一个已被移除的工作区"的半失效状态。接管者的优先级：
+   * 注册表里最近的**其它**有效工作区 → 用户主目录。
+   */
+  const onForgetWorkspace = (dir: string): void => {
+    void forgetWorkspaceAndRestart({
+      userDataDir,
+      target: dir,
+      current: active.get(),
+      nextActive: activeNextAfterForget(dir),
+      beginQuit: () => {
+        if (session !== undefined) session.quitting = true
+      },
+      stopServer: () => server.stop(2000),
+      relaunch: () => app.relaunch(),
+      exit: (code) => app.exit(code),
+    })
+  }
+
+  /** 移除 `target` 之后接管的工作区：注册表里最近的其它有效工作区，否则主目录。 */
+  const activeNextAfterForget = (target: string): string => {
+    const view = registryView()
+    const others = {
+      ...view,
+      entries: view.entries.filter((entry) => !isSameWorkspace(entry.path, target)),
+    }
+    return pickRegisteredFallback(others, isUsableDirectory) ?? fallbackWorkspace()
+  }
+
+  /**
+   * 「文件」菜单的工作区动作。
+   *
+   * 每次重建都拿一份**新**的动作对象：`recent` 是构建时的快照（`createWorkspaceActions`
+   * 读一次 settings），而菜单是静态模板，所以"最近打开"变了就必须重建。其余命令是纯闭包，
+   * 重建后行为完全相同。
+   *
+   * 关键不变量：**没有任何一处把 `workspace`（启动值）捕获进来**。所有"当前工作区"都在
+   * 点击那一刻读 `active.get()`，因此 Harness 切项目、语言重建菜单、乃至工作区被删掉，
+   * 三个菜单项都跟着走（BUG B）。
+   */
+  const workspaceActions = (): WorkspaceActions =>
+    createWorkspaceActions({
+      active,
+      userDataDir,
+      strings,
+      effects: workspaceActionEffects,
+      onSwitchWorkspace,
+      onForgetWorkspace,
+      onProjectInfo: (current) => {
+        showProjectInfoFor(window, current, dshHome, userDataDir, runtime, runtimeVersion, strings)
+      },
+    })
+
+  /** 菜单与托盘共用的工作区动作（托盘只用到 `projectInfo`）。 */
+  let actions: WorkspaceActions
+
+  /** Electron 侧的四件事（注入，因此 workspace-actions 可以被离线测试直接驱动）。 */
+  const workspaceActionEffects: WorkspaceActionEffects = {
+    pickDirectory: () =>
+      dialog.showOpenDialogSync(window, {
+        title: strings.dialogOpenFolderTitle,
+        buttonLabel: strings.dialogOpenFolderButton,
+        properties: ['openDirectory', 'createDirectory'],
+      })?.[0],
+    confirmSwitch: (candidate) =>
+      dialog.showMessageBoxSync(window, {
+        type: 'question',
+        title: strings.switchWorkspaceTitle,
+        message: strings.switchWorkspaceMessage,
+        detail: `${candidate}\n\n${strings.switchWorkspaceDetail}`,
+        buttons: [strings.switchWorkspaceConfirm, strings.switchWorkspaceCancel],
+        defaultId: 0,
+        cancelId: 1,
+      }) === 0,
+    confirmForget: (candidate) =>
+      dialog.showMessageBoxSync(window, {
+        type: 'warning',
+        title: strings.forgetWorkspaceTitle,
+        message: strings.forgetWorkspaceMessage,
+        detail: `${candidate}\n\n${strings.forgetWorkspaceDetail}`,
+        buttons: [strings.forgetWorkspaceConfirm, strings.forgetWorkspaceCancel],
+        defaultId: 1,
+        cancelId: 1,
+      }) === 0,
+    revealPath: (path) => {
+      void shell.openPath(path)
+    },
+    copyText: (text) => {
+      clipboard.writeText(text)
+    },
+    alert: ({ type, title, detail }) => {
+      void dialog.showMessageBox(window, { type, title, message: title, detail, buttons: [strings.buttonOk] })
+    },
+    // 「最近打开」变了（移除一项、或删掉了不存在的目录）：重建菜单，否则列表停在旧快照上。
+    refreshRecent: () => {
+      refreshApplicationMenu()
+    },
+  }
+
+  // 先备一份：托盘（早于菜单构建）也要用同一个 `projectInfo`。
+  actions = workspaceActions()
+
+  /**
    * 语言之外的应用菜单输入：命令回调与动态数据。
    *
    * 抽成一份可复用的对象，是因为菜单在**语言变化时会被重建**：重建必须换文案、绝不能换命令，
    * 而复用同一份 deps 正好把这件事变成结构上的保证（测试也直接比对中英两份模板）。
    *
-   * @param projectInfo - 「项目信息」入口。
+   * 注意 `projectInfo` 走的是 `actions.projectInfo`（点击时读 active.get()），而不是一个
+   * 捕获了路径的闭包——1.6.2 之前它闭包捕获了**启动时**的工作区，于是 Harness 里切项目
+   * 之后「项目信息」还显示旧目录（BUG B）。
+   *
    * @param openUpdates - 「检查更新」入口。
    * @returns 交给 `applicationMenuTemplate` 的输入（文案与外壳版本由调用方补上）。
    */
-  const menuDepsFor = (
-    projectInfo: () => void,
-    openUpdates: () => void,
-  ): Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> => {
-    const actions = createWorkspaceActions({ window, workspace, userDataDir, strings, onSwitchWorkspace })
+  const menuDepsFor = (openUpdates: () => void): Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> => {
+    actions = workspaceActions()
     return {
       recent: actions.recent,
       runtimeVersion,
       openFolder: actions.openFolder,
       openRecent: actions.openRecent,
-      projectInfo,
+      removeRecent: actions.removeRecent,
+      projectInfo: actions.projectInfo,
       revealWorkspace: actions.revealWorkspace,
       copyWorkspacePath: actions.copyWorkspacePath,
+      forgetWorkspace: () => actions.forgetWorkspace(),
       openUpdates,
       openReleases: () => void shell.openExternal(RELEASES_URL),
     }
   }
 
-  /** 菜单输入（语言变化时用它重建菜单；在诊断模式与正常模式下各装配一次）。 */
+  /** 菜单输入（语言变化、或「最近打开」变化时用它重建菜单）。 */
   let menuDeps: Omit<ApplicationMenuDeps, 'strings' | 'shellVersion'> | undefined
+  /** 「检查更新」入口（菜单重建时复用同一份命令）。 */
+  let openUpdatesEntry: (() => void) | undefined
   /** 停止监听 Harness 语言设置（退出时收尾）。 */
   let stopLocaleWatch: (() => void) | undefined
   let tray: Tray | undefined
   let trayActions: TrayActions | undefined
+
+  /**
+   * 重建应用菜单。
+   *
+   * 两处调用：语言变化（换文案，命令必须不变）与「最近打开」变化（换数据）。
+   * `menuDepsFor()` 每次重新读 settings 里的 recent，因此列表不会停在旧快照上。
+   */
+  const refreshApplicationMenu = (): void => {
+    if (openUpdatesEntry === undefined) return
+    // 诊断模式（DSH_DESKTOP_DUMP_MENU=1）下菜单只是打印出来，没有窗口/托盘依赖，照样走这条路。
+    menuDeps = menuDepsFor(openUpdatesEntry)
+    buildApplicationMenu(menuDeps)
+  }
 
   /**
    * 把"Harness 的语言变了"应用到已经构建出来的界面上。
@@ -334,12 +592,15 @@ async function main(): Promise<void> {
    * 对话框、项目信息窗口、更新窗口不在这里：它们拿的是同一份**活**文案表（`strings`），
    * 读的时候已经是新语言。
    *
+   * 重建**不会**把工作区带回启动值：菜单项都在点击时读 `active.get()`，重建只换文案与
+   * 「最近打开」的数据，不换"当前项目"的判定来源（见 workspace-actions.ts 的说明）。
+   *
    * @param locale - 新的语言偏好（原始值；undefined 表示偏好被清空 → 回退系统语言）。
    */
   const applyShellLocale = (locale: string | undefined): void => {
     // 没有偏好（第一次使用，或用户把设置清空）时回退系统语言——与启动路径同一个判定。
     if (!setShellLocale(resolveShellLocale(locale))) return
-    if (menuDeps !== undefined) buildApplicationMenu(menuDeps)
+    if (menuDeps !== undefined) refreshApplicationMenu()
     if (tray !== undefined && trayActions !== undefined) refreshTray(tray, trayActions)
     mainWindow.publishShellState()
   }
@@ -353,8 +614,8 @@ async function main(): Promise<void> {
   // DSH_DESKTOP_DUMP_MENU=1 启动时，构建完菜单就直接退出，让菜单可以被脚本
   // 快速断言，而不是每次等十几秒。
   if (process.env.DSH_DESKTOP_DUMP_MENU === '1') {
-    menuDeps = menuDepsFor(() => {}, () => {})
-    buildApplicationMenu(menuDeps)
+    openUpdatesEntry = () => {}
+    refreshApplicationMenu()
     // 诊断实例默认打完就退；`DSH_DESKTOP_MENU_WATCH=1` 时让它活着并跟着语言重建菜单，
     // 于是"运行中切换语言"可以只靠 stderr 就被断言（见 test-shell-locale.mjs）。
     if (process.env.DSH_DESKTOP_MENU_WATCH === '1') {
@@ -368,6 +629,9 @@ async function main(): Promise<void> {
   let ready
   try {
     ready = await server.start()
+    // 服务端已经启动 = 「移除工作区」的意图已经由它用官方 API 执行完毕，标记是耗材。
+    // 放在成功之后而不是构造时：启动失败时标记要留着，让下一次启动再试。
+    takePendingForgets(userDataDir)
   } catch (error) {
     if (runtime.dir.startsWith(join(userDataDir, 'runtime'))) {
       // An updated runtime failed to boot: drop back to the bundled one rather
@@ -425,7 +689,9 @@ async function main(): Promise<void> {
     },
     checkForUpdates: openUpdates,
     projectInfo: () => {
-      showProjectInfoFor(window, workspace, dshHome, userDataDir, runtime, runtimeVersion, strings)
+      // 与菜单同一个入口：点击时读 active.get()，并且"工作区已不存在"时给提示而不是
+      // 静默打开一个不存在的目录。
+      actions.projectInfo()
     },
     quit: () => {
       if (session !== undefined) session.quitting = true
@@ -440,13 +706,8 @@ async function main(): Promise<void> {
     if (tray === undefined) app.quit()
   })
 
-  menuDeps = menuDepsFor(
-    () => {
-      showProjectInfoFor(window, workspace, dshHome, userDataDir, runtime, runtimeVersion, strings)
-    },
-    openUpdates,
-  )
-  buildApplicationMenu(menuDeps)
+  openUpdatesEntry = openUpdates
+  refreshApplicationMenu()
   session = { server, window, ...(tray !== undefined ? { tray } : {}), updater, quitting: false }
 
   // 跟随 Harness 的语言设置：宿主把用户选择写进 `<dshHome>/settings.yaml` 的
@@ -473,85 +734,6 @@ async function main(): Promise<void> {
   app.on('window-all-closed', () => {
     if (session?.tray === undefined) app.quit()
   })
-}
-
-/**
- * 构造文件菜单里工作区相关动作的实现。
- *
- * 两条切换入口（「打开文件夹」与「最近打开」）都只用下面这**一个**注入的
- * `onSwitchWorkspace`，不存在"一个走方案 A、一个走方案 B"。1.2.0–1.5.8 期间它是
- * "就地换服务端"，那样换不掉 Harness 的工作区生命周期；现在的实现是"写意图 + 重启应用"，
- * 理由见 `workspace-switch.ts` 的文件头。
- *
- * @param deps - 需要的窗口、当前工作区、数据目录、切换回调与文案。
- * @returns 菜单动作集合。
- */
-function createWorkspaceActions(deps: {
-  window: BrowserWindow
-  /** 本次进程的工作区。切换靠重启，因此它在进程生命周期内不变。 */
-  workspace: string
-  userDataDir: string
-  strings: ReturnType<typeof t>
-  /**
-   * 切换到新工作区：记录选择 + 重启应用。
-   *
-   * 由 `main()` 注入，因为重启前要先停掉服务端子进程、并让"关窗即隐藏到托盘"
-   * 让开——那些都在 `main()` 的作用域里。
-   */
-  onSwitchWorkspace: (dir: string) => void
-}): WorkspaceActions {
-  const { window, workspace, userDataDir, strings, onSwitchWorkspace } = deps
-  const s = strings
-
-  const recent = readSettings(userDataDir).recent ?? []
-  const recentLabelsForMenu = recentLabels(recent)
-
-  return {
-    recent: recentLabelsForMenu.map((label, index) => ({ label, path: recent[index] ?? '' })),
-    openFolder: (): void => {
-      // 关闭选择器、确认框里取消、以及"选中的就是当前目录"都在这里被挡掉：三种情况
-      // 都不该改设置、不该写标记、更不该重启。判定本身在 workspace-switch.ts，
-      // 因此可以被回归测试直接跑（那里的对话框是注入的）。
-      const dir = pickFolderToOpen({
-        currentWorkspace: workspace,
-        showOpenDialog: () =>
-          dialog.showOpenDialogSync(window, {
-            title: s.dialogOpenFolderTitle,
-            buttonLabel: s.dialogOpenFolderButton,
-            properties: ['openDirectory', 'createDirectory'],
-          })?.[0],
-        confirm: (candidate) =>
-          dialog.showMessageBoxSync(window, {
-            type: 'question',
-            title: s.switchWorkspaceTitle,
-            message: s.switchWorkspaceMessage,
-            detail: `${candidate}\n\n${s.switchWorkspaceDetail}`,
-            buttons: [s.switchWorkspaceConfirm, s.switchWorkspaceCancel],
-            defaultId: 0,
-            cancelId: 1,
-          }) === 0,
-      })
-      if (dir === undefined) return
-      onSwitchWorkspace(dir)
-    },
-    openRecent: (dir: string): void => {
-      // 空条目与"已经是当前工作区"都由 restartIntoWorkspace 挡掉（同一个判定，
-      // 因此这里不需要再写一遍）。
-      onSwitchWorkspace(dir)
-    },
-    revealWorkspace: (): void => {
-      void shell.openPath(workspace)
-    },
-    copyWorkspacePath: (): void => {
-      clipboard.writeText(workspace)
-      dialog.showMessageBox(window, {
-        type: 'info',
-        message: s.copiedPathTitle,
-        detail: `${workspace}\n\n${s.copiedPathMessage}`,
-        buttons: [s.buttonOk],
-      })
-    },
-  }
 }
 
 /**
@@ -896,17 +1078,7 @@ function registerIpc(updater: RuntimeUpdater): void {
 }
 
 /** 文件菜单里与工作区（项目）相关的动作。 */
-export interface WorkspaceActions {  /** 弹出目录选择器，切换工作区。 */
-  openFolder: () => void
-  /** 切到某个最近打开过的目录。 */
-  openRecent: (dir: string) => void
-  /** 在系统文件管理器中打开当前工作区。 */
-  revealWorkspace: () => void
-  /** 复制当前工作区路径到剪贴板。 */
-  copyWorkspacePath: () => void
-  /** 菜单里"最近打开"的条目（已解析为可显示文案）。 */
-  recent: Array<{ label: string; path: string }>
-}
+export type { WorkspaceActions }
 
 /**
  * Application menu, reduced to what a desktop shell should own.

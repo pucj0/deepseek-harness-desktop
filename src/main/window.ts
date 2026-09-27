@@ -153,6 +153,22 @@ export interface MainWindowOptions {
      */
     open: (index: unknown, point: { x: number; y: number }, onClosed: () => void) => boolean
   }
+  /**
+   * Harness 上报的"当前工作区"（不可信输入，这里只做**形状**校验）。
+   *
+   * 只有来自 Harness 子视图（`appContents`）的消息会被转发；语义校验（绝对路径、目录是否
+   * 存在、是否属于已注册工作区）在 `index.ts` / `ActiveWorkspaceController` 里做——
+   * 那里才知道 Harness home 与注册表。
+   */
+  onActiveWorkspaceReport?: (payload: ActiveWorkspaceReportPayload) => void
+}
+
+/** Harness 上报的 active workspace 载荷（归一化之后）。 */
+export interface ActiveWorkspaceReportPayload {
+  /** 当前会话的工作区路径；`null` 表示此刻没有当前会话。 */
+  path: string | null
+  /** 官方工作区 id（可选，供主进程与注册表交叉核对）。 */
+  workspaceId?: string
 }
 
 /**
@@ -540,6 +556,36 @@ export function createMainWindow(options: MainWindowOptions): {
   }
   ipcMain.on('dsh-desktop:app-theme', onAppTheme)
   window.on('closed', () => ipcMain.off('dsh-desktop:app-theme', onAppTheme))
+
+  /**
+   * Harness 页面上报"当前工作区"（见 preload.ts 的 `reportActiveWorkspace`）。
+   *
+   * 两条边界，缺一不可：
+   *   * **只认这个视图**（`event.sender !== appContents` 一律丢弃）。窗口自身的标题栏页面
+   *     也跑在同一组 `ipcMain` 上，没有这条判断，标题栏页面就能替 Harness 决定工作区。
+   *   * **只传归一化后的形状**：`path` 必须是字符串或 null，`workspaceId` 必须是字符串；
+   *     其余一律丢弃。绝对路径、目录存在性、以及"是不是已注册工作区"的判定在
+   *     `index.ts` 里做（那里才知道 Harness home 与注册表），因此即使这里放行了一个
+   *     恶意路径，它也不会被外壳拿去打开任何东西。
+   *
+   * @param event - IPC 事件（用 sender 做来源校验）。
+   * @param payload - 渲染进程送来的原始值。
+   */
+  const onActiveWorkspace = (event: Electron.IpcMainEvent, payload: unknown): void => {
+    if (event.sender !== appContents) return
+    if (options.onActiveWorkspaceReport === undefined) return
+    if (payload === null || typeof payload !== 'object') return
+    const raw = payload as { path?: unknown; workspaceId?: unknown }
+    const path = raw.path === null || raw.path === undefined ? null : typeof raw.path === 'string' ? raw.path : undefined
+    // `undefined` 表示形状不对（例如 path 是数字）——整条丢弃，不做任何猜测。
+    if (path === undefined) return
+    options.onActiveWorkspaceReport({
+      path,
+      ...(typeof raw.workspaceId === 'string' && raw.workspaceId !== '' ? { workspaceId: raw.workspaceId } : {}),
+    })
+  }
+  ipcMain.on('dsh-desktop:active-workspace', onActiveWorkspace)
+  window.on('closed', () => ipcMain.off('dsh-desktop:active-workspace', onActiveWorkspace))
 
   return {
     window,
