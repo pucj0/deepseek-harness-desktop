@@ -3,16 +3,26 @@
 //
 //   node scripts/check-plugin-i18n.mjs [文件路径 …]
 //
-// 不带参数时检查**两个内置插件**的客户端包。以前默认只查 gitbar，而 review 那份要显式传路径
-// 才会被检查——这类"要记得加参数"的检查等于没有检查，新增文案一旦漏掉英文就会直接漏过去。
+// 不带参数时检查**全部内置插件**的客户端包。以前默认只查 gitbar，而 review 那份要显式传
+// 路径才会被检查——这类"要记得加参数"的检查等于没有检查，新增文案一旦漏掉英文就会直接漏过去。
 //
-// 存在的理由：本地化最容易漏掉一两处，而漏掉的那处在英文界面下就会突然冒出中文（或者反过来，
-// 中文界面里冒出一行英文）。更难发现的是**键位不齐**：某个键只在 en 里有，中文界面就会显示
-// 原始键名或英文兜底，而代码评审时逐行比对两份字典并不现实。这个脚本把这两件事都变成可自动
-// 检查的结论。
-import { readFileSync } from 'node:fs'
+// 名单从 `plugins/*/lib/client.js` 里算出来，不写死：内置插件会增加（本轮多了 shell-bridge），
+// 而"新插件的文案没被检查"正是这类清单最容易漏掉的一格。没有字典的插件（例如只做上报的
+// shell-bridge）会被跳过一次键位比对，但硬编码中文仍然照查。
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
-const DEFAULT_FILES = ['plugins/dsh-client-ui-gitbar/lib/client.js', 'plugins/dsh-client-ui-review/lib/client.js']
+/** 仓库 `plugins/` 下所有插件的客户端入口（相对仓库根，最新排序稳定）。 */
+function bundledClientEntries() {
+  const root = resolve(import.meta.dirname, '..', 'plugins')
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join('plugins', entry.name, 'lib', 'client.js'))
+    .filter((file) => existsSync(resolve(import.meta.dirname, '..', file)))
+    .sort()
+}
+
+const DEFAULT_FILES = bundledClientEntries()
 const files = process.argv.slice(2).length > 0 ? process.argv.slice(2) : DEFAULT_FILES
 
 const HAN = /[\u4e00-\u9fff]/u

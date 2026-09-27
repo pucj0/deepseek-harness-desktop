@@ -5,9 +5,9 @@
 // 这是本轮改动里最容易写错的一处（二进制归档的边界解析），所以单独可测；顺带量出耗时，
 // 用来决定启动时要不要显示解包进度。
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ensureRuntimeUnpacked, reusableUnpacked } from '../dist/main/runtime-unpack.js'
 
 const ARCHIVE = join(process.cwd(), 'build', 'runtime.br')
@@ -70,9 +70,18 @@ try {
     existsSync(join(first.dir, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
     'true',
   )
-  // 三个内置插件都要随包。只查一个不够：`scripts/sync-plugins.mjs` 是按目录自动带走的，
+  // 内置插件都要随包。只查一个不够：`scripts/sync-plugins.mjs` 是按目录自动带走的，
   // 而"某个插件目录没被 stage 进压缩包"这种错误在只抽查一个插件时完全看不出来。
-  for (const plugin of ['dsh-client-ui-gitbar', 'dsh-client-ui-review', 'dsh-client-ui-typography']) {
+  //
+  // 名单从 `plugins/` **目录**里算出来，不写死：内置插件是会增加的（本轮就多了一个
+  // `dsh-client-ui-shell-bridge`），写死会让这个测试每加一个插件就失败一次——失败的原因
+  // 与它要守的"插件确实进包了"毫无关系。
+  const bundledPlugins = readdirSync(join(resolve(import.meta.dirname, '..'), 'plugins'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(resolve(import.meta.dirname, '..'), 'plugins', entry.name, 'package.json')))
+    .map((entry) => entry.name)
+    .sort()
+  console.log(`  内置插件 ${bundledPlugins.length} 个: ${bundledPlugins.join(', ')}`)
+  for (const plugin of bundledPlugins) {
     check(
       `插件随包（${plugin}）`,
       existsSync(join(first.dir, 'runtime', 'node_modules', plugin, 'package.json')),

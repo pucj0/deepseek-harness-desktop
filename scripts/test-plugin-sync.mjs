@@ -7,7 +7,7 @@
 //
 // 与其它 test-*.mjs 的区别：它**不需要**跑起来的应用，也不需要 CDP。被测模块只碰文件
 // 系统，因此可以用临时目录把"已损坏的运行时"精确造出来再修。
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -159,6 +159,17 @@ check('本次解包目录排在前面', dev[1], 'C:\\data\\bundled-runtime\\runt
 console.log('')
 console.log('=== 9. 启动入口 syncPluginsAtStartup：修复时报告，正常时安静 ===')
 // 这就是 index.ts 在 spawn 服务端之前调用的那一个函数，用真实的仓库 plugins/ 当来源。
+/**
+ * 仓库 `plugins/` 里当前有几个内置插件。
+ *
+ * 从目录里算出来，而不是写死数字：内置插件是会增加的（本轮就多了一个
+ * `dsh-client-ui-shell-bridge`），写死会让这个测试每加一个插件就失败一次——失败的原因
+ * 与它要守的行为毫无关系。
+ */
+const bundledPluginCount = readdirSync(join(ROOT, 'plugins'), { withFileTypes: true }).filter(
+  (entry) => entry.isDirectory() && existsSync(join(ROOT, 'plugins', entry.name, 'package.json')),
+).length
+
 const freshRuntime = writeRuntime(join(work, 'runtime', '0.1.5-rc.9'))
 const repair = sync.syncPluginsAtStartup({
   runtimeDir: freshRuntime,
@@ -167,7 +178,7 @@ const repair = sync.syncPluginsAtStartup({
   userDataDir: work,
   packaged: false,
 })
-check('确实补齐了插件', repair.outcome.written.length, 3)
+check('确实补齐了插件', repair.outcome.written.length, bundledPluginCount)
 check('打出了一行"已同步内置插件"', repair.messages.length, 1)
 console.log(`  ${repair.messages[0]}`)
 check('日志里点名了运行时目录', repair.messages[0].includes(freshRuntime), 'true')
@@ -200,7 +211,6 @@ const real = sync.readPluginSource(join(ROOT, 'plugins'))
 check('仓库 plugins/ 可解析', real !== undefined, 'true')
 console.log(`  实际插件: ${real === undefined ? '(无)' : real.names.join(', ')}`)
 check('至少包含三个内置插件', (real?.names.length ?? 0) >= 3, 'true')
-
 // 走一遍真实来源 + 假运行时的完整链路，确保真实包结构也能被复制。
 const realTarget = writeRuntime(join(work, 'runtime', 'real-source'))
 const realSync = sync.syncPluginsIntoRuntime(realTarget, [join(ROOT, 'plugins')])
