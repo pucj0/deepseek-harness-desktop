@@ -32,6 +32,7 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(readFileSync(join(__dirname, '../plugins/dsh-client-ui-typography/lib/client.js'), 'utf8'))
     const results = await win.webContents.executeJavaScript(`(async () => {
       const results = [], disposers = [], listeners = new Set();
+      const requested = [];
       let accepted = 14, fail = false;
       const scope = {
         getSnapshot: () => ({value: {fontSize: accepted}, writable: true}),
@@ -54,7 +55,9 @@ app.whenReady().then(async () => {
       const ctx = {
         effect: fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) },
         inject: (services, callback) => { if (services[0] === 'configForms') callback(ctx) },
-        configForms: {get: namespace => namespace === 'ui-theme' ? conversationScope : scope},
+        // 0.1.7 的设置命名空间必须是**组合行 id**：宿主按 options.id 解析
+        // settings.update，拿旧命名空间去读会得到一个永远保存不了的表单。
+        configForms: {get: namespace => { requested.push(namespace); return namespace === 'ui-theme' ? conversationScope : scope }},
         locale: {register: () => () => {}, bind: () => key => key},
         slots: {inject: (_name, fn) => fn(), register: row => {
           if (row.id === 'font-size') window.conversationModel = row.inject().model;
@@ -67,6 +70,9 @@ app.whenReady().then(async () => {
       if (required.includes('configForms') || required.includes('settingsScope')) throw Error('settings service blocks plugin activation');
       const tick = () => new Promise(resolve => setTimeout(resolve, 0));
       const assert = (condition, message) => { if (!condition) throw Error(message) };
+      assert(requested.includes('ui-typography'), '0.1.7 的设置命名空间应当是组合行 id，实际请求的是 ' + JSON.stringify(requested));
+      assert(!requested.includes('desktop-ui-typography'), '0.1.7 分支不得再使用旧命名空间 ' + JSON.stringify(requested));
+      results.push('configForms 用组合行 id（ui-typography）作设置命名空间；旧命名空间只留给 settingsScope 分支');
       const font = id => parseFloat(getComputedStyle(document.getElementById(id)).fontSize);
       for (const size of [14, 12, 16, 20, 14]) {
         await window.model.setSize(size); await tick();

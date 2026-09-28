@@ -39,6 +39,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 
 import {
@@ -556,6 +557,217 @@ async function prepareModuleResolution(profile, installAnchor, home) {
 }
 
 /**
+ * 交给组合层的「启动器自有 profile 事实」——即 `@deepseek-ai/dsh` 的 `runProfile()`
+ * 在挂载配置树之前 provide 的那个 `profileContext`。
+ *
+ * ## 为什么 Desktop 必须自己 provide 它（本轮修复的根因）
+ *
+ * 0.1.7 起 `@deepseek-ai/dsh-base` 用这个服务给整组行做门控：
+ *
+ *     - id: config-editor
+ *       name: '@deepseek-ai/dsh-config-editor'
+ *       disabled: !!js "!ctx.get('profileContext')"
+ *     - id: settings
+ *       name: '@deepseek-ai/dsh-settings'
+ *       disabled: !!js "!ctx.get('profileContext')"
+ *
+ * 而 `config-editor`（inject `loader` + `profileContext`）与 `dsh-settings` 的
+ * `settings` 服务（inject `configEditor` + `profileContext`）本来也把
+ * `profileContext` 声明成依赖。少 provide 这一个服务，两行都进不了 ACTIVE：
+ * `ctx.settings` 根本不存在，`settings-controller` 的每个方法都返回
+ * "settings service is absent: mount @deepseek-ai/dsh-settings with
+ * @deepseek-ai/dsh-config-editor in the profile composition"——界面表现为
+ * 设置→模型整页报错、通用设置→权限「不可用」。同一条门控还静默关掉了
+ * `plugin-manager`、`hmr`，以及 web-app 里 `profileContext?.name === 'desktop'`
+ * 的桌面专属行（右侧栏的 Browser 标签）。
+ *
+ * 最阴的地方是它**不报错**：`disabled` 行会被 Loader 直接跳过，
+ * `auditStartupEntries` 也明确跳过 disabled 行，所以日志里一条警告都没有。
+ *
+ * 这些事实只有启动方知道，harness 不会替外壳补：`runProfile()` 会 provide（所以
+ * CLI 与官方 profile 启动正常），而本文件走的是
+ * `loadProfileDirectory()` + `boot()` 这条「应用自有 profile」的路径
+ * （`dsh` 的 CLI 按设计拒绝 `desktop` 这个 profile 名），必须自己补上。
+ *
+ * ## 时序要求
+ *
+ * 必须在**配置树挂载之前**（也就是 `boot()` 的 `prepare` 回调里）provide：
+ * `!!js` 门控是在行挂载时求值的，晚一步那两行就已经被判成 disabled 了。
+ *
+ * ## 字段
+ *
+ * 与 `runProfile()` 保持一致，因为消费者直接读它们：
+ * `dir` / `installAnchor` / `patchPath` 是 `config-editor` 装载并回写 profile
+ * patch 的落点（`readProfilePatches` 与 `loadProfileDirectory` 都按它们解析），
+ * `home` 是 `dsh-settings` 做旧文档迁移（`<home>/settings.yaml`）与 `hmr` 盯
+ * home 级 patch 的落点，`name === 'desktop'` 是桌面专属行（如右侧栏 Browser）的开关。
+ *
+ * 多 provide 一个服务对老运行时（0.1.5/0.1.6）是无害的：那时没有任何行读它，
+ * 设置由未门控的 `@deepseek-ai/dsh-settings-file` 提供。因此这里不需要按版本做能力判断。
+ *
+ * @param profile - 已装载的 desktop profile。
+ * @param installAnchor - 运行中的 dsh 安装的 package.json 绝对路径。
+ * @param home - Harness 主目录（DSH_HOME）。
+ * @returns 组合层读取的 profile 事实。
+ */
+function createProfileContext(profile, installAnchor, home) {
+  return {
+    name: PROFILE_NAME,
+    dir: profile.dir,
+    patchPath: profile.patchPath,
+    installAnchor,
+    startedBundles: profile.layers.map((layer) => layer.packageName),
+    cwd: process.cwd(),
+    home,
+    overlays: [],
+    telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+  }
+}
+
+/** cordis 的 FiberState，仅用于诊断文案。 */
+const FIBER_STATE_LABELS = { 0: '等待服务', 1: '加载中', 2: '已激活', 3: '激活失败', 4: '已卸载' }
+
+/** 组合里承载「设置」能力的行；任何一行没起来，设置页就没有数据源。 */
+const SETTINGS_ROWS = [
+  { id: 'config-editor', package: '@deepseek-ai/dsh-config-editor' },
+  { id: 'settings', package: '@deepseek-ai/dsh-settings' },
+  { id: 'settings-controller', package: '@deepseek-ai/dsh-api-settings-controller' },
+]
+
+/**
+ * 一个包实际从哪里加载：`<包目录>（v<版本>）`，解析不出来就返回空串。
+ *
+ * 这是「当前实际加载的 dsh-settings 到底来自哪里」的答案——内置运行时，还是
+ * `$DSH_HOME/profiles/desktop/node_modules`（最近路径优先会覆盖运行时的那份）。
+ *
+ * 优先问 0.1.7 的 `pluginPackages` 服务（它知道进程内拦截后的真实落点）；老运行时
+ * 没有这个服务，就退回 Node 自己的查找顺序探测同一件事。
+ *
+ * @param ctx - boot 之后的主机上下文。
+ * @param name - 行里声明的包名（可能带子路径）。
+ * @returns 供日志拼接的后缀。
+ */
+function packageOrigin(ctx, name) {
+  const located = locatePackage(ctx, name)
+  if (located === undefined) return ''
+  return ` <- ${located.dir}${located.version === undefined ? '' : `（v${located.version}）`}`
+}
+
+/**
+ * 定位一个包名对应的目录与版本。
+ *
+ * @param ctx - boot 之后的主机上下文。
+ * @param name - 包名，可能带子路径（只取包名部分）。
+ * @returns `{ dir, version }`，定位不到时 undefined。
+ */
+function locatePackage(ctx, name) {
+  try {
+    const pkg = ctx.get('pluginPackages')?.packageOf?.(name, ctx.baseUrl)
+    const dir = pkg?.dir ?? (typeof pkg?.manifestPath === 'string' ? dirname(pkg.manifestPath) : undefined)
+    if (dir !== undefined) return { dir, version: pkg.version }
+  } catch {
+    // 落回下面的 Node 查找（拦截层不在也不该让诊断消失）。
+  }
+  try {
+    const parts = String(name).split('/')
+    const bare = String(name).startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+    const fromProfile = createRequire(new URL('package.json', ctx.baseUrl))
+    for (const searchPath of fromProfile.resolve.paths(bare) ?? []) {
+      const dir = join(searchPath, bare)
+      const manifestPath = join(dir, 'package.json')
+      if (!existsSync(manifestPath)) continue
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      return { dir, version: typeof manifest.version === 'string' ? manifest.version : undefined }
+    }
+  } catch {
+    // 定位失败只是少一段诊断，不该影响启动。
+  }
+  return undefined
+}
+
+/**
+ * 一行在 Loader 里的实际状态，用中文写清「为什么没起来」。
+ *
+ * 与 `dsh-app-boot` 的 `inactiveEntries()` 同一套判据：`disabled` 由表达式求值、
+ * 失败的行要 `await fiber.await()` 才能拿到原始 rejection（cordis 的 `_error` 是私有的）。
+ *
+ * @param entry - Loader 里的一行。
+ * @returns 状态文案。
+ */
+async function rowState(entry) {
+  let disabled = false
+  try {
+    disabled = entry.disabled === true
+  } catch (error) {
+    return `disabled 表达式抛错: ${error instanceof Error ? error.message : String(error)}`
+  }
+  if (disabled) return '被 disabled 门控跳过（组合里没有它的依赖服务）'
+  const fiber = entry.fiber
+  if (fiber === undefined) return '未挂载（模块导入失败，或行根本不在组合里）'
+  if (fiber.state === 3) {
+    try {
+      await fiber.await()
+    } catch (error) {
+      return `激活失败: ${error instanceof Error ? error.stack ?? error.message : String(error)}`
+    }
+    return '激活失败（原因未记录）'
+  }
+  if (fiber.state === 0) {
+    const missing = Object.keys(fiber.inject ?? {}).filter((service) => fiber.ctx.get(service) === undefined)
+    return `等待服务: ${missing.join(', ') || '(未记录)'}`
+  }
+  return FIBER_STATE_LABELS[fiber.state] ?? `未知状态 ${String(fiber.state)}`
+}
+
+/**
+ * 把「设置能力有没有起来、起来的是谁、包在哪」提前打到 Host 日志里。
+ *
+ * 加它的原因见 {@link createProfileContext}：门控缺失在界面上只剩一句靠后的英文
+ * 错误（`settings service is absent: ...`），而 Host 侧一声不吭。这里正常路径只有
+ * 两行（`profileContext` 与 `ctx.settings` 的状态与来源），**只有 `ctx.settings`
+ * 真的缺席时**才展开逐行明细——不引入 debug spam。
+ *
+ * @param ctx - boot 之后的主机上下文。
+ */
+async function reportSettingsSurface(ctx) {
+  const profile = ctx.get('profileContext')
+  console.log(
+    profile === undefined
+      ? `${BIN_NAME}: 组合上下文: profileContext 未 provide —— 依赖它的行（config-editor/settings/hmr/桌面专属行）会被静默禁用`
+      : `${BIN_NAME}: 组合上下文: profileContext 已 provide（name=${String(profile.name)}）`,
+  )
+
+  const rows = new Map()
+  for (const entry of ctx.get('loader')?.entries() ?? []) {
+    const id = entry.options?.id
+    if (!SETTINGS_ROWS.some((row) => row.id === id)) continue
+    rows.set(id, {
+      name: entry.options?.name ?? '(未命名)',
+      state: await rowState(entry),
+      origin: packageOrigin(ctx, entry.options?.name),
+    })
+  }
+
+  const settings = rows.get('settings')
+  if (ctx.get('settings') !== undefined) {
+    console.log(`${BIN_NAME}: 设置服务: ctx.settings 已挂载${settings?.origin ?? ''}`)
+    return
+  }
+
+  console.log(
+    `${BIN_NAME}: 设置服务缺失: ctx.settings 未挂载，设置页无法读取或写入配置。承载它的组合行：`,
+  )
+  for (const row of SETTINGS_ROWS) {
+    const found = rows.get(row.id)
+    console.log(
+      found === undefined
+        ? `${BIN_NAME}:   ${row.id}: 不在本次组合里${packageOrigin(ctx, row.package)}`
+        : `${BIN_NAME}:   ${row.id} (${found.name}): ${found.state}${found.origin}`,
+    )
+  }
+}
+
+/**
  * 启动阶段计时。
  *
  * 加它的原因：实测从进程启动到出现 URL 行要 11 秒以上，而内置 Node 冷启动只有
@@ -625,10 +837,16 @@ async function main() {
   mark('环境快照')
 
   const appReady = createAppReady()
+  // 组合层读取的启动器自有事实：必须在 `boot()` 的 prepare 里、**配置树挂载之前**
+  // provide，否则 dsh-base 里 `disabled: !!js "!ctx.get('profileContext')"` 的
+  // config-editor / settings 两行会被判成 disabled，ctx.settings 就不存在。
+  // 详见 {@link createProfileContext}。
+  const profileContext = createProfileContext(profile, installAnchor, home)
   const ctx = await boot(BIN_NAME, join(profile.dir, PROFILE_ROOT_FILENAME), patches, async (hostCtx) => {
     // 必须早于配置树里的任何 bundle：0.1.7 的包解析由这个服务在进程内接管，
     // 它没装好时 Loader 解析第一个 bundle 就会失败。
     await prepare?.(hostCtx)
+    hostCtx.provide('profileContext', profileContext)
     hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
     provideCmdline(hostCtx, {
       // The desktop shell owns its own window and port: never open a browser,
@@ -640,6 +858,11 @@ async function main() {
   })
   appReady.commit()
   mark('boot 插件树')
+
+  // 设置能力的状态与来源（正常路径两行；缺席时才展开明细）。放在 ready 之前：
+  // 它要能解释"设置页为什么报错"，就必须和那句错误同时到达日志。
+  await reportSettingsSurface(ctx)
+  mark('设置能力自检')
 
   // 顺序：**先清理，后登记**。清理用官方 API（见 reconcileWorkspaceRegistry 的说明），
   // 而且必须早于下面那句 `[dsh-desktop] ready`：父进程一收到它就导航窗口，界面首次拉取

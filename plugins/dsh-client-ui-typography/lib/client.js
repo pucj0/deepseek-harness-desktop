@@ -7,7 +7,12 @@ window.__ModuleLoader__.load({
     const DEFAULT = 14
     const MIN = 12
     const MAX = 20
+    // 本地命名空间：语言包与小节槽位用它，与宿主设置无关，因此两个版本都一样。
     const NS = 'desktop-ui-typography'
+    // ≥0.1.7 的设置命名空间 = 组合行 id（见 cordis.patch.yml 与本包的 lib/index.js）。
+    const ENTRY_NAMESPACE = 'ui-typography'
+    // ≤0.1.6 的设置命名空间：插件自报，值落在 <home>/settings.yaml。
+    const LEGACY_NAMESPACE = 'desktop-ui-typography'
     const normalize = (value, max = MAX) => Number.isFinite(Number(value))
       ? Math.max(MIN, Math.min(max, Math.round(Number(value)))) : DEFAULT
 
@@ -215,7 +220,7 @@ window.__ModuleLoader__.load({
       return model
     }
 
-    function activate(ctx, getScope) {
+    function activate(ctx, getScope, settingsNamespace) {
       const style = document.createElement('style')
       style.dataset.plugin = 'dsh-client-ui-typography'
       style.textContent = css
@@ -223,7 +228,7 @@ window.__ModuleLoader__.load({
       const initialSize = document.documentElement.dataset.dshUiFontSize ?? DEFAULT
       const typography = installTypography(document, initialSize)
       ctx.effect(() => () => typography.dispose())
-      const model = createFontSizeModel(ctx, getScope(NS), {
+      const model = createFontSizeModel(ctx, getScope(settingsNamespace), {
         initialSize, onSize: (size) => typography.setSize(size),
       })
       // Reuse the upstream namespace so existing conversation preferences and the
@@ -242,10 +247,18 @@ window.__ModuleLoader__.load({
       }, FontSizeRow)))
     }
     function apply(ctx) {
-      // 0.1.7 exposes configForms; older bundled runtimes expose settingsScope.
-      // Resolve either service after boot so an absent one cannot hold up the UI.
-      ctx.inject(['configForms'], (scoped) => activate(scoped, (namespace) => scoped.configForms.get(namespace)))
-      ctx.inject(['settingsScope'], (scoped) => activate(scoped, (namespace) => scoped.settingsScope.bind({ namespace })))
+      // 设置命名空间随 dsh 版本换过一次（0.1.7 = 组合行 id），所以这里**按服务存在与否**
+      // 选路，而不是按版本号：两个服务在任一时点上最多只有一个存在。
+      //
+      //   * `configForms`（≥0.1.7）：命名空间是行 id（`ui-typography`），
+      //     写回走 profile patch；
+      //   * `settingsScope`（≤0.1.6）：插件自报命名空间，
+      //     写回走 <home>/settings.yaml。
+      //
+      // 用错命名空间的后果不是报错而是"行看起来在、保存不了"（宿主按行 id 解析
+      // `settings.update`，找不到就拒绝），因此两者必须各取各的。
+      ctx.inject(['configForms'], (scoped) => activate(scoped, (namespace) => scoped.configForms.get(namespace), ENTRY_NAMESPACE))
+      ctx.inject(['settingsScope'], (scoped) => activate(scoped, (namespace) => scoped.settingsScope.bind({ namespace }), LEGACY_NAMESPACE))
     }
     return { name: 'ui-typography', inject: ['slots', 'locale', 'remote'], apply }
   },

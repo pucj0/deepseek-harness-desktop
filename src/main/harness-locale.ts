@@ -10,23 +10,38 @@
  *   * 客户端的唯一写入入口 `LocaleRuntime.setLocale()` 做的是
  *     `this.host?.set('preference', id)`，而 `this.host` 是
  *     `ctx.settingsScope.bind({ namespace: 'locale' })`；
- *   * 这个 scope 由 `dsh-settings-file` 落到 **`<harness home>/settings.yaml`**
- *     （也支持 `.json`），写入走 `writeFileAtomic`（临时文件 + rename）；
- *   * 宿主自己用 chokidar 盯着这份文档，**外部编辑会热发布**给 Web UI。
+ *   * 这份 scope **落到哪里**由宿主决定，而它随 dsh 版本换过一次（见下）。
+ *   * 宿主自己盯着落点文件，**外部编辑会热发布**给 Web UI。
  *
- * 因此"用户的语言选择"唯一可信的落点是这份设置文档。Desktop Shell 只是第二个消费者：
- * 它不新增语言设置、不读 `navigator.language`、也不用 `app.getLocale()` 去"决定"语言，
- * 只把这份文档里的值翻译成自己的菜单文案。
+ * 因此"用户的语言选择"唯一可信的落点就是宿主当前的那份设置文档。Desktop Shell 只是
+ * 第二个消费者：它不新增语言设置、不读 `navigator.language`、也不用 `app.getLocale()`
+ * 去"决定"语言，只把这份文档里的值翻译成自己的菜单文案。
  *
  * 读不到（文件还不存在、用户从未选过语言、内容被改坏）时返回 `undefined`，由调用方回退到
  * "系统/浏览器语言"——那正是 Harness 在没有 preference 时的行为（它的 provisional 值来自
  * `navigator.languages`）。
+ *
+ * ## 落点随版本换过一次：`settings.yaml` → profile patch
+ *
+ *   * **dsh ≤ 0.1.6**：`@deepseek-ai/dsh-settings-file` 把 `locale` 小节写进
+ *     `<home>/settings.yaml`（也支持 `.json`）。
+ *   * **dsh ≥ 0.1.7**：设置改由 `@deepseek-ai/dsh-settings` + `@deepseek-ai/dsh-config-editor`
+ *     承载，用户值变成**组合行**写进 profile patch
+ *     `<home>/profiles/desktop/cordis.patch.yml`。旧的 `settings.yaml` 只在首次启动时被
+ *     *迁移*一次，并按小节搬成组合行，随后原文件被改名成 `settings.yaml.imported`
+ *     （见 `dsh-settings` 的 `importLegacyDocument()`）。
+ *
+ * 只认 `settings.yaml` 的读法在 0.1.7 上会**安静地失效**：迁移之后那份文件不再存在，
+ * 菜单语言于是退回系统语言，而 Harness 自己的界面语言仍然正确——这种"设置还在、外壳
+ * 看不见"的错位没有任何报错。因此这里两个落点都读：老文档优先（0.1.6 及更早的唯一权威），
+ * 读不到时再看 profile patch（0.1.7 的唯一权威）。
  *
  * ## 为什么不做成"每次读一遍"
  *
  * 菜单在启动时构建，而运行中切换语言必须**不重启**就生效。监听用 `fs.watch` 同时盯
  * **文件本体与它所在目录**：宿主用 rename 提交写入，只盯文件在某些平台上会因 inode 被替换
  * 而丢掉后续事件；只盯目录则在文件已存在时拿不到内容级变化。两条一起盯才是稳的。
+ * 两个落点、以及各自的父目录，都按同一套规则盯上。
  */
 import { existsSync, readFileSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
@@ -40,6 +55,24 @@ export const SETTINGS_JSON_FILENAME = 'settings.json'
 export const LOCALE_SECTION = 'locale'
 /** 小节里承载选择的字段（= locale 插件的 preference 字段）。 */
 export const LOCALE_FIELD = 'preference'
+/**
+ * 应用自有 profile 的名字，与 `src/server/server.mjs` 的 `PROFILE_NAME` 必须一致。
+ *
+ * Desktop 是该 profile 的唯一所有者（`dsh` 的 CLI 按设计拒绝这个名字），所以这里写死是
+ * 安全的；`scripts/test-harness-locale.mjs` 会拿 server.mjs 里的常量做交叉校验，
+ * 改名时不会两边静默漂移。
+ */
+export const PROFILE_NAME = 'desktop'
+/** profile 目录（`<home>/profiles/<name>`）相对 Harness 主目录的位置。 */
+export const PROFILES_DIRNAME = 'profiles'
+/** profile 的用户 patch 文件名（= `dsh-app-boot` 的 `PROFILE_PATCH_FILENAME`）。 */
+export const PROFILE_PATCH_FILENAME = 'cordis.patch.yml'
+/** 组合里承载语言偏好的行 id（= web-app patch 里 locale 插件的行 id）。 */
+export const LOCALE_ENTRY_ID = 'locale'
+
+/** profile 的用户 patch 落点：0.1.7 起语言偏好真正住在这里。 */
+export const profilePatchPath = (dshHome: string): string =>
+  join(dshHome, PROFILES_DIRNAME, PROFILE_NAME, PROFILE_PATCH_FILENAME)
 
 /** 写入是"临时文件 + rename"，两次事件可能挨得很近，合并一下再读。 */
 const RELOAD_DEBOUNCE_MS = 60
@@ -127,7 +160,76 @@ export function parseLocalePreference(text: string): string | undefined {
 }
 
 /**
+ * 从 profile patch（`cordis.patch.yml`）里取出 `- id: locale` 那一行的 `config.preference`。
+ *
+ * 0.1.7 的迁移把 `locale` 小节写成这样一行（实测由 `dsh-config-editor` 落盘）：
+ *
+ * ```yaml
+ * - id: locale
+ *   name: "@deepseek-ai/dsh-client-locale"
+ *   config:
+ *     preference: zh
+ * ```
+ *
+ * patch 是一个 YAML 列表，行本身也可能嵌在 `insert:` 之下，所以这里按**缩进**扫行：
+ * 行首（任意缩进）的 `- id: <值>` 开始一行，之后缩进更深的内容属于这一行；在这一行里
+ * 先找块状的 `preference:`，再兜底流式的 `config: { preference: xx }`。后出现的行覆盖
+ * 先出现的（patch 语义：后写者胜）。
+ *
+ * 任何解析不了的地方都只是"没有值"，绝不抛错——一个坏掉的 patch 不该让外壳起不来。
+ *
+ * @param text - profile patch 原文。
+ * @returns 语言 id，或 undefined。
+ */
+export function parseLocaleFromProfilePatch(text: string): string | undefined {
+  if (typeof text !== 'string') return undefined
+  const lines = text.split(/\r?\n/u)
+  let value: string | undefined
+  for (let index = 0; index < lines.length; index += 1) {
+    const dash = /^(\s*)-\s*id:\s*(.*)$/u.exec(stripComment(lines[index] ?? ''))
+    if (dash === null || scalarValue(dash[2] ?? '') !== LOCALE_ENTRY_ID) continue
+    const found = localeFieldBelow(lines, index, (dash[1] ?? '').length)
+    if (found !== undefined) value = found
+  }
+  return value
+}
+
+/**
+ * 在 `start` 之后、缩进深于 `rowIndent` 的那个块里找 `preference`。
+ *
+ * @param lines - patch 原文按行切分。
+ * @param start - `- id: …` 那一行的下标。
+ * @param rowIndent - `-` 所在列的缩进宽度（块里的一切都比它深）。
+ * @returns 字段值，或 undefined（行结束/字段缺失）。
+ */
+function localeFieldBelow(lines: readonly string[], start: number, rowIndent: number): string | undefined {
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = stripComment(lines[index] ?? '')
+    if (line.trim() === '') continue
+    // 回到不深于本行的缩进 = 这一行结束了。
+    if (line.length - line.trimStart().length <= rowIndent) return undefined
+    const flow = /\{([^}]*)\}/u.exec(line)
+    if (flow !== null) {
+      const mapped = fromFlowMapping(flow[1] ?? '')
+      if (mapped !== undefined) return mapped
+      continue
+    }
+    const field = /^\s+preference:\s*(.*)$/u.exec(line)
+    if (field !== null) return scalarValue(field[1] ?? '')
+  }
+  return undefined
+}
+
+/** 去掉行尾注释（`#` 之前至少一个空白，避免吃掉引号里的 `#`）。 */
+function stripComment(line: string): string {
+  return line.replace(/\s+#.*$/u, '')
+}
+
+/**
  * 读出 Harness 当前的语言偏好。
+ *
+ * 两个落点按"谁更权威"排序：老设置文档（0.1.6 及更早唯一会写的地方）在前，0.1.7 起
+ * 承载用户值的 profile patch 在后。两个都没有时返回 undefined。
  *
  * @param dshHome - Harness 主目录（本应用是 `<userData>/home`）。
  * @returns 语言 id（宿主存的是 `zh`/`en`，语言包可以是别的 id），或 undefined。
@@ -143,6 +245,12 @@ export function readLocalePreference(dshHome: string): string | undefined {
     } catch {
       // 读不到就当作"没有偏好"：回退到系统语言，与用户从未设置过时一致。
     }
+  }
+  try {
+    const file = profilePatchPath(dshHome)
+    if (existsSync(file)) return parseLocaleFromProfilePatch(readFileSync(file, 'utf8'))
+  } catch {
+    // 同上：读不到不算错误。
   }
   return undefined
 }
@@ -214,6 +322,10 @@ export function watchLocalePreference(
   watchPath(join(dshHome, SETTINGS_FILENAME))
   watchPath(join(dshHome, SETTINGS_JSON_FILENAME))
   watchPath(dshHome)
+  // 0.1.7 的落点：profile patch 本体，以及它所在的 profile 目录（文件可能还不存在，
+  // 首次写入是"新建"而不是"修改"，只盯文件会漏掉——这正是要同时盯目录的原因）。
+  watchPath(profilePatchPath(dshHome))
+  watchPath(join(dshHome, PROFILES_DIRNAME, PROFILE_NAME))
   // 立刻对账一次：把"读到偏好"与"装上监听"之间那次修改补回来（见上面的说明）。
   read()
 
