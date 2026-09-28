@@ -62,9 +62,13 @@ echo ============================================================
 echo  PUSH FAILED (see the error above).
 echo.
 echo  Common causes:
-echo    * Wrong or expired token -> recreate it at the URL above
-echo    * Proxy not running     -> Clash Verge must listen on 7890
-echo    * No network to GitHub  -> check the proxy is actually on
+rem The arrows below MUST be escaped as ^> . A bare ">" makes cmd.exe treat the
+rem rest of the line as a redirection, so instead of printing these hints it
+rem silently creates files named after the next word -- this file really did
+rem leave "Clash", "check" and "recreate" in the repo root on a failed push.
+echo    * Wrong or expired token ^-^> recreate it at the URL above
+echo    * Proxy not running       ^-^> Clash Verge must listen on 7890
+echo    * No network to GitHub    ^-^> check the proxy is actually on
 echo ============================================================
 pause
 exit /b 1
