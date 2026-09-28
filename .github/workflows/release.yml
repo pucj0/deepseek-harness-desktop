@@ -37,17 +37,25 @@ jobs:
     strategy:
       # 一个平台失败不影响其它平台出产物。
       fail-fast: false
+      max-parallel: 4
       matrix:
         include:
           - name: Windows (setup.exe)
             os: windows-latest
             target: win
+            arch: x64
           - name: Linux (AppImage + deb)
             os: ubuntu-latest
             target: linux
-          - name: macOS (dmg + zip, x64 + arm64)
+            arch: x64
+          - name: macOS x64 (dmg + zip)
+            os: macos-15-intel
+            target: mac
+            arch: x64
+          - name: macOS arm64 (dmg + zip)
             os: macos-latest
             target: mac
+            arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -118,9 +126,8 @@ jobs:
         run: npm run stage
         # stage = stage:runtime + stage:node + link:runtime + compress:runtime。
         # stage:node 不带参数时自动按当前平台/架构下载，无需在 CI 里区分。
-        # compress:runtime 把瘦身后的运行时压成 build/runtime.br（42.9 MB），
-        # 安装包携带的是这个归档而不是散开的 27 400 个文件。brotli q11 要跑约 11 分钟，
-        # 在 macOS 与 Windows 上都是如此——这是为了让安装包小 100 MB 以上付出的构建时间。
+        # compress:runtime 用 brotli q6 生成归档。实测约 23 秒 / 51 MB；
+        # 原来的 q11 要约 11 分钟 / 40 MB，是每个平台共同的主要耗时。
 
       - name: 确认运行时已就位
         shell: bash
@@ -199,16 +206,15 @@ jobs:
       #   * Variables 新增 SIGN_MACOS = true
       #   * Secrets  新增 MAC_CERT_P12 / MAC_CERT_PASSWORD（以及可选的公证三项）
       #
-      # 便携 Node 的架构自动跟随 runner（macos-latest 是 arm64），因此 x64 产物
-      # 由 --x64 交叉构建，不需要手工替换 runtime/node。
+      # 两个架构在独立 runner 上并行构建，各自准备原生依赖与便携 Node。
       - name: 打包 macOS (x64)
-        if: matrix.target == 'mac' && vars.SIGN_MACOS != 'true'
+        if: matrix.target == 'mac' && matrix.arch == 'x64' && vars.SIGN_MACOS != 'true'
         run: npx electron-builder --mac --x64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 打包 macOS (x64, 已签名)
-        if: matrix.target == 'mac' && vars.SIGN_MACOS == 'true'
+        if: matrix.target == 'mac' && matrix.arch == 'x64' && vars.SIGN_MACOS == 'true'
         run: npx electron-builder --mac --x64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -219,13 +225,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: 打包 macOS (arm64)
-        if: matrix.target == 'mac' && vars.SIGN_MACOS != 'true'
+        if: matrix.target == 'mac' && matrix.arch == 'arm64' && vars.SIGN_MACOS != 'true'
         run: npx electron-builder --mac --arm64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 打包 macOS (arm64, 已签名)
-        if: matrix.target == 'mac' && vars.SIGN_MACOS == 'true'
+        if: matrix.target == 'mac' && matrix.arch == 'arm64' && vars.SIGN_MACOS == 'true'
         run: npx electron-builder --mac --arm64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -270,6 +276,9 @@ jobs:
                -o -name '*.dmg' -o -name '*.zip' \
                -o -name 'latest*.yml' \) \
             -exec cp -v {} dist-artifacts/ \;
+          if [ "${{ matrix.target }}" = mac ]; then
+            mv dist-artifacts/latest-mac.yml "dist-artifacts/latest-mac-${{ matrix.arch }}.yml"
+          fi
           echo "--- dist-artifacts ---"
           ls -la dist-artifacts || true
 
@@ -277,7 +286,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-desktop-${{ matrix.target }}
+          name: dsh-desktop-${{ matrix.target }}-${{ matrix.arch }}
           # 只传上一步收集好的结果：目录是扁平的，因此 artifacts/<文件> 这种
           # 一层匹配在发布的 job 里就能正确工作。
           path: dist-artifacts/*
@@ -309,6 +318,9 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: 合并 macOS 双架构更新元数据
+        run: node scripts/merge-mac-update-metadata.mjs artifacts
 
       - name: 列出将要发布的文件
         run: ls -laR artifacts | head -60

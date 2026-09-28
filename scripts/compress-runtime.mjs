@@ -4,12 +4,13 @@
 //
 // 为什么这样做：runtime 有 27 400 个文件、314 MB，而其中大半在运行期用不到
 // （.ts 源文件、.map、.d.ts、.pdb 调试符号、非本平台二进制、Node 自带的 npm）。
-// 瘦身后 188 MB，brotli q11 压到约 40 MB——安装包因此小得多，解包体积也小得多。
+// 瘦身后约 199 MB，brotli q6 压到约 51 MB。q11 再省约 11 MB，
+// 但每个平台构建都要多等约 10 分钟；发布速度优先使用 q6。
 //
 // 实测过的取舍：
 //   zstd 19  = 55 MB / 2 秒
 //   brotli 11 = 40.5 MB / 10 分钟
-// 选了 brotli：省 15 MB 值得，压缩只发生在构建阶段一次。
+// 仍用 brotli 归档格式，现以 q6 平衡下载大小和构建时间。
 //
 // 归档格式是自己定义的（不用 tar），因为 Node 内置没有 tar 写入器、也不想为此加依赖：
 //   magic "DSHRT1\n" + 若干记录；每条记录 = 4 字节头长度 + JSON 头 + 文件内容。
@@ -33,7 +34,7 @@ const ROOT = resolve(import.meta.dirname, '..')
 const option = (name) => process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3)
 const SOURCE = resolve(option('source') ?? join(ROOT, 'runtime'))
 const OUTPUT = resolve(option('output') ?? join(ROOT, 'build', 'runtime.br'))
-const QUALITY = Number(option('quality') ?? 11)
+const QUALITY = Number(option('quality') ?? 6)
 if (!Number.isInteger(QUALITY) || QUALITY < 0 || QUALITY > 11) throw new Error('quality must be an integer from 0 to 11')
 const MAGIC = 'DSHRT1\n'
 
