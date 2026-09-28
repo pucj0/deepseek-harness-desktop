@@ -277,6 +277,14 @@ jobs:
                -o -name 'latest*.yml' \) \
             -exec cp -v {} dist-artifacts/ \;
           if [ "${{ matrix.target }}" = mac ]; then
+            arch="${{ matrix.arch }}"
+            test -f "dist-artifacts/dsh-desktop-${arch}.dmg"
+            test -f "dist-artifacts/dsh-desktop-${arch}.zip"
+            count=$(find dist-artifacts -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' \) | wc -l)
+            if [ "$count" -ne 2 ]; then
+              echo "::error::macOS ${arch} 任务产出了 $count 个安装包，预期仅本架构的 dmg + zip"
+              exit 1
+            fi
             mv dist-artifacts/latest-mac.yml "dist-artifacts/latest-mac-${{ matrix.arch }}.yml"
           fi
           echo "--- dist-artifacts ---"

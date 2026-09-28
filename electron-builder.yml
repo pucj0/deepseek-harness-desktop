@@ -156,10 +156,11 @@ mac:
   icon: build/icon.png
   category: public.app-category.developer-tools
   target:
-    - target: dmg
-      arch: [x64, arm64]
-    - target: zip
-      arch: [x64, arm64]
+    # Leave architecture to the CLI. CI passes exactly one --x64 / --arm64 per
+    # matrix job; embedding both here makes each job build both architectures,
+    # even when its staged Node runtime only matches the runner's architecture.
+    - dmg
+    - zip
   # 文件名里不带版本号：版本已经在目录名中（release/${version}/）。
   # 保留 ${arch}，因为同平台的多架构产物必须区分（macOS x64 与 arm64）。
   artifactName: ${productName}-${arch}.${ext}
