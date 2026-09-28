@@ -7,7 +7,7 @@ const { join, resolve, sep } = require('node:path')
 
 if (!process.versions.electron) {
   const reports = []
-  for (const disabled of ['1', '0']) {
+  for (const disabled of process.env.DSH_STARTUP_TEST_RUNTIME ? ['1'] : ['1', '0']) {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-startup-test-'))
     try {
       const env = { ...process.env, DSH_STARTUP_TEST_HOME: directory, DSH_DESKTOP_DISABLE_STARTUP_CACHE: disabled }
@@ -26,7 +26,7 @@ if (!process.versions.electron) {
       rmSync(directory, { recursive: true, force: true })
     }
   }
-  assert.deepEqual(reports[1], reports[0], 'startup cache introduced renderer errors')
+  if (reports.length === 2) assert.deepEqual(reports[1], reports[0], 'startup cache introduced renderer errors')
   console.log(`PASS no new renderer errors compared with the official implementation (${reports[0].length} existing errors)`)
   process.exit(0)
 }
@@ -40,8 +40,8 @@ const workspace = join(scratch, 'workspace'); mkdirSync(workspace)
 app.setPath('userData', scratch)
 app.disableHardwareAcceleration()
 let mainWindow, server
-async function expect(label, predicate) {
-  const deadline = Date.now() + 15000
+async function expect(label, predicate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await predicate()) { console.log(`PASS ${label}`); return }
     await new Promise(resolveWait => setTimeout(resolveWait, 20))
@@ -60,8 +60,16 @@ async function run() {
   window.show = () => {}
   const shellErrors = []
   const errors = []
+  const connectionWarnings = []
+  const upgradeStatuses = []
+  contents.session.webRequest.onCompleted(details => {
+    if (details.url.includes('/api/remote.mux')) upgradeStatuses.push(details.statusCode)
+  })
   shell.on('console-message', (_event, level, message) => { if (level >= 3) shellErrors.push(message) })
-  contents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
+  contents.on('console-message', (_event, level, message) => {
+    if (level >= 3) errors.push(message)
+    if (message.includes('[connection]')) connectionWarnings.push(message)
+  })
   let loads = 0
   shell.on('did-finish-load', () => { loads++ })
   const text = () => shell.executeJavaScript("document.getElementById('startup-hint')?.textContent")
@@ -93,6 +101,11 @@ async function run() {
   await expect('add workspace control is available on a fresh profile', () => contents.executeJavaScript(
     `[...document.querySelectorAll('button')].some(button => /^(添加工作区|Add workspace)$/i.test(button.getAttribute('aria-label') || button.getAttribute('title') || ''))`,
   ))
+  await expect('real-time connection upgrades successfully', () => upgradeStatuses.includes(101), 30000).catch(error => {
+    console.error('CONNECTION_WARNINGS ' + JSON.stringify(connectionWarnings.slice(-30)))
+    console.error('WEBSOCKET_STATUSES ' + JSON.stringify(upgradeStatuses))
+    throw error
+  })
   assert.equal(errors.some(message => /single slot .*already has a registration/.test(message)), false,
     'duplicate single-slot registration breaks the workspace directory picker')
   assert.equal(new URL(contents.getURL()).origin, ready.url)

@@ -95,6 +95,30 @@ const PROFILE_PATCH_TEMPLATE = `# dsh-desktop patch layer, applied after every b
 []
 `
 
+/** Match the launcher readiness contract used by newer dsh packages. */
+function createAppReady() {
+  let ready = false
+  const listeners = new Set()
+  return {
+    service: {
+      onReady(listener) {
+        if (ready) {
+          listener()
+          return () => {}
+        }
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    },
+    commit() {
+      if (ready) return
+      ready = true
+      for (const listener of [...listeners]) listener()
+      listeners.clear()
+    },
+  }
+}
+
 /**
  * Parse this server's own arguments.
  *
@@ -600,6 +624,7 @@ async function main() {
   installFailLoud(BIN_NAME, process, () => {})
   mark('环境快照')
 
+  const appReady = createAppReady()
   const ctx = await boot(BIN_NAME, join(profile.dir, PROFILE_ROOT_FILENAME), patches, async (hostCtx) => {
     // 必须早于配置树里的任何 bundle：0.1.7 的包解析由这个服务在进程内接管，
     // 它没装好时 Loader 解析第一个 bundle 就会失败。
@@ -610,9 +635,10 @@ async function main() {
       // and let the OS assign a free port so several instances cannot collide.
       args: ['--no-open', '--port', '0'],
       exit: (code) => process.exit(code),
-      ready: { onReady: () => () => {} },
+      ready: appReady.service,
     })
   })
+  appReady.commit()
   mark('boot 插件树')
 
   // 顺序：**先清理，后登记**。清理用官方 API（见 reconcileWorkspaceRegistry 的说明），
