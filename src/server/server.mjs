@@ -9,6 +9,15 @@
  *   3. run the dsh boot chain using ONLY public @deepseek-ai/dsh-app-boot APIs
  *   4. announce the Web UI URL (with launch token) to the parent over stdout
  *
+ * This file is copied into whatever runtime directory is being booted (see
+ * `resolveServerEntry()` in src/main/dsh-server.ts), and the runtime is
+ * auto-updated from npm — so every dsh-app-boot symbol it names must exist in
+ * *every* runtime it can be copied into. A named export that a newer runtime
+ * dropped is not a recoverable error: the module fails to instantiate before a
+ * single line runs, and the shell only sees "server exited before ready".
+ * Version-sensitive API use therefore goes through a dynamic import with a
+ * capability check, never a static named import (see prepareModuleResolution).
+ *
  * Deliberately does NOT go through the `dsh` CLI: `lib/bin.js` refuses the
  * "desktop" profile name by design, because this application is the owner of
  * that profile. `loadProfileDirectory()` is the public entry point meant for
@@ -24,7 +33,6 @@ import { dirname, join, resolve } from 'node:path'
 
 import {
   boot,
-  healProfilesModuleFallback,
   installFailLoud,
   loadLayeredEnv,
   loadOptionalPatches,
@@ -412,6 +420,70 @@ async function announceWhenAddressable(ctx, port) {
 }
 
 /**
+ * 让 profile 的 `@deepseek-ai/*`（以及 bundle 自带的插件依赖）可解析。
+ *
+ * dsh-app-boot 在 0.1.7 换了实现，**旧名字被删掉**了，而本文件会被外壳复制进
+ * **任意版本**的运行时目录里运行（`resolveServerEntry()` 每次启动都同步覆盖），
+ * 所以这里不能静态 import 任一版本的符号：一个解析不到的具名导出会让整个模块
+ * 加载失败，进程连一行日志都来不及打就退出（父进程只看到
+ * "server exited before ready"）。
+ *
+ * 因此按能力选择，而不是按版本号：
+ *
+ *   1. `createRuntimeResolution` + `PluginPackages`（0.1.7 起）
+ *      解析结果不再落盘，而是由 `PluginPackages` 服务在进程内接管 ESM/CJS 解析
+ *      （并覆盖此后的 Worker）。必须在 `boot()` 的 `prepare` 里、**配置树挂载之前**
+ *      注册，否则 Loader 解析第一个 bundle 时拦截层还没装好。
+ *   2. `healProfilesModuleFallback`（0.1.5 及更早）
+ *      老实现靠写链接：`$DSH_HOME/profiles/node_modules` 镜像安装闭包，profile 自带
+ *      的插件再链进 profile 的 `node_modules`。
+ *   3. 两个都没有：不猜、不动文件系统，让 dsh 自己的解析错误报出来——那比这里静默
+ *      改错目录清楚得多。
+ *
+ * @param profile - 已装载的 desktop profile。
+ * @param installAnchor - 运行中的 dsh 安装的 package.json 绝对路径。
+ * @param home - Harness 主目录。
+ * @returns boot() 的 prepare 回调；没有可用的解析 API 时返回 undefined。
+ */
+async function prepareModuleResolution(profile, installAnchor, home) {
+  // 动态 import：只有真正支持的版本才会真的加载这份实现，且解析失败在这里被降级，
+  // 不会升级成模块级语法错误。
+  let appBoot
+  try {
+    appBoot = await import('@deepseek-ai/dsh-app-boot')
+  } catch (error) {
+    console.error(
+      `[dsh-desktop] 警告: 无法加载 @deepseek-ai/dsh-app-boot，将不做模块解析准备: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return undefined
+  }
+
+  if (typeof appBoot.createRuntimeResolution === 'function' && appBoot.PluginPackages !== undefined) {
+    const { PluginPackages, createRuntimeResolution } = appBoot
+    const resolution = await createRuntimeResolution({ installAnchor, profile, home })
+    console.log(
+      `[dsh-desktop] 模块解析: 进程内拦截（${resolution.entries.length} 个包，` +
+        `${resolution.linkedRoots.length} 个外部链接根）`,
+    )
+    return async (hostCtx) => {
+      await hostCtx.plugin(PluginPackages, { resolution })
+    }
+  }
+
+  if (typeof appBoot.healProfilesModuleFallback === 'function') {
+    await appBoot.healProfilesModuleFallback({ installAnchor, profile, home })
+    console.log('[dsh-desktop] 模块解析: profile 回退链接')
+    return undefined
+  }
+
+  console.error(
+    '[dsh-desktop] 警告: 这个 dsh 运行时既不提供 createRuntimeResolution 也不提供 ' +
+      'healProfilesModuleFallback，跳过模块解析准备',
+  )
+  return undefined
+}
+
+/**
  * 启动阶段计时。
  *
  * 加它的原因：实测从进程启动到出现 URL 行要 11 秒以上，而内置 Node 冷启动只有
@@ -462,11 +534,12 @@ async function main() {
   // 选过的其它项目都会被判为"未登记"而拒绝，徽章就仍显示外壳那个仓库的分支。
   process.env.DSH_HOME = home
 
-  // Link the installation's dependency closure into $DSH_HOME/profiles/node_modules
-  // and reconcile the profile-local links. This is what makes the bundled runtime
-  // self-sufficient; it also means a newly swapped runtime needs no reinstall.
-  await healProfilesModuleFallback({ installAnchor, profile, home })
-  mark('模块回退链接')
+  // Make the installation's dependency closure resolvable for this profile. Which
+  // mechanism applies depends on the dsh version being booted (see
+  // prepareModuleResolution); both replace the "a newly swapped runtime needs no
+  // reinstall" behavior the old unconditional `healProfilesModuleFallback` call gave.
+  const prepare = await prepareModuleResolution(profile, installAnchor, home)
+  mark('模块解析准备')
 
   const patches = [
     ...profile.layers.flatMap((layer) => layer.patches),
@@ -479,7 +552,10 @@ async function main() {
   installFailLoud(BIN_NAME, process, () => {})
   mark('环境快照')
 
-  const ctx = await boot(BIN_NAME, join(profile.dir, PROFILE_ROOT_FILENAME), patches, (hostCtx) => {
+  const ctx = await boot(BIN_NAME, join(profile.dir, PROFILE_ROOT_FILENAME), patches, async (hostCtx) => {
+    // 必须早于配置树里的任何 bundle：0.1.7 的包解析由这个服务在进程内接管，
+    // 它没装好时 Loader 解析第一个 bundle 就会失败。
+    await prepare?.(hostCtx)
     hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
     provideCmdline(hostCtx, {
       // The desktop shell owns its own window and port: never open a browser,

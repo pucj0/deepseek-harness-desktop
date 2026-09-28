@@ -17,6 +17,13 @@
  * 这里在启动服务端之前主动检查一遍：只要发现失效链接，就删掉整个
  * `$DSH_HOME/profiles/node_modules`，让 dsh 在本次启动时重建。删除是安全的——
  * 该目录完全是 dsh 自己管理的派生数据，没有任何用户内容。
+ *
+ * 注意适用版本：这条路径只对 **0.1.5 及更早** 的运行时有效。0.1.7 起
+ * `healProfilesModuleFallback` 被 `createRuntimeResolution` + `PluginPackages`
+ * 取代，安装闭包改由进程内的解析拦截提供，这个目录里剩下的链接已经**不参与**
+ * 启动解析（服务端那边的分支见 `src/server/server.mjs` 的 `prepareModuleResolution`）。
+ * 所以保留这里的清理不会帮到 0.1.7，也不会伤到它——中性与无害，但不要误以为它是
+ * 新版运行时的模块解析修复手段。
  */
 import { existsSync, lstatSync, readdirSync, readlinkSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
