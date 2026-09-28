@@ -28,7 +28,17 @@
  *   - `dsh web: <url>?token=<token>` is printed by dsh-web-app itself
  *   - `[dsh-desktop] ready` is printed by us immediately afterwards
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 import {
@@ -162,6 +172,39 @@ function reconcileBundles(dir, available) {
 }
 
 /**
+ * 删掉 profile 里的一个链接条目，**包括已经断开的那种**。
+ *
+ * 为什么不能用 `existsSync` 判断"要不要删"：它跟随重解析点，所以一个指向已消失目标的
+ * junction 会返回 **false**，看起来"这个位置是空的"，于是调用方跳过删除直接去建链接，
+ * 而 `symlinkSync` 覆盖不了那个残留的重解析点，抛 `EEXIST`。
+ *
+ * 这正是"运行时更新失败回退之后插件全部失效"的成因：回退会删掉
+ * `<userData>/runtime/current`，而 profile 里四个内置插件的链接都指向
+ * `runtime/current/node_modules/...`，于是全部变成悬空链接；修复逻辑随后因为
+ * `existsSync === false` 而失败，且只留下一行被吞掉的警告——自愈看起来存在，实际不生效。
+ *
+ * 用 `lstatSync`（**不跟随**链接）判断条目是否真实存在，再用 `unlinkSync` 删链接本身：
+ * 对重解析点不能递归删除，那会跟进目标目录、删掉别人的内容。
+ *
+ * @param link - 链接条目的绝对路径。
+ */
+function removeLinkEntry(link) {
+  try {
+    // 不是链接（真目录，例如 pnpm 装出来的）就不动它。
+    if (!lstatSync(link).isSymbolicLink()) return
+  } catch {
+    // 连 lstat 都失败（真不存在）——没什么可删的。
+    return
+  }
+  try {
+    // Windows 上删目录联接要显式 unlink；unlinkSync 对 junction 是按链接删除。
+    unlinkSync(link)
+  } catch {
+    rmSync(link, { recursive: true, force: true })
+  }
+}
+
+/**
  * 把 runtime 里内置的插件链进 profile 的 node_modules。
  *
  * 为什么需要这一步：客户端插件要被 dsh 的模块系统发现，前提是 host 侧能从安装位置
@@ -170,6 +213,8 @@ function reconcileBundles(dir, available) {
  * 因此必须由外壳自己把它链进 profile。
  *
  * 用链接而不是复制：运行时更新会替换整个 runtime/，复制出的副本会与新版本脱节。
+ * 代价是**每次启动都必须能自愈断链**——这里对"已存在"的判断一律走 `lstatSync`，
+ * 不跟随链接，否则悬空链接会被误判为不存在（见 {@link removeLinkEntry}）。
  *
  * @param dir - profile 目录。
  * @param installAnchor - dsh 包的 package.json 绝对路径。
@@ -188,19 +233,22 @@ function linkBundledPlugins(dir, installAnchor) {
 
     const link = join(profileModules, plugin)
     try {
-      if (existsSync(link)) {
-        // 已指向同一目标就跳过；否则先删再建，避免旧链接指向已失效的路径。
-        if (realpathSync(link) === realpathSync(source)) {
-          ready.push(plugin)
-          continue
-        }
-        rmSync(link, { recursive: true, force: true })
+      // realpath 会在悬空链接上抛 ENOENT：那本身就是"必须重建"的信号。
+      if (existsSync(link) && realpathSync(link) === realpathSync(source)) {
+        ready.push(plugin)
+        continue
       }
+      removeLinkEntry(link)
       symlinkSync(source, link, 'junction')
       ready.push(plugin)
     } catch (error) {
       // 链接失败不该让整个应用起不来：报一条可诊断的警告后继续。
-      console.error(`[dsh-desktop] 警告: 无法链接内置插件 ${plugin}: ${error.message}`)
+      // 带上 code（EPERM/EEXIST 的处置完全不同），并说清后果——插件会从界面上消失。
+      const code = error !== null && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+      console.error(
+        `[dsh-desktop] 警告: 无法链接内置插件 ${plugin}${code === '' ? '' : ` (${code})`}: ${error.message}；` +
+          '该插件的界面功能将不可用',
+      )
     }
   }
   return ready

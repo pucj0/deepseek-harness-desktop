@@ -17,6 +17,19 @@ cd /d "%~dp0"
 set "PROXY=http://127.0.0.1:7890"
 set "REPO=https://github.com/pucj0/deepseek-harness-desktop.git"
 
+rem Read the version from package.json instead of hardcoding a tag.
+rem This line used to say "v1.0.0" long after that release, so step [2/2] always failed.
+for /f "usebackq delims=" %%v in (`node -p "require('./package.json').version"`) do set "TAG=v%%v"
+
+rem A failed read used to be invisible: step [2/2] would "succeed" while pushing an
+rem empty ref, and the banner still said DONE. Refuse to continue instead.
+if not defined TAG (
+  echo [push] ERROR: could not read the version from package.json.
+  echo [push] Run this file from the repository root, with node on PATH.
+  pause
+  exit /b 1
+)
+
 echo ============================================================
 echo  Pushing to %REPO%
 echo  Proxy: %PROXY%
@@ -31,13 +44,13 @@ git -c http.proxy=%PROXY% -c https.proxy=%PROXY% push -u origin master
 if errorlevel 1 goto :failed
 
 echo.
-echo [2/2] Pushing tag v1.0.0 ...
-git -c http.proxy=%PROXY% -c https.proxy=%PROXY% push origin v1.0.0
+echo [2/2] Pushing tag %TAG% ...
+git -c http.proxy=%PROXY% -c https.proxy=%PROXY% push origin %TAG%
 if errorlevel 1 goto :failed
 
 echo.
 echo ============================================================
-echo  DONE. Pushing the v1.0.0 tag starts the release workflow:
+echo  DONE. Pushing the %TAG% tag starts the release workflow:
 echo    https://github.com/pucj0/deepseek-harness-desktop/actions
 echo ============================================================
 pause
