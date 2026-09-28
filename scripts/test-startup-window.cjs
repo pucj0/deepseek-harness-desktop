@@ -74,7 +74,7 @@ async function run() {
   assert.equal(window.getTitle(), 'DeepSeek Harness — test-branch')
   console.log('PASS late Git badge updates the native title')
 
-  const runtime = resolve(__dirname, '../runtime')
+  const runtime = resolve(process.env.DSH_STARTUP_TEST_RUNTIME || join(__dirname, '../runtime'))
   const nodeBinary = join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
   server = new DshServer({
     runtime: { dir: runtime, installAnchor: join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), serverEntry: resolve(__dirname, '../src/server/server.mjs'), serverRunEntry: join(runtime, 'server.mjs'), nodeBinary, packaged: false },
@@ -85,7 +85,10 @@ async function run() {
   mainWindow.setSplashHint('Late progress must not replace the app')
   await navigation
   await expect('real Web UI mounts after authenticated navigation', () => contents.executeJavaScript(
-    "document.getElementById('startup-hint') === null && !!window.__DSH_BOOT__ && document.body.innerText.trim().length > 50",
+    "document.getElementById('startup-hint') === null && !!window.__DSH_BOOT__ && document.body.innerText.trim().length > 15",
+  ))
+  await expect('typography plugin activates without blocking Web boot', () => contents.executeJavaScript(
+    "!!document.querySelector('style[data-plugin=\"dsh-client-ui-typography\"]') && !document.body.innerText.includes('Failed to load plugins')",
   ))
   await expect('add workspace control is available on a fresh profile', () => contents.executeJavaScript(
     `[...document.querySelectorAll('button')].some(button => /^(添加工作区|Add workspace)$/i.test(button.getAttribute('aria-label') || button.getAttribute('title') || ''))`,

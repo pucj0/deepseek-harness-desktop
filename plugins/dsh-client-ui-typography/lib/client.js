@@ -203,7 +203,10 @@ window.__ModuleLoader__.load({
           if (next === state.size) return
           const previous = state.size
           publish({ size: next, pending: true, error: false })
-          try { await scope.set('fontSize', next); publish({ pending: false }); adopt() }
+          try {
+            if (await scope.set('fontSize', next) === false) throw new Error('Font size was not saved')
+            publish({ pending: false }); adopt()
+          }
           catch { publish({ size: scope.getSnapshot().value?.fontSize ?? previous, pending: false, error: true }) }
         },
       }
@@ -212,7 +215,7 @@ window.__ModuleLoader__.load({
       return model
     }
 
-    function apply(ctx) {
+    function activate(ctx, getScope) {
       const style = document.createElement('style')
       style.dataset.plugin = 'dsh-client-ui-typography'
       style.textContent = css
@@ -220,12 +223,12 @@ window.__ModuleLoader__.load({
       const initialSize = document.documentElement.dataset.dshUiFontSize ?? DEFAULT
       const typography = installTypography(document, initialSize)
       ctx.effect(() => () => typography.dispose())
-      const model = createFontSizeModel(ctx, ctx.settingsScope.bind({ namespace: NS }), {
+      const model = createFontSizeModel(ctx, getScope(NS), {
         initialSize, onSize: (size) => typography.setSize(size),
       })
       // Reuse the upstream namespace so existing conversation preferences and the
       // theme presenter's content-size updates remain authoritative.
-      const conversationModel = createFontSizeModel(ctx, ctx.settingsScope.bind({ namespace: 'ui-theme' }), { max: 17 })
+      const conversationModel = createFontSizeModel(ctx, getScope('ui-theme'), { max: 17 })
       ctx.effect(() => ctx.locale.register(NS, { zh, en }))
       ctx.effect(() => ctx.slots.inject('settings.general.item', () => ctx.slots.register({
         name: 'settings.general.item', id: 'desktop-ui-font-size', order: 10.5, locale: NS,
@@ -238,6 +241,12 @@ window.__ModuleLoader__.load({
         inject: () => ({ t: ctx.locale.bind(NS), model: conversationModel, inputId: 'dsh-conversation-font-size', prefix: 'conversation.' }),
       }, FontSizeRow)))
     }
-    return { name: 'ui-typography', inject: ['slots', 'locale', 'remote', 'settingsScope'], apply }
+    function apply(ctx) {
+      // 0.1.7 exposes configForms; older bundled runtimes expose settingsScope.
+      // Resolve either service after boot so an absent one cannot hold up the UI.
+      ctx.inject(['configForms'], (scoped) => activate(scoped, (namespace) => scoped.configForms.get(namespace)))
+      ctx.inject(['settingsScope'], (scoped) => activate(scoped, (namespace) => scoped.settingsScope.bind({ namespace })))
+    }
+    return { name: 'ui-typography', inject: ['slots', 'locale', 'remote'], apply }
   },
 })

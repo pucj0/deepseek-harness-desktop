@@ -36,7 +36,7 @@ app.whenReady().then(async () => {
       const scope = {
         getSnapshot: () => ({value: {fontSize: accepted}, writable: true}),
         subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn) },
-        set: async (_field, value) => { if (fail) throw Error('offline'); accepted = value; for (const fn of listeners) fn() },
+        set: async (_field, value) => { if (fail) return false; accepted = value; for (const fn of listeners) fn(); return true },
       };
       let conversationSize = 17;
       const conversationListeners = new Set();
@@ -48,11 +48,13 @@ app.whenReady().then(async () => {
           conversationSize = value;
           document.body.style.setProperty('--dsh-content-font-size', value + 'px');
           for (const fn of conversationListeners) fn();
+          return true;
         },
       };
       const ctx = {
         effect: fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) },
-        settingsScope: {bind: ({namespace}) => namespace === 'ui-theme' ? conversationScope : scope},
+        inject: (services, callback) => { if (services[0] === 'configForms') callback(ctx) },
+        configForms: {get: namespace => namespace === 'ui-theme' ? conversationScope : scope},
         locale: {register: () => () => {}, bind: () => key => key},
         slots: {inject: (_name, fn) => fn(), register: row => {
           if (row.id === 'font-size') window.conversationModel = row.inject().model;
@@ -61,6 +63,8 @@ app.whenReady().then(async () => {
         }},
       };
       window.typographyPlugin.apply(ctx);
+      const required = window.typographyPlugin.inject;
+      if (required.includes('configForms') || required.includes('settingsScope')) throw Error('settings service blocks plugin activation');
       const tick = () => new Promise(resolve => setTimeout(resolve, 0));
       const assert = (condition, message) => { if (!condition) throw Error(message) };
       const font = id => parseFloat(getComputedStyle(document.getElementById(id)).fontSize);
