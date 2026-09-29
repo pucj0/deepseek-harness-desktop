@@ -1,3 +1,15 @@
+# 1.7.1
+
+本版同时收口桌面更新与项目 Git 工作流：
+
+- 用户侧更新现在只检查 `pucj0/deepseek-harness-desktop` 的 GitHub Releases。一个 Release 同时交付 Electron 外壳、配套 Harness Runtime、桌面插件、安装包与 `latest*.yml`；不再查询 npm registry 或在 `userData/runtime` 热安装 `@deepseek-ai/dsh`。旧 `userData/runtime/current` 只作为遗留缓存忽略，不删除 session、workspace、设置、凭据或用户项目。
+- 项目级 Git 正式注册进 Harness 官方 Right Sidebar（`sidebarRightTabs.register`，Git 分支图标），复用原 Changes / Log / Graph / Diff / Commit / Conflict 组件；旧 `shell.overlay:review-project-changes` fixed Drawer 主入口已移除。Sidebar 的项目只取当前 Harness session 的 cwd，工作区与仓库请求继续由 generation guard 隔离，迟到的旧项目响应不会覆盖新项目。
+- 分支切换升级为 Smart Checkout：先正常 `git switch`；仅当 Git 返回 localChanges 时创建 `dsh-smart-switch:<uuid>:<from>:<to>` 安全储藏，记录不可变 OID，包含 staged / unstaged / untracked，切换后优先 `stash apply --index`，必要时从 stash 的 index parent 重建暂存路径。确认恢复且无冲突后才按 marker + id + OID 精确删除自己的 stash。
+- 恢复冲突留在目标分支并复用现有冲突编辑器，安全 stash 保留；无法自动恢复的条目显示在 **Auto-saved Changes / 自动保存的改动**，应用重启后直接扫描 Git stash 重新发现，可查看、恢复或切回来源分支并恢复。普通用户 stash 永不自动删除。
+- 中文术语统一：stage = **暂存**，stash = **储藏**；不再把 “Stash and Switch” 译成“暂存并切换”。
+
+---
+
 # 1.7.0
 
 修复设置页整体不可用：设置 → 模型 直接显示 `settings service is absent: mount @deepseek-ai/dsh-settings with @deepseek-ai/dsh-config-editor in the profile composition`，通用设置 → 权限 显示「不可用」。

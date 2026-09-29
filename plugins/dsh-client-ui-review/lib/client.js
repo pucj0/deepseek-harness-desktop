@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const react = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const UI_FONT = 'var(--dsw-font-family, "Segoe UI", "Microsoft YaHei", sans-serif)'
     const CODE_FONT = 'var(--ds-font-family-code, Consolas, "Microsoft YaHei", monospace)'
     const ACCENT = 'var(--dsw-alias-state-business-primary, #4d6bfe)'
@@ -470,22 +471,6 @@ window.__ModuleLoader__.load({
      */
     const CHIP_SLOT = 'dsh.desktop.composer.actions'
 
-    /** 项目级入口所在的槽位。
-     *
-     * 用 `shell.overlay`——**全局覆盖层，list 槽**，在项目页与会话内都会渲染，而且
-     * 由我自己决定位置（fixed），不依赖任何槽位的布局。
-     *
-     * 为什么不挂在别处（都是实测踩过的）：
-     *   * `conversation.hero.workspace`（项目页工作区选择器那一行）是 **single** 槽，
-     *     官方自己也在注册它；官方在前，我的被静默顶掉，入口从未出现。
-     *   * `sidebar.footer.action` 虽然渲染了，但注册后内容为空——项目页那个状态下
-     *     数据钩子拿不到，组件直接返回空。
-     *   * `conversation.composer.bar` 就是**输入框本体**，遮蔽它会顶掉输入框。
-     *
-     * 结论：要"无论有没有会话都能点开"，只有全局覆盖层可靠。
-     */
-    const HERO_SLOT = 'shell.overlay'
-
     /** 常驻面板开关的持久化键（按应用而非按会话记忆）。 */
     const PANEL_KEY = 'dsh.review.panelOpen'
 
@@ -564,7 +549,8 @@ window.__ModuleLoader__.load({
     const TAB_LOG = 'log'
 
     /** 标签类型标识：同时作为两个槽位的 key。 */
-    const KIND = 'review-changes'
+    const KIND = 'git'
+    const SIDEBAR_ID = 'dsh-client-ui-review/git'
 
     /** 概览入口的注册 id 与顺序。 */
     const ID = 'review-changes'
@@ -843,7 +829,7 @@ window.__ModuleLoader__.load({
       noBaseline: '本轮尚未记录基线。开始一轮对话后会自动记录。',
       notRepo: '当前工作区（{name}）不是 git 仓库。',
       clean: '本轮没有改动任何文件。',
-      projectTitle: '项目改动',
+      projectTitle: 'Git',
       noWorkspace: '当前没有可用的工作区。',
       projectIdle: '项目暂无改动',
       /**
@@ -963,6 +949,19 @@ window.__ModuleLoader__.load({
       // 所有文案都跟着 Harness 语言走；分支名、储藏消息、路径、SHA 一律原样显示（它们是
       // 用户自己的数据，翻译它们会让"我在哪个储藏里"这件事对不上）。
       stashesTitle: '储藏',
+      autoSavedChanges: '自动保存的改动',
+      restorePreviousChanges: '恢复切换前改动',
+      restoreLatestAutoSave: '恢复最近一次自动保存',
+      switchBackAndRestore: '切回并恢复',
+      switchAndRestoreLocalChanges: '切换并恢复本地改动',
+      viewSavedChanges: '查看保存的改动',
+      findSavedChanges: '查找保存的改动',
+      copyRestoreCommand: '复制恢复命令',
+      restoreCommandCopied: '恢复命令已复制',
+      autoSaveReminder: '上次离开此分支时保存了 {count} 个修改',
+      autoSaveRestored: '已恢复切换分支前的 {count} 个修改',
+      noRecoverableAutoSave: '没有找到可恢复的自动保存',
+      safetyBackupKept: '安全备份仍保留在储藏中',
       stashChangesTitle: '储藏改动',
       stashQuick: '直接储藏',
       stashQuickHint: '直接储藏当前改动（不带消息，不含未跟踪文件）',
@@ -1345,7 +1344,7 @@ window.__ModuleLoader__.load({
       noBaseline: 'No baseline recorded for this turn yet. It is captured when a turn starts.',
       notRepo: 'The current workspace ({name}) is not a git repository.',
       clean: 'This turn did not change any file.',
-      projectTitle: 'Project changes',
+      projectTitle: 'Git',
       noWorkspace: 'No workspace is available.',
       projectIdle: 'No project changes',
       /** Multi-repository project: the badge number is the sum over all repositories. */
@@ -1458,6 +1457,19 @@ window.__ModuleLoader__.load({
       // Branch names, stash messages, paths and SHAs are always shown as-is: they are the
       // user's own data, and translating them would make "which stash am I in" ambiguous.
       stashesTitle: 'Stashes',
+      autoSavedChanges: 'Auto-saved Changes',
+      restorePreviousChanges: 'Restore Previous Changes',
+      restoreLatestAutoSave: 'Restore Latest Auto-save',
+      switchBackAndRestore: 'Switch Back and Restore',
+      switchAndRestoreLocalChanges: 'Switch and Restore Local Changes',
+      viewSavedChanges: 'View Saved Changes',
+      findSavedChanges: 'Find Saved Changes',
+      copyRestoreCommand: 'Copy Restore Command',
+      restoreCommandCopied: 'Restore command copied',
+      autoSaveReminder: '{count} changes were saved before you left this branch',
+      autoSaveRestored: 'Restored {count} changes saved before switching branches',
+      noRecoverableAutoSave: 'No recoverable auto-save was found',
+      safetyBackupKept: 'The safety backup is still preserved in the stash',
       stashChangesTitle: 'Stash changes',
       stashQuick: 'Stash now',
       stashQuickHint: 'Stash the current changes immediately (no message, untracked files left alone)',
@@ -1941,10 +1953,9 @@ window.__ModuleLoader__.load({
       const listeners = new Set()
       let pending = false
       return {
-        /** 请求"打开抽屉并切到 Log"（同时把抽屉打开）。 */
+        /** 请求官方 Sidebar 中的 Git 标签切到 Log。 */
         request: () => {
           pending = true
-          panelStore.set(true)
           for (const listener of listeners) listener()
         },
         /** 是否还有未被消费的请求。 */
@@ -4504,13 +4515,8 @@ window.__ModuleLoader__.load({
     // `/history`。
 
     /**
-     * 常驻的右侧面板。
-     *
-     * 自绘而不是用官方右侧栏：官方那套内容槽带 `scope: "session"`，在项目页（没有会话）
-     * 时不渲染，且 `sidebarRightTabs` 没有任何被采纳的会话——实测 `openTabIn` 会静默
-     * 返回而不报错。因此项目级面板只能自己管理。
-     *
-     * 位置用 fixed 相对视口，避免被祖先裁剪（此前自制浮层就因此在小窗口里只露出顶部）。
+     * 可复用的项目 Git 面板。正式入口由 Harness 官方 Right Sidebar 承载；`embedded`
+     * 模式服从 Sidebar 自己的尺寸与 resize，不创建 fixed 覆盖层或第二套拖动手柄。
      *
      * 面板**不提供工作区选择器**，也不显示工作区路径：工作区由当前对话决定（见
      * `useCurrentWorkspace`），跟随对话自动切换；把它做成可编辑并列出绝对路径，既
@@ -4526,7 +4532,9 @@ window.__ModuleLoader__.load({
        * 丢了），只说"正在切换项目…"。等 cwd 到手，下一帧就是新项目的数据。
        */
       const switching = props?.switching === true
-      const open = usePanelOpen()
+      const embedded = props?.embedded === true
+      const drawerOpen = usePanelOpen()
+      const open = embedded || drawerOpen
       const rootRef = react.useRef(null)
 
       /** 抽屉宽度（像素）。初值直接读持久化值，因此重新打开不会先闪一下默认宽度。 */
@@ -4541,7 +4549,7 @@ window.__ModuleLoader__.load({
        * 缩回去——那时手柄已经贴着屏幕左边缘了。
        */
       react.useEffect(() => {
-        if (!open) return undefined
+        if (!open || embedded) return undefined
         const onResize = () => {
           const clamped = clampPanelWidth(dragWidthRef.current)
           dragWidthRef.current = clamped
@@ -4549,7 +4557,7 @@ window.__ModuleLoader__.load({
         }
         window.addEventListener('resize', onResize)
         return () => window.removeEventListener('resize', onResize)
-      }, [open])
+      }, [open, embedded])
 
       /**
        * 拖动左边缘调整宽度。
@@ -4622,7 +4630,7 @@ window.__ModuleLoader__.load({
        * "点外部就关"变得时灵时不灵。
        */
       react.useEffect(() => {
-        if (!open) return undefined
+        if (!open || embedded) return undefined
         const onPointerDown = (event) => {
           const node = rootRef.current
           if (node !== null && node.contains(event.target)) return
@@ -4651,7 +4659,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('mousedown', onPointerDown, true)
           document.removeEventListener('keydown', onKeyDown)
         }
-      }, [open])
+      }, [open, embedded])
 
       // 两种语义分别取数据：
       //   * 会话内的"本轮改动"仍然走 `/changes`（它的基线是这一轮开始时的快照，与项目级
@@ -4854,14 +4862,14 @@ window.__ModuleLoader__.load({
             // 这样与 IDE 的提交面板一致：内容区更高（提交记录能一屏看更多），且因为
             // 贴着窗口右边、占满高度，不会与窗口控件或页面头部图标抢位置——浮动面板
             // 会挡住它们（实际反馈）。
-            position: 'fixed',
-            top: 0,
-            right: 0,
-            bottom: 0,
-            height: '100vh',
-            zIndex: 9998,
+            position: embedded ? 'relative' : 'fixed',
+            top: embedded ? undefined : 0,
+            right: embedded ? undefined : 0,
+            bottom: embedded ? undefined : 0,
+            height: embedded ? '100%' : '100vh',
+            zIndex: embedded ? undefined : 9998,
             // 宽度可拖动（见下面的 resizer）；上限随视口收窄，避免把主界面挤没。
-            width: `${width}px`,
+            width: embedded ? '100%' : `${width}px`,
             // 上限就是**视口本身**（需求 35/63）：宽度已经由 `panelWidthBounds` 唯一的
             // 一处算好了（视口 < 500 时就是 `100vw`），这里再减 64px 会让窄窗口里的抽屉
             // 比"代码算出来的宽度"窄一截——屏幕上表现为右侧留出一条谁也点不到的缝，
@@ -4869,17 +4877,17 @@ window.__ModuleLoader__.load({
             maxWidth: '100vw',
             display: 'flex',
             flexDirection: 'column',
-            borderLeft: '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
+            borderLeft: embedded ? 'none' : '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
             background: 'var(--dsw-alias-bg-base, #fff)',
             color: 'var(--dsw-alias-label-primary)',
             fontFamily: UI_FONT,
-            boxShadow: '-12px 0 36px rgba(0,0,0,.10)',
+            boxShadow: embedded ? 'none' : '-12px 0 36px rgba(0,0,0,.10)',
             overflow: 'hidden',
           },
         },
         // 左边缘的宽度手柄。用 button 而不是 div：它能被 Tab 聚焦，从而用方向键调整
         // （`role="separator"` 表达"这是两个区域之间的可调分隔"）。
-        react.createElement('button', {
+        embedded ? null : react.createElement('button', {
           type: 'button',
           'data-review-resizer': '',
           role: 'separator',
@@ -4957,7 +4965,7 @@ window.__ModuleLoader__.load({
               }),
             ),
           ),
-          react.createElement(
+          embedded ? null : react.createElement(
             'button',
             {
               type: 'button',
@@ -5944,6 +5952,41 @@ window.__ModuleLoader__.load({
       const hours = Math.floor(minutes / 60)
       if (hours < 24) return { text: t('stashTimeHours', { count: hours }), exact }
       return { text: t('stashTimeDays', { count: Math.floor(hours / 24) }), exact }
+    }
+
+    function smartStashInfo(entry) {
+      const message = String(entry?.message ?? '')
+      if (!message.startsWith('dsh-smart-switch:')) return undefined
+      const fields = message.slice('dsh-smart-switch:'.length).split(':')
+      if (fields.length < 3 || !/^[0-9a-f-]{36}$/iu.test(fields[0])) return undefined
+      const discovered = entry?.autoSave
+      return {
+        id: fields[0],
+        fromBranch: fields[1],
+        toBranch: fields.slice(2).join(':'),
+        stashOid: typeof discovered?.stashOid === 'string' ? discovered.stashOid : String(entry?.sha ?? ''),
+        files: typeof discovered?.files === 'number' ? discovered.files : undefined,
+      }
+    }
+
+    function AutoSaveRow(props) {
+      const { t, entry, currentBranch, busy, onOpen, onRestore, onCopy } = props
+      const info = smartStashInfo(entry)
+      if (info === undefined) return null
+      const sameBranch = currentBranch === info.fromBranch
+      return react.createElement(
+        'div',
+        { 'data-staging-auto-save': info.id, style: { padding: '8px 10px 8px 26px', borderBottom: `1px solid ${BORDER}` } },
+        react.createElement('div', { style: { fontWeight: 600, fontSize: uiPx(11.5) } }, `${info.fromBranch} → ${info.toBranch}`),
+        react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(10.5), marginTop: '2px' } }, stashTime(t, entry?.date).text),
+        react.createElement(
+          'div',
+          { style: { display: 'flex', gap: '6px', marginTop: '6px' } },
+          react.createElement('button', { type: 'button', disabled: busy, onClick: () => onOpen(entry.ref) }, t('viewSavedChanges')),
+          react.createElement('button', { type: 'button', disabled: busy, onClick: () => onRestore(info, sameBranch) }, sameBranch ? t('restorePreviousChanges') : t('switchBackAndRestore')),
+          react.createElement('button', { type: 'button', disabled: busy || info.stashOid === '', onClick: () => onCopy(info) }, t('copyRestoreCommand')),
+        ),
+      )
     }
 
     /** 储藏列表里的一行：`stash@{n}` + 消息 + 原分支 + 时间。 */
@@ -9193,6 +9236,8 @@ window.__ModuleLoader__.load({
       const [stashBusy, setStashBusy] = react.useState(false)
       /** 储藏列表的刷新令牌（写操作之后 +1）。 */
       const [stashRevision, setStashRevision] = react.useState(0)
+      const autoSavedStashes = stashes.filter((entry) => smartStashInfo(entry) !== undefined)
+      const ordinaryStashes = stashes.filter((entry) => smartStashInfo(entry) === undefined)
 
       // ---- 修改最后一次提交（amend）与撤销提交 -------------------------------
       //
@@ -9428,9 +9473,21 @@ window.__ModuleLoader__.load({
         const token = (stashToken.current += 1)
         setStashPhase((current) => (current === 'idle' ? 'loading' : current))
         try {
-          const result = await fetchStashList({ workspace: mine, ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }) })
+          const query = { workspace: mine, ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }) }
+          // `/auto-saves` deliberately rescans Git's stash reflog every time. Merge
+          // its stable OID/file metadata into the ordinary stash rows so a restart
+          // or lost UI state can never make a marked safety copy disappear.
+          const [result, autoResult] = await Promise.all([
+            fetchStashList(query),
+            callGitbarGet('auto-saves', query),
+          ])
           if (stashToken.current !== token || workspaceRef.current !== mine) return undefined
-          const list = Array.isArray(result?.stashes) ? result.stashes : []
+          const discovered = new Map(
+            (Array.isArray(autoResult?.autoSaves) ? autoResult.autoSaves : [])
+              .map((entry) => [entry?.stashOid, entry]),
+          )
+          const list = (Array.isArray(result?.stashes) ? result.stashes : [])
+            .map((entry) => ({ ...entry, ...(discovered.has(entry?.sha) ? { autoSave: discovered.get(entry.sha) } : {}) }))
           setStashes(list)
           setStashPhase('ready')
           setStashError('')
@@ -9562,6 +9619,58 @@ window.__ModuleLoader__.load({
         },
         [workspace, repositoryRoot, t],
       )
+
+      const restoreAutoSave = react.useCallback(async (info, sameBranch) => {
+        const mine = workspace
+        setStashBusy(true)
+        setTrouble(null)
+        try {
+          const result = await callGitbarRoute(sameBranch ? 'auto-save/restore' : 'auto-save/switch-and-restore', {
+            workspace: mine,
+            ...(repositoryRoot === '' ? {} : { repository: repositoryRoot }),
+            id: info.id,
+          })
+          await gitSnapshots.invalidate(mine).catch(() => undefined)
+          if (workspaceRef.current !== mine) return result
+          if (result?.conflicted === true) {
+            setNotice(`${t('stashApplyConflicted')} ${t('safetyBackupKept')}`)
+            const first = result?.conflictFiles?.[0]?.path
+            if (typeof first === 'string') setSelectedFile(first)
+          } else {
+            setNotice(t('autoSaveRestored', { count: info.files ?? 0 }))
+          }
+          setStashRevision((value) => value + 1)
+          return result
+        } catch (cause) {
+          if (workspaceRef.current !== mine) return undefined
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          setTrouble({ key: '', detail: String(error.detail ?? error.message), code: error.code ?? '' })
+          return undefined
+        } finally {
+          if (workspaceRef.current === mine) setStashBusy(false)
+        }
+      }, [workspace, repositoryRoot, t])
+
+      const copyAutoSaveRestoreCommand = react.useCallback(async (info) => {
+        const oid = typeof info?.stashOid === 'string' ? info.stashOid : ''
+        if (!/^[0-9a-f]{40,64}$/iu.test(oid)) return
+        const command = `git stash apply --index ${oid}`
+        try {
+          if (globalThis.navigator?.clipboard?.writeText !== undefined) {
+            await globalThis.navigator.clipboard.writeText(command)
+          } else if (typeof document?.execCommand === 'function') {
+            const area = document.createElement('textarea')
+            area.value = command
+            document.body.appendChild(area)
+            area.select()
+            document.execCommand('copy')
+            area.remove()
+          }
+          setNotice(t('restoreCommandCopied'))
+        } catch (cause) {
+          setTrouble({ key: '', detail: String(cause?.message ?? cause), code: '' })
+        }
+      }, [t])
 
       /**
        * 冲突面板里的「继续 / 中止 / 标记已解决」之后，父级要做的两件事。
@@ -10412,7 +10521,31 @@ window.__ModuleLoader__.load({
       //
       // 同一个文件同时有已暂存与未暂存改动（porcelain 的 `MM`）时会出现在两组里——这是
       // IDEA 的行为：一组回答"索引里有什么"，另一组回答"工作区还有什么没进索引"。
+      const currentBranchAutoSaves = autoSavedStashes.filter((entry) => smartStashInfo(entry)?.fromBranch === (snapshot?.branch ?? ''))
+      const latestAutoSave = autoSavedStashes[0]
+      const latestCurrentBranchAutoSave = currentBranchAutoSaves[0]
       const fileGroups = [
+        latestCurrentBranchAutoSave === undefined
+          ? null
+          : react.createElement(
+              'div',
+              {
+                key: 'auto-save-reminder',
+                'data-auto-save-reminder': '',
+                style: { margin: '4px 6px', padding: '8px 10px', borderRadius: '7px', background: 'color-mix(in srgb, #d99a00 13%, transparent)', color: 'var(--dsw-alias-label-primary)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: uiPx(11.5) },
+              },
+              react.createElement('span', { style: { flex: '1 1 auto' } }, `⚠ ${t('autoSaveReminder', { count: smartStashInfo(latestCurrentBranchAutoSave)?.files ?? 0 })}`),
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  'data-auto-save-reminder-restore': '',
+                  disabled: busy || stashBusy,
+                  onClick: () => void restoreAutoSave(smartStashInfo(latestCurrentBranchAutoSave), true),
+                },
+                t('restorePreviousChanges'),
+              ),
+            ),
         conflicted.length === 0
           ? null
           : react.createElement(
@@ -10696,7 +10829,72 @@ window.__ModuleLoader__.load({
          *
          * 行按 `ref / 消息 / 原分支 / 时间` 展示，点一条就在右侧看它的改动文件与差异。
          */
-        stashes.length === 0 && stashCountSnapshot !== true
+        react.createElement(
+              'div',
+              { key: 'g:auto-saves', 'data-staging-group': 'auto-saves' },
+              react.createElement(StagingGroupHeader, {
+                t,
+                id: 'auto-saves',
+                label: t('autoSavedChanges'),
+                count: autoSavedStashes.length,
+                collapsed: collapsed.autoSaves === true,
+                onToggle: () => setCollapsed((value) => ({ ...value, autoSaves: !value.autoSaves })),
+                action: react.createElement(
+                  'div',
+                  { style: { display: 'flex', gap: '4px' } },
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-auto-save-latest': '',
+                      disabled: busy || stashBusy || latestAutoSave === undefined,
+                      title: t('restoreLatestAutoSave'),
+                      onClick: (event) => {
+                        event.stopPropagation()
+                        if (latestAutoSave === undefined) {
+                          setNotice(t('noRecoverableAutoSave'))
+                          return
+                        }
+                        const info = smartStashInfo(latestAutoSave)
+                        void restoreAutoSave(info, (snapshot?.branch ?? '') === info?.fromBranch)
+                      },
+                    },
+                    t('restoreLatestAutoSave'),
+                  ),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-auto-save-find': '',
+                      disabled: busy || stashBusy,
+                      title: t('findSavedChanges'),
+                      onClick: (event) => {
+                        event.stopPropagation()
+                        void loadStashes().then((list) => {
+                          if (Array.isArray(list) && !list.some((entry) => smartStashInfo(entry) !== undefined)) setNotice(t('noRecoverableAutoSave'))
+                        })
+                      },
+                    },
+                    t('findSavedChanges'),
+                  ),
+                ),
+              }),
+              collapsed.autoSaves === true
+                ? null
+                : autoSavedStashes.length === 0
+                  ? react.createElement('div', { 'data-auto-save-empty': '', style: { padding: '6px 10px 8px 26px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } }, t('noRecoverableAutoSave'))
+                  : autoSavedStashes.map((entry) => react.createElement(AutoSaveRow, {
+                    key: `auto:${entry.sha}`,
+                    t,
+                    entry,
+                    currentBranch: snapshot?.branch ?? '',
+                    busy: busy || stashBusy,
+                    onOpen: (ref) => void openStash(ref),
+                    onRestore: (info, sameBranch) => void restoreAutoSave(info, sameBranch),
+                    onCopy: (info) => void copyAutoSaveRestoreCommand(info),
+                  })),
+            ),
+        ordinaryStashes.length === 0 && stashCountSnapshot !== true
           ? null
           : react.createElement(
               'div',
@@ -10707,7 +10905,7 @@ window.__ModuleLoader__.load({
                 label: t('stashesTitle'),
                 // 数字用**列表长度**（不是快照里的快速计数）：用户看到的是列出来的行，
                 // 标题上的数字必须与行数对得上。
-                count: stashes.length,
+                count: ordinaryStashes.length,
                 collapsed: collapsed.stashes === true,
                 onToggle: () => setCollapsed((value) => ({ ...value, stashes: !value.stashes })),
                 action: null,
@@ -10729,7 +10927,7 @@ window.__ModuleLoader__.load({
                             { style: { padding: '4px 8px 4px 26px', color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(11.5) } },
                             t('stashLoading'),
                           )
-                        : stashes.map((entry) =>
+                        : ordinaryStashes.map((entry) =>
                             react.createElement(StashRow, {
                               key: `stash:${entry.ref}`,
                               t,
@@ -12598,27 +12796,26 @@ window.__ModuleLoader__.load({
      */
     function ReviewTab(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      // 标签正文的注入按会话作用域做，因此 sessionId 可直接使用。
       const sessionId = props?.sessionId
-      // **无条件**取钩子；"有没有 sessionId"交给选择器表达（见 useLatchedHook）。
       const useSessions = useLatchedHook(props?.useSessions, absentSessions)
-      const workspace = useSessions((state) =>
-        sessionId === undefined ? undefined : asPath(state?.byId?.[sessionId]?.cwd),
-      )
-
-      const { state, reload } = useChanges(workspace, sessionId)
-
+      // The Sidebar follows Harness's *current* session first. `sessionId` is
+      // only a bootstrap fallback while the store has not exposed `current`.
+      // Never substitute process.cwd/recent/first workspace.
+      const workspace = useSessions((state) => {
+        const activeId = state?.current ?? sessionId
+        return activeId === undefined ? undefined : asPath(state?.byId?.[activeId]?.cwd)
+      })
+      const switching = sessionId !== undefined && workspace === undefined
       return react.createElement(
-        'div',
-        { 'data-desktop-review-surface': 'tab', style: { padding: '16px', overflowY: 'auto', height: '100%', boxSizing: 'border-box', fontFamily: UI_FONT } },
-        react.createElement(FileList, {
+        ProjectGitPanelErrorBoundary,
+        { t, workspace, embedded: true },
+        react.createElement(ReviewPanel, {
           t,
-          result: state.result,
-          phase: state.phase,
-          message: state.message,
           workspace,
           sessionId,
-          onChanged: reload,
+          scope: 'workspace',
+          switching,
+          embedded: true,
         }),
       )
     }
@@ -12626,7 +12823,13 @@ window.__ModuleLoader__.load({
     /** 侧边栏标签的标题。 */
     function ReviewTabTitle(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      return react.createElement('span', { style: { fontSize: uiPx(12), fontFamily: UI_FONT } }, t('title'))
+      const Icon = primitives.IconBranchOutline16
+      return react.createElement(
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: uiPx(12), fontFamily: UI_FONT } },
+        typeof Icon === 'function' ? react.createElement(Icon, { size: 16 }) : null,
+        'Git',
+      )
     }
 
     // =========================================================================
@@ -14519,15 +14722,15 @@ window.__ModuleLoader__.load({
                 'data-review-panel-error': '',
                 role: 'alert',
                 style: {
-                  position: 'fixed',
-                  top: '84px',
-                  right: '14px',
-                  zIndex: 9998,
+                  position: this.props?.embedded === true ? 'relative' : 'fixed',
+                  top: this.props?.embedded === true ? undefined : '84px',
+                  right: this.props?.embedded === true ? undefined : '14px',
+                  zIndex: this.props?.embedded === true ? undefined : 9998,
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '8px',
                   boxSizing: 'border-box',
-                  width: 'min(460px, calc(100vw - 28px))',
+                  width: this.props?.embedded === true ? '100%' : 'min(460px, calc(100vw - 28px))',
                   maxHeight: 'min(60vh, 460px)',
                   overflowY: 'auto',
                   padding: '14px',
@@ -14537,7 +14740,7 @@ window.__ModuleLoader__.load({
                   color: 'var(--dsw-alias-label-primary, #202124)',
                   fontFamily: UI_FONT,
                   fontSize: uiPx(12.5),
-                  boxShadow: '0 12px 36px rgba(0,0,0,.12)',
+                  boxShadow: this.props?.embedded === true ? 'none' : '0 12px 36px rgba(0,0,0,.12)',
                 },
               },
               react.createElement('div', { style: { fontWeight: 600, color: REMOVED } }, t('panelCrashedTitle')),
@@ -14566,7 +14769,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { style: { display: 'flex', gap: '8px' } },
                 button('reload', t('panelReload'), this.onRetry, true),
-                button('close', t('close'), this.onClose, false),
+                typeof this.props?.onClose === 'function' ? button('close', t('close'), this.onClose, false) : null,
               ),
             )
           }
@@ -16634,9 +16837,9 @@ window.__ModuleLoader__.load({
        *
        * 调用方（gitbar）用可选链，本插件没加载时它什么也不会发生。
        *
-       * **导航方式**：提交图现在只在项目级 Git 抽屉的 Log 页签里（独立的侧栏入口已删除），
-       * 因此这里不再 `ctx.layout.selectPanel(...)`，而是下一条"打开抽屉并切到 Log"的一次性
-       * 意图（见 panelLogIntent）。抽屉打开、Log 挂载之后，`CommitGraphView` 会消费
+       * **导航方式**：提交图现在只在官方 Right Sidebar 的 Git 标签里（独立入口已删除），
+       * 因此这里不再 `ctx.layout.selectPanel(...)`，而是打开 `git` 标签并发送一次切到 Log 的
+       * 意图（见 panelLogIntent）。标签挂载之后，`CommitGraphView` 会消费
        * `compareRequest` 并把比较视图显示出来。
        */
       if (typeof window !== 'undefined') {
@@ -16653,9 +16856,11 @@ window.__ModuleLoader__.load({
               b,
               fromBranch: typeof request.fromBranch === 'string' ? request.fromBranch : '',
             })
-            // 打开抽屉并落在 Log 页签：不这么做的话，请求会一直挂到用户自己切到 Log 为止
-            // （旧行为），用户点「与当前比较」之后看起来"什么都没发生"。
+            // 打开官方 Git Sidebar 并落在 Log 页签：不这么做的话，请求会一直挂到用户
+            // 自己切到 Log 为止，用户点「与当前比较」之后看起来"什么都没发生"。
             panelLogIntent.request()
+            const sidebar = ctx.sidebarRight
+            if (typeof sidebar?.openTab === 'function') sidebar.openTab(KIND, {})
           },
         }
         ctx.effect(() => () => {
@@ -16684,42 +16889,6 @@ window.__ModuleLoader__.load({
         'dsh-client-ui-review: review chip',
       )
 
-      // 项目页的常驻面板入口。挂在这个槽位是因为它**在没有会话时也渲染**——
-      // 官方右侧栏的内容槽带 scope: "session"，项目页根本没有它（实测）。
-      ctx.effect(
-        () =>
-          ctx.slots.inject(HERO_SLOT, () =>
-            ctx.slots.register(
-              {
-                name: HERO_SLOT,
-                id: 'review-project-changes',
-                order: 30,
-                locale: NS,
-                // 只注入文案函数。**绝不能注入 useSessions / useWorkspaces。**
-                //
-                // 这两个是渲染器提供给每个 root 槽位的**标准钩子**：官方
-                // `dsh-client-ui-session` 用 `slots.provideRoot({ hooks: { sessions } })`、
-                // `dsh-client-ui-workspace` 同理提供了 `workspaces`，渲染器按
-                // `use<Name>` 约定把它们绑成 props（`use${Capitalize<N>}`）。
-                //
-                // 而渲染器合并 props 的顺序是 `{ ...kit, ...injected, ... }`——
-                // **inject 会盖掉 kit**，且 `bindInjectSources` 不会剔除 undefined 值。
-                // 这里此前写的是 `ctx.sessions?.useSessions ?? ctx.sessions?.use`，而
-                // sessions 服务上并没有这两个成员（它只有 list / open / create / fork …），
-                // 于是注入进去的其实是一个 `undefined`，恰好把标准钩子覆盖掉，组件里
-                // `typeof useSessions === 'function'` 永远为假。
-                //
-                // 这正是"项目级面板拿不到当前会话的工作区"的真正原因。1.3.1 把它误判为
-                // "全局覆盖层不注入 useSessions"，于是改成问宿主要 `process.cwd()`——那
-                // 只是绕过了本插件自己造成的遮蔽。什么都不注入，标准钩子就会原样送到。
-                inject: () => ({ t: ctx.locale.bind(NS) }),
-              },
-              HeroChangesTrigger,
-            ),
-          ),
-        'dsh-client-ui-review: project changes trigger',
-      )
-
       // 把标签**类型**注册进侧边栏的类型表。
       //
       // 这一步与下面的槽位注册是两件事，缺一不可：
@@ -16731,10 +16900,16 @@ window.__ModuleLoader__.load({
         const registry = ctx.sidebarRightTabs
         if (registry === undefined) return () => undefined
         return registry.register({
-          id: KIND,
+          id: SIDEBAR_ID,
           kind: KIND,
-          // 本标签没有对应的资源地址；`title` 只在标签栏显示固定文案。
-          title: () => ctx.locale.bind(NS)('title'),
+          priority: 'extension',
+          title: () => 'Git',
+          guide: [{
+            order: 20,
+            title: () => 'Git',
+            description: () => ctx.locale.bind(NS)('projectTitle'),
+            icon: primitives.IconBranchOutline16,
+          }],
         })
       }, 'dsh-client-ui-review: tab type')
 
@@ -16745,7 +16920,7 @@ window.__ModuleLoader__.load({
             ctx.slots.register(
               {
                 name: TAB_SLOT,
-                key: KIND,
+                key: SIDEBAR_ID,
                 locale: NS,
                 inject: () => ({ t: ctx.locale.bind(NS) }),
               },
@@ -16761,7 +16936,7 @@ window.__ModuleLoader__.load({
             ctx.slots.register(
               {
                 name: TAB_TITLE_SLOT,
-                key: KIND,
+                key: SIDEBAR_ID,
                 locale: NS,
                 inject: () => ({ t: ctx.locale.bind(NS) }),
               },

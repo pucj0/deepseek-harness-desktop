@@ -391,7 +391,7 @@ const ctx = {
 }
 loaded.apply(ctx)
 
-const HERO_KEY = 'shell.overlay:review-project-changes'
+const HERO_KEY = 'sidebar.right.pane.tab:dsh-client-ui-review/git'
 const Hero = entries.get(HERO_KEY)
 const injected = injectedFaces.get(HERO_KEY)
 
@@ -483,15 +483,10 @@ async function drain() {
   return drainView(Hero, props, heroKey)
 }
 
-/** 打开抽屉：点右上角那个入口按钮（已经开着就不点，否则会把它关掉）。 */
+/** 官方 Sidebar 挂载正文后 Git 面板直接可见。 */
 async function openDrawer(label) {
   heroKey = `hero-${label}-${heroSeq++}`
-  let nodes = await drain()
-  if (nodes.some((n) => n.props?.['data-review-tablist'] !== undefined)) return true
-  const trigger = nodes.find((n) => n.type === 'button' && n.props?.title === 'projectTitle')
-  if (trigger === undefined) return false
-  trigger.props.onClick()
-  nodes = await drain()
+  const nodes = await drain()
   return nodes.some((n) => n.props?.['data-review-tablist'] !== undefined)
 }
 
@@ -544,7 +539,7 @@ console.log('=== A. 正常数据：点 Log 之后图、抽屉、右上角入口�
   has('   图渲染出来', rowsOf(nodes, 'data-graph-view').length === 1)
   check('   两条提交各一行', rowsOf(nodes, 'data-graph-row').length, 2)
   has('   没有错误页', rowsOf(nodes, 'data-graph-error').length === 0)
-  has('   右上角入口还在', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板还在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   has('   页签栏还在（抽屉没被带走）', rowsOf(nodes, 'data-review-tablist').length === 1)
   check('   没有走到槽位级隔离', slotErrors.length, 0)
 }
@@ -567,7 +562,7 @@ console.log('=== B. host 少给/给错字段：不崩，坏数据被挡在渲染
     console.log('  [debug] 图请求数 =', requests.filter((r) => r.url.includes('/graph')).length)
   }
   check('   坏数据不影响好数据（3 行）', rowsOf(nodes, 'data-graph-row').length, 3)
-  has('   右上角入口还在', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板还在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   has('   页签栏还在', rowsOf(nodes, 'data-review-tablist').length === 1)
   // 缺 parents 的那条不该画出"向下的线"：根提交的判断不能因为字段缺失而崩。
   has('   缺 parents 的提交也能画出泳道', rowsOf(nodes, 'data-graph-edge').length > 0)
@@ -583,7 +578,7 @@ console.log('=== B. host 少给/给错字段：不崩，坏数据被挡在渲染
   has('   详情栏渲染出来', rowsOf(detailNodes, 'data-graph-detail').length === 1)
   has('   文件列表为空而不是崩掉', rowsOf(detailNodes, 'data-graph-files').length === 1)
   check('   文件数为 0', textOf(rowsOf(detailNodes, 'data-graph-file-count')[0] ?? null), 'graphFiles')
-  has('   右上角入口还在', rowsOf(detailNodes, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板还在', rowsOf(detailNodes, 'data-desktop-review-surface').length === 1)
   has('   页签栏还在', rowsOf(detailNodes, 'data-review-tablist').length === 1)
   check('   详情这段也没走到槽位级隔离', slotErrors.length, 0)
   detailPayload = { isRepo: true, commit: { hash: 'a'.repeat(40), short: 'aaaaaaa' }, files: [], containingBranches: ['main'] }
@@ -604,9 +599,9 @@ console.log('=== C. 图子树真的抛错：边界接住，入口与抽屉存活
   has('   出现降级页', rowsOf(crashed, 'data-graph-error').length === 1)
   has('   图本身不再渲染', rowsOf(crashed, 'data-graph-view').length === 0)
   // 这三条是这次修复的**核心**：崩溃只能降级 Log 页签，不许带走抽屉与右上角入口。
-  has('   右上角入口存活', rowsOf(crashed, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板存活', rowsOf(crashed, 'data-desktop-review-surface').length === 1)
   has('   页签栏存活', rowsOf(crashed, 'data-review-tablist').length === 1)
-  has('   抽屉外壳存活', rowsOf(crashed, 'data-review-resizer').length === 1)
+  has('   Sidebar 外壳存活', rowsOf(crashed, 'data-desktop-review-surface').length === 1)
   // 最能说明"这不是面板被关掉"的一条：**整块入口没有被槽位级隔离换掉**。
   check('   没有走到槽位级隔离（入口还在原位）', slotErrors.length, 0)
   // 诊断信息：界面、console（`window` 上的记录）、组件名与字段都要有。
@@ -626,7 +621,7 @@ console.log('=== C. 图子树真的抛错：边界接住，入口与抽屉存活
   has('   降级页消失', rowsOf(retried, 'data-graph-error').length === 0)
   has('   图回来了', rowsOf(retried, 'data-graph-view').length === 1)
   check('   重试后重新拉了图', rowsOf(retried, 'data-graph-row').length, 2)
-  has('   右上角入口仍在', rowsOf(retried, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板仍在', rowsOf(retried, 'data-desktop-review-surface').length === 1)
   has('   重试计数已递增', rowsOf(retried, 'data-log-retry')[0]?.props?.['data-log-retry'] === '1')
 }
 
@@ -637,14 +632,14 @@ console.log('=== D. Log → Changes：切回来照常工作，改动数量不变
   has('D) 抽屉打开', await openDrawer('switch'))
   has('   切到 Log', await clickNow('data-review-tab', 'log'))
   await drain()
-  has('   入口与抽屉都在', (await drain()).some((n) => n.props?.['data-review-trigger'] !== undefined))
+  has('   Sidebar Git 面板仍在', (await drain()).some((n) => n.props?.['data-desktop-review-surface'] !== undefined))
   has('   切回 Changes', await clickNow('data-review-tab', 'changes'))
   const nodes = await drain()
   has('   暂存/提交区块回来了', rowsOf(nodes, 'data-staging').length === 1)
   has('   提交卡片回来了', rowsOf(nodes, 'data-staging-commit-card').length === 1)
   has('   图不再渲染', rowsOf(nodes, 'data-graph-view').length === 0)
   has('   没有错误页', rowsOf(nodes, 'data-graph-error').length === 0)
-  has('   右上角入口仍在', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   Sidebar Git 面板仍在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   // 头栏计数与列表来自同一份快照：切页签不该改变它。
   const counts = rowsOf(nodes, 'data-review-count').map((n) => textOf(n))
   has('   项目改动数量等于文件数', counts.includes(String(CHANGES.files.length)))

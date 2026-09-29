@@ -600,7 +600,7 @@ check('2) 区块已渲染', find('data-staging') !== null, 'true')
   const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
   // 三组，与 IDEA 的 Git 工具窗一致：索引里有什么（Staged）、工作区还剩什么（Changes）、
   // 还没进版本管理的新文件（Unversioned）。分组全部由**同一份快照**过滤得出。
-  check('   三组：已暂存 + 更改 + 未跟踪', groups.join(','), 'staged,unstaged,untracked')
+  check('   三组改动 + 自动保存区', groups.join(','), 'staged,unstaged,untracked,auto-saves')
   const rows = findAll('data-staging-row')
   const trackedRows = rows.filter((r) => r.props['data-staging-side'] !== 'untracked').map((r) => r.props['data-staging-row'])
   // 已跟踪的每个文件至少一行；`MM` 的 both.txt 在两组里各出现一次（IDEA 也是这样）。
@@ -850,7 +850,7 @@ console.log('=== 9b. 提交：默认全选、一步到位、可排除 ===')
   await mount()
   // 三组都在，且 `MM` 的文件在两组里各出现一次（这是"分组回答不同问题"的直接证据）。
   const groups = [...new Set(findAll('data-staging-group').map((n) => n.props['data-staging-group']))]
-  check('9b) 三组都在', groups.join(','), 'staged,unstaged,untracked')
+  check('9b) 三组改动 + 自动保存区都在', groups.join(','), 'staged,unstaged,untracked,auto-saves')
   const bothRows = findAll('data-staging-row').filter((n) => n.props['data-staging-row'] === 'both.txt' && n.props['data-staging-side'] !== 'untracked')
   check('   `MM` 的文件在两组里各一行', bothRows.length, 2)
   // 已跟踪文件按路径去重后共 3 个，每个一个勾选框。

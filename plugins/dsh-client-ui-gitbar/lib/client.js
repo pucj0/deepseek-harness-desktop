@@ -182,9 +182,13 @@ window.__ModuleLoader__.load({
       noMatchingBranches: '没有匹配的分支或操作',
       currentBranch: '当前分支',
       remoteTag: '远程',
-      stashing: '暂存并切换中…',
-      stashAndSwitch: '暂存改动并切换到 {branch}',
-      hintCommitOrStash: '提交这些改动，或用下方的「暂存并切换」。',
+      stashing: '储藏并切换中…',
+      stashAndSwitch: '储藏并切换到 {branch}',
+      hintCommitOrStash: '提交这些改动，或使用储藏。',
+      smartSwitchRestored: '已切换到 {branch}，本地修改已保留',
+      smartSwitchConflict: '已切换到 {branch}；恢复本地修改时出现冲突。安全备份仍保留在储藏中。',
+      switchFailedRestored: '分支切换失败，本地修改已恢复',
+      switchFailedStashed: '分支切换失败，本地修改已安全保存',
       /**
        * 储藏：两条入口（直接储藏 / 带选项储藏）。
        *
@@ -415,6 +419,10 @@ window.__ModuleLoader__.load({
       stashing: 'Stashing and switching…',
       stashAndSwitch: 'Stash changes and switch to {branch}',
       hintCommitOrStash: 'Commit these changes, or use "Stash changes and switch" below.',
+      smartSwitchRestored: 'Switched to {branch}; local changes were preserved',
+      smartSwitchConflict: 'Switched to {branch}; conflicts occurred while restoring local changes. The safety backup is still preserved in the stash.',
+      switchFailedRestored: 'Branch switch failed; local changes were restored',
+      switchFailedStashed: 'Branch switch failed; local changes were safely saved',
       actionStash: 'Stash changes',
       actionStashOptions: 'Stash with options…',
       dialogStashTitle: 'Stash changes',
@@ -1603,7 +1611,7 @@ window.__ModuleLoader__.load({
       /**
        * 上一次尝试切换的目标分支。
        *
-       * 失败时错误面板要给出「暂存并切换到 <分支>」按钮，就必须记住用户点的是哪一个
+       * 写操作提示需要知道用户点的是哪一个目标分支，因此记住本次目标。
        * ——错误文本里只有文件名，没有分支名。
        */
       const [pendingBranch, setPendingBranch] = react.useState('')
@@ -2113,8 +2121,8 @@ window.__ModuleLoader__.load({
           if (entry === null || entry === undefined || typeof entry.ref !== 'string') return undefined
           // 成功或冲突都不再提供这个入口：冲突那条路要去「项目改动」里解决，而储藏仍在列表里。
           const result = await run(
-            'stash/pop',
-            { ref: entry.ref },
+            typeof entry.id === 'string' ? 'auto-save/restore' : 'stash/pop',
+            typeof entry.id === 'string' ? { id: entry.id } : { ref: entry.ref },
             (payload) => ({
               notice: payload?.conflicted === true ? t('stashRestoreConflicted') : t('stashRestored', { ref: entry.ref }),
               // 冲突时储藏还在、冲突也还在，这是**仓库状态**，不能三秒后自己消失；
@@ -2183,35 +2191,26 @@ window.__ModuleLoader__.load({
 
       const switchTo = react.useCallback(
         async (branch, options) => {
-          // 记下目标分支：失败时错误面板要靠它给出"暂存并切换到 X"的入口。
           setPendingBranch(branch)
           const result = await run(
             'checkout',
-            options?.stash === true
-              ? {
-                  branch,
-                  stash: true,
-                  // 消息由**客户端**给（宿主不知道界面语言，而这条消息会出现在储藏列表里）。
-                  message: t('stashBeforeCheckoutMessage', { branch }),
-                  // 未跟踪文件同样会让 checkout 失败（目标分支里有同名文件），因此这两条
-                  // 建议动作里包含它们——不包含的话用户会再撞一次墙。
-                  includeUntracked: true,
-                }
-              : { branch },
-            // 成功时：一句"已储藏并切换"的提示 + **恢复入口**（改动还躺在储藏里，用户很
-            // 可能想拿回来）。两者同源，因此不会出现"提示在、按钮不在"的半截状态。
-            (payload) =>
-              payload?.stash?.stashed === true
-                ? {
-                    notice: t('stashAndSwitched', { ref: String(payload.stash.ref ?? ''), branch }),
-                    restore: payload.stash,
-                  }
-                : undefined,
+            { branch },
+            (payload) => {
+              if (payload?.code === 'smartSwitchRestored') return { notice: t('smartSwitchRestored', { branch }) }
+              if (payload?.code === 'smartSwitchConflict') {
+                return { notice: t('smartSwitchConflict', { branch }), persistence: 'actionable' }
+              }
+              if (payload?.code === 'switchFailedRestored') return { notice: t('switchFailedRestored'), persistence: 'actionable' }
+              if (payload?.code === 'switchFailedStashed') {
+                return { notice: t('switchFailedStashed'), persistence: 'actionable', restore: payload.autoSave }
+              }
+              return undefined
+            },
           )
           // 只有成功才关闭面板。失败时保持打开，否则用户看不到原因、也不知道
           // 该重试哪个分支——实测中最常见的失败是有未提交改动（git 会拒绝覆盖）。
           // 关闭走 closePanel：面板、二级菜单、对话框与待弹定时器必须一起收（见它的说明）。
-          if (result !== undefined) {
+          if (result !== undefined && result.code !== 'switchFailedRestored' && result.code !== 'switchFailedStashed') {
             // 签出标签会进入**游离 HEAD**：把"刚从哪个标签出来"记下来，提示区据此给出
             // 「从这里新建分支…」——这是把游离 HEAD 变回可提交状态的唯一正路，用户不该
             // 自己想办法。
@@ -3186,7 +3185,7 @@ window.__ModuleLoader__.load({
       /**
        * 错误面板里的"下一步"按钮（先更新再推、发布分支、强制推送…）。
        *
-       * 它们与「暂存并切换」是同一类东西：错误区里的按钮都不是普通操作，而是**针对这次
+       * 它们与恢复安全储藏是同一类东西：错误区里的按钮都不是普通操作，而是**针对这次
        * 失败的建议动作**，因此形状必须一致（撑满整行、小一号字）。`primary` 给首选的
        * 那一个（更新项目），其余是次要选项。
        */
@@ -3770,29 +3769,6 @@ window.__ModuleLoader__.load({
                   ),
               // 只在"因未提交改动而被拒"时给出暂存入口：其它失败（例如目标分支
               // 不存在）暂存也解决不了，给按钮反而误导。
-              error.key === 'error_localChanges'
-                ? react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      disabled: busy,
-                      onClick: onStashSwitch,
-                      style: {
-                        marginTop: '7px',
-                        width: '100%',
-                        padding: '6px 8px',
-                        borderRadius: '6px',
-                        border: '1px solid color-mix(in srgb, currentColor 25%, transparent)',
-                        background: SURFACE,
-                        color: 'inherit',
-                        fontFamily: UI_FONT,
-                        fontSize: '12px',
-                        cursor: busy ? 'default' : 'pointer',
-                      },
-                    },
-                    busy ? t('stashing') : t('stashAndSwitch', { branch: pendingBranchLabel(pendingBranch) }),
-                  )
-                : null,
               // 推送被拒是"先更新再推"这个动作序列的提示，单独给一句该怎么办。
               error.key === 'error_pushRejected'
                 ? react.createElement('div', { style: { marginTop: '5px' } }, t('pushRejectedHint'))
@@ -3987,7 +3963,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 清掉"暂存并切换"按钮上分支名的回退。
+     * 清掉分支切换提示里的目标分支回退。
      *
      * 这个按钮只会出现在 `error_localChanges` 的错误面板里，而那时 `pendingBranch`
      * 一定已经被赋值（切换是被它触发的）。因此这里只做空值兜底，不做推测——早先

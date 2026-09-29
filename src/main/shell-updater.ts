@@ -16,7 +16,7 @@
  */
 import type { BrowserWindow } from 'electron'
 
-/** 外壳更新检查的结果。 */
+/** 完整应用更新检查的结果。 */
 export interface ShellCheck {
   /** 是否可用（未打包运行、缺元数据、网络失败时为 false）。 */
   available: boolean
@@ -29,7 +29,7 @@ export interface ShellCheck {
 }
 
 /**
- * 外壳更新器。
+ * 完整应用更新器（GitHub Releases）。
  *
  * `electron-updater` 只在打包后的应用里工作（它要读 `app-update.yml` 并写
  * 更新缓存），因此在开发运行时会以 `available: false` 明确返回原因，而不是
@@ -38,7 +38,10 @@ export interface ShellCheck {
 export class ShellUpdater {
   private updater: import('electron-updater').AppUpdater | undefined
 
-  constructor(private readonly currentVersion: string) {}
+  constructor(
+    private readonly currentVersion: string,
+    private readonly developmentReason = 'App self-update is unavailable in development mode',
+  ) {}
 
   /** 惰性加载 electron-updater，避免未打包运行时立刻报错。 */
   private async load(): Promise<import('electron-updater').AppUpdater | undefined> {
@@ -75,7 +78,7 @@ export class ShellUpdater {
       return {
         available: false,
         current: this.currentVersion,
-        reason: '未打包运行（开发模式下没有 app-update.yml）',
+        reason: this.developmentReason,
       }
     }
     const updater = await this.load()

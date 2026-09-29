@@ -101,13 +101,6 @@ const api = {
   shellVersion: process.env.DSH_DESKTOP_SHELL_VERSION ?? '0.0.0',
   /** Version of the bundled dsh runtime serving this window. */
   runtimeVersion: process.env.DSH_DESKTOP_RUNTIME_VERSION ?? 'unknown',
-  /** Ask the shell to check the runtime channel for a newer dsh. */
-  checkForRuntimeUpdate: (): Promise<{ current: string; latest: string; newer: boolean }> =>
-    ipcRenderer.invoke('dsh-desktop:check-runtime-update') as Promise<{
-      current: string
-      latest: string
-      newer: boolean
-    }>,
   /** Open an external URL in the system browser. */
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('dsh-desktop:open-external', url) as Promise<void>,
   /**

@@ -10,7 +10,7 @@ DeepSeek Harness Desktop 是 [DeepSeek Harness (`dsh`)](https://github.com/deeps
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-当前仓库版本：**1.6.0**。详细变更见 [发布记录](RELEASE_NOTES.md)。
+当前仓库版本：**1.7.1**。详细变更见 [发布记录](RELEASE_NOTES.md)。
 
 ## 为什么需要桌面版
 
@@ -43,8 +43,9 @@ dsh web
 
 这些能力由本仓库的 `gitbar` 和 `review` 插件提供，运行在官方 Harness Web UI 中：
 
-- **Git 工具条：**显示当前分支、未提交状态及相对上游的领先/落后；可搜索本地和远程分支并切换。分支行右键可按 IDEA 的习惯操作（切换、从它新建分支、合并/变基到当前、重命名、推送、删除、复制分支名）。有未提交改动时切换分支不再需要终端：被拒后给出「暂存并切换」，并且**即使切换失败也会明确告诉你改动已进入储藏**，同时给出「恢复储藏的改动」入口。
-- **储藏（Stash）：**Git 工具条与「项目改动」两处都能「储藏改动」（直接储藏 / 带选项储藏：可写消息、可包含未跟踪文件，默认**不**包含）；「项目改动」里有**储藏列表**（`stash@{n}`、消息、原分支、时间），点开可看这条储藏改了哪些文件与逐文件差异（复用同一套并排/统一差异视图），并可「应用 / 弹出 / 删除」——`apply` 保留条目、`pop` 应用后删除，删除前必须确认。储藏冲突（git 不写任何"进行中"标记）会被如实报成储藏冲突：界面把你送到现有的冲突面板，说明逐块解决即可、储藏不会被自动删除，而不是伪装成一次可以「继续」的合并。储藏严格属于当前仓库：多仓库项目里 frontend 的储藏不会出现在 backend 的列表里。
+- **Git 工具条与 Smart Checkout：**显示当前分支、未提交状态及相对上游的领先/落后；切换分支时先让 Git 正常携带兼容修改。只有 Git 明确拒绝覆盖本地修改时，宿主才用带唯一标记与稳定 OID 的安全储藏执行“储藏 → 切换 → `apply --index` → 验证 → 精确删除”。已暂存、未暂存和未跟踪文件都会保护；恢复冲突时留在目标分支并进入现有冲突编辑器，安全储藏绝不删除。
+- **官方 Git Sidebar：**项目级 Changes 与 Log 已注册到 Harness 官方右侧 Sidebar（Git 分支图标），不再使用右上角 fixed Drawer。它以当前 Harness 会话的 `cwd` 为唯一 active workspace，项目切换会清空旧选择并由 generation guard 丢弃迟到响应；多仓库选择按 workspace 保存。Changes 包含 Conflicts / Staged / Changes / Unversioned / Auto-saved Changes / Stashes，Log 保留提交图、分支筛选、详情、比较、重置、摘取与标签。
+- **储藏（Stash）与自动保存：**`stash` 统一译为“储藏”，`stage` 才是“暂存”。普通储藏可查看、应用、弹出和删除；Smart Checkout 未能自动恢复的安全副本列在 **自动保存的改动**，应用重启后通过扫描 `dsh-smart-switch:` 标记重新发现，可查看文件、恢复或切回来源分支并恢复。自动删除必须同时匹配应用标记、唯一 id 与 OID，绝不按动态的 `stash@{0}` 猜测，也绝不删除用户自己的普通储藏。
 - **更新与推送：**「更新项目」（fetch → pull）与「推送」直接执行，不再弹二次确认，进度显示在动作行上。首次推送自动建立上游（等价 `push -u`）；被拒绝时给出「更新项目」与受确认保护的**强制推送**（只用 `--force-with-lease`，不会覆盖协作者刚推上去的提交）；没有上游、没有配置远端、认证失败、远端不可达各有各的提示。除破坏性操作（还原、删除分支、强制推送、签出标记或修订）外都不再二次确认。
 - **合并冲突：**Changes 里冲突文件单独成组（不再同时出现在已暂存/未暂存里，也不再提供会丢掉改动的还原按钮）；点开是**合并编辑器**——逐块显示 Current / Incoming 两侧、按块选择「用当前 / 用对方 / 两者都要」（选择立刻反映到 Result 面板，但只算不写）、可直接编辑结果（Tab 缩进），另有「标记为已解决」（宿主会复扫文件，残留标记一律拒绝）与按操作类型给出的「继续 / 中止」（合并 / 变基 / 摘取 / 还原）。变基/摘取是一提交一提交地往前的：继续之后若下一个提交又冲突（甚至落在**别的文件**上），宿主会照实回报"前进到下一次冲突"，界面继续处理而不是宣布完成。合并、变基、摘取、还原的进行中状态由宿主判定，界面不猜。
 - **项目改动（Changes）：**按冲突、已暂存、未暂存和未跟踪文件查看改动；支持逐文件 diff、暂存、取消暂存、提交，以及使用当前 Harness 模型起草提交信息。差异视图默认**并排（Side-by-Side）**，可切回**统一（Unified）**（选择记在本机，不写进 Harness 设置）；并排时左右同属一行因而天然同步滚动，改动块按"删除/新增"配对对齐，行内再标出字符级差异；工具栏给出「上一个 / 下一个改动」与 `n/N` 计数，并可直接跳到某个改动块；纯二进制改动、只改名的文件各有专门说明。
@@ -83,7 +84,7 @@ Windows 构建未配置代码签名，SmartScreen 可能提示“未知发布者
 1. 下载并安装对应平台版本，然后打开应用。首次启动会解包随应用携带的官方运行时。
 2. 通过 **文件 → 打开文件夹** 选择工作区；未选择时默认使用用户主目录。
 3. 在官方 Harness 界面的 **设置 → 模型** 中配置模型及 API Key，然后开始会话。具体设置项取决于内置或已更新的 Harness 版本。
-4. 需要 Git 功能时打开 Git 工具条或项目改动面板；工作区不是 Git 仓库时，先选择仓库或打开一个仓库目录。
+4. 需要项目 Git 功能时，在 Harness 官方右侧栏打开 **Git**；工作区不是 Git 仓库时，先选择仓库或打开一个仓库目录。
 
 ## 与官方 npm 版的关系
 
@@ -96,8 +97,7 @@ Windows 构建未配置代码签名，SmartScreen 可能提示“未知发布者
 | 工作区入口 | Harness 自身的工作区操作 | 加上原生目录选择器和最近打开列表 |
 | 托盘与原生菜单 | — | 提供 |
 | Git 工具条、Changes、Log、本轮审查 | — | 由桌面插件提供 |
-| Harness 更新 | npm | 应用内按 npm dist-tag 更新 |
-| 桌面外壳更新 | 不适用 | 打包应用通过 GitHub Releases 检查和下载 |
+| 产品更新 | npm | 完整应用通过本项目 GitHub Releases 检查、下载并重启安装；内置 Runtime 与外壳同版交付 |
 
 ## 架构
 
@@ -127,9 +127,9 @@ Electron Desktop Shell
 
 ## 更新机制
 
-- **Harness 运行时：**应用内更新界面从 npm registry 检查 `@deepseek-ai/dsh`；默认跟随 `latest`，设置文件支持 `next` 和 `alpha`。新版本安装到用户数据目录，重启后启用。若更新后的运行时启动失败，应用会回退到随安装包携带的版本。
-- **桌面外壳：**打包应用使用 `electron-updater` 和 GitHub Releases 的更新元数据。用户从 **更新 → 检查更新** 主动检查与下载；开发模式不支持外壳自更新。
-- 两条更新轨道独立。外壳每次启动都会把本仓库的三个 UI 插件同步到实际使用的 Harness 运行时。
+- **完整产品更新：**打包应用只使用 `electron-updater` 与本项目 GitHub Releases 的元数据。用户从 **更新 → 检查更新** 检查、下载并重启安装；一个 Release 同时携带桌面外壳、对应的 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`。
+- **Runtime 随 Release 生效：**安装新版后始终启动该版本随包携带的 Runtime。旧版本可能留下的 `<userData>/runtime/current` 仅作为遗留缓存忽略，不会覆盖新 Release；session、workspace、设置、登录数据与用户项目均不删除。
+- **开发与发布仍使用 npm：**`npm ci`、`npm run build` 与 `npm run stage` 仍用于取得构建依赖和准备官方 Runtime；取消的只是安装完成后面向终端用户的 npm registry 查询与 `@deepseek-ai/dsh` 热安装。开发模式明确不支持应用自更新。
 
 ## 项目结构
 
@@ -143,7 +143,7 @@ build/                    图标和打包资源
 .github/workflows/        跨平台发布工作流
 ```
 
-关键实现位于 `src/main/index.ts`、`window.ts`、`titlebar.ts`、`menu.ts`、`dsh-server.ts`、`updater.ts`、`shell-updater.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`workspace-switch.ts`、`git.ts` 和 `i18n.ts`。
+关键实现位于 `src/main/index.ts`、`window.ts`、`titlebar.ts`、`menu.ts`、`dsh-server.ts`、`shell-updater.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`workspace-switch.ts`、`git.ts` 和 `i18n.ts`。
 
 ## 开发与测试
 
@@ -184,7 +184,7 @@ npm run dist:mac
 - Windows 的端到端验证最充分；Linux 和 macOS 有 CI 构建配置，但仓库记录的真机安装验证较少。
 - Windows 安装包未配置商业代码签名；macOS 默认构建未签名。系统可能要求首次手动放行。
 - 外壳自更新代码已接入，仓库记录的跨版本真机完整升级验证有限。
-- 运行时更新依赖 npm registry 和 npm 的依赖解析；联网更新需要可访问 registry。
+- 完整应用更新依赖 GitHub Releases、各平台 `latest*.yml` 与安装资源严格匹配；跨版本真机升级验证仍少于仓库内自动化验证。
 - 本轮审查的基线保存在运行中的宿主进程内存里；应用重启后需新轮次重新建立。
 - Electron 与内置运行时会增加安装包体积；首次启动需要解包内置运行时。
 - 桌面 `safeStorage` 凭据写入尚未接入可见的设置流程。

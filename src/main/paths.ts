@@ -47,19 +47,19 @@ export interface RuntimeLocation {
 /**
  * Resolve the bundled runtime.
  *
- * Precedence (highest first):
- *   1. an updated runtime downloaded into userData by the updater
- *   2. the bundled runtime unpacked from the compressed archive on first run
- *   3. the runtime shipped as loose files inside the installer (resources/runtime)
- *   4. the repo's runtime/ directory, for development
+ * Packaged releases always run the runtime shipped by that same release. Older
+ * versions could install an npm-updated runtime under
+ * `<userData>/runtime/current`; deliberately ignoring that legacy location is
+ * what prevents an old hot-updated runtime from overriding a newer full release.
+ * User workspaces, sessions and settings live elsewhere and are untouched.
  *
- * @param userDataDir - Electron's per-user data directory, where updates land.
+ * @param _userDataDir - Kept for API compatibility; legacy runtime caches here are ignored.
  * @param unpackedDir - 内置归档解包出来的运行时目录（打包运行时才有）。
  * @returns the resolved runtime location.
  */
-export function resolveRuntime(userDataDir: string, unpackedDir?: string): RuntimeLocation {
+export function resolveRuntime(_userDataDir: string, unpackedDir?: string): RuntimeLocation {
   const packaged = app.isPackaged
-  const candidates: string[] = [join(userDataDir, 'runtime', 'current')]
+  const candidates: string[] = []
 
   if (packaged) {
     // 解包目录排在"安装包内的散文件运行时"之前：后者只可能来自开发期或旧包，

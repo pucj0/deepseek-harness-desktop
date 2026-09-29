@@ -33,7 +33,6 @@ import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
-import { RuntimeUpdater, locateNpmCli } from './updater'
 import { createMainWindow } from './window'
 import type { ActiveWorkspaceReportPayload } from './window'
 import { createWorkspaceActions } from './workspace-actions'
@@ -67,7 +66,6 @@ interface Session {
   server: DshServer
   window: BrowserWindow
   tray?: Tray
-  updater: RuntimeUpdater
   quitting: boolean
 }
 
@@ -457,10 +455,9 @@ async function main(): Promise<void> {
 
   // 解包内置运行时（已解过则瞬间返回）。
   let unpackedDir: string | undefined
-  // Updated runtimes have their own Node. Prepare the bundled fallback only when
-  // it is actually selected (rollback removes current and relaunches this path).
-  const hasUpdatedRuntime = existsSync(join(userDataDir, 'runtime', 'current', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
-  if (app.isPackaged && !hasUpdatedRuntime) {
+  // Every packaged release boots the runtime bundled with that same release.
+  // Legacy npm-updated runtimes under userData/runtime are intentionally ignored.
+  if (app.isPackaged) {
     const archivePath = join(process.resourcesPath, 'runtime.br')
     if (existsSync(archivePath)) {
       try {
@@ -499,15 +496,9 @@ async function main(): Promise<void> {
     return
   }
 
-  // 把随本应用发布的客户端插件同步进**当前实际使用的**运行时。
-  //
-  // 必须在服务端进程启动之前做，而且每次启动都要做：运行时自动更新会整体换掉
-  // `<userData>/runtime/current` 指向的那份运行时，而那份里没有内置插件（它们不在
-  // dsh 的依赖闭包里，只随安装包携带）。缺失时 `server.mjs` 是静默跳过的，表现为
-  // **三个插件一起从界面上消失**且没有任何报错。详见 plugin-sync.ts。
-  //
-  // 放在这里而不放进更新器：更新器只覆盖"更新"这一条路径，而这里同时覆盖"更新后自动
-  // 补齐"、"已经装坏的运行时就地修好"和"外壳升级后刷新旧副本"三种情形。
+  // 把本 Release 携带的客户端插件同步进同一 Release 的 bundled Runtime。
+  // 必须在服务端进程启动前、每次启动都做：插件不在官方 dsh 依赖闭包中，只随桌面包
+  // 发布；同步也能修复被用户误删的插件文件。旧 userData/runtime/current 不参与解析。
   const pluginSync = syncPluginsAtStartup({
     runtimeDir: runtime.dir,
     resourcesPath: process.resourcesPath,
@@ -518,17 +509,14 @@ async function main(): Promise<void> {
   })
   for (const line of pluginSync.messages) process.stderr.write(`${line}\n`)
 
-  runtimeVersion = RuntimeUpdater.readVersion(runtime.dir) ?? runtime.stagedVersion ?? 'unknown'
+  try {
+    runtimeVersion = (JSON.parse(readFileSync(runtime.installAnchor, 'utf8')) as { version?: string }).version ?? runtime.stagedVersion ?? 'unknown'
+  } catch {
+    runtimeVersion = runtime.stagedVersion ?? 'unknown'
+  }
   activeRuntime = runtime
   process.env.DSH_DESKTOP_SHELL_VERSION = SHELL_VERSION
   process.env.DSH_DESKTOP_RUNTIME_VERSION = runtimeVersion
-
-  const updater = new RuntimeUpdater({
-    baseDir: join(userDataDir, 'runtime'),
-    bundledDir: runtime.dir,
-    currentVersion: runtimeVersion,
-    ...(readSettings(userDataDir).channel !== undefined ? { channel: readSettings(userDataDir).channel } : {}),
-  })
 
   // 服务端实例在本次进程里只有一个：切换工作区走的是重启应用（见 workspace-switch.ts），
   // 不再就地替换它。
@@ -737,21 +725,6 @@ async function main(): Promise<void> {
     // 放在成功之后而不是构造时：启动失败时标记要留着，让下一次启动再试。
     takePendingForgets(userDataDir)
   } catch (error) {
-    if (runtime.dir.startsWith(join(userDataDir, 'runtime'))) {
-      // An updated runtime failed to boot: drop back to the bundled one rather
-      // than leaving the user with an app that never opens.
-      updater.rollback()
-      dialog.showMessageBoxSync({
-        type: 'warning',
-        title: strings.rollbackTitle,
-        message: strings.rollbackMessage,
-        detail: error instanceof Error ? error.message : String(error),
-        buttons: [strings.buttonOk],
-      })
-      app.relaunch()
-      app.exit(0)
-      return
-    }
     mainWindow.close()
     dialog.showErrorBox(
       strings.startupFailedTitle,
@@ -766,18 +739,15 @@ async function main(): Promise<void> {
 
   // 更新相关的装配放在托盘之前：托盘与菜单都要用到同一个"打开更新窗口"入口，
   // 而它们的回调是在创建时捕获的，所以动作必须先定义好。
-  registerIpc(updater)
+  registerIpc()
   // 外壳版本必须用 app.getVersion()，不能复用运行时版本。
   // 踩过一次：这里原本传的是 runtimeVersion，于是更新窗口的
   // 「应用外壳 / 已安装版本」显示成了 dsh 的版本号（0.1.5-rc.1），而应用自己是 1.0.0。
-  const shellUpdater = new ShellUpdater(app.getVersion())
+  const shellUpdater = new ShellUpdater(app.getVersion(), strings.updateShellUnavailable)
   const openUpdates = (): void => {
     openUpdatesFor({
       window,
-      runtimeUpdater: updater,
       shellUpdater,
-      runtimeVersion,
-      runtime,
       userDataDir,
       strings,
     })
@@ -812,13 +782,13 @@ async function main(): Promise<void> {
 
   openUpdatesEntry = openUpdates
   refreshApplicationMenu()
-  session = { server, window, ...(tray !== undefined ? { tray } : {}), updater, quitting: false }
+  session = { server, window, ...(tray !== undefined ? { tray } : {}), quitting: false }
 
   // 语言设置的监听**不在这里**：它在冷启动读到偏好之后立刻就装好了（见上面
   // `watchLocalePreference` 的调用），并且以那个值为基准。放到这里再装一次的话，
   // "读偏好"与"起服务端"之间那十几秒里的修改就永远等不到事件了。
 
-  // 启动时**不再**静默检查外壳更新。
+  // 启动时**不再**静默检查完整应用更新。
   //
   // 此前 `if (app.isPackaged) void checkShellUpdate()` 会在启动后偷偷检查并弹一个
   // 对话框，用户既没触发也不知道它是谁在什么时候检查的，观感很怪（这正是要改掉的
@@ -910,91 +880,12 @@ function showProjectInfoFor(
 }
 
 /**
- * Check the configured npm channel for a newer dsh and offer to install it.
+ * 打开「更新」窗口。用户侧只有 GitHub Releases 这一条完整产品更新轨道。
  *
- * Reports the channel and the current runtime's on-disk location, because "up to
- * date" is only meaningful when the user can tell which channel was consulted and
- * which runtime is actually running.
+ * 窗口立刻打开并显示"正在检查"，GitHub 结果随后推送。这样网络慢时用户看得到
+ * 进展，而不是等十几秒后突然弹出一个窗口。
  *
- * @param updater - the runtime updater.
- * @param window - the window used as the dialog parent.
- * @param runtime - the active runtime, for reporting where this build runs from.
- */
-async function installRuntimeUpdate(
-  updater: RuntimeUpdater,
-  window: BrowserWindow,
-  version: string,
-  registry: string,
-): Promise<{ installed: boolean }> {
-  const s = t()
-  const npmCli = locateNpmCli(process.resourcesPath)
-  if (npmCli === undefined) {
-    await dialog.showMessageBox(window, {
-      type: 'error',
-      message: s.updateNoNpmTitle,
-      detail: s.updateNoNpmDetail,
-      buttons: [s.buttonOk],
-    })
-    return { installed: false }
-  }
-
-  const progress = new BrowserWindow({
-    width: 460,
-    height: 180,
-    parent: window,
-    modal: true,
-    resizable: false,
-    minimizable: false,
-    title: s.updateProgressTitle,
-    autoHideMenuBar: true,
-  })
-  await progress.loadURL(
-    'data:text/html;charset=utf-8,' +
-      encodeURIComponent(
-        '<body style="font:13px system-ui;padding:20px;background:#1b1b1f;color:#e8e8ea">' +
-          `<h3 style="margin:0 0 8px">${s.updateProgressTitle}…</h3>` +
-          `<div id="s" style="opacity:.75">${s.updateProgressStarting}</div></body>`,
-      ),
-  )
-
-  try {
-    const result = await updater.install(version, registry, npmCli, (line) => {
-      void progress.webContents.executeJavaScript(
-        `document.getElementById('s').textContent=${JSON.stringify(line)}`,
-      )
-    })
-    if (!progress.isDestroyed()) progress.destroy()
-    if (!result.updated) {
-      await dialog.showMessageBox(window, {
-        type: 'error',
-        message: s.updateFailedTitle,
-        detail: result.reason ?? s.updateFailedUnknown,
-        buttons: [s.buttonOk],
-      })
-      return { installed: false }
-    }
-    app.relaunch()
-    app.exit(0)
-    return { installed: true }
-  } catch (error) {
-    if (!progress.isDestroyed()) progress.destroy()
-    await dialog.showMessageBox(window, {
-      type: 'error',
-      message: s.updateFailedTitle,
-      detail: error instanceof Error ? error.message : String(error),
-      buttons: [s.buttonOk],
-    })
-    return { installed: false }
-  }
-}
-
-/**
- * 打开「更新」窗口：两条轨道统一展示与操作。
- *
- * 窗口立刻打开并显示"正在检查"，两条检查并行进行、结果各自推送。这样网络慢时
- * 用户看得到进展，而不是等十几秒后突然弹出一个窗口。
- *
- * 外壳更新的两个守卫：
+ * 完整应用更新的两个守卫：
  *   * 未打包运行时不可用（没有 `app-update.yml`），此时明确说明而不是给个
  *     永远转圈的按钮；
  *   * 外壳版本比较用 `app.getVersion()`。开发运行时 Electron 从 package.json
@@ -1004,22 +895,17 @@ async function installRuntimeUpdate(
  */
 function openUpdatesFor(deps: {
   window: BrowserWindow
-  runtimeUpdater: RuntimeUpdater
   shellUpdater: ShellUpdater
-  runtimeVersion: string
-  runtime: RuntimeLocation | undefined
   userDataDir: string
   strings: ReturnType<typeof t>
 }): void {
-  const { window, runtimeUpdater, shellUpdater, runtimeVersion, runtime, userDataDir, strings: s } = deps
+  const { window, shellUpdater, userDataDir, strings: s } = deps
 
   const shellVersion = app.getVersion()
-  const canInstallShell = app.isPackaged
-  let shellCanInstall = false
-  let currentShellState: UpdatePanelState['shell'] = {
+  let currentState: UpdatePanelState = {
     installed: shellVersion,
     state: 'checking',
-    latestLabel: s.updateShellLatestLabel,
+    canInstall: false,
   }
 
   const panel = openUpdateWindow(
@@ -1028,55 +914,26 @@ function openUpdatesFor(deps: {
     {
       title: s.updateWindowTitle,
       checking: s.updateChecking,
-      sectionRuntime: s.updateSectionRuntime,
-      sectionShell: s.updateSectionShell,
       stateLatest: s.updateStateLatest,
       stateAvailable: s.updateStateAvailable,
       stateUnknown: s.updateStateUnknown,
       installedLabel: s.updateInstalledLabel,
       latestLabel: s.updateNewestLabel,
-      detailLabel: s.updateDetailLabel,
       buttonClose: s.updateButtonClose,
-      buttonRuntime: s.updateButtonRuntime,
-      buttonShell: s.updateButtonShell,
-      shellUnavailable: s.updateShellUnavailable,
-      shellProgress: s.updateShellProgress,
+      buttonDownload: s.updateButtonShell,
+      progress: s.updateShellProgress,
       buttonDownloading: s.updateButtonDownloading,
-      shellFailedTitle: s.updateShellFailedTitle,
-      runtimeLatestLabel: s.updateRuntimeLatestLabel,
-      shellLatestLabel: s.updateShellLatestLabel,
     },
     (action) => {
       if (action === 'close') {
         panel.window.close()
         return
       }
-      if (action === 'update-runtime') {
-        void (async () => {
-          try {
-            const check = await runtimeUpdater.check()
-            await installRuntimeUpdate(
-              runtimeUpdater,
-              window,
-              check.latest.version,
-              check.latest.registry,
-            )
-          } catch (error) {
-            await dialog.showMessageBox(window, {
-              type: 'error',
-              message: s.updateCheckFailedTitle,
-              detail: error instanceof Error ? error.message : String(error),
-              buttons: [s.buttonOk],
-            })
-          }
-        })()
-        return
-      }
-      if (action === 'update-shell') {
+      if (action === 'download') {
         void (async () => {
           try {
             await shellUpdater.download((percent) => {
-              panel.update({ runtime: currentRuntimeState, shell: currentShellState, shellCanInstall, shellProgress: percent })
+              panel.update({ ...currentState, progress: percent })
             })
             const choice = await dialog.showMessageBox(window, {
               type: 'info',
@@ -1100,82 +957,32 @@ function openUpdatesFor(deps: {
     },
   )
 
-  const origin =
-    runtime !== undefined && runtime.dir.startsWith(join(userDataDir, 'runtime'))
-      ? s.updateSourceDownloaded
-      : s.updateSourceBundled
-
-  // 两条检查并行：它们各自要访问 npm registry 与 GitHub，串行会让等待翻倍。
-  let currentRuntimeState: UpdatePanelState['runtime'] = {
-    installed: runtimeVersion,
-    state: 'checking',
-    latestLabel: s.updateRuntimeLatestLabel,
-    details: [
-      { label: s.updateRuntimeSourceLabel, value: origin },
-      ...(runtime === undefined ? [] : [{ label: s.updateLocationLabel, value: runtime.dir }]),
-    ],
-  }
-  const push = (): void =>
-    panel.update({
-      runtime: currentRuntimeState,
-      shell: currentShellState,
-      shellCanInstall,
-    })
-  push()
-
-  void (async () => {
-    try {
-      const check = await runtimeUpdater.check()
-      currentRuntimeState = {
-        installed: check.current,
-        latest: check.latest.version,
-        state: check.newer ? 'available' : 'latest',
-        latestLabel: s.updateRuntimeLatestLabel,
-        details: [
-          { label: s.updateRuntimeSourceLabel, value: origin },
-          { label: s.updateRegistryLabel, value: check.latest.registry },
-          { label: s.updateChannelLabel, value: runtimeUpdater.channel },
-          ...(runtime === undefined ? [] : [{ label: s.updateLocationLabel, value: runtime.dir }]),
-        ],
-      }
-    } catch (error) {
-      currentRuntimeState = {
-        installed: runtimeVersion,
-        state: 'unknown',
-        reason: error instanceof Error ? error.message : String(error),
-      }
-    }
-    push()
-  })()
+  panel.update(currentState)
 
   void (async () => {
     try {
       const check = await shellUpdater.check(app.isPackaged)
-      shellCanInstall = check.available && canInstallShell
-      currentShellState = {
+      currentState = {
         installed: check.current,
         ...(check.latest === undefined ? {} : { latest: check.latest }),
         state: check.available ? 'available' : check.reason === undefined ? 'latest' : 'unknown',
-        latestLabel: s.updateShellLatestLabel,
+        canInstall: check.available && app.isPackaged,
         ...(check.reason === undefined ? {} : { reason: check.reason }),
       }
     } catch (error) {
-      currentShellState = {
+      currentState = {
         installed: shellVersion,
         state: 'unknown',
+        canInstall: false,
         reason: error instanceof Error ? error.message : String(error),
       }
     }
-    push()
+    panel.update(currentState)
   })()
 }
 
 /** Register the preload bridge's IPC handlers. */
-function registerIpc(updater: RuntimeUpdater): void {
-  ipcMain.handle('dsh-desktop:check-runtime-update', async () => {
-    const check = await updater.check()
-    return { current: check.current, latest: check.latest.version, newer: check.newer }
-  })
+function registerIpc(): void {
   ipcMain.handle('dsh-desktop:open-external', async (_event, url: unknown) => {
     if (typeof url === 'string' && /^https?:/u.test(url)) await shell.openExternal(url)
   })

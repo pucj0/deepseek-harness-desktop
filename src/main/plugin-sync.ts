@@ -1,12 +1,9 @@
 /**
  * 随本应用发布的客户端插件的就位与自愈（外壳侧）。
  *
- * 背景（这是本模块存在的唯一理由）：应用可以**整体替换运行时**——`RuntimeUpdater`
- * 把新版 `@deepseek-ai/dsh` 装进 `<userData>/runtime/<版本>`，再用 `current` 联接把它
- * 激活。而契约里说的"内置插件"是随本应用发布的三个包（gitbar / review / typography），
- * 它们**不在 dsh 的依赖闭包里**，只存在于被打包进安装包的那份运行时里。
- *
- * 于是运行时一被换掉，新 runtime 的 `node_modules` 里就没有它们，而 `server.mjs` 的
+ * 背景：桌面内置插件（gitbar / review / typography）不在官方 dsh 的依赖闭包里，
+ * 开发目录与 Release 首次解包出来的 bundled runtime 都要在服务端启动前同步插件。
+ * 若同步缺失，`server.mjs` 的
  * 处理是"没有就跳过"：
  *   * `linkBundledPlugins` 找不到包 → 静默 continue，不报错；
  *   * `reconcileBundles` 随即把它们从 profile 的 bundle 列表里摘掉。

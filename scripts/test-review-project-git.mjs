@@ -357,8 +357,8 @@ const ctx = {
   workspaces: { list: {} },
 }
 loaded.apply(ctx)
-const Hero = entries.get('shell.overlay:review-project-changes')
-const injected = injectedFaces.get('shell.overlay:review-project-changes')
+const Hero = entries.get('sidebar.right.pane.tab:dsh-client-ui-review/git')
+const injected = injectedFaces.get('sidebar.right.pane.tab:dsh-client-ui-review/git')
 const store = loaded.__gitSnapshotForTest
 
 let failures = 0
@@ -442,14 +442,9 @@ async function drainView(Comp, compProps, key) {
 }
 const drain = () => drainView(Hero, props, heroKey)
 
-/** 打开抽屉（入口按钮就是开关）。 */
+/** 官方 Sidebar 挂载正文后 Git 面板直接可见。 */
 async function openDrawer(label) {
   heroKey = `hero-${label}-${heroSeq++}`
-  let nodes = await drain()
-  if (nodes.some((n) => n.props?.['data-desktop-review-surface'] === 'panel')) return nodes
-  const trigger = nodes.find((n) => n.props?.['data-review-trigger-button'] !== undefined)
-  if (trigger === undefined) return nodes
-  trigger.props.onClick()
   return drain()
 }
 async function clickNow(attr, value) {
@@ -466,9 +461,8 @@ async function clickNow(attr, value) {
  * 抽屉里的文字也算进来（实测过：断言因此拿到一整屏文本，`includes` 永远不成立）。
  */
 const badgeText = (nodes) => {
-  const button = rowsOf(nodes, 'data-review-trigger-button')[0]
-  if (button === undefined) return ''
-  return textOf(button)
+  const count = textOf(rowsOf(nodes, 'data-review-count')[0] ?? null)
+  return count === '' ? '' : `files(count=${count})`
 }
 /** 整棵树里所有宿主节点的文本（用于"抽屉里显示的是哪句话"这类断言）。 */
 const allText = (nodes) => nodes.map((n) => textOf(n)).join(' ')
@@ -497,7 +491,7 @@ console.log('=== 1. 切换项目：A ready → B loading → B ready → 回 A =
   // 切到 B：B 的响应被挂起 → 必须显示加载态，且**不能**继续显示 A 的文件。
   sessionSnapshot = { ...sessionSnapshot, current: 's2' }
   nodes = await drain()
-  has('   切到 B 后入口仍在', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   切到 B 后 Sidebar 面板仍在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   has('   抽屉仍在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   has('   抽屉里是加载态', allText(nodes).includes('loading'))
   check('   不显示 A 的文件行', rowsOf(nodes, 'data-staging-row').length, 0)
@@ -518,20 +512,20 @@ console.log('=== 1. 切换项目：A ready → B loading → B ready → 回 A =
   has('   切回 A 立即显示 2 个文件', badgeText(nodes).includes('files(count=2)'))
   check('   仍然是 2 行', rowsOf(nodes, 'data-staging-row').length, 2)
   check('   全程没有 hook 数量变化', hookOrderErrors.length, 0)
-  has('   入口没有消失', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   Sidebar 面板没有消失', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
 }
 
 console.log('')
-console.log('=== 2. 有当前会话但 cwd 还没到：显示"正在切换项目…"，不回退也不发请求 ===')
+console.log('=== 2. 有当前会话但 cwd 还没到：保持空态，不回退也不发请求 ===')
 {
   const before = requests.filter((r) => r.route === 'workspace').length
   sessionSnapshot = { current: 's3', ids: ['s1', 's2', 's3'], byId: { s1: { cwd: A }, s2: { cwd: B }, s3: {} } }
   const nodes = await drain()
-  has('2) 入口说"正在切换项目"', badgeText(nodes).includes('switchingProject'))
-  has('   抽屉里也这么说', allText(nodes).includes('switchingProject'))
+  check('2) Sidebar 不沿用旧项目计数', badgeText(nodes), 'files(count=0)')
+  has('   Sidebar 不沿用旧项目内容', !allText(nodes).includes('A.txt') && !allText(nodes).includes('B.txt'))
   check('   没有为它发快照请求', requests.filter((r) => r.route === 'workspace').length - before, 0)
   has('   没有回退显示 A 或 B 的文件', rowsOf(nodes, 'data-staging-row').length === 0)
-  has('   入口仍在', rowsOf(nodes, 'data-review-trigger').length === 1)
+  has('   Sidebar 面板仍在', rowsOf(nodes, 'data-desktop-review-surface').length === 1)
   check('   没有 hook 数量变化', hookOrderErrors.length, 0)
   // cwd 到手 → 回到正常显示。
   sessionSnapshot = { current: 's3', ids: ['s1', 's2', 's3'], byId: { s1: { cwd: A }, s2: { cwd: B }, s3: { cwd: A } } }
@@ -550,8 +544,7 @@ console.log('=== 3. 面板内部抛错：只降级面板，入口照旧 ===')
   throwOn = 'commitMessage'
   const crashed = await drain()
   has('3) 出现面板级降级页', rowsOf(crashed, 'data-review-panel-error').length === 1)
-  has('   入口按钮仍然存在', rowsOf(crashed, 'data-review-trigger-button').length === 1)
-  has('   入口容器仍然存在', rowsOf(crashed, 'data-review-trigger').length === 1)
+  has('   Sidebar 面板错误边界仍然存在', rowsOf(crashed, 'data-review-panel-error').length === 1)
   check('   没有走到槽位级隔离', slotErrors.length, 0)
   const detail = textOf(rowsOf(crashed, 'data-review-panel-error-detail')[0] ?? null)
   has('   降级页带异常原文', detail.includes('注入的渲染期异常'))
@@ -564,18 +557,18 @@ console.log('=== 3. 面板内部抛错：只降级面板，入口照旧 ===')
   const reloaded = await drain()
   has('   降级页消失', rowsOf(reloaded, 'data-review-panel-error').length === 0)
   has('   面板回来了', rowsOf(reloaded, 'data-desktop-review-surface').length === 1)
-  has('   入口仍在', rowsOf(reloaded, 'data-review-trigger-button').length === 1)
-  // 「关闭」也必须能收起面板而**不**让入口消失。
+  has('   Sidebar 面板仍在', rowsOf(reloaded, 'data-desktop-review-surface').length === 1)
+  // 官方 Sidebar 的开合由 Harness 管理；错误页不能再造一个插件自己的「关闭」。
   store.reset()
   await openDrawer('close')
   await drain()
   throwOn = 'commitMessage'
   await drain()
   throwOn = ''
-  has('   点得中「关闭」', await clickNow('data-review-panel-error-action', 'close'))
+  has('   没有插件自定义「关闭」', !(await clickNow('data-review-panel-error-action', 'close')))
   const closed = await drain()
-  has('   面板已收起', rowsOf(closed, 'data-desktop-review-surface').length === 0)
-  has('   入口仍在（关闭不等于入口消失）', rowsOf(closed, 'data-review-trigger-button').length === 1)
+  has('   Sidebar 内容仍由 Harness 挂载', rowsOf(closed, 'data-review-panel-error').length === 1)
+  has('   Sidebar 槽仍由 Harness 管理', Hero !== undefined)
   delete globalThis.window.__dshDesktopReviewPanelError
 }
 
@@ -644,7 +637,7 @@ console.log('=== 5. 快照状态机：loading / ready / stale-while-revalidate /
 }
 
 console.log('')
-console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择器 + 操作不跨仓库 ===')
+console.log('=== 6. 多仓库项目：当前仓库计数 + 仓库选择器 + 操作不跨仓库 ===')
 {
   // 实机反馈的形状：`F:\code_buss\haiweiNew` 自己**不是** git 仓库，仓库在
   // `haiwei-manage-fronted`、`haiwei-manage-backend` 两个子目录里。1.5.3 及以前面板会
@@ -677,10 +670,9 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
   let nodes = await openDrawer('multi')
   await drain()
   await drain()
-  // 徽标：数字是**所有仓库之和**（3 + 1 = 4），并说清是几个仓库——否则用户会把它当成
-  // 某一个仓库的改动数。
-  has('6) 徽标是所有仓库之和 + 仓库数', badgeText(nodes).includes('projectFilesMulti(count=4,repositories=2)'))
-  // 目标布局：`项目改动  [仓库 ▾]  分支  计数 … 刷新 关闭`，`Changes | Log` 在它**下面**。
+  // 官方 Sidebar 标题由 Harness 渲染，面板头部计数只描述当前仓库。
+  has('6) 面板计数属于当前仓库', badgeText(nodes).includes('files(count=3)'))
+  // 目标布局：`项目改动  [仓库 ▾]  分支  计数 … 刷新`，`Changes | Log` 在它**下面**。
   // 仓库 scope 住在头栏里（第一视觉区域），而不是右上角、也不是页签行里的一个部件——
   // 它是整个 Git 工具窗的作用域，且头栏不随页签切换重新挂载（位置因此纹丝不动）。
   const header = rowsOf(nodes, 'data-review-header')[0]
@@ -690,7 +682,7 @@ console.log('=== 6. 多仓库项目：徽标是所有仓库之和 + 仓库选择
   check('   第二格是仓库 scope（在页签之上）', headerKids[1]?.type?.name, 'RepositoryScope')
   has('   第三格是分支徽标', headerKids[2]?.props?.['data-review-branch'] !== undefined)
   has('   第四格是改动计数', headerKids[3]?.props?.['data-review-count'] !== undefined)
-  has('   最后两格是刷新与关闭', headerKids[headerKids.length - 2]?.props?.title === 'refresh' && headerKids[headerKids.length - 1]?.props?.title === 'collapse')
+  has('   保留刷新且没有插件自定义关闭', rowsOf(nodes, 'data-review-icon-button').some((node) => node.props?.title === 'refresh') && !rowsOf(nodes, 'data-review-icon-button').some((node) => node.props?.title === 'collapse'))
   const tablist = rowsOf(nodes, 'data-review-tablist')[0]
   check('   页签行里只有两个页签（选择器不在这里）', childrenOf(tablist).length, 2)
   check('   头栏里有且只有一个仓库选择器', rowsOf(nodes, 'data-review-repo-select').length, 1)

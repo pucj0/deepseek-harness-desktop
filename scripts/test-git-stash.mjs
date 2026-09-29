@@ -135,7 +135,7 @@ async function withServer(workspace, body) {
       // gitbar's read routes are GET-only (that is how the client sends them); writes are POST.
       const readOnly =
         prefix === '/dsh-desktop/gitbar' &&
-        ['status', 'branches', 'remotes', 'branch/sync', 'repo-context', 'stash/list'].includes(route)
+        ['status', 'branches', 'remotes', 'branch/sync', 'repo-context', 'stash/list', 'auto-saves'].includes(route)
       const query = new URLSearchParams({ cwd: workspace })
       if (typeof payload?.repository === 'string') query.set('repository', payload.repository)
       const response = await fetch(`${base}${prefix}/${route}?${query.toString()}`, {
@@ -516,55 +516,43 @@ try {
     commitAll(switchRepo, 'develop content')
     git(switchRepo, ['switch', 'main'])
 
-    await check('5.1) 有未提交改动时 checkout 被 git 拒绝（界面据此给出「储藏并切换」）', async () => {
+    await check('5.1) Smart Checkout 恢复冲突：留在目标分支、冲突可见、安全储藏保留', async () => {
       writeRepoFile(switchRepo, 'shared.txt', 'local edit\n')
-      const blocked = await gitbar('checkout', { branch: 'develop' })
-      assert.equal(blocked.status, 409, JSON.stringify(blocked.body).slice(0, 200))
-      assert.equal(blocked.body.code, 'localChanges')
-      assert.equal(git(switchRepo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'main')
-      assert.deepEqual(stashRefs(switchRepo), [])
-    })
-
-    await check('5.2) 储藏并切换：改动进储藏、切到目标分支、工作区干净', async () => {
-      const switched = await gitbar('checkout', {
-        branch: 'develop',
-        stash: true,
-        message: '切换分支前自动储藏',
-        includeUntracked: true,
-      })
+      const switched = await gitbar('checkout', { branch: 'develop' })
       assert.equal(switched.status, 200, JSON.stringify(switched.body).slice(0, 300))
-      assert.equal(switched.body.stash.stashed, true)
-      assert.equal(switched.body.stash.ref, 'stash@{0}')
-      assert.equal(switched.body.stash.message, '切换分支前自动储藏')
-      assert.equal(switched.body.stash.branch, 'main', '原分支是切换**之前**那个')
+      assert.equal(switched.body.code, 'smartSwitchConflict')
       assert.equal(git(switchRepo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'develop')
-      assert.equal(porcelain(switchRepo), '')
-      assert.equal(readRepoFile(switchRepo, 'shared.txt'), 'develop content\n')
+      assert.notEqual(git(switchRepo, ['ls-files', '-u']).trim(), '')
+      const list = await gitbar('auto-saves', {})
+      assert.equal(list.body.autoSaves.length, 1)
+      assert.match(list.body.autoSaves[0].id, /^[0-9a-f-]{36}$/iu)
+      assert.equal(switched.body.autoSave.stashOid, list.body.autoSaves[0].stashOid)
+
+      // 清理夹具；产品路径本身没有执行任何 reset/clean。
+      git(switchRepo, ['reset', '--hard'])
+      git(switchRepo, ['switch', 'main'])
+      git(switchRepo, ['stash', 'drop', list.body.autoSaves[0].ref])
     })
 
-    await check('5.3) 切换失败时储藏**已经建好**，错误响应必须把这个事实带回来', async () => {
-      // 回到 main 并造出改动，然后切到一个不存在的分支：储藏会发生，checkout 会失败。
-      git(switchRepo, ['switch', 'main'])
+    await check('5.2) 目标引用本身无效：不创建储藏，现有修改原地保留', async () => {
       writeRepoFile(switchRepo, 'shared.txt', 'another edit\n')
-      const failed = await gitbar('checkout', { branch: 'no-such-branch', stash: true, message: '失败前也要说清楚' })
+      const failed = await gitbar('checkout', { branch: 'no-such-branch' })
       assert.equal(failed.status, 404, JSON.stringify(failed.body).slice(0, 300))
       assert.equal(failed.body.code, 'noSuchRef')
-      // **关键**：用户必须能从响应里知道改动进了 stash，否则会以为改动丢了。
-      assert.equal(failed.body.stash?.stashed, true, JSON.stringify(failed.body).slice(0, 300))
-      assert.equal(failed.body.stash?.ref, 'stash@{0}')
-      assert.equal(failed.body.stash?.message, '失败前也要说清楚')
-      // 5.2 那次储藏还在（我们没删它），因此这里应当有两条，新的一条在最前面。
-      assert.equal(stashRefs(switchRepo).length, 2, stashRefs(switchRepo).join(', '))
-      assert.equal(stashRefs(switchRepo)[0], 'stash@{0}')
-      assert.equal(porcelain(switchRepo), '', '储藏之后工作区是干净的')
-      assert.equal(readRepoFile(switchRepo, 'shared.txt'), 'base\n')
+      assert.equal(git(switchRepo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'main')
+      assert.equal(readRepoFile(switchRepo, 'shared.txt'), 'another edit\n')
+      assert.deepEqual(stashRefs(switchRepo), [])
+      git(switchRepo, ['restore', '--', 'shared.txt'])
     })
 
-    await check('5.4) 干净的工作区里直接切换（不需要储藏）', async () => {
+    await check('5.3) Git 允许携带修改时直接切换，不创建任何储藏', async () => {
+      writeRepoFile(switchRepo, 'other.txt', 'compatible local edit\n')
       const switched = await gitbar('checkout', { branch: 'develop' })
       assert.equal(switched.status, 200, JSON.stringify(switched.body).slice(0, 200))
-      assert.equal(switched.body.stash.stashed, false)
+      assert.equal(switched.body.code, 'directSwitch')
       assert.equal(git(switchRepo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'develop')
+      assert.equal(readRepoFile(switchRepo, 'other.txt'), 'compatible local edit\n')
+      assert.deepEqual(stashRefs(switchRepo), [])
     })
   })
 

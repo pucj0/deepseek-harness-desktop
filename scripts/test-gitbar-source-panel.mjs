@@ -920,30 +920,17 @@ check('   请求体是分支名', JSON.stringify(posts[0]?.body), '{"branch":"de
 check('   成功后关闭面板', ui.panelOpen(), false)
 
 console.log('')
-console.log('=== 9. 有未提交改动被拒：短句 + 暂存入口 + git 原文 ===')
-nextWriteError = {
-  error: 'checkout failed',
-  code: 'localChanges',
-  detail: 'error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt',
-}
+console.log('=== 9. Smart Checkout：一次请求完成，不再出现二次储藏按钮 ===')
+writeExtra = { code: 'smartSwitchRestored', branch: 'develop', restored: true }
 await ui.openPanel()
-await ui.dblClickRow('develop')
-// 失败时面板必须保持打开，否则用户看不到原因。
-check('9) 失败后面板仍打开', ui.panelOpen(), true)
-check('   错误区带 code 标记', ui.find('data-desktop-sc-error', 'localChanges') === null, 'false')
-const errorText = textOf(ui.find('data-desktop-sc-error'))
-check('   显示本地化短句（字典键）', errorText.includes('error_localChanges'), 'true')
-check('   原样显示 git 英文原文', errorText.includes('would be overwritten by checkout'), 'true')
-const stashButton = ui.findByText('stashAndSwitch')
-check('   给出「暂存并切换」入口', stashButton === null, 'false')
 posts.length = 0
-stashButton.props.onClick({ stopPropagation() {}, preventDefault() {} })
-await ui.settle()
-check('   点它是 stash + checkout', posts[0]?.body?.stash === true && posts[0]?.body?.branch === 'develop', 'true')
-// 储藏消息由**客户端**给（宿主不知道界面语言，而这条消息会出现在储藏列表里给用户看）；
-// 未跟踪文件一并储藏 —— 它们同样会让 checkout 失败（目标分支里有同名文件）。
-check('   带上本地化的储藏消息', posts[0]?.body?.message === 'stashBeforeCheckoutMessage', 'true')
-check('   包含未跟踪文件（否则可能再被拒一次）', posts[0]?.body?.includeUntracked, true)
+await ui.dblClickRow('develop')
+check('9) 只发出一次 checkout', posts.map((entry) => entry.route).join(','), 'checkout')
+check('   请求体不再包含 stash 指令', JSON.stringify(posts[0]?.body), '{"branch":"develop"}')
+const stashButton = ui.findByText('stashAndSwitch')
+check('   不给二次「储藏并切换」入口', stashButton === null, 'true')
+check('   成功后关闭面板', ui.panelOpen(), false)
+writeExtra = {}
 
 console.log('')
 console.log('=== 10. 新建分支对话框：请求体与校验 ===')
@@ -1152,25 +1139,26 @@ check('   也不给「中止」', progressButtons.length, 0)
 statusOverride = {}
 
 console.log('')
-console.log('=== 21. 储藏并切换：切换失败时改动没丢，给恢复入口 ===')
-nextWriteError = {
-  error: 'branch not found',
-  code: 'noSuchRef',
-  detail: 'fatal: invalid reference: nope',
-  // 宿主把"那次储藏已经建好了"放在错误响应里——这是**不可丢**的信息。
-  stash: { stashed: true, ref: 'stash@{0}', message: 'auto', branch: 'main', hasUntracked: true },
+console.log('=== 21. Smart Checkout 切换失败：安全副本可按稳定 id 恢复 ===')
+writeExtra = {
+  ok: false,
+  code: 'switchFailedStashed',
+  branch: 'main',
+  restored: false,
+  autoSave: { id: '11111111-1111-4111-8111-111111111111', ref: 'stash@{0}', stashOid: 'a'.repeat(40), fromBranch: 'main', toBranch: 'develop' },
 }
 ui = await mount()
 await ui.clickBadge()
 await ui.dblClickRow('develop')
-check('21) 失败仍然报错（面板保持打开）', textOf(ui.find('data-desktop-sc-error')).includes('error_noSuchRef'), 'true')
-check('   同时明确告知"改动已存入储藏"', textOf(ui.find('data-desktop-sc-notice')).includes('stashCreatedBeforeFailure'), 'true')
-check('   并给出「恢复储藏的改动」入口', ui.find('data-desktop-sc-restore', 'stash@{0}') === null, 'false')
+check('21) 面板保持打开', ui.panelOpen(), true)
+check('   明确告知本地修改已安全保存', textOf(ui.find('data-desktop-sc-notice')).includes('switchFailedStashed'), 'true')
+check('   给出恢复入口', ui.find('data-desktop-sc-restore', 'stash@{0}') === null, 'false')
 posts.length = 0
+writeExtra = { code: 'autoSaveRestored', restored: true }
 await ui.click('data-desktop-sc-restore', 'stash@{0}')
-check('   点恢复走 stash/pop', posts.map((p) => p.route).join(','), 'stash/pop')
-check('   带的是那条储藏的引用', posts[0]?.body?.ref, 'stash@{0}')
-nextWriteError = null
+check('   点恢复走 auto-save/restore', posts.map((p) => p.route).join(','), 'auto-save/restore')
+check('   带稳定 id', posts[0]?.body?.id, '11111111-1111-4111-8111-111111111111')
+writeExtra = {}
 
 console.log('')
 console.log('=== 22. 标签：列表 / 搜索 / 菜单 / 新建 / 删除 / 推送 / 比较 ===')

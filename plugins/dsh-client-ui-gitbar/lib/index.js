@@ -20,7 +20,7 @@
 //   5. 不做自动 stash、不加 --force、不 --discard-changes：切换分支会改变用户工作区，
 //      必须由用户明确选择。
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -975,7 +975,7 @@ async function readSmallBody(request) {
  * 判断仓库当前是否有未提交改动（含未跟踪文件）。
  *
  * 用 `status --porcelain` 而不是只看已跟踪改动：未跟踪文件同样可能被 checkout 拦下
- * （目标分支里存在同名文件时），此时只报"暂存并切换"才准确。
+ * （目标分支里存在同名文件时），此时 Smart Checkout 也必须保护它们。
  *
  * @param cwd - 工作区路径。
  * @returns 是否有未提交改动。
@@ -1013,6 +1013,77 @@ async function stashChanges(cwd, options) {
   const after = await listStashes(cwd)
   if (after.length === 0 || (before.length > 0 && after[0].sha === before[0].sha)) return { stashed: false }
   return { stashed: true, ...after[0] }
+}
+
+const SMART_STASH_PREFIX = 'dsh-smart-switch:'
+
+/** Parse only stashes carrying our unambiguous Smart Checkout marker. */
+function parseSmartStash(entry) {
+  const message = String(entry?.message ?? '')
+  if (!message.startsWith(SMART_STASH_PREFIX)) return undefined
+  const fields = message.slice(SMART_STASH_PREFIX.length).split(':')
+  if (fields.length < 3 || !/^[0-9a-f-]{36}$/iu.test(fields[0])) return undefined
+  return {
+    id: fields[0],
+    stashOid: entry.sha,
+    ref: entry.ref,
+    fromBranch: fields[1],
+    toBranch: fields.slice(2).join(':'),
+    createdAt: entry.date,
+    hasUntracked: entry.hasUntracked === true,
+    state: 'pending',
+  }
+}
+
+async function listSmartStashes(cwd) {
+  const result = []
+  for (const entry of await listStashes(cwd)) {
+    const smart = parseSmartStash(entry)
+    if (smart === undefined) continue
+    const rawFiles = await git(['stash', 'show', '--name-only', '--include-untracked', entry.sha], cwd).catch(() => '')
+    const stagedRaw = await git(['diff', '--name-only', '-z', `${entry.sha}^1`, `${entry.sha}^2`], cwd).catch(() => '')
+    result.push({ ...smart, files: rawFiles.split(/\r?\n/u).filter(Boolean).length, stagedPaths: stagedRaw.split('\u0000').filter(Boolean) })
+  }
+  return result
+}
+
+/** Create a recoverable stash and identify it by both marker id and immutable OID. */
+async function createSmartStash(cwd, fromBranch, toBranch) {
+  const id = randomUUID()
+  const marker = `${SMART_STASH_PREFIX}${id}:${fromBranch}:${toBranch}`
+  const before = new Set((await listStashes(cwd)).map((entry) => entry.sha))
+  await git(['stash', 'push', '--include-untracked', '-m', marker], cwd)
+  const entry = (await listStashes(cwd)).find((candidate) => !before.has(candidate.sha) && candidate.message === marker)
+  if (entry === undefined) throw new Error('smart stash was not created')
+  const parsed = parseSmartStash(entry)
+  if (parsed === undefined) throw new Error('smart stash marker was not preserved')
+  const stagedRaw = await git(['diff', '--name-only', '-z', `${entry.sha}^1`, `${entry.sha}^2`], cwd).catch(() => '')
+  return { ...entry, ...parsed, stagedPaths: stagedRaw.split('\u0000').filter(Boolean) }
+}
+
+/** Restore a smart stash, falling back when --index cannot merge its index tree. */
+async function applySmartStash(cwd, smart) {
+  try {
+    await git(['stash', 'apply', '--index', smart.stashOid], cwd, { env: NON_INTERACTIVE_ENV })
+    return
+  } catch (indexedError) {
+    if ((await listUnmergedPaths(cwd)).length > 0) throw indexedError
+    try {
+      await git(['stash', 'apply', smart.stashOid], cwd, { env: NON_INTERACTIVE_ENV })
+      const stagedPaths = Array.isArray(smart.stagedPaths) ? smart.stagedPaths : []
+      if (stagedPaths.length > 0) await git(['add', '--', ...stagedPaths], cwd)
+    } catch {
+      throw indexedError
+    }
+  }
+}
+
+/** Drop exactly our stash; never infer identity from stash@{0}. */
+async function dropSmartStash(cwd, smart) {
+  const entry = (await listStashes(cwd)).find((candidate) => candidate.sha === smart.stashOid)
+  const parsed = parseSmartStash(entry)
+  if (entry === undefined || parsed?.id !== smart.id) throw new Error('smart stash identity changed')
+  await git(['stash', 'drop', entry.ref], cwd, { env: NON_INTERACTIVE_ENV })
 }
 
 /**
@@ -2043,6 +2114,11 @@ function createGitHandler() {
           sendJson(response, 200, { isRepo: context !== undefined, ...scope, stashes, stashCount: stashes.length })
           return
         }
+        if (path === `${ROUTE_PREFIX}/auto-saves`) {
+          const autoSaves = context === undefined ? [] : await listSmartStashes(cwd)
+          sendJson(response, 200, { isRepo: context !== undefined, ...scope, autoSaves, count: autoSaves.length })
+          return
+        }
         // 当前 HEAD 的完整信息（amend 要把原信息填回输入框；撤销提交要知道它的父提交）。
         // 顺带算出"这个提交是否已经发布"，因为那决定了 amend 要不要给出改写历史的警告——
         // 而这只有宿主知道（upstream 与远端跟踪引用都在它手里）。
@@ -2198,7 +2274,52 @@ function createGitHandler() {
         return
       }
 
-      // 切换分支 / 签出标记或修订。表单 `{ branch, stash?, message?, includeUntracked? }`。
+      if (path === `${ROUTE_PREFIX}/auto-save/restore` || path === `${ROUTE_PREFIX}/auto-save/switch-and-restore`) {
+        const id = typeof payload?.id === 'string' ? payload.id : ''
+        const smart = (await listSmartStashes(cwd)).find((entry) => entry.id === id)
+        if (smart === undefined) {
+          sendJson(response, 404, { error: 'no such auto-save', code: 'noAutoSave' })
+          return
+        }
+        if (path === `${ROUTE_PREFIX}/auto-save/restore`) {
+          const branch = await currentBranchName(cwd)
+          if (branch !== smart.fromBranch) {
+            sendJson(response, 409, {
+              error: `auto-save belongs to ${smart.fromBranch}; current branch is ${branch ?? 'HEAD'}`,
+              code: 'wrongBranch',
+              autoSave: smart,
+            })
+            return
+          }
+        }
+        await runWrite(cwd, scope, response, async () => {
+          if (path.endsWith('/switch-and-restore')) {
+            await git(['switch', '--', smart.fromBranch], cwd)
+          }
+          try {
+            await applySmartStash(cwd, smart)
+          } catch (error) {
+            const conflicts = await listConflictEntries(cwd)
+            if (conflicts.length > 0) {
+              return { code: 'smartSwitchConflict', restored: false, conflicted: true, conflictFiles: conflicts, autoSave: { ...smart, state: 'conflict' }, details: String(error?.message ?? error) }
+            }
+            throw error
+          }
+          const conflicts = await listConflictEntries(cwd)
+          if (conflicts.length > 0) {
+            return { code: 'smartSwitchConflict', restored: false, conflicted: true, conflictFiles: conflicts, autoSave: { ...smart, state: 'conflict' } }
+          }
+          await dropSmartStash(cwd, smart)
+          return { code: 'autoSaveRestored', restored: true, autoSave: { ...smart, state: 'restored' } }
+        }, (error) => {
+          const message = String(error?.message ?? error)
+          if (looksLikeLocalChanges(message)) return { status: 409, code: 'localChanges' }
+          return undefined
+        }, () => ({ autoSave: smart }))
+        return
+      }
+
+      // 切换分支 / 签出标记或修订。表单只需 `{ branch }`；Smart Checkout 由 host 编排。
       if (path === `${ROUTE_PREFIX}/checkout`) {
         // 这里接受"分支名或提交 SHA"：界面的「签出标记或修订…」要能切到标签。
         // 标签名会走 asRef 分支（与分支名同一字符集），提交 SHA 走十六进制分支。
@@ -2206,27 +2327,6 @@ function createGitHandler() {
         if (target === undefined) {
           sendJson(response, 400, { error: 'invalid branch name', code: 'invalidBranch' })
           return
-        }
-        // 储藏消息由**客户端**给：宿主不知道界面语言，而这条消息会出现在储藏列表里
-        // （用户看得见），因此不能在宿主里硬编码某一种语言的文案。
-        const stashMessage = normalizeStashMessage(payload?.message)
-        if (stashMessage === undefined) {
-          sendJson(response, 400, { error: 'invalid stash message', code: 'invalidStashMessage' })
-          return
-        }
-        // 用户明确要求先储藏：只有这种情况才动 stash，绝不自动执行。
-        let stash = { stashed: false }
-        if (payload?.stash === true) {
-          try {
-            if (!(await isDirty(cwd))) {
-              sendJson(response, 400, { error: 'nothing to stash', code: 'nothingToStash' })
-              return
-            }
-            stash = await stashChanges(cwd, { message: stashMessage, includeUntracked: payload?.includeUntracked === true })
-          } catch (error) {
-            sendJson(response, 409, { error: 'stash failed', code: 'stashFailed', detail: String(error.message) })
-            return
-          }
         }
         await runWrite(
           cwd,
@@ -2251,17 +2351,76 @@ function createGitHandler() {
             }
             const onLocalBranch = await exists(`refs/heads/${target}`)
             const onRemoteBranch = !onLocalBranch && (await exists(`refs/remotes/${target}`))
-            // 不加 --force / --discard-changes：有未提交改动时 git 自己会拒绝，
-            // 把这个决定留给用户，而不是替他丢弃或暂存改动。
+            // 不加 --force / --discard-changes：先让 Git 携带兼容修改直接切换；只有 Git
+            // 明确报告会覆盖本地修改时，下面才进入可恢复的 Smart Checkout。
             const args = onLocalBranch
               ? ['switch', '--', target]
               : onRemoteBranch
                 ? ['switch', '--track', '--', `refs/remotes/${target}`]
                 : ['switch', '--detach', '--', target]
-            await git(args, cwd)
-            // 标签或提交会进入游离 HEAD：界面必须告诉用户，否则他下一次提交就成了
-            // "没有分支的提交"，很难自己看出来。
-            return { stash, detached: !onLocalBranch && !onRemoteBranch }
+            const detached = !onLocalBranch && !onRemoteBranch
+            // First let git carry compatible local changes across. Smart Checkout
+            // starts only when git itself says the target would overwrite them.
+            try {
+              await git(args, cwd)
+              return { code: 'directSwitch', branch: target, detached }
+            } catch (directError) {
+              if (!looksLikeLocalChanges(String(directError?.message ?? directError))) throw directError
+            }
+
+            const fromBranch = (await currentBranchName(cwd)) ?? 'HEAD'
+            const smart = await createSmartStash(cwd, fromBranch, target)
+            const safety = {
+              id: smart.id,
+              stashId: smart.id,
+              stashOid: smart.stashOid,
+              ref: smart.ref,
+              fromBranch,
+              toBranch: target,
+              createdAt: smart.date,
+            }
+            try {
+              await git(args, cwd)
+            } catch (switchError) {
+              // We are still on the source branch. Apply first, then (and only
+              // then) drop the exact marked OID after confirming no conflicts.
+              try {
+                await applySmartStash(cwd, smart)
+                const conflicts = await listConflictEntries(cwd)
+                if (conflicts.length === 0) {
+                  await dropSmartStash(cwd, smart)
+                  return { ok: false, code: 'switchFailedRestored', branch: fromBranch, restored: true, details: String(switchError?.message ?? switchError) }
+                }
+              } catch {
+                // The immutable stash remains the safety source of truth.
+              }
+              return { ok: false, code: 'switchFailedStashed', branch: fromBranch, restored: false, autoSave: safety, details: String(switchError?.message ?? switchError) }
+            }
+
+            try {
+              await applySmartStash(cwd, smart)
+            } catch (restoreError) {
+              const conflicts = await listConflictEntries(cwd)
+              if (conflicts.length > 0) {
+                return {
+                  ok: true,
+                  code: 'smartSwitchConflict',
+                  branch: target,
+                  restored: false,
+                  conflicted: true,
+                  conflictFiles: conflicts,
+                  autoSave: { ...safety, state: 'conflict' },
+                  details: String(restoreError?.message ?? restoreError),
+                }
+              }
+              return { ok: true, code: 'smartSwitch', branch: target, restored: false, autoSave: safety, details: String(restoreError?.message ?? restoreError) }
+            }
+            const conflicts = await listConflictEntries(cwd)
+            if (conflicts.length > 0) {
+              return { ok: true, code: 'smartSwitchConflict', branch: target, restored: false, conflicted: true, conflictFiles: conflicts, autoSave: { ...safety, state: 'conflict' } }
+            }
+            await dropSmartStash(cwd, smart)
+            return { ok: true, code: 'smartSwitchRestored', branch: target, restored: true, conflicted: false, detached }
           },
           (error) => {
             const message = String(error?.message ?? error)
@@ -2271,8 +2430,6 @@ function createGitHandler() {
             }
             return undefined
           },
-          // 失败也要把"储藏已经建好了"带回去：这是**不可丢**的信息（见 runWrite 的说明）。
-          () => (stash.stashed === true ? { stash } : {}),
         )
         return
       }
@@ -3489,6 +3646,9 @@ export function apply(ctx) {
     `${ROUTE_PREFIX}/stash/apply`,
     `${ROUTE_PREFIX}/stash/pop`,
     `${ROUTE_PREFIX}/stash/drop`,
+    `${ROUTE_PREFIX}/auto-saves`,
+    `${ROUTE_PREFIX}/auto-save/restore`,
+    `${ROUTE_PREFIX}/auto-save/switch-and-restore`,
     `${ROUTE_PREFIX}/branch/create`,
     `${ROUTE_PREFIX}/branch/rename`,
     `${ROUTE_PREFIX}/branch/delete`,

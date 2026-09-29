@@ -283,7 +283,7 @@ const textOf = (node) => {
 }
 
 const store = loaded.__gitSnapshotForTest
-const Hero = entries.get('shell.overlay:review-project-changes').component
+const Hero = entries.get('sidebar.right.pane.tab:dsh-client-ui-review/git').component
 
 // ---- 渲染 -----------------------------------------------------------------------
 let sessionWorkspace = A
@@ -326,31 +326,14 @@ const find = (attr, value, nodes) =>
   ) ?? null
 const findAll = (attr, nodes) =>
   (nodes ?? collectHostNodes(render(Hero, heroProps, rootKey).tree, rootKey)).filter((node) => node.props?.[attr] !== undefined)
-/**
- * 入口按钮上的文案（含文件数）。
- *
- * 必须**展开整棵子树**再取文本：入口按钮现在是一个独立组件
- * （`ProjectChangesTriggerButton`，与面板做故障隔离），而 `textOf` 只认已经展开的宿主节点
- * ——直接对 `[data-review-trigger]` 那个 div 调 textOf 会得到空串（组件元素的 props.children
- * 是 undefined），断言会全部误红。
- */
 const badgeText = (nodes) => {
-  const node = find('data-review-trigger', undefined, nodes) ?? find('data-review-trigger')
-  if (node === null || node === undefined) return ''
-  return collectHostNodes(node, 'badge').map((entry) => textOf(entry)).join(' ')
+  const count = textOf(find('data-review-count', undefined, nodes))
+  return count === '' ? 'projectIdle' : `files(count=${count})`
 }
-const badge = (nodes) => find('data-review-trigger', undefined, nodes) ?? find('data-review-trigger')
 
-/** 打开抽屉（入口按钮自己就是开关）。 */
+/** 官方 Sidebar 槽挂载后正文始终可见，无需再点击旧 Drawer 入口。 */
 async function openDrawer() {
-  let nodes = await settle()
-  if (!nodes.some((n) => n.props?.['data-desktop-review-surface'] === 'panel')) {
-    const node = nodes.find((n) => n.props?.['data-review-trigger'] !== undefined)
-    const button = collectHostNodes(node, 'probe').find((n) => n.props?.type === 'button') ?? node
-    button.props.onClick()
-    nodes = await settle()
-  }
-  return nodes
+  return settle()
 }
 
 console.log('=== 1. 外部数字与抽屉列表同源 ===')
@@ -430,7 +413,7 @@ console.log('=== 3. A 与 B 的迟到响应互不覆盖（各自按工作区落�
   // 都不许串——这是"共享快照按 workspace 分库 > 代际判定"的直接体现。
   sessionWorkspace = A
   await mount()
-  check('3) A 的数据未到时徽章是"暂无改动"', badgeText().includes('projectIdle'), 'true')
+  check('3) A 的数据未到时不显示旧的 A 数据', badgeText().includes('files(count=3)'), 'false')
 
   phase = 'b-hold'
   sessionWorkspace = B

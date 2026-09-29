@@ -1,15 +1,11 @@
-// 端到端验证 gitbar 的切换与「暂存并切换」流程。
+// 端到端验证 gitbar 的 Smart Checkout 流程。
 //
 //   node scripts/test-gitbar-checkout.mjs
 //
 // 为什么用一次性临时仓库：这个测试会真的执行 `git stash` 与 `git checkout`。
 // 在有未提交改动的真实仓库上跑会移动用户的工作区状态，绝不可以。
 //
-// 覆盖的四种情形对应界面上的四种结果：
-//   1. 脏工作区直接切换  -> 409，界面显示 git 原文并给出「暂存并切换」入口
-//   2. 脏工作区带 stash  -> 200，切换成功且返回 stash 引用（界面要告知用户）
-//   3. 干净工作区带 stash -> 400 nothing to stash（界面不该出现这个按钮，但接口要稳）
-//   4. 非法分支名        -> 400，安全边界
+// 覆盖：可直接携带修改、被 Git 拒绝后自动储藏/恢复、普通 stash 不受影响、安全边界。
 import { execFile, execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -41,15 +37,16 @@ try {
   execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com'])
   execFileSync('git', ['-C', repo, 'config', 'user.name', 'test'])
   writeFileSync(join(repo, 'a.txt'), 'base\n')
+  writeFileSync(join(repo, 'shared.txt'), 'one\ntwo\nthree\nfour\nfive\n')
   await runner(['add', '.'], repo)
   await runner(['commit', '-q', '-m', 'init'], repo)
   await runner(['checkout', '-q', '-b', 'feature'], repo)
-  writeFileSync(join(repo, 'b.txt'), 'feature\n')
+  writeFileSync(join(repo, 'shared.txt'), 'ONE\ntwo\nthree\nfour\nfive\n')
   await runner(['add', '.'], repo)
   await runner(['commit', '-q', '-m', 'feature'], repo)
   await runner(['checkout', '-q', 'main'], repo)
-  // 制造与 feature 冲突的未提交改动
-  writeFileSync(join(repo, 'b.txt'), 'dirty on main\n')
+  // 先制造一个 Git 本身允许跨分支携带的改动。
+  writeFileSync(join(repo, 'a.txt'), 'dirty but compatible\n')
 
   console.log('临时仓库:', repo)
   console.log(`  当前分支: ${(await runner(['rev-parse', '--abbrev-ref', 'HEAD'], repo)).trim()}`)
@@ -128,27 +125,74 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-test-home-'))
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
+  const autoSaves = () => fetch(`${base}/dsh-desktop/gitbar/auto-saves?cwd=${encodeURIComponent(repo)}`)
+  const restoreAutoSave = (id, route = 'restore') =>
+    fetch(`${base}/dsh-desktop/gitbar/auto-save/${route}?cwd=${encodeURIComponent(repo)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }),
+    })
 
-  // ---- 1. 脏工作区直接切换 ---------------------------------------------
+  // ---- 1. dirty 不等于 blocked：Git 允许就直接切，不产生 stash ----------
   let response = await post({ branch: 'feature' })
-  let text = await response.text()
-  check('1) 脏工作区直接切换 -> 409', response.status, 409)
-  check('   错误里含 git 原文', /local changes|would be overwritten/iu.test(text), 'true')
+  let body = await response.json()
+  check('1) 可携带修改直接切换 -> 200', response.status, 200)
+  check('   稳定状态码 directSwitch', body?.code, 'directSwitch')
+  check('   不创建 stash', (await runner(['stash', 'list'], repo)).trim(), '')
+  check('   修改仍在工作区', (await runner(['status', '--porcelain'], repo)).includes('a.txt'), 'true')
 
-  // ---- 2. 带 stash 切换 -------------------------------------------------
-  response = await post({ branch: 'feature', stash: true })
-  const body = await response.json()
-  check('2) 暂存并切换 -> 200', response.status, 200)
-  check('   返回 stash.stashed', body?.stash?.stashed, 'true')
-  check('   返回 stash.ref 非空', typeof body?.stash?.ref === 'string' && body.stash.ref !== '', 'true')
+  await runner(['switch', 'main'], repo)
+  await runner(['restore', '--', 'a.txt'], repo)
+  // 用户原本已有普通 stash；Smart Checkout 只能精确操作自己的那一条。
+  writeFileSync(join(repo, 'a.txt'), 'user stash\n')
+  await runner(['stash', 'push', '-m', 'user-stash'], repo)
+  // staged + unstaged-compatible + untracked。feature 改第一行，本地改第二行，apply 可三方合并。
+  writeFileSync(join(repo, 'shared.txt'), 'one\ntwo\nthree\nfour\nFIVE local\n')
+  await runner(['add', 'shared.txt'], repo)
+  writeFileSync(join(repo, 'new.txt'), 'untracked\n')
+
+  // ---- 2. Git 拒绝覆盖后，一次请求完成 stash/switch/apply/drop ----------
+  response = await post({ branch: 'feature' })
+  body = await response.json()
+  check('2) Smart Checkout -> 200', response.status, 200)
+  check('   稳定状态码 smartSwitchRestored', body?.code, 'smartSwitchRestored')
   check('   当前分支已切换', body?.branch, 'feature')
   check('   git 视角也在 feature', (await runner(['rev-parse', '--abbrev-ref', 'HEAD'], repo)).trim(), 'feature')
-  check('   工作区已干净', (await runner(['status', '--porcelain'], repo)).trim(), '')
-  check('   stash 里有记录', (await runner(['stash', 'list'], repo)).includes('dsh-gitbar'), 'true')
+  const status = await runner(['status', '--porcelain'], repo)
+  check('   tracked 修改仍存在', status.includes('shared.txt'), 'true')
+  check('   staged 状态保留', /^M\s+shared\.txt$/mu.test(status), 'true')
+  check('   untracked 仍存在', status.includes('?? new.txt'), 'true')
+  const stashList = await runner(['stash', 'list'], repo)
+  check('   自动 stash 已精确删除', stashList.includes('dsh-smart-switch:'), 'false')
+  check('   用户普通 stash 保留', stashList.includes('user-stash'), 'true')
 
-  // ---- 3. 干净工作区带 stash -------------------------------------------
-  response = await post({ branch: 'main', stash: true })
-  check('3) 干净工作区带 stash -> 400', response.status, 400)
+  // ---- 3. 自动恢复不能完成时，安全 stash 可重启后扫描并找回 -------------
+  await runner(['restore', '--staged', '--', 'shared.txt'], repo)
+  await runner(['restore', '--', 'shared.txt'], repo)
+  rmSync(join(repo, 'new.txt'), { force: true })
+  writeFileSync(join(repo, 'collision.txt'), 'tracked on feature\n')
+  await runner(['add', 'collision.txt'], repo)
+  await runner(['commit', '-q', '-m', 'collision target'], repo)
+  await runner(['switch', 'main'], repo)
+  writeFileSync(join(repo, 'collision.txt'), 'untracked from main\n')
+  response = await post({ branch: 'feature' })
+  body = await response.json()
+  check('3) 无法自动恢复时仍完成切分支', body?.branch, 'feature')
+  check('   返回可找回的 autoSave', typeof body?.autoSave?.stashOid === 'string', 'true')
+  let savesBody = await (await autoSaves()).json()
+  check('   扫描 Git stash 可重新发现', savesBody?.autoSaves?.length, 1)
+  const saved = savesBody.autoSaves[0]
+  check('   以稳定 OID 标识', saved?.stashOid, body?.autoSave?.stashOid)
+  response = await restoreAutoSave(saved.id)
+  body = await response.json()
+  check('   在错误分支直接恢复会被拒绝', response.status, 409)
+  check('   返回稳定状态码 wrongBranch', body?.code, 'wrongBranch')
+  check('   拒绝后安全副本仍在', (await (await autoSaves()).json())?.autoSaves?.length, 1)
+  response = await restoreAutoSave(saved.id, 'switch-and-restore')
+  body = await response.json()
+  check('   切回来源分支并恢复', body?.code, 'autoSaveRestored')
+  check('   未跟踪文件回来', (await runner(['status', '--porcelain'], repo)).includes('?? collision.txt'), 'true')
+  savesBody = await (await autoSaves()).json()
+  check('   成功恢复后只删除自己的 stash', savesBody?.autoSaves?.length, 0)
+  check('   用户普通 stash 仍保留', (await runner(['stash', 'list'], repo)).includes('user-stash'), 'true')
 
   // ---- 4. 非法分支名 ---------------------------------------------------
   response = await post({ branch: '--upload-pack=calc' })

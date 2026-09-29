@@ -10,7 +10,7 @@ It packages the official `@deepseek-ai/dsh` runtime, a portable Node.js runtime,
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-Repository version: **1.6.0**. See [release notes](RELEASE_NOTES.md) for the version history.
+Repository version: **1.7.1**. See [release notes](RELEASE_NOTES.md) for the version history.
 
 ## Why a desktop client?
 
@@ -43,8 +43,9 @@ The app boots the official `dsh-base` and `dsh-web-app` bundles. Harness feature
 
 The repository's `gitbar` and `review` plugins add these controls to the official Harness Web UI:
 
-- **Git toolbar:** current branch, dirty state, and ahead/behind counts; searchable local and remote branches with switching. A branch row's context menu follows IDEA's layout (checkout, new branch from here, merge/rebase into current, rename, push, delete, copy branch name). Switching with uncommitted work no longer needs a terminal: when git refuses, “Stash changes and switch” appears — and if the switch still fails, the UI says explicitly that the changes **did** go into a stash (nothing is lost) and offers “Restore stashed changes”.
-- **Stashes:** both the Git toolbar and Project Changes can stash (immediately, or with options: message plus “include untracked files”, which is off by default). Project Changes also lists the stashes (`stash@{n}`, message, original branch, time); opening one shows which files it changed and their per-file diffs through the same side-by-side/unified viewer, with Apply / Pop / Drop (apply keeps the entry, pop applies and deletes it, and dropping asks first). A stash conflict — git records **no** in-progress marker for it — is reported as exactly that: the UI hands you to the existing conflict resolver and says the stash is not deleted automatically, instead of pretending this is a merge you can “continue”. Stashes belong to one repository: in a multi-repository project, a frontend stash never shows up under backend.
+- **Git toolbar and Smart Checkout:** branch switching first lets Git carry compatible changes normally. Only when Git refuses because local changes would be overwritten does the host create an OID-tracked safety stash, switch, restore with index preservation, verify the result, and drop that exact marked stash. Staged, unstaged, and untracked files are protected; restore conflicts stay on the target branch and open in the existing conflict editor while the safety stash remains.
+- **Official Git Sidebar:** project Changes and Log are registered in the official Harness right Sidebar with its branch icon; the old fixed Project Changes drawer is gone. The active Harness session cwd is the sole workspace source, stale asynchronous responses are discarded, and multi-repository selection is scoped per workspace. Changes includes Conflicts, Staged, Changes, Unversioned, Auto-saved Changes, and Stashes; Log retains graph, filters, details, compare, reset, cherry-pick, and tags.
+- **Stashes and Auto-saved Changes:** normal stashes remain viewable and manually applicable. Unrestored Smart Checkout backups are rediscovered from their `dsh-smart-switch:` marker after restart, can be inspected, restored, or switched back and restored. Automatic deletion requires the app marker, unique id, and exact OID; it never guesses from `stash@{0}` or deletes a user-created stash.
 - **Update and push:** “Update project” (fetch → pull) and “Push” run directly instead of asking for a second confirmation, and report progress on the action row. The first push sets the upstream automatically (equivalent to `push -u`). A rejected push offers “Update project” plus a confirmation-protected **force push** that only ever uses `--force-with-lease`, so a collaborator's newer commit is never overwritten. Missing upstream, no configured remote, authentication failure, and an unreachable remote each get their own message. Only destructive actions (discard, delete branch, force push, checkout tag or revision) still ask first.
 - **Merge conflicts:** conflicted files form their own group in Changes (they no longer appear under both staged and unstaged, and no longer offer a discard that would throw the work away). Opening one shows the **merge editor**: Current and Incoming per block, per-block “take current / take incoming / take both” (the choice updates the Result pane immediately, but only as a preview — nothing is written), an editable result (Tab indents), “mark as resolved” (the host re-scans the file and refuses leftover markers), and per-operation “continue / abort” for merge, rebase, cherry-pick and revert. Rebase and cherry-pick advance one commit at a time: if the next commit conflicts again — possibly in a *different file* — the host reports that the operation moved on to the next conflict instead of claiming completion, and the UI keeps resolving. The host decides which operation is in progress; the UI never guesses.
 - **Project Changes:** conflicts, staged, unstaged, and untracked groups; per-file diffs, stage, unstage, commit, and an AI-assisted commit message draft using the configured Harness model. The diff viewer defaults to **side-by-side** and can switch back to **unified** (the choice is stored locally, not in Harness settings); because both sides are the same grid row the panes scroll together, delete/add runs are paired up, and the changed characters inside a line are highlighted. The toolbar offers previous/next change with an `n/N` counter and jumps to any hunk; binary-only changes and rename-only changes get their own explanation.
@@ -84,7 +85,7 @@ Windows builds have no configured code signing, so SmartScreen may show an unkno
 1. Download the build for your platform, install it, and launch it. The first launch unpacks the bundled official runtime.
 2. Use **File → Open Folder** to choose a workspace. Until one is chosen, the app uses your home directory.
 3. In the official Harness UI, open **Settings → Models**, configure your model and API key, and start a session. Available settings depend on the bundled or updated Harness version.
-4. For Git operations, use the toolbar or Project Changes panel. If the workspace is not itself a repository, select a discovered repository or open a repository directory.
+4. For project Git operations, open **Git** in the official Harness right Sidebar. If the workspace is not itself a repository, select a discovered repository or open a repository directory.
 
 ## Relationship to the official npm distribution
 
@@ -97,8 +98,7 @@ This compares launch methods and additions provided by this project's shell. Bot
 | Workspace access | Harness workspace controls | Also offers a native picker and recent list |
 | Tray and native menu | — | Included |
 | Git toolbar, Changes, Log, per-turn review | — | Desktop plugins |
-| Harness updates | npm | In-app update from npm dist-tags |
-| Shell updates | Not applicable | Packaged app checks GitHub Releases |
+| Product updates | npm | The complete app checks and installs this project's GitHub Releases; shell and bundled runtime ship together |
 
 ## Architecture
 
@@ -128,9 +128,9 @@ The code includes a credential store that wraps a key with Electron `safeStorage
 
 ## Updates
 
-- **Harness runtime:** the in-app Updates window checks the npm registry for `@deepseek-ai/dsh`. It follows `latest` by default; its settings file also supports `next` and `alpha`. A new version is installed under user data and activated after restart. If it fails to boot, the app falls back to the bundled runtime.
-- **Desktop shell:** packaged builds use `electron-updater` and GitHub Releases metadata. The user starts checks and downloads from **Update → Check for Updates**. Shell self-update is unavailable in development mode.
-- The two update tracks are independent. At startup, the shell syncs all three bundled UI plugins into whichever Harness runtime is active.
+- **Complete product updates:** packaged builds use only `electron-updater` and this project's GitHub Releases metadata. **Update → Check for Updates** checks, downloads, and restarts into a Release containing the desktop shell, its matching Harness runtime, desktop plugins, platform installers, and `latest*.yml` metadata.
+- **The Release runtime always wins:** after installation the app boots the runtime bundled with that Release. A legacy `<userData>/runtime/current` left by an older version is ignored and cannot override it; sessions, workspaces, settings, sign-in data, and user projects are not deleted.
+- **npm remains a build-time tool:** `npm ci`, `npm run build`, and `npm run stage` still fetch build dependencies and prepare the official runtime. Only end-user npm-registry checks and hot installation of `@deepseek-ai/dsh` have been removed. App self-update is explicitly unavailable in development mode.
 
 ## Project structure
 
@@ -144,7 +144,7 @@ build/                    Icons and packaging resources
 .github/workflows/        Cross-platform release workflow
 ```
 
-The main implementation is in `src/main/index.ts`, `window.ts`, `titlebar.ts`, `menu.ts`, `dsh-server.ts`, `updater.ts`, `shell-updater.ts`, `credentials.ts`, `plugin-sync.ts`, `workspace.ts`, `workspace-switch.ts`, `git.ts`, and `i18n.ts`.
+The main implementation is in `src/main/index.ts`, `window.ts`, `titlebar.ts`, `menu.ts`, `dsh-server.ts`, `shell-updater.ts`, `credentials.ts`, `plugin-sync.ts`, `workspace.ts`, `workspace-switch.ts`, `git.ts`, and `i18n.ts`.
 
 ## Development and testing
 
@@ -183,7 +183,7 @@ The version comes from `package.json`. Pushing a `v*` tag triggers the [GitHub A
 - Windows has the most complete end-to-end verification. CI builds Linux and macOS assets, but the repository records less installation testing on real machines for those platforms.
 - Windows installers have no configured commercial code signing; macOS builds are unsigned by default. The OS may require a one-time manual approval.
 - Shell self-update is wired up, but the repository records limited full, cross-version testing on real machines.
-- Runtime updates rely on the npm registry and npm dependency resolution; online updates require registry access.
+- Complete app updates depend on GitHub Releases and an exact match between each platform's `latest*.yml` metadata and uploaded assets; real-device cross-version coverage remains smaller than the repository's automated coverage.
 - Per-turn baselines live in host-process memory. A new turn must establish a new baseline after an app restart.
 - Electron and the bundled runtime add to package size. First launch unpacks the runtime.
 - The shell's `safeStorage` credential write path is not connected to a visible settings flow.
