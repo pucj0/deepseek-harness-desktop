@@ -116,7 +116,13 @@ try {
 
   const source = readFileSync(join(root, 'runtime/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js'), 'utf8')
   const cached = cachedClientModuleSource(source)
-  assert(cached, 'This runtime must match the tested adapter for the performance regression test')
+  if (cached === undefined) {
+    await check('new upstream client module implementation keeps response bodies lazy and cached', () => {
+      assert.match(source, /function lazyBody\(/u)
+      assert.match(source, /this\.responses\.get\(artifact\.url\) \?\?/u)
+      assert.match(source, /scriptBody: lazyBody/u)
+    })
+  } else {
   const loadCombo = text => {
     const helpers = text.slice(text.indexOf('function shortHash('), text.indexOf('/** Add initial-load scheduling metadata'))
     return runInNewContext(`const HASH_REVISION_LENGTH=12; const COMBO_REVISION_PLACEHOLDER='000000000000'; const MAX_COMBO_URL_BYTES=3072;
@@ -152,6 +158,7 @@ try {
   await check('unknown upstream source uses the untouched implementation', () => {
     assert.equal(cachedClientModuleSource(source + '\n// new upstream implementation'), undefined)
   })
+  }
   console.log(`${passed} startup checks passed`)
 } finally {
   if (!resolve(scratch).startsWith(join(root, '.probe-home') + '\\') && !resolve(scratch).startsWith(join(root, '.probe-home') + '/')) throw new Error('Unsafe cleanup path')

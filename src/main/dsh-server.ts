@@ -160,6 +160,14 @@ export class DshServer extends EventEmitter {
     const pathValue = process.env['PATH'] ?? ''
     const childPath =
       nodeDir === undefined ? pathValue : `${nodeDir}${path.delimiter}${pathValue}`
+    let runtimeVersion = runtime.stagedVersion
+    if (runtimeVersion === undefined) {
+      try {
+        runtimeVersion = (JSON.parse(readFileSync(runtime.installAnchor, 'utf8')) as { version?: string }).version
+      } catch {
+        // The normal startup validation reports an invalid anchor separately.
+      }
+    }
 
     const child = spawn(
       program,
@@ -198,6 +206,7 @@ export class DshServer extends EventEmitter {
           ...(useBundledNode ? { PATH: childPath } : { ELECTRON_RUN_AS_NODE: '1' }),
           DSH_HOME: dshHome,
           DSH_DESKTOP: '1',
+          DSH_CLIENT_VERSION: process.env.DSH_CLIENT_VERSION ?? runtimeVersion ?? 'unknown',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,

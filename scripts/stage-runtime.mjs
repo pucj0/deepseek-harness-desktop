@@ -7,7 +7,7 @@
 // bundle packages from (resolveBundleDir probes the anchor's node_modules).
 //
 // Usage:
-//   node scripts/stage-runtime.mjs                     # installs @deepseek-ai/dsh@latest
+//   node scripts/stage-runtime.mjs                     # installs package.json's pinned official GitHub Release
 //   node scripts/stage-runtime.mjs 0.1.5-rc.2          # pin an exact version
 //   node scripts/stage-runtime.mjs next                # follow a dist-tag (latest|next|alpha)
 //
@@ -35,6 +35,38 @@ import { syncBundledPlugins } from './sync-plugins.mjs'
 const ROOT = resolve(import.meta.dirname, '..')
 const RUNTIME = join(ROOT, 'runtime')
 const PKG = '@deepseek-ai/dsh'
+const UPSTREAM_REPOSITORY = 'deepseek-ai/deepseek-harness'
+
+/** Read the build-time runtime pin. End-user update checks never invoke npm. */
+export function readPinnedRuntimeVersion(manifest) {
+  const value = manifest?.dshRuntimeVersion
+  return typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value) ? value : undefined
+}
+
+/** Verify that the pin names a published official GitHub Release before packaging it. */
+async function verifyGithubRelease(version) {
+  if (process.env.DSH_GITHUB_RELEASE_CHECK?.toLowerCase() === 'off') {
+    return { tag: `dsh-v${version}`, url: `https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/dsh-v${version}` }
+  }
+  const tag = `dsh-v${version}`
+  const headers = {
+    accept: 'application/vnd.github+json',
+    'user-agent': 'deepseek-harness-desktop-build',
+    'x-github-api-version': '2022-11-28',
+  }
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
+  if (typeof token === 'string' && token !== '') headers.authorization = `Bearer ${token}`
+  const response = await fetch(
+    `https://api.github.com/repos/${UPSTREAM_REPOSITORY}/releases/tags/${encodeURIComponent(tag)}`,
+    { headers, signal: AbortSignal.timeout(30_000) },
+  )
+  if (!response.ok) throw new Error(`stage-runtime: official GitHub Release ${tag} returned HTTP ${response.status}`)
+  const release = await response.json()
+  if (release?.draft === true || release?.tag_name !== tag || typeof release?.html_url !== 'string') {
+    throw new Error(`stage-runtime: ${tag} is not a published official GitHub Release`)
+  }
+  return { tag, url: release.html_url }
+}
 
 /**
  * 同一次发布波的窗口（毫秒）。
@@ -143,7 +175,10 @@ async function fetchPackument(registry, timeoutMs) {
 }
 
 async function main() {
-  const requested = process.argv[2] ?? 'latest'
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const pinned = readPinnedRuntimeVersion(manifest)
+  const requested = process.argv[2] ?? pinned
+  if (requested === undefined) throw new Error('stage-runtime: package.json must declare dshRuntimeVersion or pass an explicit version')
   const registry = process.env.DSH_STAGE_REGISTRY ?? 'https://registry.npmmirror.com'
 
   /**
@@ -168,6 +203,8 @@ async function main() {
   )
 
   const start = Date.now()
+  const sourceRelease = await verifyGithubRelease(requested)
+  console.log(`[stage-runtime] verified official GitHub Release ${sourceRelease.tag}`)
   const closure = computeClosureBefore({
     requested,
     packument: await fetchPackument(registry, Number(FETCH_TIMEOUT_MS)),
@@ -223,6 +260,8 @@ async function main() {
         plugins,
         // 诊断用：这次是按哪个时间点选的依赖闭包（没有截止时间时为 null）。
         closureBefore: closure.before ?? null,
+        sourceRelease: sourceRelease.tag,
+        sourceUrl: sourceRelease.url,
       },
       null,
       2,

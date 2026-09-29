@@ -114,11 +114,11 @@ async function withServer(workspace, body, options = {}) {
 }
 
 /** 查一次 git 插件那层的 `/roots`（只有壳内插件才提供这条路由）。 */
-async function readRoots(server) {
+async function readRoots(server, logs = []) {
   const url = server.ready?.url
   assert.ok(typeof url === 'string' && url !== '', 'server.ready.url 应当可用')
   const response = await fetch(`${url}/dsh-desktop/review/roots`)
-  assert.equal(response.status, 200)
+  assert.equal(response.status, 200, `review roots missing; server log tail:\n${logs.slice(-40).join('\n')}`)
   return await response.json()
 }
 
@@ -135,7 +135,7 @@ try {
     await check('引导标记已写死（此后不会自己发现新目录）', () => assert.equal(registry.initialized, true))
     await check('登记用的是官方 API 而不是旁路写文件（无告警）', () =>
       assert.equal(logs.some((line) => line.includes('无法登记工作区')), false))
-    const roots = await readRoots(server)
+    const roots = await readRoots(server, logs)
     await check('git 层（进程级）也指向 A', () => assert.equal(realpathSync.native(roots.current), realA))
   })
 
@@ -159,7 +159,7 @@ try {
       assert.equal(logs.some((line) => line.includes('无法登记工作区')), false))
 
     // 两层同时成立，且是**两次独立的观测**：git 层跟着 cwd 走，注册表层跟着登记走。
-    const roots = await readRoots(server)
+    const roots = await readRoots(server, logs)
     await check('git 层指向 B', () => assert.equal(realpathSync.native(roots.current), realB))
     await check('git 层允许的根包含 A 与 B', () => {
       const allowed = roots.roots.map((entry) => realpathSync.native(entry))

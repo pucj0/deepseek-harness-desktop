@@ -73,6 +73,9 @@ export interface ShellStrings {
   updateShellProgress: string
   /** 按钮在下载中的文案，`{percent}` 会被替换成百分比。 */
   updateButtonDownloading: string
+  updateRuntimeBundledNote: string
+  updateRuntimeAvailableNote: string
+  updateButtonRuntimeRelease: string
   updateShellFailedTitle: string
   updateShellReadyTitle: string
   updateShellReadyDetail: string
@@ -212,9 +215,9 @@ const en: ShellStrings = {
 
   updateWindowTitle: 'Updates',
   updateChecking: 'Checking GitHub Releases…',
-  updateSectionRuntime: 'Application',
-  updateSectionShell: 'Application',
-  updateStateLatest: 'The application is up to date',
+  updateSectionRuntime: 'Harness Runtime · official GitHub',
+  updateSectionShell: 'Desktop App · project GitHub',
+  updateStateLatest: 'Up to date',
   updateStateAvailable: 'update available',
   updateStateUnknown: 'could not check',
   updateLatestLabel: 'Latest',
@@ -225,6 +228,9 @@ const en: ShellStrings = {
   updateShellUnavailable: 'App self-update is unavailable in development mode',
   updateShellProgress: 'Downloading… {percent}%',
   updateButtonDownloading: 'Downloading {percent}%…',
+  updateRuntimeBundledNote: 'The complete, built runtime is installed together with a compatible Desktop release; npm is never run on the user device.',
+  updateRuntimeAvailableNote: 'Official runtime {version} is available. Install the compatible Desktop release when it appears.',
+  updateButtonRuntimeRelease: 'Open Runtime Release',
   updateShellFailedTitle: 'App update failed',
   updateShellReadyTitle: 'Application update ready',
   updateShellReadyDetail: 'The new version has been downloaded. Restart to apply it.',
@@ -358,8 +364,8 @@ const zh: ShellStrings = {
 
   updateWindowTitle: '更新',
   updateChecking: '正在检查 GitHub Releases…',
-  updateSectionRuntime: '应用',
-  updateSectionShell: '应用',
+  updateSectionRuntime: 'Harness Runtime · 官方 GitHub',
+  updateSectionShell: 'Desktop 应用 · 本项目 GitHub',
   updateStateLatest: '当前已是最新版本',
   updateStateAvailable: '有可用更新',
   updateStateUnknown: '无法检查',
@@ -371,6 +377,9 @@ const zh: ShellStrings = {
   updateShellUnavailable: '开发模式不支持应用自更新',
   updateShellProgress: '正在下载… {percent}%',
   updateButtonDownloading: '下载中 {percent}%…',
+  updateRuntimeBundledNote: '完整且已构建的 Runtime 随兼容的 Desktop Release 一并安装；不会在用户电脑运行 npm。',
+  updateRuntimeAvailableNote: '官方 Runtime {version} 已发布；包含该版本的 Desktop Release 上线后即可安装。',
+  updateButtonRuntimeRelease: '打开 Runtime Release',
   updateShellFailedTitle: '应用更新失败',
   updateShellReadyTitle: '应用更新已就绪',
   updateShellReadyDetail: '新版本已下载完成，重启后生效。',

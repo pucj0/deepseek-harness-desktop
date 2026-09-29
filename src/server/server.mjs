@@ -9,10 +9,10 @@
  *   3. run the dsh boot chain using ONLY public @deepseek-ai/dsh-app-boot APIs
  *   4. announce the Web UI URL (with launch token) to the parent over stdout
  *
- * This file is copied into whatever runtime directory is being booted (see
- * `resolveServerEntry()` in src/main/dsh-server.ts), and the runtime is
- * auto-updated from npm — so every dsh-app-boot symbol it names must exist in
- * *every* runtime it can be copied into. A named export that a newer runtime
+ * This file is copied into the bundled runtime directory (see
+ * `resolveServerEntry()` in src/main/dsh-server.ts). Desktop GitHub Releases can
+ * carry a newer official runtime, so every dsh-app-boot symbol it names must
+ * exist in every supported bundled version. A named export that a newer runtime
  * dropped is not a recoverable error: the module fails to instantiate before a
  * single line runs, and the shell only sees "server exited before ready".
  * Version-sensitive API use therefore goes through a dynamic import with a
@@ -34,6 +34,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -214,13 +215,26 @@ function reconcileBundles(dir, available) {
  * @param link - 链接条目的绝对路径。
  */
 function removeLinkEntry(link) {
+  let entry
   try {
-    // 不是链接（真目录，例如 pnpm 装出来的）就不动它。
-    if (!lstatSync(link).isSymbolicLink()) return
+    entry = lstatSync(link)
   } catch {
     // 连 lstat 都失败（真不存在）——没什么可删的。
     return
   }
+  // Node 24 on Windows can report a junction as a directory instead of a
+  // symbolic link. rmdir removes an empty directory or the junction itself but
+  // refuses a non-empty physical directory, so it never traverses plugin data.
+  if (process.platform === 'win32' && !entry.isSymbolicLink()) {
+    try {
+      rmdirSync(link)
+    } catch {
+      // A real, non-empty directory is not owned as a link; leave it untouched.
+    }
+    return
+  }
+  // 不是链接（真目录，例如 pnpm 装出来的）就不动它。
+  if (!entry.isSymbolicLink()) return
   try {
     // Windows 上删目录联接要显式 unlink；unlinkSync 对 junction 是按链接删除。
     unlinkSync(link)

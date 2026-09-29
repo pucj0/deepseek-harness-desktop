@@ -29,6 +29,7 @@ import { syncPluginsAtStartup } from './plugin-sync'
 import { ensureRuntimeUnpacked } from './runtime-unpack'
 import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
+import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
 import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
@@ -902,9 +903,16 @@ function openUpdatesFor(deps: {
   const { window, shellUpdater, userDataDir, strings: s } = deps
 
   const shellVersion = app.getVersion()
+  const runtimeVersion = activeRuntime?.stagedVersion ?? (() => {
+    try {
+      return (JSON.parse(readFileSync(activeRuntime?.installAnchor ?? '', 'utf8')) as { version?: string }).version ?? 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  })()
   let currentState: UpdatePanelState = {
-    installed: shellVersion,
-    state: 'checking',
+    desktop: { installed: shellVersion, state: 'checking' },
+    runtime: { installed: runtimeVersion, state: 'checking' },
     canInstall: false,
   }
 
@@ -923,6 +931,11 @@ function openUpdatesFor(deps: {
       buttonDownload: s.updateButtonShell,
       progress: s.updateShellProgress,
       buttonDownloading: s.updateButtonDownloading,
+      sectionDesktop: s.updateSectionShell,
+      sectionRuntime: s.updateSectionRuntime,
+      runtimeBundledNote: s.updateRuntimeBundledNote,
+      runtimeAvailableNote: s.updateRuntimeAvailableNote,
+      buttonRuntimeRelease: s.updateButtonRuntimeRelease,
     },
     (action) => {
       if (action === 'close') {
@@ -954,28 +967,49 @@ function openUpdatesFor(deps: {
           }
         })()
       }
+      if (action === 'runtime-release') {
+        const url = currentState.runtime.releaseUrl ?? RUNTIME_RELEASES_URL
+        void shell.openExternal(url)
+      }
     },
   )
 
   panel.update(currentState)
 
   void (async () => {
-    try {
-      const check = await shellUpdater.check(app.isPackaged)
-      currentState = {
-        installed: check.current,
-        ...(check.latest === undefined ? {} : { latest: check.latest }),
-        state: check.available ? 'available' : check.reason === undefined ? 'latest' : 'unknown',
-        canInstall: check.available && app.isPackaged,
-        ...(check.reason === undefined ? {} : { reason: check.reason }),
-      }
-    } catch (error) {
-      currentState = {
-        installed: shellVersion,
-        state: 'unknown',
-        canInstall: false,
-        reason: error instanceof Error ? error.message : String(error),
-      }
+    const [shellResult, runtimeResult] = await Promise.allSettled([
+      shellUpdater.check(app.isPackaged),
+      checkRuntimeRelease(runtimeVersion),
+    ])
+    const desktop = shellResult.status === 'fulfilled'
+      ? {
+          installed: shellResult.value.current,
+          ...(shellResult.value.latest === undefined ? {} : { latest: shellResult.value.latest }),
+          state: shellResult.value.available ? 'available' as const : shellResult.value.reason === undefined ? 'latest' as const : 'unknown' as const,
+          ...(shellResult.value.reason === undefined ? {} : { reason: shellResult.value.reason }),
+        }
+      : {
+          installed: shellVersion,
+          state: 'unknown' as const,
+          reason: shellResult.reason instanceof Error ? shellResult.reason.message : String(shellResult.reason),
+        }
+    const runtime = runtimeResult.status === 'fulfilled'
+      ? {
+          installed: runtimeResult.value.current,
+          ...(runtimeResult.value.latest === undefined ? {} : { latest: runtimeResult.value.latest }),
+          state: runtimeResult.value.available ? 'available' as const : runtimeResult.value.reason === undefined ? 'latest' as const : 'unknown' as const,
+          ...(runtimeResult.value.reason === undefined ? {} : { reason: runtimeResult.value.reason }),
+          ...(runtimeResult.value.releaseUrl === undefined ? {} : { releaseUrl: runtimeResult.value.releaseUrl }),
+        }
+      : {
+          installed: runtimeVersion,
+          state: 'unknown' as const,
+          reason: runtimeResult.reason instanceof Error ? runtimeResult.reason.message : String(runtimeResult.reason),
+        }
+    currentState = {
+      desktop,
+      runtime,
+      canInstall: desktop.state === 'available' && app.isPackaged,
     }
     panel.update(currentState)
   })()

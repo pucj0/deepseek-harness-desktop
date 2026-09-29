@@ -9,6 +9,7 @@ import {
   SAME_WAVE_WINDOW_MS,
   computeClosureBefore,
   npmInstallArgs,
+  readPinnedRuntimeVersion,
   readPackument,
 } from './stage-runtime.mjs'
 
@@ -97,5 +98,14 @@ console.log('=== 5. npm 参数：只有真的算出截止时间才带 --before =
 }
 
 console.log('')
-console.log(failures === 0 ? 'stage-runtime 截止时间测试全部通过' : `${failures} 项失败`)
+console.log('=== 6. Runtime 版本由 package.json 的官方 Release pin 决定 ===')
+{
+  check('6) 读取精确预发布版本', readPinnedRuntimeVersion({ dshRuntimeVersion: '0.2.0-rc.1' }), '0.2.0-rc.1')
+  check('   稳定版也支持', readPinnedRuntimeVersion({ dshRuntimeVersion: '1.0.0' }), '1.0.0')
+  check('   latest 这类浮动标签被拒绝', readPinnedRuntimeVersion({ dshRuntimeVersion: 'latest' }), undefined)
+  check('   缺少 pin 时不猜', readPinnedRuntimeVersion({}), undefined)
+}
+
+console.log('')
+console.log(failures === 0 ? 'stage-runtime 截止时间与 GitHub Release pin 测试全部通过' : `${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)

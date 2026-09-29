@@ -1,12 +1,18 @@
-/** GitHub Releases backed full-application update window. */
+/** Two GitHub-backed update tracks: Desktop package and official Harness runtime. */
 import { BrowserWindow } from 'electron'
 import { escapeHtml, openPanel } from './panel'
 
-export interface UpdatePanelState {
+export interface UpdateTrackState {
   installed: string
   latest?: string
   state: 'checking' | 'latest' | 'available' | 'unknown'
   reason?: string
+  releaseUrl?: string
+}
+
+export interface UpdatePanelState {
+  desktop: UpdateTrackState
+  runtime: UpdateTrackState
   canInstall: boolean
   progress?: number
 }
@@ -23,6 +29,11 @@ export interface UpdateWindowStrings {
   buttonDownload: string
   progress: string
   buttonDownloading: string
+  sectionDesktop: string
+  sectionRuntime: string
+  runtimeBundledNote: string
+  runtimeAvailableNote: string
+  buttonRuntimeRelease: string
 }
 
 export function openUpdateWindow(
@@ -31,18 +42,22 @@ export function openUpdateWindow(
   strings: UpdateWindowStrings,
   onAction: (action: string) => void,
 ): { window: BrowserWindow; update: (state: UpdatePanelState) => void } {
+  const track = (id: string, title: string): string => `
+  <section class="track" id="${id}-track">
+    <div class="track-head"><span class="track-title">${escapeHtml(title)}</span><span class="status" id="${id}-status">${escapeHtml(strings.checking)}</span></div>
+    <div class="row"><div class="label">${escapeHtml(strings.installedLabel)}</div><div class="value" id="${id}-installed">—</div></div>
+    <div class="row"><div class="label">${escapeHtml(strings.latestLabel)}</div><div class="value" id="${id}-latest">—</div></div>
+    <div class="note" id="${id}-note" hidden></div>
+  </section>`
   const body = `
   <div id="progress-wrap" hidden>
     <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
     <div class="progress-text" id="progress-text"></div>
   </div>
-  <section class="track">
-    <div class="track-head"><span class="track-title">GitHub Releases</span><span class="status" id="status">${escapeHtml(strings.checking)}</span></div>
-    <div class="row"><div class="label">${escapeHtml(strings.installedLabel)}</div><div class="value" id="installed">—</div></div>
-    <div class="row"><div class="label">${escapeHtml(strings.latestLabel)}</div><div class="value" id="latest">—</div></div>
-    <div class="note" id="note" hidden></div>
-  </section>`
+  ${track('desktop', strings.sectionDesktop)}
+  ${track('runtime', strings.sectionRuntime)}`
   const footer = `<footer>
+    <button data-action="runtime-release" id="btn-runtime-release" hidden>${escapeHtml(strings.buttonRuntimeRelease)}</button>
     <button data-action="close" id="btn-close">${escapeHtml(strings.buttonClose)}</button>
     <button class="primary" data-action="download" id="btn-download" hidden>${escapeHtml(strings.buttonDownload)}</button>
   </footer>`
@@ -55,21 +70,31 @@ export function openUpdateWindow(
       buttonDownload: strings.buttonDownload,
       buttonDownloading: strings.buttonDownloading,
       progress: strings.progress,
+      runtimeBundledNote: strings.runtimeBundledNote,
+      runtimeAvailableNote: strings.runtimeAvailableNote,
     })};
+    function renderTrack(id, payload) {
+      document.getElementById(id + '-installed').textContent = payload.installed || '—';
+      document.getElementById(id + '-latest').textContent = payload.latest || '—';
+      const status = document.getElementById(id + '-status');
+      status.textContent = text[payload.state] || payload.state;
+      status.className = 'status ' + payload.state;
+      const note = document.getElementById(id + '-note');
+      let detail = payload.reason || '';
+      if (id === 'runtime' && !detail) detail = payload.state === 'available'
+        ? text.runtimeAvailableNote.replace('{version}', payload.latest || '')
+        : text.runtimeBundledNote;
+      note.hidden = !detail;
+      note.textContent = detail;
+    }
     window.__panelReady(() => {});
     window.dshPanel.onPush(({ channel, payload }) => {
       if (channel !== 'state') return;
       window.__lastState = payload;
-      document.getElementById('installed').textContent = payload.installed || '—';
-      document.getElementById('latest').textContent = payload.latest || '—';
-      const status = document.getElementById('status');
-      status.textContent = text[payload.state] || payload.state;
-      status.className = 'status ' + payload.state;
-      const note = document.getElementById('note');
-      note.hidden = !payload.reason;
-      note.textContent = payload.reason || '';
+      renderTrack('desktop', payload.desktop);
+      renderTrack('runtime', payload.runtime);
       const button = document.getElementById('btn-download');
-      button.hidden = !(payload.state === 'available' && payload.canInstall);
+      button.hidden = !(payload.desktop.state === 'available' && payload.canInstall);
       const downloading = payload.progress !== undefined;
       button.disabled = downloading;
       button.textContent = downloading ? text.buttonDownloading.replace('{percent}', String(payload.progress)) : text.buttonDownload;
@@ -79,9 +104,12 @@ export function openUpdateWindow(
         document.getElementById('progress-bar').style.width = payload.progress + '%';
         document.getElementById('progress-text').textContent = text.progress.replace('{percent}', String(payload.progress));
       }
+      const runtimeButton = document.getElementById('btn-runtime-release');
+      runtimeButton.hidden = !payload.runtime.releaseUrl;
     });`
   const css = `
-  .track { margin-top:4px; }
+  .track { margin-top:4px;padding-bottom:14px; }
+  .track + .track { border-top:1px solid #323238;padding-top:16px; }
   .track-head { display:flex;align-items:baseline;gap:10px;margin-bottom:8px; }
   .track-title { font-weight:600;font-size:13px; }
   .status { font-size:12px;padding:2px 8px;border-radius:999px;background:#3a3a40;color:#b9b9c0; }
