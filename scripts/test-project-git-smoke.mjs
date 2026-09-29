@@ -1,4 +1,4 @@
-// 真实 Electron + CDP 冒烟测试：项目级 Git 的入口/抽屉在真实 React 下不许消失。
+// 真实 Electron + CDP 冒烟测试：官方 Git 标签与面板在真实 React 下不许消失。
 //
 //   node scripts/test-project-git-smoke.mjs
 //
@@ -9,7 +9,7 @@
 //   * React #300 / #310 —— Rules of Hooks（"Rendered more/fewer hooks than during the
 //     previous render"）。假渲染器只按位置记录 hook 槽，多调少调都不会报错。
 // 这两类问题在实机上的表现都是**整个入口被卸载**（外层槽位的错误边界把它换成错误占位），
-// 也就是用户报的"点 Log / 切项目之后抽屉与右上角入口一起消失"。所以这里跑真渲染器，
+// 也就是用户报的"点 Log / 切项目之后面板整块消失"。所以这里跑真渲染器，
 // 并且把 window.onerror / unhandledrejection / console.error 全部收上来，出现 React
 // minified error 即判失败。
 //
@@ -158,7 +158,7 @@ async function evaluateJson(expression, label) {
   throw new Error(`${label}: ${lastError === undefined ? '未知错误' : String(lastError.message ?? lastError)}`)
 }
 
-/** 头栏那个改动计数（抽屉标题右侧的胶囊）。 */
+/** 头栏那个改动计数（标题右侧的胶囊）。 */
 const HEADER_COUNT = `(() => {
   const node = document.querySelector('[data-review-header] [data-review-count]');
   return node ? node.textContent.trim() : '';
@@ -166,23 +166,25 @@ const HEADER_COUNT = `(() => {
 
 // ---- 页面侧的状态读取 ------------------------------------------------------------
 //
-// `[data-review-trigger-button]`、`[data-review-trigger]`、`[data-desktop-review-surface]`
-// 都是本插件自己的稳定标记，不依赖 CSS 类名（那些会随观感改动而变）。
+// `[data-sidebar-right-open]` 是**官方侧栏**"已展开"的标记，`[data-desktop-review-surface]`
+// 是 Git 标签正文（`ProjectGitPanel`）的标记。`trigger` / `host` 这两个字段名是历史遗留
+// （那时本插件还有一个自己的浮动入口），现在两者都表示"官方侧栏里的 Git 标签已就位"。
 const STATE = `(() => {
-  const trigger = document.querySelector('[data-review-trigger-button]');
-  const host = document.querySelector('[data-review-trigger]');
+  const sidebar = document.querySelector('[data-sidebar-right-open]');
+  const trigger = sidebar;
+  const host = document.querySelector('[data-desktop-review-surface]');
   const panel = document.querySelector('[data-desktop-review-surface]');
-  const diag = window.__dshDesktopReviewPanel;
+  const diag = window.__dshDesktopGitTab;
   const counts = [...document.querySelectorAll('[data-review-count]')].map((n) => n.textContent);
   const rows = document.querySelectorAll('[data-staging-row]').length;
   const branch = document.querySelector('[data-review-branch]')?.textContent ?? '';
   const graph = document.querySelector('[data-graph-view]') !== null;
   const graphRows = document.querySelectorAll('[data-graph-row]').length;
-  const badge = (trigger?.innerText ?? '').trim();
+  const badge = (panel?.querySelector('[data-review-count]')?.textContent ?? '').trim();
   const bodyText = (panel?.innerText ?? '').slice(0, 200);
   return JSON.stringify({
     trigger: trigger !== null, host: host !== null, panel: panel !== null,
-    session: diag?.session ?? null, hasCurrentSession: diag?.hasCurrentSession ?? null,
+    session: diag?.sessionId ?? null, hasCurrentSession: diag?.workspace != null,
     counts, rows, branch, graph, graphRows, badge, bodyText,
   });
 })()`
@@ -197,11 +199,11 @@ const REACT_ERROR = /Minified React error #(290|300|310)|Rendered (more|fewer) h
 const reactErrors = () => pageErrors.filter((text) => REACT_ERROR.test(text))
 
 console.log('=== 0. 前置：加载的必须是**修好之后**的 bundle ===')
-// `__dshDesktopReviewPanel` 是本轮新加的诊断（含 hasCurrentSession）。它不存在说明跑的是
-// 旧 bundle —— 那样下面的断言只是在测旧代码，必须直接失败并提示重启。
+// `__dshDesktopGitTab` 是 Git 标签自己的诊断（含它解析到的 sessionId 与工作区）。它不存在
+// 说明跑的是旧 bundle —— 那样下面的断言只是在测旧代码，必须直接失败并提示重启。
 {
-  const diag = await evaluate('JSON.stringify(window.__dshDesktopReviewPanel ?? null)')
-  has('0) 页面里有本轮新增的诊断 __dshDesktopReviewPanel', diag !== 'null')
+  const diag = await evaluate('JSON.stringify(window.__dshDesktopGitTab ?? null)')
+  has('0) 页面里有 Git 标签的诊断 __dshDesktopGitTab', diag !== 'null')
   if (diag === 'null') {
     console.error('   加载的是旧 bundle：客户端插件是启动时注入的，请重启应用后再跑这个测试。')
     socket.close()
@@ -210,9 +212,9 @@ console.log('=== 0. 前置：加载的必须是**修好之后**的 bundle ===')
   console.log(`  诊断: ${String(diag).slice(0, 200)}`)
 }
 
-// ---- A0. 「提交图」不再有独立入口（只留在抽屉的 Log 里）-------------------------
+// ---- A0. 「提交图」不再有独立入口（只留在 Git 标签的 Log 里）---------------------
 //
-// 需求 A：这个入口与抽屉的 Log 画的是同一个 `CommitGraphView`，用户在主界面左侧看到的是
+// 需求 A：这个入口与 Git 标签的 Log 画的是同一个 `CommitGraphView`，用户在主界面左侧看到的是
 // "多了一个重复入口"。它是两处槽位注册（`sidebar.panellist` 的图标 + `main` 的内容），
 // 现在两处都删了。真实 DOM 里要能证明这一点：旧图标带着 `data-graph-icon` 标记，
 // 且侧栏里不该再有任何文案是「提交图 / Commit graph」的可点项。
@@ -285,43 +287,46 @@ async function switchTo(index) {
     return true;
   })()`)
   // 等诊断里的 session 变过去（最多 6 秒）。
-  await waitFor(`JSON.stringify(window.__dshDesktopReviewPanel?.session ?? null) !== ${JSON.stringify(JSON.stringify(null))}`, 6000)
+  await waitFor(`JSON.stringify(window.__dshDesktopGitTab?.sessionId ?? null) !== ${JSON.stringify(JSON.stringify(null))}`, 6000)
   await sleep(1200)
 }
 
-/** 抽屉是否打开（没有就点开）。 */
+/** 项目级 Git 面板是否就位（没有就让**官方侧栏**打开 Git 标签）。 */
 async function ensureDrawer() {
   const state = await readState()
   if (state.panel) return state
-  await click('[data-review-trigger-button]')
-  await sleep(600)
+  // 开关由 Harness 的官方侧栏管理。本插件把侧栏服务挂在 `window.__dshDesktopReview` 上
+  // （跨插件的「与当前比较」用的就是同一条调用），这里借它把 Git 标签打开——
+  // 不去猜官方侧栏的 DOM 结构。
+  await evaluate(`(() => { window.__dshDesktopReview?.openTab?.('git', {}); return true })()`)
+  await sleep(900)
   return readState()
 }
 
 // ---- A. 打开项目 A 的 Git → Changes ready → 切 B（loading）→ B ready --------------
 console.log('')
-console.log('=== A. 切换项目：入口与抽屉全程都在 ===')
+console.log('=== A. 切换项目：官方侧栏与 Git 面板全程都在 ===')
 {
   await switchTo(sessions[0].index)
   let state = await ensureDrawer()
-  has('A) 入口存在', state.trigger)
-  has('   抽屉已打开', state.panel)
+  has('A) 官方侧栏已打开', state.trigger)
+  has('   面板已就位', state.panel)
   // Changes 就绪（文件行或"没有改动"这类空态都算 ready；这里只要求有内容在渲染）。
   await waitFor(`${STATE}.includes('"panel":true')`, 5000)
   state = await readState()
   console.log(`   A 状态: rows=${state.rows} counts=${state.counts.join(',')} branch=${state.branch}`)
 
-  // 切到 B：切过去的**那一刻**入口与抽屉都必须在（这是 #310 的现场）。
+  // 切到 B：切过去的**那一刻**侧栏与面板都必须在（这是 #310 的现场）。
   await switchTo(sessions[1].index)
   state = await readState()
-  has('   切到 B 后入口仍在', state.trigger)
-  has('   切到 B 后抽屉仍在', state.panel)
+  has('   切到 B 后官方侧栏仍在', state.trigger)
+  has('   切到 B 后面板仍在', state.panel)
   check('   切项目这一帧没有 React error', reactErrors().length, 0)
   await waitFor(`JSON.parse(${JSON.stringify(STATE)}).rows >= 0`, 8000)
   await sleep(1500)
   state = await readState()
-  has('   B 稳定后入口仍在', state.trigger)
-  has('   B 稳定后抽屉仍在', state.panel)
+  has('   B 稳定后官方侧栏仍在', state.trigger)
+  has('   B 稳定后面板仍在', state.panel)
   console.log(`   B 状态: rows=${state.rows} counts=${state.counts.join(',')} branch=${state.branch}`)
   check('   全程没有 React error', reactErrors().length, 0)
 }
@@ -338,13 +343,13 @@ console.log('=== B. Log 页签：真实 React 下不许报 #290 ===')
   check('   点 Log 没有产生 React error（#290）', reactErrors().length - before, 0)
   const refErrors = pageErrors.filter((t) => /Element ref was specified as a string|Function components cannot be given refs/i.test(t))
   check('   没有 ref 相关报错', refErrors.length, 0)
-  has('   入口仍在', state.trigger)
-  has('   抽屉仍在', state.panel)
+  has('   官方侧栏仍在', state.trigger)
+  has('   面板仍在', state.panel)
 }
 
 // ---- C. Log → Changes → 切项目，循环 5 次 ---------------------------------------
 console.log('')
-console.log('=== C. Log/Changes/切项目 循环 5 次：入口与抽屉不许消失 ===')
+console.log('=== C. Log/Changes/切项目 循环 5 次：侧栏与面板不许消失 ===')
 {
   let survived = true
   for (let round = 1; round <= 5; round += 1) {
@@ -354,7 +359,7 @@ console.log('=== C. Log/Changes/切项目 循环 5 次：入口与抽屉不许�
     const state = await readState()
     if (!state.trigger || !state.panel) {
       survived = false
-      console.error(`   第 ${round} 轮后入口/抽屉消失：${JSON.stringify(state)}`)
+      console.error(`   第 ${round} 轮后侧栏/面板消失：${JSON.stringify(state)}`)
       break
     }
     await click('[data-review-tab="log"]')
@@ -362,11 +367,11 @@ console.log('=== C. Log/Changes/切项目 循环 5 次：入口与抽屉不许�
     const logState = await readState()
     if (!logState.trigger || !logState.panel) {
       survived = false
-      console.error(`   第 ${round} 轮点 Log 后入口/抽屉消失：${JSON.stringify(logState)}`)
+      console.error(`   第 ${round} 轮点 Log 后侧栏/面板消失：${JSON.stringify(logState)}`)
       break
     }
   }
-  has('C) 5 轮循环后入口与抽屉仍在', survived)
+  has('C) 5 轮循环后侧栏与面板仍在', survived)
   check('   循环期间没有 React error', reactErrors().length, 0)
 }
 
@@ -380,17 +385,17 @@ console.log('=== D. 快速 A→B→A：最终数据必须都属于 A ===')
   await sleep(3000)
   const state = await readState()
   console.log(`   最终状态: session=${state.session} branch=${state.branch} rows=${state.rows} counts=${state.counts.join(',')}`)
-  has('D) 入口仍在', state.trigger)
-  has('   抽屉仍在', state.panel)
+  has('D) 官方侧栏仍在', state.trigger)
+  has('   面板仍在', state.panel)
   has('   诊断里的 session 是 A', state.session !== null && String(state.session).length > 0)
-  // 入口数字与抽屉里的行数必须一致（同一份快照）。
+  // 头栏计数与面板里的行数必须一致（同一份快照）。
   //
   // 这里**点名头栏**那个胶囊，而不是"最后一个 `[data-review-count]`"：Changes 里每个分区
   // （已暂存/未暂存/未跟踪）也带同一个标记，DOM 顺序上它们排在这个计数之后，取最后一个
   // 只会取到"未跟踪 183 个"这种分区计数——那是另一件事，两边本来就不该相等。
   const header = String(await evaluate(HEADER_COUNT)).trim()
   if (state.panel && header !== '') {
-    check('   头栏计数等于抽屉行数', Number(header), state.rows)
+    check('   头栏计数等于面板行数', Number(header), state.rows)
   }
   check('   这一段没有 React error', reactErrors().length, 0)
 }
@@ -400,13 +405,44 @@ console.log('=== D. 快速 A→B→A：最终数据必须都属于 A ===')
 // 这一条对应"点左栏某个分支之后，左栏只剩那个分支附近的 refs / 整个 Log 先白屏再出现"。
 // 真渲染器下这两件事都必须不发生。
 console.log('')
-console.log('=== E. 点分支：左栏完整、不白屏、滚动位置保持 ===')
+console.log('=== E. 分支选择在首行下拉里（Log 没有左侧分支栏）===')
 {
   await click('[data-review-tab="log"]')
-  has('E) 提交图已渲染', await waitFor(`document.querySelector('[data-graph-tree]') !== null`, 10000))
-  // 左栏是**权威 refs 清单**（gitbar 的 `/branches` + `/tags`，宿主跑 `for-each-ref`），
+  has('E) 提交图已渲染', await waitFor(`document.querySelector('[data-graph-view]') !== null`, 10000))
+
+  // ---- 结构：没有左侧分支栏；选择器在提交图首行 ----
+  const layout = await evaluateJson(
+    `(() => {
+      const toolbar = document.querySelector('[data-graph-toolbar]');
+      const first = toolbar ? toolbar.firstElementChild : null;
+      return JSON.stringify({
+        treePanes: document.querySelectorAll('[data-graph-pane="tree"]').length,
+        treeSplitters: document.querySelectorAll('[data-graph-splitter="tree"]').length,
+        treeTools: document.querySelectorAll('[data-graph-tool="tree"]').length,
+        listPanes: document.querySelectorAll('[data-graph-pane="list"]').length,
+        detailPanes: document.querySelectorAll('[data-graph-pane="detail"]').length,
+        // 首行第一格就是分支选择器（它曾经占掉左边一整列）。
+        selectorFirstInToolbar: first !== null && first.hasAttribute('data-graph-ref-select'),
+        // 下拉没打开时，ref 清单一个节点都不该有。
+        rowsClosed: document.querySelectorAll('[data-graph-ref-row]').length,
+      });
+    })()`,
+    'Log 布局',
+  )
+  check('   没有左侧分支栏', layout.treePanes, 0)
+  check('   没有分支栏拖动手柄', layout.treeSplitters, 0)
+  check('   没有「收起分支树」按钮', layout.treeTools, 0)
+  check('   提交列表栏还在', layout.listPanes, 1)
+  check('   详情栏还在', layout.detailPanes, 1)
+  has('   首行工具栏第一格是分支选择器', layout.selectorFirstInToolbar)
+  check('   下拉未打开时 ref 清单不占位', layout.rowsClosed, 0)
+
+  // ---- 打开下拉：清单来自 gitbar 的权威 for-each-ref ----
+  await click('[data-graph-ref-select-button]')
+  has('   下拉已打开', await waitFor(`document.querySelector('[data-graph-ref-list]') !== null`, 4000))
+  // 清单是**权威 refs 清单**（gitbar 的 `/branches` + `/tags`，宿主跑 `for-each-ref`），
   // 不是"第一页提交上的 `%D` 装饰"。真实页面里可以从 Resource Timing 看到那两条请求：
-  // 少了它们，左栏的分支清单就只能来自 decor——那正是"远端分支被当成唯一真相"的老问题。
+  // 少了它们，清单就只能来自 decor——那正是"远端分支被当成唯一真相"的老问题。
   const inventoryCalls = await evaluateJson(
     `(() => {
       const names = performance.getEntriesByType('resource').map((e) => e.name);
@@ -422,116 +458,139 @@ console.log('=== E. 点分支：左栏完整、不白屏、滚动位置保持 ==
   // 结构契约：三段（本地/远程/标签）、没有单独的 HEAD 分组、当前分支留在本地并带 ✓。
   const treeShape = await evaluateJson(
     `(() => {
-      const sections = [...document.querySelectorAll('[data-graph-tree-section]')].map((n) => n.getAttribute('data-graph-tree-section'));
-      const rows = [...document.querySelectorAll('[data-graph-tree-row]')];
-      const current = rows.filter((n) => n.getAttribute('data-graph-tree-current') === 'true');
+      const sections = [...document.querySelectorAll('[data-graph-ref-section]')].map((n) => n.getAttribute('data-graph-ref-section'));
+      const rows = [...document.querySelectorAll('[data-graph-ref-row]')];
+      const current = rows.filter((n) => n.getAttribute('data-graph-ref-current') === 'true');
       const inLocal = (el) => {
-        const section = el.closest('[data-graph-tree-section]');
-        return section ? section.getAttribute('data-graph-tree-section') : '';
+        const section = el.closest('[data-graph-ref-section]');
+        return section ? section.getAttribute('data-graph-ref-section') : '';
       };
       return JSON.stringify({
         sections,
         currentCount: current.length,
-        currentName: current[0] ? current[0].getAttribute('data-graph-tree-row') : '',
+        currentName: current[0] ? current[0].getAttribute('data-graph-ref-row') : '',
         currentText: current[0] ? (current[0].innerText || '').trim() : '',
         currentSection: current[0] ? inLocal(current[0]) : '',
+        hasAllRefsItem: document.querySelector('[data-graph-clear-ref]') !== null,
         // 带斜杠的本地分支必须落在 local 段（分类只看 namespace，不看名字里有没有斜杠）。
-        localSlash: rows.filter((n) => inLocal(n) === 'local' && String(n.getAttribute('data-graph-tree-row')).includes('/')).map((n) => n.getAttribute('data-graph-tree-row')),
+        localSlash: rows.filter((n) => inLocal(n) === 'local' && String(n.getAttribute('data-graph-ref-row')).includes('/')).map((n) => n.getAttribute('data-graph-ref-row')),
         // 反过来：remote 段里的每一行都必须是真·远端跟踪引用。
-        remoteSlash: rows.filter((n) => inLocal(n) === 'remote').map((n) => n.getAttribute('data-graph-tree-row')),
+        remoteSlash: rows.filter((n) => inLocal(n) === 'remote').map((n) => n.getAttribute('data-graph-ref-row')),
       });
     })()`,
-    '左栏结构',
+    'ref 清单结构',
   )
-  check('   左栏三段就是 本地/远程/标签', treeShape.sections.join(','), 'local,remote,tags')
+  check('   三段就是 本地/远程/标签', treeShape.sections.join(','), 'local,remote,tags')
   check('   没有 HEAD 分组', treeShape.sections.includes('head'), false)
   check('   恰好一个当前分支被标 current', treeShape.currentCount, 1)
   check('   当前分支在「本地」段里', treeShape.currentSection, 'local')
   has('   当前分支行带 ✓ 前缀', treeShape.currentText.startsWith('\u2713'))
+  has('   下拉里有「全部分支」（= 清除筛选）', treeShape.hasAllRefsItem)
   console.log(`   当前分支: ${treeShape.currentText}（本地段）`)
   if (treeShape.localSlash.length > 0) {
     has('   带 `/` 的本地分支没有跑到远程段', treeShape.remoteSlash.some((n) => treeShape.localSlash.includes(n)) === false)
   }
-  const readTree = async () =>
-    JSON.parse(
+
+  /** 读下拉里的 ref 行 + 高亮项；下拉关着时先打开。 */
+  const readTree = async () => {
+    await evaluate(`(() => {
+      if (document.querySelector('[data-graph-ref-list]') === null) {
+        document.querySelector('[data-graph-ref-select-button]')?.click();
+      }
+      return true;
+    })()`)
+    await sleep(500)
+    return JSON.parse(
       await evaluate(`(() => {
-        const rows = [...document.querySelectorAll('[data-graph-tree-row]')].map((el) => el.getAttribute('data-graph-tree-row'));
-        const selected = [...document.querySelectorAll('[data-graph-tree-row][aria-selected="true"]')].map((el) => el.getAttribute('data-graph-tree-row'));
-        const scroll = document.querySelector('[data-graph-tree]');
-        return JSON.stringify({ rows, selected, scrollTop: scroll ? scroll.scrollTop : -1, panes: document.querySelectorAll('[data-graph-pane]').length });
+        const rows = [...document.querySelectorAll('[data-graph-ref-row]')].map((el) => el.getAttribute('data-graph-ref-row'));
+        const selected = [...document.querySelectorAll('[data-graph-ref-row][aria-selected="true"]')].map((el) => el.getAttribute('data-graph-ref-row'));
+        return JSON.stringify({ rows, selected, panes: document.querySelectorAll('[data-graph-pane]').length });
       })()`),
     )
+  }
   const before = await readTree()
-  console.log(`   左栏 ${before.rows.length} 项，三栏 ${before.panes} 个: ${before.rows.slice(0, 8).join(', ')}`)
+  console.log(`   ref 清单 ${before.rows.length} 项，两栏 ${before.panes} 个: ${before.rows.slice(0, 8).join(', ')}`)
   if (before.rows.length < 2) {
     console.log('   分支太少，跳过这一节（需要一个有多分支的仓库）')
   } else {
-    // 先把左栏滚动一段，之后要验证它没被重置。
-    await evaluate(`(() => { const el = document.querySelector('[data-graph-tree]'); if (el) el.scrollTop = 24; return true })()`)
-    // 点第二个分支（第一个通常是当前分支，点它意义不大）。
+    // 点第二个分支（第一个通常是当前分支，点它意义不大）。点完下拉会自动收起。
     const target = before.rows[1]
-    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-tree-row]')].find((n) => n.getAttribute('data-graph-tree-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
-    await sleep(1500)
+    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-ref-row]')].find((n) => n.getAttribute('data-graph-ref-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
+    await sleep(1800)
+    has('   选完自动收起下拉', (await evaluate(`document.querySelector('[data-graph-ref-list]') === null`)) === true)
+    // **提交图按该分支重新加载**：Resource Timing 里必须出现带 ref 的 graph 请求。
+    const refCalls = await evaluateJson(
+      `(() => {
+        const names = performance.getEntriesByType('resource').map((e) => e.name);
+        return JSON.stringify({ withRef: names.filter((n) => /\\/dsh-desktop\\/review\\/graph/.test(n) && /[?&]ref=/.test(n)).length });
+      })()`,
+      '按 ref 重载提交图',
+    )
+    has('   提交图按选中的分支重新加载（请求带 ref）', refCalls.withRef >= 1)
+    const selectorValue = await evaluate(`document.querySelector('[data-graph-ref-value]')?.getAttribute('data-graph-ref-value') ?? ''`)
+    check('   选择器上写着选中的 ref', selectorValue, target)
     const after = await readTree()
-    check('   左栏项数与点之前一致', after.rows.length, before.rows.length)
-    check('   左栏内容与点之前一致', after.rows.join(','), before.rows.join(','))
+    check('   下拉里的项数与点之前一致', after.rows.length, before.rows.length)
+    check('   下拉内容与点之前一致', after.rows.join(','), before.rows.join(','))
     check('   被点的分支是唯一高亮项', after.selected.join(','), target)
-    check('   三栏仍在（没有白屏）', after.panes, before.panes)
+    check('   两栏仍在（没有白屏）', after.panes, before.panes)
     has('   提交图容器仍在', (await evaluate(`document.querySelector('[data-graph-view]') !== null`)) === true)
-    has('   左栏滚动位置保持', after.scrollTop === before.scrollTop + 24 || after.scrollTop > 0)
     check('   点分支没有 React error', reactErrors().length, 0)
-    // 再点一次同一个分支 = 取消过滤，左栏仍然完整。
-    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-tree-row]')].find((n) => n.getAttribute('data-graph-tree-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
-    await sleep(1200)
+    // 再点一次同一个分支 = 取消过滤（下拉里的「全部分支」做的是同一件事）。
+    await evaluate(`(() => { const el = [...document.querySelectorAll('[data-graph-ref-row]')].find((n) => n.getAttribute('data-graph-ref-row') === ${JSON.stringify(target)}); if (el) el.click(); return true })()`)
+    await sleep(1500)
     const cleared = await readTree()
-    check('   取消过滤后左栏仍然完整', cleared.rows.length, before.rows.length)
+    check('   取消过滤后下拉仍然完整', cleared.rows.length, before.rows.length)
     check('   取消过滤后没有高亮项', cleared.selected.length, 0)
     check('   这一段没有 React error', reactErrors().length, 0)
   }
 }
 
-// ---- F. 抽屉默认宽度 80% + 点外部关闭 -------------------------------------------
+// ---- F. 面板填满官方侧栏给的那一格；开合完全由 Harness 管理 ----------------------
 //
-// 两件事都在真渲染器下才有意义：宽度取决于真实视口（`window.innerWidth`），
-// 点外部取决于真实的 `mousedown` 事件与真实的 DOM 包含关系（`rootRef.contains`）。
+// 这一节过去断言的是"自带抽屉的默认宽度是视口 80% + 点外部关闭"。**那个抽屉已经删除**：
+// 项目级 Git 现在是官方侧栏里的一个标签，宽度、拖动、关闭、全屏都由侧栏自己管。
+// 于是要钉住的契约正好相反——插件**不要**再插手这些事：
+//   * 面板里没有自己的宽度手柄 / 收起按钮；
+//   * 面板填满侧栏给它的容器（宽度 ≈ 容器宽度）；
+//   * 点面板外部**不会**把面板卸载掉（Harness 决定什么时候关）。
 console.log('')
-console.log('=== F. 抽屉默认宽度 80%，点外部关闭且入口仍在 ===')
+console.log('=== F. 面板填满官方侧栏的格子，关开由 Harness 管理 ===')
 {
-  // 清掉持久化宽度并重载，拿到"默认宽度"这一帧。重载后入口与抽屉都会复位。
-  //
-  // 键是 **v2**：旧键 `dsh.review.panelWidth` 里存的像素值**故意不迁移**（需求 38/63）——
-  // 继续读它的话，"默认 80%" 在升级用户那里永远不生效。这里两个键都清，断言的是真正的
-  // 默认值。
-  await evaluate(
-    `localStorage.removeItem('dsh.review.panelWidth.v2'), localStorage.removeItem('dsh.review.panelWidth'), localStorage.removeItem('dsh.review.panelOpen'), true`,
-  )
-  await evaluate(`location.reload(), true`)
-  await sleep(9000)
   const opened = await ensureDrawer()
   // `ensureDrawer()` 回的是**状态对象**（`{ panel, trigger, ... }`），不是布尔值：这里曾经
   // 直接把它喂给 `has()`，于是这条断言永远是红的（对象 `!== true`），却看起来像"抽屉没开"。
-  has('F) 抽屉已打开', opened.panel === true)
+  has('F) 面板已就位', opened.panel === true)
+
   const measured = JSON.parse(
     await evaluate(`(() => {
       const panel = document.querySelector('[data-desktop-review-surface]');
+      const slot = panel.parentElement ?? panel;
       const r = panel.getBoundingClientRect();
-      return JSON.stringify({ width: Math.round(r.width), viewport: window.innerWidth });
+      const s = slot.getBoundingClientRect();
+      return JSON.stringify({
+        width: Math.round(r.width), slot: Math.round(s.width), viewport: window.innerWidth,
+        resizer: document.querySelector('[data-review-resizer]') !== null,
+        collapseButton: [...panel.querySelectorAll('button')].some((b) => b.title === 'Collapse panel' || b.title === '收起面板'),
+      });
     })()`),
   )
-  // 允许 ±2px 的取整差（`Math.round` 与浏览器布局各取一次整）。
-  check('   默认宽度是视口的 80%', Math.abs(measured.width - Math.round(measured.viewport * 0.8)) <= 2, true)
-  console.log(`   视口 ${measured.viewport} → 抽屉 ${measured.width}（80% 是 ${Math.round(measured.viewport * 0.8)}）`)
+  has('   面板里没有插件自己的宽度手柄', measured.resizer === false)
+  has('   面板里没有插件自己的收起按钮', measured.collapseButton === false)
+  console.log(`   视口 ${measured.viewport} → 侧栏格子 ${measured.slot} → 面板 ${measured.width}`)
+  // 允许 ±2px 的取整差：面板是 `width: 100%`，应当与容器同宽。
+  check('   面板宽度等于侧栏给它的那格宽度', Math.abs(measured.width - measured.slot) <= 2, true)
 
-  // 点抽屉外部（页面最左侧的空白/正文区）→ 关闭。用真实的 mousedown，走的是捕获阶段的监听。
-  const closed = await evaluate(`(() => {
+  // 点面板外部：**不能**把面板卸掉（插件已经不再注册外部点击监听）。
+  const dispatched = await evaluate(`(() => {
     const target = document.elementFromPoint(40, Math.round(window.innerHeight / 2)) || document.body;
     target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     return true;
   })()`)
-  has('   派发了外部 mousedown', closed === true)
+  has('   派发了外部 mousedown', dispatched === true)
   await sleep(700)
-  has('   点外部后抽屉已关闭', (await evaluate(`document.querySelector('[data-desktop-review-surface]') === null`)) === true)
-  has('   右上角入口仍在（不是"面板被卸载"）', (await evaluate(`document.querySelector('[data-review-trigger-button]') !== null`)) === true)
+  has('   点外部后面板仍在（开合由 Harness 决定）', (await evaluate(`document.querySelector('[data-desktop-review-surface]') !== null`)) === true)
+  has('   官方侧栏仍然开着', (await evaluate(`document.querySelector('[data-sidebar-right-open]') !== null`)) === true)
   check('   这一段没有 React error', reactErrors().length, 0)
   await ensureDrawer()
 }

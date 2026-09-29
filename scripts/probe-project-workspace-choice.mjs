@@ -5,9 +5,9 @@
 // 用户反馈面板显示的是应用自己的仓库（F:\code\dshDesktop），而他在用的项目是另一个
 // （mmsm-amis）。要修就不能靠猜优先级——先把取值链上每一环的实际值打出来。
 //
-// 现在这一链的答案是"当前会话的 cwd"，因此在客户端的 `window.__dshDesktopReviewPanel`
-// 上能看到 `session`（当前会话）、`hostCurrent`（外壳工作区）、`fromHooks`（登记列表）
-// 与 `roots`（宿主允许名单）四个实际值。
+// 现在这一链的答案是"官方侧栏认为的当前会话"，因此 Git 标签会把它的解析结果挂到客户端的
+// `window.__dshDesktopGitTab` 上：`sessionId`（当前会话）、`workspace`（该会话的 cwd）、
+// `switching`（已切会话但 cwd 还没到——这一帧不许显示上一个项目的数据）。
 import { readFileSync, existsSync } from 'node:fs'
 
 const candidates = [

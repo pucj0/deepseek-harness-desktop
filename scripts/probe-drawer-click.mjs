@@ -1,3 +1,23 @@
+// ⚠️ 历史脚本，**当前不可用**——它对准的 DOM 已经不存在。
+//
+// 本项目级 Git 曾经是**自制浮层抽屉**：入口 `[data-review-trigger]`、容器
+// `aside[style*=fixed]`、开合状态 `localStorage['dsh.review.panelOpen']`，并且点外部会关闭。
+// 那个抽屉与它的入口**已经全部删除**，现在项目级 Git 是**官方右侧栏里的 Git 标签**：
+//
+//   * 入口 = 官方侧栏的 Git 图标（标签类型与图标由 `sidebarRightTabs` 注册）；
+//   * 正文 = `<aside data-desktop-review-surface="panel">`，`position: relative`，
+//     尺寸/拖动/关闭/全屏全部由官方侧栏管理，插件不再自造；
+//   * 定位 = `window.__dshDesktopGitTab`（`{ sessionId, workspace, switching }`）。
+//
+// 顺带一提：「本轮修改」是**另一个完全独立的 surface**（`TurnReviewChip` →
+// `TurnReviewDrawer`，挂在 `shell.overlay`），不是这个 Git 标签，也不再经 `sidebarRight`。
+//
+// 因此：重新对准上面这套 DOM 之前，本文件跑不出结论。不需要 Electron 的等价回归在
+// `scripts/test-git-sidebar-contract.mjs`、`scripts/test-turn-review-drawer.mjs`、
+// `scripts/test-turn-review-scope.mjs`、`scripts/test-review-project-git.mjs`，
+// 它们都在 `npm run test:git-sidebar` 里。
+// （它诊断的"点了入口抽屉不开"已不存在：那个入口本身已删除。）
+//
 // 诊断：为什么点击入口按钮后抽屉没打开。
 //
 //   node scripts/probe-drawer-click.mjs

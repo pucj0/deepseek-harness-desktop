@@ -1,23 +1,23 @@
-// Log 左栏（分支筛选）与中栏（提交列表）的**解耦**回归。
+// Log 分支清单（分支筛选）与中栏（提交列表）的**解耦**回归。
 //
 //   node scripts/test-review-graph-branch-filter.mjs
 //
-// 这一版里左栏与中栏的数据源是**两个完全不同的东西**，本文件钉的就是这条边界：
-//   * 左栏 = **权威 refs 清单**：gitbar 宿主的 `GET /branches` + `GET /tags`（`for-each-ref`）。
+// 这一版里分支清单与中栏的数据源是**两个完全不同的东西**，本文件钉的就是这条边界：
+//   * 分支清单 = **权威 refs 清单**：gitbar 宿主的 `GET /branches` + `GET /tags`（`for-each-ref`）。
 //     分类按 namespace（`refs/heads` / `refs/remotes` / `refs/tags`），**不看名字里有没有
 //     `/`**——`feature/a`、`release/1.6.4` 都是本地分支。
 //   * 中栏 = `/graph` 的分页结果。提交行上的 `%D` 徽标只说明"这条提交上有哪些 ref"。
 //
 // 因此这里逐条钉住：
-//   * 左栏内容由清单决定：点任何 ref、翻任何一页都**不改变**它；
-//   * 更深历史里的 ref（`legacy/support`，只在第二页的装饰里出现）**不会**因此进入左栏
-//     ——左栏不是 decoration 聚合，`legacy/support` 在清单里没有就不该出现；
+//   * 分支清单内容由清单决定：点任何 ref、翻任何一页都**不改变**它；
+//   * 更深历史里的 ref（`legacy/support`，只在第二页的装饰里出现）**不会**因此进入分支清单
+//     ——分支清单不是 decoration 聚合，`legacy/support` 在清单里没有就不该出现；
 //   * 当前分支留在「本地」并带 `✓`，**没有单独的 HEAD 分组**；
 //   * 再点同一个 ref = 取消过滤、回到全部；
 //   * 一轮挂载只拉一次清单：滚动 / 过滤 / 分页都不重发（需求 71）；
-//   * 已有数据时切 ref 只置 `refreshing`：三栏 DOM（含左栏）**全程存在**，不出现只剩
+//   * 已有数据时切 ref 只置 `refreshing`：两栏+首行选择器 DOM（含分支清单）**全程存在**，不出现只剩
 //     `graphLoading` 的白屏；
-//   * 每个 ref 的首屏有缓存：切回来同一帧就显示，且不会因此把左栏弄乱；
+//   * 每个 ref 的首屏有缓存：切回来同一帧就显示，且不会因此把分支清单弄乱；
 //   * 快速点 develop → master → feature/a 且响应乱序（feature/a、master、develop）时，
 //     最终只采用 feature/a 那一份，旧响应不得覆盖。
 import { dirname, join } from 'node:path'
@@ -193,7 +193,7 @@ const INVENTORY_BRANCHES = {
 }
 const INVENTORY_TAGS = { tags: [{ name: 'v1.6.4', sha: 'a'.repeat(40) }], tagCount: 1 }
 
-/** 造一条提交：`refs` 是这条提交上的 `%D` 徽标（与左栏清单是两回事）。 */
+/** 造一条提交：`refs` 是这条提交上的 `%D` 徽标（与分支清单清单是两回事）。 */
 const commit = (hash, subject, refs) => ({
   hash,
   short: hash.slice(0, 7),
@@ -224,7 +224,7 @@ const ALL_PAGE_1 = {
 /**
  * 未过滤第二页：带一个**只在装饰里出现**的 ref（`legacy/support`）。
  *
- * 它在权威清单里**不存在**，因此绝不该出现在左栏——这正是"左栏是清单、不是 decoration
+ * 它在权威清单里**不存在**，因此绝不该出现在分支清单——这正是"分支清单是清单、不是 decoration
  * 聚合"的判据（需求 12/17）。
  */
 const ALL_PAGE_2 = { isRepo: true, branch: 'master', hasMore: false, commits: [c('a7', ['legacy/support'])] }
@@ -341,11 +341,11 @@ async function drain(passes = 8) {
   }
   return nodes
 }
-/** 左栏的行名（按渲染顺序）。 */
-const treeRows = (nodes) => rowsOf(nodes, 'data-graph-tree-row').map((n) => n.props['data-graph-tree-row'])
-const treeSelected = (nodes) => rowsOf(nodes, 'data-graph-tree-row').filter((n) => n.props['aria-selected'] === true).map((n) => n.props['data-graph-tree-row'])
+/** 分支清单的行名（按渲染顺序）。 */
+const treeRows = (nodes) => rowsOf(nodes, 'data-graph-ref-row').map((n) => n.props['data-graph-ref-row'])
+const treeSelected = (nodes) => rowsOf(nodes, 'data-graph-ref-row').filter((n) => n.props['aria-selected'] === true).map((n) => n.props['data-graph-ref-row'])
 /**
- * 左栏按**分段**收窄的行名。
+ * 分支清单按**分段**收窄的行名。
  *
  * `collectHostNodes` 把宿主元素拍平成一个列表，但**保留文档顺序**，而三段是按
  * local → remote → tags 顺序渲染的，因此"最近遇到的分段标记"就是这一行的归属。
@@ -354,31 +354,54 @@ const rowsBySection = (nodes) => {
   const out = { local: [], remote: [], tags: [] }
   let current = ''
   for (const node of nodes) {
-    const section = node.props?.['data-graph-tree-section']
+    const section = node.props?.['data-graph-ref-section']
     if (section !== undefined) {
       current = section
       continue
     }
-    const row = node.props?.['data-graph-tree-row']
+    const row = node.props?.['data-graph-ref-row']
     if (row !== undefined && current !== '') out[current]?.push(row)
   }
   return out
 }
 const middleRows = (nodes) => rowsOf(nodes, 'data-graph-row').map((n) => String(n.props['data-graph-row']).slice(0, 2))
-/** 点左栏的一行。 */
+/**
+ * 打开**提交图首行的分支选择器**，并返回那一帧的节点。
+ *
+ * ref 行只在下拉打开时存在（这正是这一轮的结构变化：它不再是左侧一整列常驻的分支树）。
+ * 因此凡是"要看清单内容"的地方都必须先经过这里。已经打开时不重复点击（再点会收起）。
+ *
+ * @param passes - 渲染轮数，透传给 drain。
+ * @returns 那一帧的宿主节点。
+ */
+async function openMenu(passes) {
+  const first = await drain(passes)
+  if (rowsOf(first, 'data-graph-ref-menu').length > 0) return first
+  const button = rowsOf(first, 'data-graph-ref-select-button')[0]
+  if (button === undefined || typeof button.props.onClick !== 'function') return first
+  button.props.onClick()
+  return await drain(passes)
+}
+/** 点清单里的一行（会自动先打开下拉）。 */
 async function clickTree(name) {
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-1', nodes)
-  const row = rowsOf(nodes, 'data-graph-tree-row').find((n) => n.props['data-graph-tree-row'] === name)
+  const row = rowsOf(nodes, 'data-graph-ref-row').find((n) => n.props['data-graph-ref-row'] === name)
   if (row === undefined || typeof row.props.onClick !== 'function') return false
   row.props.onClick()
   return true
 }
-/** 三栏都在（白屏回归的判据）。 */
-const threePanesAlive = (nodes) =>
+/**
+ * Log 的布局还在（白屏回归的判据）。
+ *
+ * 新结构的判据是：视图在 + **首行选择器在** + 提交列表栏 + 详情栏，并且**没有**
+ * 左侧分支栏（`data-graph-pane="tree"` 必须不存在）。
+ */
+const layoutAlive = (nodes) =>
   rowsOf(nodes, 'data-graph-view').length === 1 &&
-  rowsOf(nodes, 'data-graph-tree').length === 1 &&
-  rowsOf(nodes, 'data-graph-pane').some((n) => n.props['data-graph-pane'] === 'list')
+  rowsOf(nodes, 'data-graph-pane').some((n) => n.props['data-graph-pane'] === 'list') &&
+  rowsOf(nodes, 'data-graph-pane').some((n) => n.props['data-graph-pane'] === 'detail') &&
+  rowsOf(nodes, 'data-graph-pane').every((n) => n.props['data-graph-pane'] !== 'tree')
 /** 一行状态摘要（调试用）。 */
 const dump = (label, nodes) => {
   if (process.env.DSH_TEST_DEBUG !== '1') return
@@ -387,43 +410,71 @@ const dump = (label, nodes) => {
       ` more=${rowsOf(nodes, 'data-graph-more').length} sel=${treeSelected(nodes).join(',') || '-'} reqs=${graphRequests.map((r) => r.key).join('|')}`,
   )
 }
-/** 清单里的完整左栏（顺序 = 宿主返回顺序）。 */
+/** 清单里的完整分支清单（顺序 = 宿主返回顺序）。 */
 const LOCAL = 'develop,feature/a,feature/b,master,release/1.6.4'
 const REMOTE = 'origin/develop,origin/master'
 const TAGS = 'v1.6.4'
 const FULL_TREE = `${LOCAL},${REMOTE},${TAGS}`
 
-console.log('=== 0. 初始：左栏来自权威清单，中栏是未过滤提交 ===')
+console.log('=== 0. 初始：分支清单来自权威清单，中栏是未过滤提交 ===')
 {
-  const nodes = await drain()
+  // ---- 结构：**没有左侧分支栏**，分支选择在提交图首行 ----
+  //
+  // 这一组断言就是这一轮的主视觉要求：Log 不再是"左侧分支栏 + 中间提交图 + 右栏详情"的
+  // 三栏结构；分支选择变成一个顶部的选择动作。
+  const closed = await drain()
+  check('0a) 没有左侧分支栏（没有 tree 分栏）', rowsOf(closed, 'data-graph-pane').some((n) => n.props['data-graph-pane'] === 'tree'), 'false')
+  check('   也没有分支栏的拖动手柄', rowsOf(closed, 'data-graph-splitter').some((n) => n.props['data-graph-splitter'] === 'tree'), 'false')
+  check('   没有「收起分支树」按钮', rowsOf(closed, 'data-graph-tool').some((n) => n.props['data-graph-tool'] === 'tree'), 'false')
+  // 下拉没打开时，ref 清单**一个节点都不该渲染**（它不再是常驻面板）。
+  check('   下拉未打开时 ref 清单不占位', rowsOf(closed, 'data-graph-ref-list').length, 0)
+  const toolbar = rowsOf(closed, 'data-graph-toolbar')[0]
+  has('   首行工具栏存在', toolbar !== undefined)
+  // 它是 **Log 主区的第一个子节点**（横跨提交图与详情），而不是挤在提交列表栏里。
+  const mainNode = rowsOf(closed, 'data-graph-main')[0]
+  const mainKids = Array.isArray(mainNode?.props?.children) ? mainNode.props.children : [mainNode?.props?.children]
+  has('   工具栏是 Log 主区的首行（横跨两栏）', mainKids[0]?.props?.['data-graph-toolbar'] !== undefined)
+  const toolbarKids = Array.isArray(toolbar?.props?.children) ? toolbar.props.children : [toolbar?.props?.children]
+  // 第一格是**组件**本体（`data-graph-ref-select` 挂在它渲染出来的那个 div 上）。
+  check('   首行第一格就是分支选择器', toolbarKids[0]?.type?.name, 'GraphRefSelector')
+  has('   选择器渲染出了自己的容器', collectHostNodes(toolbarKids[0]).some((n) => n.props?.['data-graph-ref-select'] !== undefined))
+  // 搜索与刷新这些轻量操作仍然在**同一行**里（不因为多了选择器而被挤到第二行）。
+  has('   同一行里还有搜索框', collectHostNodes(toolbar).some((n) => n.props?.['data-graph-search'] !== undefined))
+  has('   同一行里还有刷新按钮', collectHostNodes(toolbar).some((n) => n.props?.['data-graph-tool'] === 'refresh'))
+  has('   选择器上写着「全部分支」', textOf(rowsOf(closed, 'data-graph-ref-select-button')[0] ?? null).includes('graphAllRefs'))
+
+  // ---- 内容：权威清单 ----
+  const nodes = await openMenu()
   dump('after-drain-2', nodes)
-  check('0) 左栏列出清单里的全部 ref', treeRows(nodes).join(','), FULL_TREE)
-  check('   分段只有 本地/远程/标签', rowsOf(nodes, 'data-graph-tree-section').map((n) => n.props['data-graph-tree-section']).join(','), 'local,remote,tags')
+  check('0) 分支清单列出清单里的全部 ref', treeRows(nodes).join(','), FULL_TREE)
+  check('   分段只有 本地/远程/标签', rowsOf(nodes, 'data-graph-ref-section').map((n) => n.props['data-graph-ref-section']).join(','), 'local,remote,tags')
   check('   本地段（带 `/` 的也是本地）', rowsBySection(nodes).local.join(','), LOCAL)
   check('   远程段', rowsBySection(nodes).remote.join(','), REMOTE)
   check('   标签段', rowsBySection(nodes).tags.join(','), TAGS)
-  check('   没有单独的 HEAD 分组', rowsOf(nodes, 'data-graph-tree-section').some((n) => n.props['data-graph-tree-section'] === 'head'), 'false')
-  const master = rowsOf(nodes, 'data-graph-tree-row').find((n) => n.props['data-graph-tree-row'] === 'master')
-  check('   当前分支在本地段里标了 current', master?.props['data-graph-tree-current'], 'true')
+  check('   没有单独的 HEAD 分组', rowsOf(nodes, 'data-graph-ref-section').some((n) => n.props['data-graph-ref-section'] === 'head'), 'false')
+  const master = rowsOf(nodes, 'data-graph-ref-row').find((n) => n.props['data-graph-ref-row'] === 'master')
+  check('   当前分支在本地段里标了 current', master?.props['data-graph-ref-current'], 'true')
   check('   当前分支行显示 ✓ 前缀', textOf(master), '\u2713 master')
   has('   没有把 origin/HEAD 当成一个分支', treeRows(nodes).includes('origin/HEAD') === false)
   check('   中栏六条提交', middleRows(nodes).length, 6)
   check('   初始没有选中任何 ref', treeSelected(nodes).length, 0)
+  // 「全部分支」这一项就在下拉里（它取代了以前工具条上那个独立的 ✕ 胶囊）。
+  has('   下拉里有「全部分支」一项', rowsOf(nodes, 'data-graph-clear-ref').length === 1)
   check('   清单来自 gitbar 的两条只读路由', inventoryRequests.map((r) => r.route).sort().join(','), 'branches,tags')
   check('   没有 hook 数量变化', hookOrderErrors.length, 0)
 }
 
 console.log('')
-console.log('=== 1. 点 develop：左栏完整不变，develop 高亮，中栏换成 develop 的提交 ===')
+console.log('=== 1. 点 develop：分支清单完整不变，develop 高亮，中栏换成 develop 的提交 ===')
 {
   has('1) 点得中 develop', await clickTree('develop'))
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-3', nodes)
-  check('   左栏仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
   check('   本地段照旧', rowsBySection(nodes).local.join(','), LOCAL)
   check('   只有 develop 被选中', treeSelected(nodes).join(','), 'develop')
   check('   中栏是 develop 的提交', middleRows(nodes).join(','), 'd1,d2')
-  has('   三栏都在', threePanesAlive(nodes))
+  has('   两栏+首行选择器都在', layoutAlive(nodes))
   // 需求 71：过滤**不重拉清单**（清单与"看哪一页提交"无关）。
   check('   过滤没有重发清单请求', inventoryRequests.length, 2)
   check('   没有 hook 数量变化', hookOrderErrors.length, 0)
@@ -433,12 +484,12 @@ console.log('')
 console.log('=== 2. 点 master：develop 取消高亮，master 高亮，中栏换 master ===')
 {
   has('2) 点得中 master', await clickTree('master'))
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-4', nodes)
-  check('   左栏仍然完整', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单仍然完整', treeRows(nodes).join(','), FULL_TREE)
   check('   只有 master 被选中', treeSelected(nodes).join(','), 'master')
   check('   中栏换成 master 的提交', middleRows(nodes).join(','), 'm1,m2,m3')
-  has('   三栏都在', threePanesAlive(nodes))
+  has('   两栏+首行选择器都在', layoutAlive(nodes))
 }
 
 console.log('')
@@ -446,47 +497,47 @@ console.log('=== 3. 再点 master：取消过滤，中栏回到全部（走"全�
 {
   const before = graphRequests.length
   has('3) 再点一次 master', await clickTree('master'))
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-5', nodes)
-  check('   左栏仍然完整', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单仍然完整', treeRows(nodes).join(','), FULL_TREE)
   check('   没有任何 ref 被选中', treeSelected(nodes).length, 0)
   check('   中栏回到未过滤的六条', middleRows(nodes).join(','), 'a1,a2,a3,a4,a5,a6')
-  has('   三栏都在', threePanesAlive(nodes))
+  has('   两栏+首行选择器都在', layoutAlive(nodes))
   // 缓存命中：取消过滤的这一帧不该是空白（那一份 '' 的首屏是第一页拿到的，一直在缓存里）。
   has('   取消过滤也发了后台 revalidate', graphRequests.length - before >= 1)
 }
 
 console.log('')
-console.log('=== 4. 白屏回归：请求挂起 2 秒期间三栏必须一直在 ===')
+console.log('=== 4. 白屏回归：请求挂起 2 秒期间两栏+首行选择器必须一直在 ===')
 {
   hold(pageKey('develop', 0))
   has('4) 点得中 develop', await clickTree('develop'))
   // 模拟"请求还没回来"的那段时间：反复渲染，直到内部仍处于 refreshing。
-  const during = await drain(2)
+  const during = await openMenu(2)
   if (process.env.DSH_TEST_DEBUG === '1') {
     console.log(`  [debug] held=${JSON.stringify([...held.entries()].map(([k, v]) => [k, v.length]))}`)
     console.log(`  [debug] requests=${graphRequests.map((r) => r.key).join(' | ')}`)
     console.log(`  [debug] viewText=${JSON.stringify(textOf(rowsOf(during, 'data-graph-view')[0] ?? null).slice(0, 200))}`)
   }
   has('   请求确实还挂着（没有响应回来）', held.get(pageKey('develop', 0))?.length === 1)
-  has('   三栏一直在（没有整页 loading）', threePanesAlive(during))
-  check('   左栏内容没有消失', treeRows(during).join(','), FULL_TREE)
+  has('   两栏+首行选择器一直在（没有整页 loading）', layoutAlive(during))
+  check('   分支清单内容没有消失', treeRows(during).join(','), FULL_TREE)
   has('   中栏保留上一份提交', middleRows(during).length > 0)
   has('   显示"正在加载"提示', rowsOf(during, 'data-graph-refreshing').length === 1)
   check('   视图里不是只有 graphLoading', textOf(rowsOf(during, 'data-graph-view')[0] ?? null).includes('graphLoading'), 'false')
-  // 放行：中栏原地换成 develop 的提交，三栏仍在。
+  // 放行：中栏原地换成 develop 的提交，两栏+首行选择器仍在。
   has('   放行响应', release(pageKey('develop', 0)))
   dump('放行前', during)
-  const after = await drain()
+  const after = await openMenu()
   dump('放行后', after)
   check('   中栏原地替换成 develop', middleRows(after).join(','), 'd1,d2')
-  has('   三栏仍在', threePanesAlive(after))
-  check('   左栏仍然完整', treeRows(after).join(','), FULL_TREE)
+  has('   两栏+首行选择器仍在', layoutAlive(after))
+  check('   分支清单仍然完整', treeRows(after).join(','), FULL_TREE)
   has('   加载提示消失', rowsOf(after, 'data-graph-refreshing').length === 0)
 }
 
 console.log('')
-console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动左栏 ===')
+console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动分支清单 ===')
 {
   has('5) 点得中「加载更多」', await (async () => {
     const nodes = await drain()
@@ -496,23 +547,23 @@ console.log('=== 5. 过滤状态下的分页：只追加中栏，绝不改动左
     more.props.onClick()
     return true
   })())
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-7', nodes)
   check('   中栏追加了 develop 的第二页', middleRows(nodes).join(','), 'd1,d2,d3')
-  check('   左栏仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单仍然是完整清单', treeRows(nodes).join(','), FULL_TREE)
   check('   仍然只有 develop 被选中', treeSelected(nodes).join(','), 'develop')
   const last = graphRequests.at(-1)
   check('   第二页带的是 develop 与 skip=2', `${last?.ref}/${last?.skip}`, 'develop/2')
 }
 
 console.log('')
-console.log('=== 6. 未过滤分页：只追加中栏；装饰里的新 ref 不得混进左栏 ===')
+console.log('=== 6. 未过滤分页：只追加中栏；装饰里的新 ref 不得混进分支清单 ===')
 {
   // 这一节钉的是**数据源分离**这条设计（需求 12/13/17）：
   //
-  // 左栏是权威 refs 清单，中栏是 `/graph` 分页。第二页的装饰里带了一个清单里没有的
-  // `legacy/support`——它必须**只**出现在提交行的徽标上，绝不能因此多出一行左栏。
-  // 旧实现把分页结果并进 `treeCommits` 再聚合 `commit.refs`，于是左栏会在滚动这种与它
+  // 分支清单是权威 refs 清单，中栏是 `/graph` 分页。第二页的装饰里带了一个清单里没有的
+  // `legacy/support`——它必须**只**出现在提交行的徽标上，绝不能因此多出一行分支清单。
+  // 旧实现把分页结果并进 `treeCommits` 再聚合 `commit.refs`，于是分支清单会在滚动这种与它
   // 无关的动作里自己长出新分支（而且那句"加载更多"是谁点的也说不清）。
   has('6) 取消过滤（再点 develop）', await clickTree('develop'))
   await drain()
@@ -525,10 +576,10 @@ console.log('=== 6. 未过滤分页：只追加中栏；装饰里的新 ref 不�
     more.props.onClick()
     return true
   })())
-  const nodes = await drain()
+  const nodes = await openMenu()
   dump('after-drain-9', nodes)
   check('   中栏也追加了那一条', middleRows(nodes).join(','), 'a1,a2,a3,a4,a5,a6,a7')
-  check('   左栏没有多出装饰里的 legacy/support', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单没有多出装饰里的 legacy/support', treeRows(nodes).join(','), FULL_TREE)
   check('   本地段也没有多出来', rowsBySection(nodes).local.join(','), LOCAL)
   has('   分页确实发了请求', graphRequests.length - beforeMid >= 1)
   // 整个第六节（两次过滤 + 两次分页 + 若干轮渲染）都不该重拉清单。
@@ -542,8 +593,8 @@ console.log('=== 7. 快速切换 + 乱序返回：最终只采用最后一次的
   // 重新挂载，拿到干净状态；三份响应全部挂起，再**按"最新的先回、旧的最后回"**乱序放行
   // ——这正是"旧响应不得覆盖新结果"最容易出错的方向。
   for (const ref of ['develop', 'master', 'feature/a']) hold(pageKey(ref, 0))
-  const nodes0 = await drain()
-  check('7) 重新挂载后左栏是完整清单', treeRows(nodes0).join(','), FULL_TREE)
+  const nodes0 = await openMenu()
+  check('7) 重新挂载后分支清单是完整清单', treeRows(nodes0).join(','), FULL_TREE)
   const invBefore = inventoryRequests.length
   has('   点得中 develop', await clickTree('develop'))
   await drain(1)
@@ -558,13 +609,13 @@ console.log('=== 7. 快速切换 + 乱序返回：最终只采用最后一次的
   release(pageKey('master', 0))
   const afterMaster = await drain()
   release(pageKey('develop', 0))
-  const nodes = await drain()
+  const nodes = await openMenu()
   check('   只有 feature/a 被选中', treeSelected(nodes).join(','), 'feature/a')
-  check('   左栏完整', treeRows(nodes).join(','), FULL_TREE)
+  check('   分支清单完整', treeRows(nodes).join(','), FULL_TREE)
   check('   中栏只采用 feature/a 的那一份', middleRows(nodes).join(','), 'f1')
   check('   迟到的 master 响应没有覆盖', middleRows(afterMaster).join(','), 'f1')
   check('   迟到的 develop 响应也没有覆盖', middleRows(nodes).join(','), 'f1')
-  has('   三栏都在', threePanesAlive(nodes))
+  has('   两栏+首行选择器都在', layoutAlive(nodes))
   check('   切 ref 期间没有重发清单请求', inventoryRequests.length - invBefore, 0)
 }
 
@@ -574,15 +625,15 @@ console.log('=== 8. 每个 ref 的首屏缓存：切回来同一帧就能看到 
   rootKey = 'graph-cache'
   // 重新挂载：先让 '' 的首屏落地，再点一次 feature/a（缓存里已经有），把这次请求挂起。
   hold(pageKey('feature/a', 0))
-  const nodes0 = await drain()
+  const nodes0 = await openMenu()
   check('8) 挂载后中栏是未过滤提交', middleRows(nodes0).length, 6)
   has('   点得中 feature/a', await clickTree('feature/a'))
-  const cached = await drain(2)
+  const cached = await openMenu(2)
   // 请求还挂着，但中栏已经是缓存里那一份（不是空白、不是 loading 页）。
   has('   请求仍挂着', (held.get(pageKey('feature/a', 0)) ?? []).length === 1)
   check('   中栏已经是缓存里的 feature/a 提交', middleRows(cached).join(','), 'f1')
-  has('   三栏都在', threePanesAlive(cached))
-  check('   左栏完整', treeRows(cached).join(','), FULL_TREE)
+  has('   两栏+首行选择器都在', layoutAlive(cached))
+  check('   分支清单完整', treeRows(cached).join(','), FULL_TREE)
   has('   同时标出正在后台刷新', rowsOf(cached, 'data-graph-refreshing').length === 1)
   release(pageKey('feature/a', 0))
   await drain()

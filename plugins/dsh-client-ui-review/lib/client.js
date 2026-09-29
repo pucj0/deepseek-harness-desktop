@@ -1,15 +1,25 @@
-// review 的客户端半边：本轮的改动概览，以及展示具体差异的侧边栏标签。
+// review 的客户端半边。它承载**两个语义完全不同的界面**，两者只共享最底层的差异渲染器：
+//
+//   1. 本轮修改审查（turn scope）——"这一轮 agent 改了什么"
+//      入口：输入框上方的 `TurnReviewChip`（`dsh.desktop.composer.actions`）
+//      抽屉：`TurnReviewDrawer`（`shell.overlay`，独立开合状态）
+//      数据：`/changes`，基线 = 本轮开始时记录的快照（baseline vs 当前工作区）
+//
+//   2. 项目级 Git（workspace scope）——"整个仓库相对 HEAD 是什么状态"
+//      入口：Harness 官方右侧栏的 **Git 图标**（`sidebarRightTabs` 注册的标签类型）
+//      正文：`GitSidebarTab` → `ProjectGitPanel`（Changes | Log）
+//      数据：`/workspace`（HEAD 基线），提交图等另走各自路由
+//
+// **这两条链路不得互相触发**：点「本轮修改」绝不会打开/切换/收起官方 Git 标签；打开 Git
+// 标签也绝不会改变本轮审查抽屉的开关。历史上两者共用过一个 `KIND`，本轮修改的入口因此
+// 指向了 `git` 标签，用户在"本轮修改"里看到的是整个项目的 Git——回归测试
+// `scripts/test-turn-review-turn-scope.mjs` 与 `scripts/test-review-entry-isolation.mjs`
+// 就是为了让这件事不能再发生。
 //
 // 数据来自 host 半边（同源 HTTP 路由）：
 //   POST /dsh-desktop/review/baseline   记录本轮基线（本轮开始时调用一次）
-//   POST /dsh-desktop/review/changes    基线 vs 当前工作区
-//
-// 呈现方式刻意复用官方自带的右侧栏，而不是自制浮层：
-//   * `sidebar.right.pane.tab`        —— 差异正文（keyed 槽位，key 即标签类型）
-//   * `sidebar.right.pane.tab.title`  —— 标签标题
-//   打开方式：inject 官方服务 `sidebarRight`，调用 `openTab(kind, { sessionId })`。
-// 这样标签的外观、拖拽、关闭、全屏都由官方侧边栏管理，与文档预览等既有标签一致；
-// 自制浮层做不到这些，还会在小窗口里被裁剪（此前正是如此）。
+//   POST /dsh-desktop/review/changes    基线 vs 当前工作区（turn scope）
+//   POST /dsh-desktop/review/workspace  HEAD vs 当前工作区（workspace scope）
 //
 // 轮次边界怎么定：**dsh 没有轮次生命周期事件**，因此用会话的运行状态推断——agent 从
 // "未运行"转为"运行"即一轮开始。这是本次实现里最依赖推断的一处，所以刻意保守：
@@ -146,16 +156,16 @@ window.__ModuleLoader__.load({
 
     const styles = `
       [data-desktop-review-surface] button:focus-visible, [data-desktop-review]:focus-visible,
-      [data-review-trigger] > button:focus-visible {
+      [data-review-turn-surface] button:focus-visible {
         outline: 2px solid ${ACCENT}; outline-offset: 2px;
       }
-      [data-desktop-review], [data-review-trigger] > button {
+      [data-desktop-review] {
         transition: background-color .15s ease, border-color .15s ease;
       }
-      [data-desktop-review]:hover, [data-review-trigger] > button:hover {
+      [data-desktop-review]:hover {
         --dsh-review-chip-bg: color-mix(in srgb, ${ACCENT} 5%, var(--dsw-alias-bg-base, #fff));
       }
-      [data-desktop-review]:active, [data-review-trigger] > button:active {
+      [data-desktop-review]:active {
         --dsh-review-chip-bg: color-mix(in srgb, ${ACCENT} 9%, var(--dsw-alias-bg-base, #fff));
       }
       .dsh-review-file:hover, .dsh-review-revert:hover:not(:disabled) {
@@ -171,22 +181,6 @@ window.__ModuleLoader__.load({
       [data-graph-toolbar] input::placeholder { color: var(--dsw-alias-label-tertiary); }
 
       /* ---- 面板外观：参照 IDEA 的 Git 工具窗口 ---- */
-
-      /* 抽屉左边缘的拖拽手柄。8px 宽（比视觉上的 1px 分割线宽得多）是为了好抓；
-       * 真正画出来的只有中间那条线。 */
-      [data-review-resizer] {
-        position: absolute; left: 0; top: 0; bottom: 0; width: 8px;
-        cursor: col-resize; z-index: 3; background: transparent; border: none; padding: 0;
-      }
-      [data-review-resizer]::after {
-        content: ''; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px;
-        background: transparent; transition: background-color .15s ease;
-      }
-      [data-review-resizer]:hover::after, [data-review-resizer]:focus-visible::after,
-      [data-review-resizer][data-dragging='1']::after {
-        background: color-mix(in srgb, ${ACCENT} 55%, transparent);
-      }
-      [data-review-resizer]:focus-visible { outline: none; }
 
       /* 拖动时不要选中文字、也不要让 iframe/文本抢走指针事件。 */
       body[data-review-dragging='1'] { cursor: col-resize; user-select: none; }
@@ -296,9 +290,13 @@ window.__ModuleLoader__.load({
        * 尺寸节奏：控件一律 24px 高，行内图标按钮 22px，行最小高度 28px，
        * 圆角 6/8/10 三档，间距走 4 的倍数。 */
 
-      /* 设计令牌挂在面板根上，子树统一取用；同时给浏览器声明这是浅色底，
-       * 避免原生 checkbox / scrollbar 在深色系统主题下被画成深色。 */
-      [data-desktop-review-surface='panel'] {
+      /* 设计令牌挂在两个 surface 的根上，子树统一取用；同时给浏览器声明这是浅色底，
+       * 避免原生 checkbox / scrollbar 在深色系统主题下被画成深色。
+       *
+       * **两处都要挂**：FileList 与差异渲染器是共用的，但两个 surface 的根节点不是同一个
+       * （项目级 Git 由官方侧栏挂载，本轮审查抽屉挂在 shell.overlay）。只挂一处的话，
+       * 另一处会拿不到这些令牌，共用组件的行高与配色就会走各自的兜底值。 */
+      [data-desktop-review-surface='panel'], [data-review-turn-surface='drawer'] {
         color-scheme: light;
         --dsh-review-row-h: 28px;
         --dsh-review-line: var(--dsw-alias-border-l1, #e9ebf0);
@@ -397,6 +395,47 @@ window.__ModuleLoader__.load({
       [data-staging-group-head] button { border-radius: 4px; }
       [data-staging-group-head] button:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 1px; }
 
+      /* ---- Changes：**一套**列表系统 ----
+       *
+       * 整页只有一种结构：分组标题（30px，可折叠）+ 行（28px），分组之间是一条发丝分隔线。
+       * 刻意**不再**给每个分组画独立卡片（圆角 + 底色 + 外边距）：那会让"已暂存 / 更改 /
+       * 未跟踪 / 自动保存 / 储藏"看起来像五块硬堆在一起的东西，而它们本来就是同一张列表
+       * 里的五个分组。视觉上的统一由这三条规则保证，不需要每个分组各写一套样式。 */
+      [data-staging-scroll] > [data-staging-group] {
+        border-top: 1px solid var(--dsh-review-line);
+      }
+      /* 第一个分组不画分隔线：它上面就是分区标题栏（那条已经是分隔线）。 */
+      [data-staging-scroll] > [data-staging-group]:first-child { border-top: none; }
+      /* 行：统一 28px 行高、统一的左侧缩进（与文件路径对齐），悬停同一套底色。 */
+      [data-review-list-row] {
+        display: flex; align-items: center; gap: 6px;
+        box-sizing: border-box;
+        min-height: var(--dsh-review-row-h, 28px);
+        padding: 0 8px 0 26px;
+        border-bottom: 1px solid var(--dsh-review-line);
+        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};
+      }
+      [data-review-list-row]:last-child { border-bottom: none; }
+      [data-review-list-row]:hover { background: var(--dsh-review-hover); }
+      /* 列表里的次级按钮：与图标按钮同一档尺寸，不再是浏览器默认按钮的样子。 */
+      [data-review-row-button] {
+        display: inline-flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+        height: 22px; padding: 0 8px; box-sizing: border-box;
+        border: 1px solid var(--dsh-review-line); border-radius: 5px;
+        background: transparent; color: var(--dsw-alias-label-secondary);
+        font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};
+        cursor: pointer;
+        transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+      }
+      [data-review-row-button]:not(:disabled):hover {
+        border-color: color-mix(in srgb, ${ACCENT} 45%, transparent);
+        background: color-mix(in srgb, ${ACCENT} 7%, transparent);
+        color: var(--dsw-alias-label-primary);
+      }
+      [data-review-row-button]:disabled { opacity: .5; cursor: default; }
+      [data-review-row-button]:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 1px; }
+
       /* ---- 控件 ---- */
       [data-review-input]:focus {
         outline: none;
@@ -443,12 +482,15 @@ window.__ModuleLoader__.load({
         font-variant-numeric: tabular-nums;
       }
 
-      /* 未跟踪文件的汇总条：把"有多少、选了几个、要做什么"压成一行。 */
+      /* 未跟踪分组底部的动作行：**不再是软底色的独立盒子**，而是这张列表里的一条普通行
+       * （同样的行高、缩进与发丝分隔线），只是内容换成"选了几个 + 加入 git"。
+       * 它保留 data-review-untracked-bar 这个锚点，因为脚本与样式都按它定位。 */
       [data-review-untracked-bar] {
         display: flex; align-items: center; gap: 8px;
-        margin: 6px 6px 2px; padding: 5px 8px;
-        border-radius: 8px;
-        background: var(--dsh-review-soft);
+        box-sizing: border-box;
+        min-height: var(--dsh-review-row-h, 28px);
+        padding: 0 8px 0 26px;
+        border-top: 1px solid var(--dsh-review-line);
         color: var(--dsw-alias-label-secondary);
         font-family: ${UI_FONT}; font-size: ${uiPx(11.5)};
       }
@@ -466,95 +508,55 @@ window.__ModuleLoader__.load({
     /** 稳定插件名，用于诊断。 */
     const name = 'dsh-client-ui-review'
 
-    /** gitbar 在 conversation.input.dock 提供的工具条子槽（list / session）。
-     * conversation.composer.bar 是官方输入框本体，不能用它放置上方工具条。
+    /**
+     * 「本轮修改」入口所在的槽位。
+     *
+     * 由 gitbar 声明（`conversation.input.dock` 的子槽，list / **session** 作用域），因此挂在
+     * 这里的组件能拿到 `sessionId` 与 `useSessions`——本轮基线与本轮改动数都属于那一轮对话。
      */
-    const CHIP_SLOT = 'dsh.desktop.composer.actions'
-
-    /** 常驻面板开关的持久化键（按应用而非按会话记忆）。 */
-    const PANEL_KEY = 'dsh.review.panelOpen'
+    const TURN_CHIP_SLOT = 'dsh.desktop.composer.actions'
 
     /**
-     * 抽屉宽度的持久化键（**v2**）。
+     * 「本轮修改审查」抽屉所在的槽位。
      *
-     * 为什么要换键而不是复用 `dsh.review.panelWidth`：那个键里存的是旧版本默认值下用户拖出来
-     * 的宽度（600 / 700 / 800…），而本版把默认值改成了视口的 80%。若继续读旧键，"默认 80%"
-     * 就永远不生效——用户看到的是"源码明明写着 80%，打开还是那么窄"。**旧像素值一律不迁移**：
-     * 它是在另一套默认值下做出的选择，把它当成新默认值的替代品是错的（需求 38）。
+     * `shell.overlay` 是官方槽位文档里为"自己的整帧浮层"准备的座位：在所有列之上、且在它们
+     * 的滚动容器之外。用 `position: fixed` 挂在输入框槽位里时，只要祖先里有一个
+     * transform/filter 就会被当成包含块并裁掉——这里是官方给出的、不会踩到那条的路。
      *
-     * 新键不存在时用 80%；用户手动拖过一次之后才写新键，之后一直尊重它。
+     * 作用域是 root：拿不到 `sessionId`，当前会话由 `useSessions` 的 `state.current` 取
+     * （见 useCurrentTurn）。**抽屉不读、也不依赖官方 Git Sidebar 的展开状态**。
      */
-    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth.v2'
+    const TURN_DRAWER_SLOT = 'shell.overlay'
+    const TURN_DRAWER_ID = 'dsh-client-ui-review/turn-drawer'
+
+    /** 项目级 Git 标签正文与标题的槽位。 */
+    const GIT_TAB_SLOT = 'sidebar.right.pane.tab'
+    const GIT_TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
 
     /**
-     * 抽屉宽度占视口的比例（默认值与上限都是它）。
+     * 项目级 Git 的页签（IDEA 的 Git 工具窗就是这两个）。
      *
-     * 用比例而不是像素：这块抽屉要装下"文件列表 + 逐行差异"，像素宽度在 1366 的笔记本和
-     * 2560 的显示器上是完全不同的两件事。80% 仍然留出左侧主界面可见（知道自己在哪个项目），
-     * 与"点外部就关"一起构成"宽但不遮挡"。
-     */
-    const PANEL_WIDTH_RATIO = 0.8
-
-    /**
-     * 抽屉宽度的下限（px）。
-     *
-     * 500 而不是早先的 320：抽屉里是"分支树 + 提交图 + 详情"三栏，320px 时中间那栏只剩
-     * 100px 出头，提交标题被截得只剩几个字——那是"打开了但没法用"。
-     *
-     * **视口比它还窄时不做这个下限**（见 panelWidthBounds）：否则 `min-width: 500px` 会让
-     * 整个页面横向溢出，用户连关闭按钮都点不到（需求 35）。
-     */
-    const PANEL_WIDTH_MIN = 500
-
-    /**
-     * 抽屉宽度在某个视口下的**唯一**取值范围。
-     *
-     * 只有一个实现，是为了让"默认值 / 上限 / 下限"再也不各算各的：此前
-     * `panelWidthDefault()` 与 `panelWidthMax()` 各自夹一次边界，于是"默认 80%"与"上限
-     * min(1600, 80%)"能互相矛盾（宽屏上默认 2048 被夹回 1600）。initial、读持久化值、
-     * 拖动、窗口 resize、双击复位**全部**经过这里。
-     *
-     * @param viewport - 视口宽度（px）。
-     * @returns `{ min, max, default }`（px）。
-     */
-    function panelWidthBounds(viewport) {
-      const width = Number.isFinite(viewport) && viewport > 0 ? Math.round(viewport) : 1440
-      // 视口比最小宽度还窄（分屏、很小的窗口）：抽屉占满视口，绝不横向溢出。
-      if (width < PANEL_WIDTH_MIN) return { min: width, max: width, default: width }
-      const ratio = Math.max(PANEL_WIDTH_MIN, Math.round(width * PANEL_WIDTH_RATIO))
-      return { min: PANEL_WIDTH_MIN, max: ratio, default: ratio }
-    }
-
-    /** 当前视口宽度（拿不到 window 时按 1440 算，与测试环境一致）。 */
-    function viewportWidth() {
-      return typeof window === 'undefined' ? 1440 : window.innerWidth
-    }
-
-    /** 键盘调整宽度时的步长（方向键）。 */
-    const PANEL_WIDTH_STEP = 24
-
-    /** 侧边栏标签正文与标题的槽位。 */
-    const TAB_SLOT = 'sidebar.right.pane.tab'
-    const TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
-
-    /**
-     * 项目级 Git 抽屉的页签。
-     *
-     * `'changes' | 'log'`。抽屉是**唯一**的 Git 主界面：早先还有一个独立的「提交图」
-     * 侧栏入口（`sidebar.panellist` + `main` 两处注册）画同一个 `CommitGraphView`，与抽屉的
-     * Log 页签完全重复——用户在主界面左侧看到两个入口，点哪一个都是"提交图"。那个入口已经
-     * 删除，提交图只留在抽屉的 Log 页签里（需求 A/1-3）。
+     * `'changes' | 'log'`。项目级 Git 的**唯一**入口是官方右侧栏的 Git 图标：早先还有一个
+     * 独立的「提交图」侧栏入口（`sidebar.panellist` + `main` 两处注册）画同一个
+     * `CommitGraphView`，与 Log 页签完全重复——用户在主界面左侧看到两个入口，点哪一个都是
+     * "提交图"。那个入口已经删除，提交图只留在 Git 标签的 Log 页签里。
      */
     const TAB_CHANGES = 'changes'
     const TAB_LOG = 'log'
 
-    /** 标签类型标识：同时作为两个槽位的 key。 */
-    const KIND = 'git'
-    const SIDEBAR_ID = 'dsh-client-ui-review/git'
+    /**
+     * 项目级 Git 标签的类型标识：同时作为两个槽位的 key，也是 `openTab` 用的 kind。
+     *
+     * **只有项目级 Git 用这个名字**。本轮修改审查是另一个 surface——它有自己的槽位、自己的
+     * 开合状态，从不经过 `sidebarRight`。两者曾经共用过一个 `KIND`，于是「本轮修改」的入口
+     * 打开了 `git` 标签、用户看到的是整个项目的 Git；这次修复把它拆成了两个常量。
+     */
+    const GIT_KIND = 'git'
+    const GIT_SIDEBAR_ID = 'dsh-client-ui-review/git'
 
-    /** 概览入口的注册 id 与顺序。 */
-    const ID = 'review-changes'
-    const ORDER = 20
+    /** 「本轮修改」入口在槽位里的注册 id 与顺序。 */
+    const TURN_CHIP_ID = 'review-changes'
+    const TURN_CHIP_ORDER = 20
 
     /** 本地化命名空间。 */
     const NS = 'review'
@@ -831,12 +833,6 @@ window.__ModuleLoader__.load({
       clean: '本轮没有改动任何文件。',
       projectTitle: 'Git',
       noWorkspace: '当前没有可用的工作区。',
-      projectIdle: '项目暂无改动',
-      /**
-       * 多仓库项目：徽标上的数字是**所有仓库之和**，必须一并说明"几个仓库"，否则用户会
-       * 把它当成某一个仓库的改动数。
-       */
-      projectFilesMulti: '{count} 个改动 · {repositories} 个仓库',
       repositoryCount: '{count} 个仓库',
       repoSelectorLabel: '切换仓库',
       repoDiscovering: '正在发现更多 Git 仓库…',
@@ -847,17 +843,17 @@ window.__ModuleLoader__.load({
       notGitProject: '项目 {name} 里没有发现 Git 仓库（工作区本身及其子目录都不是）。',
       workspaceClean: '这个项目当前没有未提交的改动。',
       workspaceEmpty: '这个仓库还没有任何提交。',
-      collapse: '收起面板',
-      resize: '拖动调整面板宽度（双击复位）',
       refresh: '刷新',
       changesTitle: '改动',
-      // ---- 抽屉顶部的两个页签（IDEA 的 Git 工具窗就是这两个）----
+      // ---- 项目级 Git 标签顶部的两个页签（IDEA 的 Git 工具窗就是这两个）----
       changesTab: 'Changes',
       logTab: 'Log',
-      // ---- Log 页签里的三栏与工具栏 ----
+      // ---- Log 页签：首行工具栏 + 提交图 / 提交详情（没有左侧分支栏）----
       graphSearchPlaceholder: '搜索提交信息 / 作者 / 哈希',
       graphNoMatches: '已加载的提交里没有匹配项。',
-      graphCollapseTree: '收起分支树',
+      // 分支选择器：按钮上的「全部分支」表示没有筛选（= 选中的那个 ref 为空）。
+      graphAllRefs: '全部分支',
+      graphAllRefsHint: '不按分支筛选，显示全部分支的提交',
       graphCollapseDetail: '收起详情',
       revert: '还原',
       revertConfirm: '确认还原',
@@ -871,7 +867,7 @@ window.__ModuleLoader__.load({
       noHistory: '这个仓库还没有任何提交。',
       loading: '正在读取差异…',
       truncated: '差异过大，仅显示前一部分。',
-      openInSidebar: '在侧边栏查看',
+      openTurnReview: '查看本轮修改',
       statusAdded: '新增',
       statusModified: '修改',
       statusDeleted: '删除',
@@ -1171,8 +1167,7 @@ window.__ModuleLoader__.load({
       error_emptyRevert: '这个提交没有可还原的改动（已经是空操作）。',
       binaryDiff: '该文件是二进制内容，不展示逐行差异。',
       diffOversized: '改动过多，逐行差异超出可读取上限，只列出文件。常见原因是仓库里有未被 .gitignore 覆盖的大目录（例如日志目录）。',
-      sidebarUnavailable: '当前界面未能提供侧边栏，无法展示详情。',
-      // ---- 提交图（主区域的独立面板）----
+      // ---- 提交图（官方 Git 标签的 Log 页签）----
       graphTitle: '提交图',
       graphLocal: '本地',
       graphRemote: '远程',
@@ -1233,12 +1228,12 @@ window.__ModuleLoader__.load({
       graphHideGraph: '收起提交图',
       // ---- Log 页签的渲染失败降级 ----
       logCrashedTitle: '提交图渲染出错，Log 页签暂时不可用',
-      logCrashedHint: '抽屉与右上角的入口都还在：切回"更改"页签可以继续暂存与提交。修好之后点下面的按钮重试。',
+      logCrashedHint: '官方侧栏的 Git 标签仍然在：切回"Changes"页签可以继续暂存与提交。修好之后点下面的按钮重试。',
       logReload: '重新加载 Log',
       logErrorDetail: '错误详情（组件与字段）',
       // ---- 整个项目 Git 面板的渲染失败降级 ----
       panelCrashedTitle: 'Git 面板加载失败',
-      panelCrashedHint: '右上角的入口仍然可用（关掉面板再打开即可重试），下面是可以直接复制的错误详情。',
+      panelCrashedHint: '官方侧栏的 Git 标签仍然可用（切到别的标签再切回 Git 即可重试），下面是可以直接复制的错误详情。',
       panelReload: '重新加载',
       close: '关闭',
       cancel: '取消',
@@ -1346,9 +1341,6 @@ window.__ModuleLoader__.load({
       clean: 'This turn did not change any file.',
       projectTitle: 'Git',
       noWorkspace: 'No workspace is available.',
-      projectIdle: 'No project changes',
-      /** Multi-repository project: the badge number is the sum over all repositories. */
-      projectFilesMulti: '{count} changes · {repositories} repositories',
       repositoryCount: '{count} repositories',
       repoSelectorLabel: 'Switch repository',
       repoDiscovering: 'Discovering more Git repositories…',
@@ -1360,15 +1352,14 @@ window.__ModuleLoader__.load({
       notGitProject: 'No Git repository was found in project {name} (neither the workspace nor its subdirectories).',
       workspaceClean: 'This project has no uncommitted changes.',
       workspaceEmpty: 'This repository has no commits yet.',
-      collapse: 'Collapse panel',
-      resize: 'Drag to resize (double-click to reset)',
       refresh: 'Refresh',
       changesTitle: 'Changes',
       changesTab: 'Changes',
       logTab: 'Log',
       graphSearchPlaceholder: 'Search message / author / hash',
       graphNoMatches: 'No match among the loaded commits.',
-      graphCollapseTree: 'Collapse branch tree',
+      graphAllRefs: 'All branches',
+      graphAllRefsHint: 'Do not filter by branch; show commits from every branch',
       graphCollapseDetail: 'Collapse details',
       revert: 'Revert',
       revertConfirm: 'Confirm revert',
@@ -1382,7 +1373,7 @@ window.__ModuleLoader__.load({
       noHistory: 'This repository has no commits yet.',
       loading: 'Loading diff…',
       truncated: 'The diff is large; only the beginning is shown.',
-      openInSidebar: 'Open in sidebar',
+      openTurnReview: 'Review this turn',
       statusAdded: 'added',
       statusModified: 'modified',
       statusDeleted: 'deleted',
@@ -1676,8 +1667,7 @@ window.__ModuleLoader__.load({
       error_emptyRevert: 'That commit has no changes to revert (it would be an empty operation).',
       binaryDiff: 'This file is binary; no line diff is shown.',
       diffOversized: 'Too many changes to read a line-by-line diff; only the file list is shown. A common cause is a large directory not covered by .gitignore (a log directory, for example).',
-      sidebarUnavailable: 'The sidebar is unavailable, so details cannot be shown.',
-      // ---- Commit graph (its own main-area panel) ----
+      // ---- Commit graph (the Log tab of the official Git sidebar) ----
       graphTitle: 'Commit graph',
       graphLocal: 'Local',
       graphRemote: 'Remote',
@@ -1738,12 +1728,12 @@ window.__ModuleLoader__.load({
       graphHideGraph: 'Hide commit graph',
       // ---- Log tab render failure fallback ----
       logCrashedTitle: 'The commit graph failed to render; the Log tab is unavailable',
-      logCrashedHint: 'The drawer and the top-right entry are still here: switch back to Changes to keep staging and committing. Retry with the button below once the cause is fixed.',
+      logCrashedHint: 'The official Git sidebar is still here: switch back to Changes to keep staging and committing. Retry with the button below once the cause is fixed.',
       logReload: 'Reload Log',
       logErrorDetail: 'Error detail (component and field)',
       // ---- Whole project-Git panel render failure fallback ----
       panelCrashedTitle: 'The Git panel failed to load',
-      panelCrashedHint: 'The top-right entry still works (close the panel and open it again to retry). The error detail below can be copied as-is.',
+      panelCrashedHint: 'The official Git sidebar still works (switch to another tab and back to Git to retry). The error detail below can be copied as-is.',
       panelReload: 'Reload',
       close: 'Close',
       cancel: 'Cancel',
@@ -1897,30 +1887,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 常驻面板开关的持久化状态。
+     * 「本轮修改审查」抽屉的开合状态。
      *
-     * 刻意放在模块级而不是组件 state 里：面板需要在**不同槽位之间共享同一个开关**——
-     * 项目页的入口挂在 `conversation.hero.workspace`，会话内的入口挂在输入框工具栏，
-     * 两者是两个组件实例，但它们控制的是同一块面板。用 localStorage 加一个订阅列表，
-     * 既共享状态又跨重启记住用户的选择。
+     * 与官方侧边栏**完全无关**：抽屉不是侧边栏里的一个标签，它有自己的槽位
+     * （`shell.overlay`）、自己的开关，也不读侧边栏的展开状态。历史上两者共用过一个 `KIND`，
+     * 于是「本轮修改」的入口实际打开了 `git` 标签——这条链路必须保持断开。
+     *
+     * 为什么放在模块级而不是组件 state：入口与抽屉是**两个槽位里的两个组件实例**（入口在
+     * session 作用域的输入框槽位，抽屉在 root 作用域的整帧浮层），它们必须共享同一个开关；
+     * "点入口开抽屉"正是这里唯一要表达的事。
+     *
+     * 为什么不写 localStorage：本轮审查是"看这一轮改了什么"的一次性检视，重启后自动弹出的
+     * 浮层只会挡住对话。（项目级 Git 是常驻工作区，那个偏好由官方侧边栏自己持久化。）
      */
-    const panelStore = (() => {
+    const turnDrawerStore = (() => {
       const listeners = new Set()
       let open = false
-      try {
-        open = window.localStorage.getItem(PANEL_KEY) === '1'
-      } catch {
-        // 读不到就用默认值（隐私模式等）。
-      }
       return {
         get: () => open,
         set: (value) => {
-          open = value
-          try {
-            window.localStorage.setItem(PANEL_KEY, value ? '1' : '0')
-          } catch {
-            // 存不了也不影响本次会话内的行为。
-          }
+          const next = value === true
+          if (open === next) return
+          open = next
           for (const listener of listeners) listener()
         },
         subscribe: (listener) => {
@@ -1931,20 +1919,20 @@ window.__ModuleLoader__.load({
     })()
 
     /**
-     * 订阅常驻面板的开关状态。
+     * 订阅「本轮修改审查」抽屉的开合状态。
      * @returns 当前是否展开。
      */
-    function usePanelOpen() {
-      return react.useSyncExternalStore(panelStore.subscribe, panelStore.get, () => false)
+    function useTurnDrawerOpen() {
+      return react.useSyncExternalStore(turnDrawerStore.subscribe, turnDrawerStore.get, () => false)
     }
 
     /**
-     * 一次性意图：「把抽屉打开，并切到 Log 页签」。
+     * 一次性意图：「把官方 Git 标签打开，并切到 Log 页签」。
      *
      * 存在的理由：跨插件的「与当前比较」（gitbar 的分支菜单）原先靠
      * `ctx.layout.selectPanel('git-graph')` 把主区域切到**独立提交图面板**。那个入口已经删除
-     * （它与抽屉的 Log 页签重复，见 apply 里那段说明），比较视图改成在**抽屉的 Log 页签**里
-     * 打开——于是需要一种"把抽屉打开、并让它落在 Log 上"的机制。
+     * （它与 Git 标签的 Log 页签重复，见 apply 里那段说明），比较视图改成在**官方 Git 标签的
+     * Log 页签**里打开——于是需要一种"把 Git 标签打开、并让它落在 Log 上"的机制。
      *
      * 为什么是**一次性意图**而不是持久化的页签偏好：用户自己停在 Changes 页签是**当前意图**，
      * 不该被一次外部请求永久改掉。因此这里没有 localStorage，只有"挂起一次、被消费掉"。
@@ -1960,7 +1948,7 @@ window.__ModuleLoader__.load({
         },
         /** 是否还有未被消费的请求。 */
         peek: () => pending,
-        /** 消费掉请求（抽屉已经切到 Log）。 */
+        /** 消费掉请求（Git 标签已经切到 Log）。 */
         consume: () => {
           pending = false
         },
@@ -1972,7 +1960,7 @@ window.__ModuleLoader__.load({
     })()
 
     /**
-     * 订阅「打开抽屉并切到 Log」的意图。
+     * 订阅「打开 Git 标签并切到 Log」的意图。
      * @returns 是否有待消费的请求。
      */
     function usePanelLogIntent() {
@@ -2080,68 +2068,6 @@ window.__ModuleLoader__.load({
      */
     function useDiffMode() {
       return react.useSyncExternalStore(diffModeStore.subscribe, diffModeStore.get, () => DIFF_MODE_SIDE_BY_SIDE)
-    }
-
-    /**
-     * 抽屉宽度。
-     *
-     * 与开关一样存在模块级 + localStorage：面板在两个槽位下是两个组件实例，而宽度是
-     * **用户对这块面板的偏好**，关掉再打开、甚至重启应用都该保持。
-     *
-     * 读值只认 **v2 键**（见 PANEL_WIDTH_KEY）；没有记录时用 `panelWidthBounds().default`
-     * （视口 80%），有记录时按同一套边界夹取。
-     */
-    const panelWidthStore = (() => {
-      const read = () => {
-        try {
-          const stored = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
-          // `Number(null)` 是 0（有限值！），必须排除非正数——否则"没有记录"会被当成
-          // "用户想要 0 宽"（早先这里踩过：新用户第一次打开时抽屉贴到最窄）。
-          return Number.isFinite(stored) && stored > 0 ? clampPanelWidth(stored) : panelWidthDefault()
-        } catch {
-          return panelWidthDefault()
-        }
-      }
-      return {
-        get: read,
-        set: (value) => {
-          try {
-            window.localStorage.setItem(PANEL_WIDTH_KEY, String(value))
-          } catch {
-            // 存不了就只在本实例内生效。
-          }
-        },
-        reset: () => {
-          try {
-            window.localStorage.removeItem(PANEL_WIDTH_KEY)
-          } catch {
-            // 同上。
-          }
-        },
-      }
-    })()
-
-    /**
-     * 把任意宽度夹到当前视口允许的区间（拖动、resize、读取持久化值都走它）。
-     * @param value - 期望宽度（px）。
-     * @returns 夹取后的宽度（px）。
-     */
-    function clampPanelWidth(value) {
-      const bounds = panelWidthBounds(viewportWidth())
-      const raw = Number.isFinite(value) ? value : bounds.default
-      return Math.round(Math.min(Math.max(raw, bounds.min), bounds.max))
-    }
-
-    /**
-     * 默认宽度：视口的 **80%**（视口比下限还窄时就是视口本身）。
-     *
-     * 从 50% 提到 80%：50% 下"文件列表 + 差异"两栏都太窄，逐行差异几乎每行都要横向滚动，
-     * 用户于是每次都要先把抽屉拖宽——默认值应该是可用的值，而不是每次都要调的值。
-     *
-     * @returns 默认宽度（px）。
-     */
-    function panelWidthDefault() {
-      return panelWidthBounds(viewportWidth()).default
     }
 
     /**
@@ -2671,9 +2597,9 @@ window.__ModuleLoader__.load({
     /**
      * 工作区级 Git 快照的**共享 store**（每个工作区一份）。
      *
-     * 为什么必须共享：这个数字在界面上出现两次——项目页右上角的入口按钮显示"改了 N 个
-     * 文件"，点开抽屉后是同一批文件的清单。此前两者各自轮询（入口每 10 秒打一次
-     * `/workspace`，抽屉里的"变更"区块走 `/status`），于是很自然地出现"外面显示 0，
+     * 为什么必须共享：这个数字在界面上出现在两处——「本轮修改」入口上的计数与抽屉里的
+     * 文件清单，以及官方 Git 标签面板头栏上的改动数。此前它们各自轮询（入口每 10 秒打一次
+     * `/workspace`，面板里的"变更"区块走 `/status`），于是很自然地出现"外面显示 0，
      * 进去却有文件"：两次请求之间工作区变了、或者两条路由本来就不是同一份数据。
      *
      * 现在只有**一份**数据、**一个**轮询：
@@ -4515,158 +4441,33 @@ window.__ModuleLoader__.load({
     // `/history`。
 
     /**
-     * 可复用的项目 Git 面板。正式入口由 Harness 官方 Right Sidebar 承载；`embedded`
-     * 模式服从 Sidebar 自己的尺寸与 resize，不创建 fixed 覆盖层或第二套拖动手柄。
+     * 项目级 Git 面板（**workspace scope**）——"整个仓库相对 HEAD 是什么状态"。
+     *
+     * 唯一入口是 Harness 官方右侧栏的 Git 标签（`GitSidebarTab`）。因此面板**只有嵌入模式**：
+     * 尺寸、拖动、关闭、全屏全部由官方侧边栏管理，这里不自造覆盖层、也不自造第二套开关。
      *
      * 面板**不提供工作区选择器**，也不显示工作区路径：工作区由当前对话决定（见
      * `useCurrentWorkspace`），跟随对话自动切换；把它做成可编辑并列出绝对路径，既
      * 与"这个面板属于当前对话"的语义冲突，也把用户的目录结构暴露在界面上。
-     * @param props - `{ t, workspace, sessionId, scope, anchor }`。
+     *
+     * **数据 scope 是 workspace**：读 `/workspace`（基线是 HEAD），并复用模块级的共享快照
+     * `gitSnapshots`。"这一轮 agent 改了什么"是另一件事，由 `TurnReviewPanel` 用 `/changes`
+     * （基线是本轮开始时的快照）呈现；两者不得合并成一个界面。
+     *
+     * @param props - `{ t, workspace, sessionId, switching }`。
      */
-    function ReviewPanel(props) {
-      const { t, workspace, sessionId, scope, anchor } = props
+    function ProjectGitPanel(props) {
+      const { t, workspace, sessionId } = props
       /**
-       * 是否正处在"已经切到新会话、但它的 cwd 还没到"的那一瞬间（见 HeroChangesTrigger）。
+       * 是否正处在"已经切到新会话、但它的 cwd 还没到"的那一瞬间。
        *
        * 这一帧**不能显示任何项目数据**（连"没有工作区"都不能说：那句话会让用户以为项目
        * 丢了），只说"正在切换项目…"。等 cwd 到手，下一帧就是新项目的数据。
        */
       const switching = props?.switching === true
-      const embedded = props?.embedded === true
-      const drawerOpen = usePanelOpen()
-      const open = embedded || drawerOpen
-      const rootRef = react.useRef(null)
 
-      /** 抽屉宽度（像素）。初值直接读持久化值，因此重新打开不会先闪一下默认宽度。 */
-      const [width, setWidth] = react.useState(() => clampPanelWidth(panelWidthStore.get()))
-      /** 拖动中的宽度：拖动过程中每帧都 setState 会连带重渲染整个文件列表，先记在 ref 里。 */
-      const dragWidthRef = react.useRef(width)
-
-      /**
-       * 视口变窄时把宽度收进允许区间。
-       *
-       * 不做这一步的话，窗口缩小后抽屉会占满整个视口（甚至超过），而用户没法把窗口
-       * 缩回去——那时手柄已经贴着屏幕左边缘了。
-       */
-      react.useEffect(() => {
-        if (!open || embedded) return undefined
-        const onResize = () => {
-          const clamped = clampPanelWidth(dragWidthRef.current)
-          dragWidthRef.current = clamped
-          setWidth(clamped)
-        }
-        window.addEventListener('resize', onResize)
-        return () => window.removeEventListener('resize', onResize)
-      }, [open, embedded])
-
-      /**
-       * 拖动左边缘调整宽度。
-       *
-       * 用 `mousemove`/`mouseup` 挂在 document 上而不是手柄自身：指针一旦移出手柄，
-       * 元素上的监听就收不到事件了，表现为"拖到一半断掉"。
-       *
-       * 拖动期间给 `body` 打标记：禁掉文本选择与指针光标（否则鼠标划过正文会变成
-       * 文本光标，还会顺手选中文字）。
-       */
-      const startResize = react.useCallback((event) => {
-        if (event.button !== undefined && event.button !== 0) return
-        event.preventDefault()
-        const startX = event.clientX
-        const startWidth = dragWidthRef.current
-        document.body.dataset.reviewDragging = '1'
-        const onMove = (moveEvent) => {
-          // 抽屉贴右边：向左拖是变宽。
-          const next = clampPanelWidth(startWidth + (startX - moveEvent.clientX))
-          dragWidthRef.current = next
-          setWidth(next)
-        }
-        const onUp = () => {
-          document.removeEventListener('mousemove', onMove)
-          document.removeEventListener('mouseup', onUp)
-          delete document.body.dataset.reviewDragging
-          panelWidthStore.set(dragWidthRef.current)
-        }
-        document.addEventListener('mousemove', onMove)
-        document.addEventListener('mouseup', onUp)
-      }, [])
-
-      /** 键盘调整：方向键左右各一步，Home 复位（手柄是可聚焦的 separator）。 */
-      const onResizeKeyDown = react.useCallback((event) => {
-        const step = event.key === 'ArrowLeft' ? PANEL_WIDTH_STEP : event.key === 'ArrowRight' ? -PANEL_WIDTH_STEP : 0
-        if (step !== 0) {
-          event.preventDefault()
-          const next = clampPanelWidth(dragWidthRef.current + step)
-          dragWidthRef.current = next
-          setWidth(next)
-          panelWidthStore.set(next)
-          return
-        }
-        if (event.key === 'Home') {
-          event.preventDefault()
-          dragWidthRef.current = panelWidthDefault()
-          setWidth(panelWidthDefault())
-          panelWidthStore.reset()
-        }
-      }, [])
-
-      /**
-       * 点击外部任意普通区域关闭抽屉；Escape 也关闭。
-       *
-       * 需求（本版）：**两种 scope 一视同仁**——点左侧项目列表、点聊天正文、点任何空白
-       * 都关闭。上一版曾经让项目级抽屉豁免（`scope !== 'workspace'`），理由是"它是 IDEA 的
-       * Git 工具窗、不是 popover"；实际使用下来"点外面不关"比"点一下项目就关了"更烦：
-       * 抽屉占 80% 宽，用户想回到主界面必须先精确找到 X 或再点一次入口。
-       *
-       * 反向的坑是**误关**（点内部、点入口时不该关），因此豁免必须逐条列清楚：
-       *   * 抽屉内部（`rootRef` 包含）——包括抽屉里的浮层、下拉、dialog：它们都渲染在
-       *     抽屉的 DOM 子树里，`contains` 天然覆盖，不需要各自再登记一次；
-       *   * resize handle —— 也在抽屉子树里，同上；
-       *   * 入口按钮 —— 它**不在**抽屉子树里。这里必须豁免，否则捕获阶段的 mousedown 会
-       *     先把它关掉，紧接着按钮自己的 onClick 又打开，用户看到的是"闪一下、打不开"。
-       *     入口由它自己 toggle，因此这里只负责"不要替它关"。
-       *
-       * 监听挂在**捕获阶段**（`true`）：抽屉内部有些组件会 `stopPropagation`，冒泡阶段
-       * 会漏掉"点在这些组件上"的事件——漏掉的后果是点它们不关，而不是误关，但这会让
-       * "点外部就关"变得时灵时不灵。
-       */
-      react.useEffect(() => {
-        if (!open || embedded) return undefined
-        const onPointerDown = (event) => {
-          const node = rootRef.current
-          if (node !== null && node.contains(event.target)) return
-          // 入口按钮：由它自己的 toggle 处理（它先关再开会闪，见上面的说明）。
-          const trigger = document.querySelector('[data-review-trigger="1"]')
-          if (trigger !== null && trigger.contains(event.target)) return
-          // 抽屉内部弹出来的菜单/对话框：有的**不**在抽屉子树里（分支菜单由 gitbar 插件
-          // 渲染在 body 级别、用 `position: fixed` 定位），因此按它们**已有的稳定标记**
-          // 再豁免一层。用现成标记而不是新造一个：新标记需要另一个插件配合才能生效，
-          // 而这两个属性已经在 gitbar 的测试里被当作锚点了。
-          // `!= null` 而不是 `!== null`：合成事件、程序化派发的 mousedown 可能根本没有
-          // `target`，而 `typeof undefined.closest` 会**先取属性再 typeof**，直接抛 TypeError
-          // ——那是一次点外部就把整个抽屉带走。
-          const target = event.target
-          if (target != null && typeof target.closest === 'function') {
-            if (target.closest('[data-desktop-sc-menu], [data-desktop-branch-menu], dialog[open]') !== null) return
-          }
-          panelStore.set(false)
-        }
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') panelStore.set(false)
-        }
-        document.addEventListener('mousedown', onPointerDown, true)
-        document.addEventListener('keydown', onKeyDown)
-        return () => {
-          document.removeEventListener('mousedown', onPointerDown, true)
-          document.removeEventListener('keydown', onKeyDown)
-        }
-      }, [open, embedded])
-
-      // 两种语义分别取数据：
-      //   * 会话内的"本轮改动"仍然走 `/changes`（它的基线是这一轮开始时的快照，与项目级
-      //     的 HEAD 基线是两件事，不能合并）；
-      //   * **工作区级的一切只有一份数据**——模块级的共享快照（见 gitSnapshots）。
-      const turn = useChanges(scope === 'workspace' ? undefined : workspace, sessionId)
-      const snapshot = useWorkspaceGitSnapshot(scope === 'workspace' ? workspace : undefined)
+      // 工作区级的一切只有一份数据——模块级的共享快照（见 gitSnapshots）。
+      const snapshot = useWorkspaceGitSnapshot(workspace)
       /**
        * 当前标签页。IDEA 的 Git 工具窗是 `Changes | Log` 两个页签，这里照搬：
        * 从前的做法是在同一列里自上而下叠"暂存区 → 更改 → 文件列表 → 历史"，提交记录还要
@@ -4696,13 +4497,9 @@ window.__ModuleLoader__.load({
       /**
        * 当前项目的仓库列表 + active 仓库。
        *
-       * 只在**项目级**（`scope === 'workspace'`）订阅：会话级标签页的 Git 数据属于那一轮
-       * 改动，与"项目里有几个仓库"无关，多订阅一份只会多打一条 `/project-git-scope`。
-       *
-       * 用 `activeRepository` / `selectRepository` 这样带前缀的名字，是因为 `scope` 这个
-       * 名字在本组件里已经是"面板的 scope"（`'workspace'` 或会话 id），两者不能混。
+       * 只有项目级 Git 需要它：仓库是**仓库级**的概念，与"这一轮改了什么"无关。
        */
-      const projectGitScope = useProjectGitScope(scope === 'workspace' ? workspacePath : '')
+      const projectGitScope = useProjectGitScope(workspacePath)
       /**
        * 仓库列表**带各自的快照**（分支 + 改动数）。
        *
@@ -4711,7 +4508,7 @@ window.__ModuleLoader__.load({
        * 是空的。汇总那一层本来就在给每个仓库挂订阅（徽标也要它），因此这里不多花一次
        * 请求，只是多借一个订阅者。
        */
-      const projectSnapshots = useProjectGitSnapshots(scope === 'workspace' ? workspacePath : '')
+      const projectSnapshots = useProjectGitSnapshots(workspacePath)
       const repositories = projectSnapshots?.repositories ?? projectGitScope.repositories
       const activeRepository = projectGitScope.active
       const selectRepository = projectGitScope.select
@@ -4719,33 +4516,30 @@ window.__ModuleLoader__.load({
       const discoveringRepositories = projectGitScope.scope?.discovery?.complete === false
 
       /**
-       * 打开抽屉时：快照过期就先刷一次。
+       * 快照过期就先刷一次。
        *
-       * **不引入第二份缓存**：抽屉里的列表始终是 store 里那一份（可能略旧，但一定是同一个
+       * **不引入第二份缓存**：面板里的列表始终是 store 里那一份（可能略旧，但一定是同一个
        * 数据源）。过期的判定用 `updatedAt`，"过期"只意味着"再问一次 host"，不是"换一份
        * 数据来显示"。
        */
       react.useEffect(() => {
-        if (!open || scope !== 'workspace' || workspacePath === '') return undefined
+        if (workspacePath === '') return undefined
         void gitSnapshots.refreshIfStale(workspacePath)
         return undefined
-      }, [open, scope, workspacePath])
+      }, [workspacePath])
 
-      if (!open) return null
-
-      const title = scope === 'workspace' ? t('projectTitle') : t('title')
+      const title = t('projectTitle')
       /** 切换项目的那一瞬间：面板里只说这一句，不显示上一个项目的数据。 */
       const switchingBlock = statusBlock(t('switchingProject'))
       const projectFiles = snapshot?.files ?? []
-      const turnSummary = summarize(turn.state.result)
-      // 头栏与文件列表用的是**同一个数字**（scope==='workspace' 时就是快照的 files）。
-      const fileCount = scope === 'workspace' ? projectFiles.length : turnSummary.files.length
-      const reload = scope === 'workspace' ? () => void gitSnapshots.refresh(workspacePath) : turn.reload
+      // 头栏与文件列表用的是**同一个数字**（就是快照的 files）。
+      const fileCount = projectFiles.length
+      const reload = () => void gitSnapshots.refresh(workspacePath)
       // 当前分支取自**这份快照自己**（host 在 `/workspace` 里一并给了），因此不存在
       // "文件是旧的、分支是新的"这种错配。
-      const branch = scope === 'workspace' ? (snapshot?.branch ?? '') : ''
-      /** 工作区级快照 → `FileList` 认识的形状（会话标签仍用 `/changes` 的原始响应）。 */
-      const projectResult =
+      const branch = snapshot?.branch ?? ''
+      /** 工作区级快照 → `FileList` 认识的形状。 */
+      const activeResult =
         snapshot === undefined
           ? undefined
           : {
@@ -4760,16 +4554,13 @@ window.__ModuleLoader__.load({
               // （见 /workspace-file 与 LazyFileDiff 的说明）。这里保留 `diffOversized` 的
               // 位置也没有意义——"整份差异太大"这件事不存在了。
             }
-      const activeResult = scope === 'workspace' ? projectResult : turn.state.result
       const activePhase =
-        scope === 'workspace'
-          ? snapshot === undefined || snapshot.phase === 'idle' || snapshot.phase === 'loading'
-            ? 'loading'
-            : snapshot.phase === 'error'
-              ? 'error'
-              : 'ready'
-          : turn.state.phase
-      const activeMessage = scope === 'workspace' ? (snapshot?.error ?? '') : turn.state.message
+        snapshot === undefined || snapshot.phase === 'idle' || snapshot.phase === 'loading'
+          ? 'loading'
+          : snapshot.phase === 'error'
+            ? 'error'
+            : 'ready'
+      const activeMessage = snapshot?.error ?? ''
 
       /** 一个页签按钮。 */
       const tabButton = (key, label) =>
@@ -4853,66 +4644,37 @@ window.__ModuleLoader__.load({
       return react.createElement(
         'aside',
         {
-          ref: rootRef,
           'data-desktop-review-surface': 'panel',
+          'data-review-git-surface': 'sidebar',
           'aria-label': title,
           style: {
-            // 右侧全高抽屉，而不是浮在入口下方的小面板。
-            //
-            // 这样与 IDE 的提交面板一致：内容区更高（提交记录能一屏看更多），且因为
-            // 贴着窗口右边、占满高度，不会与窗口控件或页面头部图标抢位置——浮动面板
-            // 会挡住它们（实际反馈）。
-            position: embedded ? 'relative' : 'fixed',
-            top: embedded ? undefined : 0,
-            right: embedded ? undefined : 0,
-            bottom: embedded ? undefined : 0,
-            height: embedded ? '100%' : '100vh',
-            zIndex: embedded ? undefined : 9998,
-            // 宽度可拖动（见下面的 resizer）；上限随视口收窄，避免把主界面挤没。
-            width: embedded ? '100%' : `${width}px`,
-            // 上限就是**视口本身**（需求 35/63）：宽度已经由 `panelWidthBounds` 唯一的
-            // 一处算好了（视口 < 500 时就是 `100vw`），这里再减 64px 会让窄窗口里的抽屉
-            // 比"代码算出来的宽度"窄一截——屏幕上表现为右侧留出一条谁也点不到的缝，
-            // 而测试断言的是代码算出的值，两边对不上。
-            maxWidth: '100vw',
+            // 面板**填满官方侧边栏给的那一格**：position/尺寸/拖动/关闭/全屏都由侧边栏管，
+            // 这里不自造 fixed 覆盖层，也就没有"抽屉和侧栏各管一半"的问题。
+            position: 'relative',
+            height: '100%',
+            width: '100%',
+            maxWidth: '100%',
             display: 'flex',
             flexDirection: 'column',
-            borderLeft: embedded ? 'none' : '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
+            borderLeft: 'none',
             background: 'var(--dsw-alias-bg-base, #fff)',
             color: 'var(--dsw-alias-label-primary)',
             fontFamily: UI_FONT,
-            boxShadow: embedded ? 'none' : '-12px 0 36px rgba(0,0,0,.10)',
+            boxShadow: 'none',
             overflow: 'hidden',
           },
         },
-        // 左边缘的宽度手柄。用 button 而不是 div：它能被 Tab 聚焦，从而用方向键调整
-        // （`role="separator"` 表达"这是两个区域之间的可调分隔"）。
-        embedded ? null : react.createElement('button', {
-          type: 'button',
-          'data-review-resizer': '',
-          role: 'separator',
-          'aria-orientation': 'vertical',
-          'aria-label': t('resize'),
-          title: t('resize'),
-          onMouseDown: startResize,
-          onDoubleClick: () => {
-            dragWidthRef.current = panelWidthDefault()
-            setWidth(panelWidthDefault())
-            panelWidthStore.reset()
-          },
-          onKeyDown: onResizeKeyDown,
-        }),
         react.createElement(
           'div',
           {
             'data-review-header': '',
-            // 头栏也是仓库菜单的**定位父级**：菜单在它下面展开，宽度以它的宽度（= 抽屉宽度）
-            // 为上限。挂在选择器自己身上会有一个真问题——抽屉最窄允许到 320px，而选择器
-            // 位于标题右侧，从那里向右展开 240px 起步的菜单会被抽屉的 `overflow: hidden`
-            // 裁掉一截（英文界面标题更长，裁得更多）。
+            // 头栏也是仓库菜单的**定位父级**：菜单在它下面展开，宽度以它的宽度为上限。
+            // 挂在选择器自己身上会有一个真问题——侧栏最窄允许到 320px，而选择器位于标题
+            // 右侧，从那里向右展开 240px 起步的菜单会被 `overflow: hidden` 裁掉一截
+            // （英文界面标题更长，裁得更多）。
             style: { position: 'relative' },
           },
-          // 标题：抽屉里第一个要回答的问题是"这是哪个项目的 Git"。
+          // 标题：这块面板里第一个要回答的问题是"这是哪个项目的 Git"。
           react.createElement(
             'div',
             { 'data-review-title': '' },
@@ -4920,12 +4682,12 @@ window.__ModuleLoader__.load({
           ),
           // 仓库 scope 选择器紧跟在标题右边，位于 **Changes | Log 之上**。
           //
-          // 位置是有意的：它是整个 Git 工具窗的**作用域**（Changes 的文件列表与右侧 diff、
+          // 位置是有意的：它是整个 Git 标签的**作用域**（Changes 的文件列表与右侧 diff、
           // 底部提交框、Log 的分支树/提交图/详情全部只作用于它），必须比两个页签更外一层，
           // 而且**不随页签切换重新挂载**——它是同一棵子树里的同一个位置，切换页签只换下面
           // 的页签体，React 连它的 DOM 节点都不会重建（位置因此纹丝不动）。
           //
-          // 头栏是本抽屉的"第一视觉区域"：打开面板第一眼就能看到当前在哪个仓库、哪个分支，
+          // 头栏是这块面板的"第一视觉区域"：打开第一眼就能看到当前在哪个仓库、哪个分支，
           // 而不是要往右上角、或者点开某个页签才看得到。
           react.createElement(RepositoryScope, {
             t,
@@ -4936,14 +4698,14 @@ window.__ModuleLoader__.load({
             // 单仓库时这一块自己写着 `名字 · 分支`（见 RepositoryScope），因此不叠分支徽标。
             branch,
           }),
-          // 分支徽标：整个抽屉里"我在哪个分支上提交"是第一个要回答的问题。
+          // 分支徽标：整个面板里"我在哪个分支上提交"是第一个要回答的问题。
           //
           // 单仓库时分支已经写在仓库 scope 里（`haiwei-backend · master`），这里不重复；
           // 多仓库、以及仓库还没解析出来时照旧显示。
           singleRepository ? null : branchBadge(branch),
           react.createElement('span', { 'data-review-count': '' }, String(fileCount)),
           react.createElement('span', { style: { flex: 1 } }),
-          // 刷新：IDEA 的工具窗左上角也有这个动作；这里放在右侧，靠近"关闭"。
+          // 刷新：IDEA 的工具窗左上角也有这个动作。
           react.createElement(
             'button',
             {
@@ -4965,135 +4727,100 @@ window.__ModuleLoader__.load({
               }),
             ),
           ),
-          embedded ? null : react.createElement(
-            'button',
-            {
-              type: 'button',
-              'data-review-icon-button': '',
-              onClick: () => panelStore.set(false),
-              title: t('collapse'),
-              'aria-label': t('collapse'),
-            },
-            react.createElement(
-              'svg',
-              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
-              react.createElement('path', {
-                d: 'M4 4l8 8M12 4l-8 8',
-                stroke: 'currentColor',
-                strokeWidth: 1.5,
-                strokeLinecap: 'round',
-              }),
-            ),
-          ),
+          // **没有插件自定义的「关闭」**：官方侧边栏自己提供关闭与全屏，面板再造一个只会
+          // 与它打架（也曾经造成"面板被关掉之后状态对不上"）。
         ),
         // 工作区选择器已移除：工作区跟随当前对话，不可编辑、也不展示路径。
         //
-        // 页签行里**只有两个页签**：仓库 scope 选择器在头栏里（见上），因为它是整个工具窗
-        // 的作用域而不是页签的工具条部件。这样切到 Log 之后它的位置、DOM 节点都纹丝不动。
+        // 页签行里**只有两个页签**：仓库 scope 选择器在头栏里（见上），因为它是整个标签的
+        // 作用域而不是页签的工具条部件。这样切到 Log 之后它的位置、DOM 节点都纹丝不动。
         //
-        // 项目级的两个页签**自己撑满剩余高度**（`flex: 1 1 auto; min-height: 0`）：
+        // 两个页签**自己撑满剩余高度**（`flex: 1 1 auto; min-height: 0`）：
         // 提交区要固定在底部，就不允许外层再套一层 `overflow: auto`——那样提交框会跟着
         // 超长文件列表一起滚走（这正是要修掉的一处）。
-        scope === 'workspace'
-          ? react.createElement(
-              'div',
-              {
-                'data-review-tabs': '',
-                style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 },
-              },
-              react.createElement(
+        react.createElement(
+          'div',
+          {
+            'data-review-tabs': '',
+            style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 },
+          },
+          react.createElement(
+            'div',
+            {
+              role: 'tablist',
+              'data-review-tablist': '',
+              style: { display: 'flex', alignItems: 'center', gap: '2px', padding: '0 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 },
+            },
+            tabButton(TAB_CHANGES, t('changesTab')),
+            tabButton(TAB_LOG, t('logTab')),
+          ),
+          tab === TAB_LOG
+            ? react.createElement(
                 'div',
                 {
-                  role: 'tablist',
-                  'data-review-tablist': '',
-                  style: { display: 'flex', alignItems: 'center', gap: '2px', padding: '0 12px', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 },
+                  // key 里带**仓库**（见 bodyScopeKey）：切仓库 = 换一棵新子树，
+                  // Log 因此重新拉新仓库的提交图，绝不会留着上一个仓库的提交。
+                  key: `log@${bodyScopeKey}`,
+                  'data-review-tab-body': 'log',
+                  style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
                 },
-                tabButton(TAB_CHANGES, t('changesTab')),
-                tabButton(TAB_LOG, t('logTab')),
+                // **复用**提交图，不重写一套：Log 页签要的"分支树 / 提交列表 / 详情"
+                // 三栏与主区域的提交图是同一个视图，差别只在容器宽度与是否带外框。
+                // `refreshToken` 让"提交成功"这类外部事件能把它顶一页新的回来。
+                //
+                // 外面这层错误边界是**必须**的：提交图的渲染依赖 host 回来的字段
+                // （`parents`/`refs`/`commits`…），字段一旦缺了就是渲染期 TypeError，
+                // 而 React 在没有边界时会把整棵子树卸掉——现象是"点了 Log，面板整个消失"，
+                // 看起来像被关掉了，实际是一次崩溃。
+                react.createElement(
+                  LogErrorBoundary,
+                  { t, workspace: workspacePath },
+                  switching
+                    ? switchingBlock
+                    : react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
+                ),
+              )
+            : react.createElement(
+                'div',
+                {
+                  // 同上：切仓库就换一棵新子树。提交框里的草稿、勾选与 AI 建议都属于
+                  // **上一个仓库**，绝不能跟着数据一起漂到新仓库上。
+                  key: `changes@${bodyScopeKey}`,
+                  'data-review-tab-body': 'changes',
+                  style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+                },
+                // 暂存与提交只属于**项目级** Git：它动的是索引与历史，与"这一轮改了什么"
+                // 没有关系。把它放进"本轮修改"里会让人以为提交只针对本轮，那是错的
+                // （本轮修改是 `TurnReviewPanel`，它没有暂存与提交）。
+                switching
+                  ? switchingBlock
+                  : react.createElement(StagingSection, {
+                  t,
+                  workspace: workspacePath,
+                  // 同一份共享快照：分组、数量、清单全部来自它。
+                  snapshot,
+                  // 逐行差异的基线（HEAD）；按需取单文件差异时带上它。
+                  revision: snapshot?.head ?? '',
+                  /**
+                   * 多仓库项目：提交框的标题里带上"哪个仓库"。
+                   *
+                   * 提交框固定在底部，而仓库 scope 选择器在头栏里——中间隔着整个文件
+                   * 列表。多仓库时**必须**在提交框自己这一层再说一次仓库名，否则用户
+                   * 盯着"提交信息 (master)"根本不知道这次提交会落到哪个仓库里。
+                   * 单仓库时传空串，标题与 1.5.2 逐字一致。
+                   */
+                  repositoryName:
+                    repositories.length > 1
+                      ? (repositories.find((entry) => entry.repositoryRoot === activeRepository)?.name ?? '')
+                      : '',
+                  // 写操作成功后 store 会自己 invalidate + refresh（见 StagingSection.run）；
+                  // 这里只需要再通知 Log 页签"历史变了"。
+                  onCommitted: () => {
+                    setLogToken((value) => value + 1)
+                  },
+                }),
               ),
-              tab === TAB_LOG
-                ? react.createElement(
-                    'div',
-                    {
-                      // key 里带**仓库**（见 bodyScopeKey）：切仓库 = 换一棵新子树，
-                      // Log 因此重新拉新仓库的提交图，绝不会留着上一个仓库的提交。
-                      key: `log@${bodyScopeKey}`,
-                      'data-review-tab-body': 'log',
-                      style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
-                    },
-                    // **复用**提交图，不重写一套：Log 页签要的"分支树 / 提交列表 / 详情"
-                    // 三栏与主区域的提交图是同一个视图，差别只在容器宽度与是否带外框。
-                    // `refreshToken` 让"提交成功"这类外部事件能把它顶一页新的回来。
-                    //
-                    // 外面这层错误边界是**必须**的：提交图的渲染依赖 host 回来的字段
-                    // （`parents`/`refs`/`commits`…），字段一旦缺了就是渲染期 TypeError，
-                    // 而 React 在没有边界时会把整棵子树卸掉——现象是"点了 Log，抽屉和右上角
-                    // 入口一起消失"，看起来像面板被关掉了，实际是一次崩溃。
-                    react.createElement(
-                      LogErrorBoundary,
-                      { t, workspace: workspacePath },
-                      switching
-                        ? switchingBlock
-                        : react.createElement(CommitGraphView, { t, workspace: workspacePath, refreshToken: logToken }),
-                    ),
-                  )
-                : react.createElement(
-                    'div',
-                    {
-                      // 同上：切仓库就换一棵新子树。提交框里的草稿、勾选与 AI 建议都属于
-                      // **上一个仓库**，绝不能跟着数据一起漂到新仓库上。
-                      key: `changes@${bodyScopeKey}`,
-                      'data-review-tab-body': 'changes',
-                      style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
-                    },
-                    // 暂存与提交只在**项目级**面板出现。
-                    //
-                    // 会话内那个标签讲的是"本轮改了什么"（基线与本轮开始时的快照比较），
-                    // 而暂存与提交是**仓库**级动作：它动的是索引与历史，与"本轮"没有关系。
-                    // 把提交框放进会话标签里会让人以为提交只针对本轮，那是错的。
-                    switching
-                      ? switchingBlock
-                      : react.createElement(StagingSection, {
-                      t,
-                      workspace: workspacePath,
-                      // 同一份共享快照：分组、数量、清单全部来自它。
-                      snapshot,
-                      // 逐行差异的基线（HEAD）；按需取单文件差异时带上它。
-                      revision: snapshot?.head ?? '',
-                      /**
-                       * 多仓库项目：提交框的标题里带上"哪个仓库"。
-                       *
-                       * 提交框固定在底部，而仓库 scope 选择器在头栏里——中间隔着整个文件
-                       * 列表。多仓库时**必须**在提交框自己这一层再说一次仓库名，否则用户
-                       * 盯着"提交信息 (master)"根本不知道这次提交会落到哪个仓库里。
-                       * 单仓库时传空串，标题与 1.5.2 逐字一致。
-                       */
-                      repositoryName:
-                        repositories.length > 1
-                          ? (repositories.find((entry) => entry.repositoryRoot === activeRepository)?.name ?? '')
-                          : '',
-                      // 写操作成功后 store 会自己 invalidate + refresh（见 StagingSection.run）；
-                      // 这里只需要再通知 Log 页签"历史变了"。
-                      onCommitted: () => {
-                        setLogToken((value) => value + 1)
-                      },
-                    }),
-                  ),
-            )
-          : react.createElement(
-              'div',
-              { style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 20px 18px' } },
-              react.createElement(FileList, {
-                t,
-                result: activeResult,
-                phase: activePhase,
-                message: activeMessage,
-                workspace,
-                sessionId,
-                revision: activeResult?.revision ?? '',
-                onChanged: reload,
-              }),
-            ),
+        ),
       )
     }
 
@@ -5166,286 +4893,35 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 读取**当前会话**的工作区。
+     * 读取**当前会话**的身份：它的 id，以及本轮审查要用的工作区。
      *
-     * 这是项目级面板唯一正确的取值来源。面板挂在全局覆盖层上，拿不到会话作用域的
-     * `sessionId`，但 `sessions` 服务本身是 `inject` 进来的：`state.current` 就是用户
-     * 此刻打开的那个会话（**新建对话在创建时也会被选中**），而 `byId[current].cwd`
-     * 正是它所属的项目。
+     * 「本轮修改审查」抽屉挂在 `shell.overlay`（root 作用域），拿不到会话作用域的
+     * `sessionId`；但 `sessions` 是标准注入的服务：`state.current` 就是用户此刻打开的那个
+     * 会话，`byId[current].cwd` 是它所属的项目（新建对话在创建时也会被选中，因此切换对话与
+     * 新建对话都会自动跟随）。
      *
-     * 此前这里用的是"最近一个会话的 cwd"（倒序扫 `state.ids`），于是：
-     *   * 切回一个更早的、属于别的项目的对话时，面板仍停在上一个新会话的项目上；
-     *   * 新建对话时面板不会跟着走。
-     * 两者都会表现为"右上角这块没有切到当前项目的空间"（实际反馈）。改成读
-     * `state.current` 后，切换对话与新建对话都会自动跟随。
+     * 两个值都从同一个 `state.current` 取：分别取两次就可能出现"用 A 会话的 id 去查 B 项目"
+     * 的错配，而本轮基线本来就是按 sessionId 记录的，错配会直接查错基线。
+     *
+     * 返回值是**两个原始值**而不是新对象：`useSyncExternalStore` 的选择器每次渲染都要给出
+     * 同一个引用，返回新对象会让 React 警告 "The result of getSnapshot should be cached"
+     * 并可能死循环；字符串天然满足。
      *
      * @param props - 槽注入的属性。
-     * @returns 工作区路径；没有当前会话或该会话还没有 cwd 时 undefined。
+     * @returns `{ sessionId, workspace }`；没有当前会话时两者都是 undefined。
      */
-    function useCurrentWorkspace(props) {
+    function useCurrentTurn(props) {
       // **无条件**取钩子（缺席时用空实现），见 useLatchedHook：条件调用会让 hook 数量可变。
       const useSessions = useLatchedHook(props?.useSessions, absentSessions)
-      return useSessions((state) => {
+      const sessionId = useSessions((state) => {
         const current = state?.current
-        if (current === undefined) return undefined
-        return asPath(state?.byId?.[current]?.cwd)
+        return current === undefined || current === null || current === '' ? undefined : String(current)
       })
-    }
-
-    /**
-     * 当前**是否存在**一个被选中的会话。
-     *
-     * 与 `useCurrentWorkspace` 分开成一个布尔值，是为了让调用方能区分两种完全不同的
-     * `undefined`（见 HeroChangesTrigger 里工作区解析的说明）：
-     *   * 根本没有当前会话（全新状态）→ 允许用兜底工作区；
-     *   * 有当前会话、但它的 cwd 还没加载出来 → **必须停在"正在切换项目"**，
-     *     不许临时退回上一个会话的目录。
-     *
-     * 返回布尔而不是对象：`useSyncExternalStore` 的选择器每次渲染都要给出**同一个引用**
-     * （否则 React 会警告 "The result of getSnapshot should be cached" 并可能死循环），
-     * 布尔与字符串这类原始值天然满足。
-     *
-     * @param props - 槽注入的属性。
-     * @returns 有当前会话则 true。
-     */
-    function useHasCurrentSession(props) {
-      const useSessions = useLatchedHook(props?.useSessions, absentSessions)
-      return useSessions((state) => {
+      const workspace = useSessions((state) => {
         const current = state?.current
-        return current !== undefined && current !== null && current !== ''
+        return current === undefined || current === null || current === '' ? undefined : asPath(state?.byId?.[current]?.cwd)
       })
-    }
-
-    /**
-     * 读取**全部**已登记的工作区。
-     *
-     * 只作为兜底：还没有任何当前会话（全新状态）时，面板得有个地方拿一个可用路径，
-     * 否则只能空着。**不用于让用户挑选**——工作区由当前会话决定，面板不再提供选择器。
-     * @param props - 槽注入的属性。
-     * @returns 工作区路径数组。
-     */
-    function useWorkspaceList(props) {
-      const useWorkspaces = useLatchedHook(props?.useWorkspaces, absentSessions)
-      return useWorkspaces((state) => {
-        const items = state?.items
-        if (!Array.isArray(items)) return []
-        return items.map((item) => asPath(item?.path ?? item?.root)).filter((value) => value !== undefined)
-      })
-    }
-
-    /**
-     * 测量入口按钮的位置，供面板贴着它显示。
-     *
-     * 面板用 `fixed` 定位是为了跳出祖先裁剪（此前被输入框容器裁成一条），但 `fixed`
-     * 不跟随入口——偏移写成常量就会钉在角落。因此打开时测量一次，并在窗口尺寸变化或
-     * 滚动时重测。
-     * @param open - 面板是否展开。
-     * @returns `{ ref, anchor }`，`anchor` 为 `{ bottom, rightInset }`（视口坐标）。
-     */
-    function useAnchor(open) {
-      const ref = react.useRef(null)
-      const [anchor, setAnchor] = react.useState(undefined)
-
-      react.useEffect(() => {
-        if (!open) {
-          setAnchor(undefined)
-          return undefined
-        }
-        const measure = () => {
-          const node = ref.current
-          if (node === null) return
-          const rect = node.getBoundingClientRect()
-          setAnchor({
-            // 面板放在按钮下方。
-            bottom: rect.bottom,
-            // 用"距右边缘的距离"而不是 left：面板是右对齐的，这样窗口变窄时也不会溢出。
-            rightInset: Math.max(8, window.innerWidth - rect.right),
-          })
-        }
-        measure()
-        window.addEventListener('resize', measure)
-        window.addEventListener('scroll', measure, true)
-        return () => {
-          window.removeEventListener('resize', measure)
-          window.removeEventListener('scroll', measure, true)
-        }
-      }, [open])
-
-      return { ref, anchor }
-    }
-
-    /**
-     * 项目页（尚未进入会话）的常驻面板入口。
-     * @param props - 槽注入的属性。
-     */
-    function HeroChangesTrigger(props) {
-      const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const open = usePanelOpen()
-      const { ref, anchor } = useAnchor(open)
-
-      // 宿主侧的 `/roots`：给出**允许访问**的工作区名单，以及外壳启动时的工作区
-      // （`process.cwd()`）。名单用于兜底与合法性判断，外壳工作区则只在"还没有当前
-      // 会话"时使用——真正决定面板看哪个项目的是当前会话（见下面的 `useCurrentWorkspace`）。
-      const [roots, setRoots] = react.useState([])
-      const [hostCurrent, setHostCurrent] = react.useState(undefined)
-      react.useEffect(() => {
-        let alive = true
-        void (async () => {
-          try {
-            const result = await call('roots', {})
-            if (!alive) return
-            setRoots(Array.isArray(result?.roots) ? result.roots : [])
-            setHostCurrent(asPath(result?.current))
-          } catch {
-            if (!alive) return
-            setRoots([])
-            setHostCurrent(undefined)
-          }
-        })()
-        return () => {
-          alive = false
-        }
-      }, [])
-
-      const fromHooks = useWorkspaceList(props)
-      const candidates = roots.length > 0 ? roots : fromHooks
-      // **当前会话的工作区**排在第一位：切换对话或新建对话后，面板必须立刻跟到那个
-      // 对话所属的项目上。后面几项只在"还没有当前会话"（全新状态）时兜底。
-      const session = useCurrentWorkspace(props)
-      /**
-       * 当前**有没有**一个被选中的会话。
-       *
-       * 这一个布尔值是为了区分两种完全不同的 `undefined`——它们以前长得分不开，于是切换
-       * 项目时会走出一条错误的回退路径（A → hostCurrent(A) → candidates(X) → B）：
-       *   * **根本没有当前会话**（全新状态）：允许用宿主工作区 / 候选第一项兜底；
-       *   * **已经切到新会话、但它的 cwd 还没加载出来**：必须停在"正在切换项目…"，
-       *     绝不能临时回退到上一个会话的目录——那会让用户在 B 的会话里看到 A 的项目，
-       *     而且右上角数字也跟着 A 走（"切项目后数据串了"的一类现象）。
-       */
-      const hasCurrentSession = useHasCurrentSession(props)
-
-      // 诊断快照：这块面板的状态分布在"当前会话 / 宿主的当前值 / 宿主给的名单 /
-      // 注入的钩子"四处，出问题时从界面上只能看到"对不上项目"，无法判断是哪一环出错。
-      // 挂到 window 上后，脚本可以一眼看清每一环的实际值。
-      if (typeof window !== 'undefined') {
-        window.__dshDesktopReviewPanel = { roots, hostCurrent, fromHooks, session, hasCurrentSession }
-      }
-
-      /**
-       * 工作区解析（**顺序是有意义的**）：
-       *   1. 有当前会话 → 只用它的 cwd（还没有就是 undefined，进入"正在切换项目"）；
-       *   2. 没有当前会话 → 宿主给的当前工作区 → 候选第一项。
-       *
-       * 为什么当前会话优先：工作区是**会话的属性**，不是外壳的属性。用户在界面里可以
-       * 让每个对话属于不同项目，而外壳启动时的 `--workspace` 只是其中一个，所以
-       * `process.cwd()` 只能在没有当前会话时用（例如刚打开、还没进对话）。
-       *
-       * 不再保留任何"用户手动选定"的状态：工作区不可编辑，面板始终跟随当前对话。
-       */
-      const workspace = hasCurrentSession ? session : (hostCurrent ?? candidates[0])
-      /**
-       * 处在"已经切到新会话、但它的 cwd 还没到"的那一瞬间。
-       *
-       * 这一帧**不发任何请求、也不显示上一个项目的数据**：入口与抽屉都显示"正在切换项目…"。
-       * 少了这个状态，界面就会先显示 A 的（或某个候选目录的）数据再跳到 B——那正是
-       * "切项目后右上角数字/文件列表对不上"的来源。
-       */
-      const switching = hasCurrentSession && session === undefined
-      /**
-       * 改动数量**就是共享快照里的文件数**。
-       *
-       * 这一个 hook 就是"外面显示 0、进去却有文件"的根治点：入口与抽屉订阅的是同一个
-       * store、同一次请求的结果，因此两处不可能给出不同的数字；轮询也只有 store 那一份
-       * （以前这里自己每 10 秒打一次 `/workspace`，抽屉内部又走 `/status`）。
-       *
-       * 本项目级入口**只订阅、不打开面板**也有轮询，理由与以前一致：这个数字要在用户
-       * 没打开面板时也保持新鲜（否则"有没有改动"这件事要等到点开才知道）。
-       */
-      const snapshot = useWorkspaceGitSnapshot(switching ? undefined : workspace)
-      /**
-       * 项目级汇总：多仓库时徽标显示的是**所有仓库之和**，且**保留归属**。
-       *
-       * 单仓库项目里它就是那一个仓库（同一个 store 记录，因此不会多一次轮询）；多仓库时它是
-       * 每条仓库各一格、各一套轮询的汇总——"frontend 4 个 + backend 7 个 = 11"这件事在
-       * badge 上只是一个数字，但内部始终知道 4 属于谁、7 属于谁（见 subscribeProject）。
-       */
-      const project = useProjectGitSnapshots(switching ? undefined : workspace)
-      const repositories = project?.repositories ?? []
-      const multiRepository = repositories.length > 1
-      // 数字直接就是快照的改动数——不是"再算一遍"，也不是另一条路由的结果。
-      // 用 `changedFiles`（含未跟踪的条数）而不是 `files.length`：未跟踪大量时 `files` 里
-      // 一条都不放（browse 模式），用 `files.length` 会让徽标少算一截。
-      const count = multiRepository
-        ? project?.phase === 'ready'
-          ? project.changedFiles
-          : null
-        : snapshot !== undefined && snapshot.phase === 'ready'
-          ? snapshot.changedFiles
-          : null
-
-      // 拿不到工作区时**也要渲染按钮**：面板会说明当前没有可用的工作区。
-      // 此前这里直接 return null，结果在"还没有任何会话与登记工作区"的状态下入口彻底
-      // 消失，用户看到的是"这个功能不存在"。
-      const hasChanges = typeof count === 'number' && count > 0
-      /**
-       * 面板里的东西全部交给错误边界。
-       *
-       * 结构与以前不同（这一条是硬要求）：入口按钮与面板**不再是同一条会一起崩的子树**。
-       *   * `ProjectChangesTriggerButton` 是入口本身——只要插件挂载成功，它就必须一直在；
-       *   * `ProjectGitPanelErrorBoundary` 只包住面板，面板内部（Changes / Log / 暂存区 /
-       *     提交图）任何渲染期异常都只让面板显示"Git 面板加载失败 + 详细错误 + 重新加载 +
-       *     关闭"，**不会**把入口一起带走。
-       * 以前两者是兄弟但同在一个函数组件里，任何一处抛错都会让 React 卸载整棵
-       * `HeroChangesTrigger` 子树（外层槽位的边界再把它换成错误占位），表现就是
-       * "抽屉和右上角入口一起消失"——看起来像面板被关掉了。
-       */
-      return react.createElement(
-        'div',
-        {
-          ref,
-          // 标记这个按钮是"审查抽屉的入口"，供抽屉的外部点击判定排除它——
-          // 否则点按钮会先被当成外部点击关闭、再被按钮自己的开关打开，出现一闪。
-          'data-review-trigger': '1',
-          // 自绘的固定定位：覆盖层槽位不提供布局，位置由我们自己定。
-          //
-          // 纵向位置在窗口顶边下方约 44px：顶边那一带是窗口的最小化/最大化/关闭按钮
-          // （Windows 的 caption 区域），紧贴顶边会挡住它们，也会压住对话页头部的
-          // 功能图标（实际反馈）。
-          style: {
-            position: 'fixed',
-            top: '44px',
-            right: '14px',
-            zIndex: 9997,
-            display: 'inline-flex',
-          },
-        },
-        react.createElement(ProjectChangesTriggerButton, {
-          t,
-          open,
-          count,
-          hasChanges,
-          switching,
-          workspace,
-          /** 多仓库时徽标额外标出仓库数（数字是所有仓库之和，必须让用户知道这一点）。 */
-          repositories: multiRepository ? repositories.length : 0,
-          onToggle: () => panelStore.set(!open),
-        }),
-        react.createElement(
-          ProjectGitPanelErrorBoundary,
-          {
-            t,
-            workspace,
-            onClose: () => panelStore.set(false),
-          },
-          react.createElement(ReviewPanel, {
-            t,
-            workspace,
-            scope: 'workspace',
-            anchor,
-            switching,
-          }),
-        ),
-      )
+      return { sessionId, workspace }
     }
 
     /**
@@ -5741,70 +5217,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 右上角那个"项目改动"入口按钮。
-     *
-     * 单独成一个组件是**故障隔离**的一部分（见 HeroChangesTrigger 末尾的说明）：它与面板
-     * 不在同一条会被一起卸载的子树上，因此面板内部崩溃时它照常显示。
-     *
-     * @param props - `{ t, open, count, hasChanges, switching, onToggle }`。
-     * @returns React 元素。
-     */
-    function ProjectChangesTriggerButton(props) {
-      const { t, open, count, hasChanges, switching, workspace } = props
-      const onToggle = typeof props?.onToggle === 'function' ? props.onToggle : () => undefined
-      /** 多仓库项目：徽标上的数字是**所有仓库之和**，因此再缀一句"几个仓库"。 */
-      const repositoryCount = Number.isFinite(props?.repositories) ? props.repositories : 0
-      /** 文案：切换项目的瞬间说清楚在等什么，而不是显示上一个项目的数字。 */
-      const label =
-        switching === true
-          ? t('switchingProject')
-          : workspace === undefined
-            ? t('projectTitle')
-            : typeof count === 'number'
-              ? repositoryCount > 1
-                ? t('projectFilesMulti', { count, repositories: repositoryCount })
-                : t('files', { count })
-              : t('projectIdle')
-      return react.createElement(
-        'button',
-        {
-          type: 'button',
-          title: t('projectTitle'),
-          'aria-expanded': open,
-          'data-review-trigger-button': '',
-          onClick: onToggle,
-          style: {
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '7px',
-            padding: '0 11px',
-            height: '30px',
-            borderRadius: '8px',
-            border: '1px solid var(--dsw-alias-border-l1, #eceef2)',
-            background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
-            color: hasChanges || open ? ACCENT : 'var(--dsw-alias-label-secondary)',
-            fontSize: uiPx(12),
-            fontFamily: UI_FONT,
-            fontWeight: 500,
-            whiteSpace: 'nowrap',
-            cursor: 'pointer',
-          },
-        },
-        react.createElement(
-          'svg',
-          { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
-          react.createElement('path', {
-            d: 'M3 4.5h10M3 8h10M3 11.5h6',
-            stroke: 'currentColor',
-            strokeWidth: 1.3,
-            strokeLinecap: 'round',
-          }),
-        ),
-        react.createElement('span', null, label),
-      )
-    }
-
-    /**
      * 还原确认弹窗。
      *
      * 用弹窗而不是"再点一次按钮"的二次确认：后者有两个问题——按钮本身很小、第二次点击
@@ -5969,6 +5381,14 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 「自动保存的改动」列表里的一行。
+     *
+     * 视觉上它就是**这张统一列表里的一条普通行**：与文件行同样的行高、左侧缩进、发丝分隔线
+     * 与悬停底色（`data-review-list-row`）。三个动作是同一套次级按钮（`data-review-row-button`）
+     * ——此前它们是没有样式的原生 `<button>`，在一列排得整整齐齐的文件行中间，那三个灰扑扑的
+     * 默认按钮正是"这块像临时补丁"的直接来源。
+     */
     function AutoSaveRow(props) {
       const { t, entry, currentBranch, busy, onOpen, onRestore, onCopy } = props
       const info = smartStashInfo(entry)
@@ -5976,15 +5396,19 @@ window.__ModuleLoader__.load({
       const sameBranch = currentBranch === info.fromBranch
       return react.createElement(
         'div',
-        { 'data-staging-auto-save': info.id, style: { padding: '8px 10px 8px 26px', borderBottom: `1px solid ${BORDER}` } },
-        react.createElement('div', { style: { fontWeight: 600, fontSize: uiPx(11.5) } }, `${info.fromBranch} → ${info.toBranch}`),
-        react.createElement('div', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(10.5), marginTop: '2px' } }, stashTime(t, entry?.date).text),
+        { 'data-staging-auto-save': info.id, 'data-review-list-row': '' },
         react.createElement(
           'div',
-          { style: { display: 'flex', gap: '6px', marginTop: '6px' } },
-          react.createElement('button', { type: 'button', disabled: busy, onClick: () => onOpen(entry.ref) }, t('viewSavedChanges')),
-          react.createElement('button', { type: 'button', disabled: busy, onClick: () => onRestore(info, sameBranch) }, sameBranch ? t('restorePreviousChanges') : t('switchBackAndRestore')),
-          react.createElement('button', { type: 'button', disabled: busy || info.stashOid === '', onClick: () => onCopy(info) }, t('copyRestoreCommand')),
+          { style: { display: 'flex', flexDirection: 'column', gap: '1px', flex: '1 1 auto', minWidth: 0 } },
+          react.createElement('span', { style: { fontWeight: 600, fontSize: uiPx(11.5), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${info.fromBranch} → ${info.toBranch}`),
+          react.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: uiPx(10.5) } }, stashTime(t, entry?.date).text),
+        ),
+        react.createElement(
+          'div',
+          { style: { display: 'flex', gap: '4px', flexShrink: 0 } },
+          react.createElement('button', { type: 'button', 'data-review-row-button': '', disabled: busy, onClick: () => onOpen(entry.ref) }, t('viewSavedChanges')),
+          react.createElement('button', { type: 'button', 'data-review-row-button': '', disabled: busy, onClick: () => onRestore(info, sameBranch) }, sameBranch ? t('restorePreviousChanges') : t('switchBackAndRestore')),
+          react.createElement('button', { type: 'button', 'data-review-row-button': '', disabled: busy || info.stashOid === '', onClick: () => onCopy(info) }, t('copyRestoreCommand')),
         ),
       )
     }
@@ -6002,6 +5426,9 @@ window.__ModuleLoader__.load({
           type: 'button',
           'data-staging-stash-row': entry?.ref,
           'data-staging-stash-selected': selected ? 'true' : 'false',
+          // 与文件行、自动保存行同属**一套行**（行高 / 缩进 / 发丝分隔线 / 悬停底色都由
+          // `[data-review-list-row]` 提供）；这里只额外表达"选中"这一件事。
+          'data-review-list-row': '',
           disabled: busy,
           onClick: () => onOpen(entry?.ref),
           title: `${entry?.ref ?? ''}\n${label}\n${time.exact}`,
@@ -6011,7 +5438,6 @@ window.__ModuleLoader__.load({
             gap: '1px',
             boxSizing: 'border-box',
             width: '100%',
-            padding: '4px 8px 4px 26px',
             border: 'none',
             borderLeft: selected ? `2px solid ${ACCENT}` : '2px solid transparent',
             background: selected ? `color-mix(in srgb, ${ACCENT} 12%, transparent)` : 'transparent',
@@ -8569,11 +7995,15 @@ window.__ModuleLoader__.load({
     /**
      * 一个分组标题（可折叠 + 右侧批量按钮）。
      *
-     * @param props - `{ t, id, label, count, collapsed, onToggle, action }`。
+     * `note` 是标题行里的一段**轻量状态文字**（例如"上一次切换前保存了 3 个改动"）：它与
+     * 标题、计数徽标同属一行，因此不会自成一种"告警块"视觉体系。凡是"想在这个分组上提示
+     * 点什么"的地方都应该用它，而不是在列表里再插一个带底色的盒子。
+     *
+     * @param props - `{ t, id, label, count, collapsed, onToggle, action, note }`。
      * @returns React 元素。
      */
     function StagingGroupHeader(props) {
-      const { label, count, collapsed, onToggle, action } = props
+      const { label, count, collapsed, onToggle, action, note } = props
       return react.createElement(
         'div',
         {
@@ -8616,6 +8046,8 @@ window.__ModuleLoader__.load({
           react.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
           // 计数用统一的胶囊徽标（[data-review-count]），与分区标题右侧那个是同一套观感。
           react.createElement('span', { 'data-review-count': '' }, String(count)),
+          // 轻量状态文字（可选）：与标题同一行，因此不会变成"另一块带底色的盒子"。
+          note ?? null,
         ),
         action ?? null,
       )
@@ -9895,7 +9327,7 @@ window.__ModuleLoader__.load({
       // **阶段守卫被刻意放在所有 hook 之后、渲染之前**：以前它写在 hook 中间，于是
       // `snapshot.phase` 从 loading 变成 ready 的那一帧会多调用一个 useMemo，React 直接抛
       // #310 "Rendered more hooks than during the previous render" 并把整棵子树卸掉——
-      // 现象就是"切换项目之后抽屉与右上角入口一起消失"。规则很简单：
+      // 现象就是"切换项目之后整个面板被卸掉、看起来像被关掉了"。规则很简单：
       // **任何 hook 都不许出现在这些 return 之后**（本文件里所有函数组件都按这条改过）。
       // 另外逐行差异已改为按需取（见 LazyFileDiff），这里不再需要 splitByFile 那个 hook。
 
@@ -10524,28 +9956,36 @@ window.__ModuleLoader__.load({
       const currentBranchAutoSaves = autoSavedStashes.filter((entry) => smartStashInfo(entry)?.fromBranch === (snapshot?.branch ?? ''))
       const latestAutoSave = autoSavedStashes[0]
       const latestCurrentBranchAutoSave = currentBranchAutoSaves[0]
-      const fileGroups = [
+      /**
+       * 「上一次切换前保存的改动」的提示。
+       *
+       * 它曾经是列表顶部一个独立的琥珀色告警块——那正是"一块告警样式硬塞进列表"的来源。
+       * 现在它只是**自动保存分组标题行里的一段状态文字**（`note`）+ 同一个「恢复」按钮：
+       * 与标题、计数徽标同一套视觉，不再自成体系。锚点 `data-auto-save-reminder` 保留
+       * （脚本与 `test-auto-save-ui-contract` 按它定位），只是换了承载方式。
+       */
+      const autoSaveNotice =
         latestCurrentBranchAutoSave === undefined
           ? null
           : react.createElement(
-              'div',
+              'span',
               {
-                key: 'auto-save-reminder',
                 'data-auto-save-reminder': '',
-                style: { margin: '4px 6px', padding: '8px 10px', borderRadius: '7px', background: 'color-mix(in srgb, #d99a00 13%, transparent)', color: 'var(--dsw-alias-label-primary)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: uiPx(11.5) },
-              },
-              react.createElement('span', { style: { flex: '1 1 auto' } }, `⚠ ${t('autoSaveReminder', { count: smartStashInfo(latestCurrentBranchAutoSave)?.files ?? 0 })}`),
-              react.createElement(
-                'button',
-                {
-                  type: 'button',
-                  'data-auto-save-reminder-restore': '',
-                  disabled: busy || stashBusy,
-                  onClick: () => void restoreAutoSave(smartStashInfo(latestCurrentBranchAutoSave), true),
+                title: t('autoSaveReminder', { count: smartStashInfo(latestCurrentBranchAutoSave)?.files ?? 0 }),
+                style: {
+                  flexShrink: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  color: '#b3760a',
+                  fontSize: uiPx(11.5),
+                  fontWeight: 500,
                 },
-                t('restorePreviousChanges'),
-              ),
-            ),
+              },
+              `⚠ ${t('autoSaveReminder', { count: smartStashInfo(latestCurrentBranchAutoSave)?.files ?? 0 })}`,
+            )
+      const fileGroups = [
         conflicted.length === 0
           ? null
           : react.createElement(
@@ -10800,10 +10240,12 @@ window.__ModuleLoader__.load({
                                   },
                                 ),
                               style: {
-                                height: '24px',
-                                padding: '0 12px',
+                                // 与列表行同一档尺寸（22px），不再是"另一套 UI 里的按钮"。
+                                height: '22px',
+                                padding: '0 10px',
+                                borderRadius: '5px',
                                 border: 'none',
-                                background: chosen.length === 0 ? 'var(--dsw-alias-bg-module-platform, #eceef2)' : ACCENT,
+                                background: chosen.length === 0 ? 'transparent' : ACCENT,
                                 color: chosen.length === 0 ? 'var(--dsw-alias-label-tertiary)' : '#fff',
                               },
                             },
@@ -10839,14 +10281,35 @@ window.__ModuleLoader__.load({
                 count: autoSavedStashes.length,
                 collapsed: collapsed.autoSaves === true,
                 onToggle: () => setCollapsed((value) => ({ ...value, autoSaves: !value.autoSaves })),
+                // 提示在**标题行里**（不再是列表顶部一个独立的告警块）。
+                note: autoSaveNotice,
                 action: react.createElement(
                   'div',
                   { style: { display: 'flex', gap: '4px' } },
+                  // 「恢复到切换前」曾经是那个告警块里的按钮。现在它是标题行上的一个标准
+                  // 次级按钮，只在真有"当前分支的自动保存"时出现。
+                  latestCurrentBranchAutoSave === undefined
+                    ? null
+                    : react.createElement(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-auto-save-reminder-restore': '',
+                          'data-review-row-button': '',
+                          disabled: busy || stashBusy,
+                          onClick: (event) => {
+                            event.stopPropagation()
+                            void restoreAutoSave(smartStashInfo(latestCurrentBranchAutoSave), true)
+                          },
+                        },
+                        t('restorePreviousChanges'),
+                      ),
                   react.createElement(
                     'button',
                     {
                       type: 'button',
                       'data-auto-save-latest': '',
+                      'data-review-row-button': '',
                       disabled: busy || stashBusy || latestAutoSave === undefined,
                       title: t('restoreLatestAutoSave'),
                       onClick: (event) => {
@@ -10866,6 +10329,7 @@ window.__ModuleLoader__.load({
                     {
                       type: 'button',
                       'data-auto-save-find': '',
+                      'data-review-row-button': '',
                       disabled: busy || stashBusy,
                       title: t('findSavedChanges'),
                       onClick: (event) => {
@@ -11003,31 +10467,24 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               'data-staging-stash-push': '',
+              'data-review-row-button': '',
               disabled: busy || stashBusy,
               title: t('stashWithOptions'),
               onClick: () => setStashDialog({ kind: 'push' }),
-              style: {
-                flexShrink: 0,
-                height: '20px',
-                padding: '0 8px',
-                border: `1px solid ${BORDER}`,
-                borderRadius: '5px',
-                background: 'transparent',
-                color: 'var(--dsw-alias-label-secondary)',
-                fontFamily: UI_FONT,
-                fontSize: uiPx(11.5),
-                cursor: busy || stashBusy ? 'default' : 'pointer',
-              },
             },
             t('stashChangesTitle'),
           ),
         ),
         // 滚动只发生在这一层：提交区在这块面板之外（order 3），因此永远贴底不动。
+        //
+        // **gap 是 0**：分组之间靠一条发丝分隔线（见 CSS 的 `[data-staging-scroll] >
+        // [data-staging-group]`），而不是留出 6px 的缝——有缝就变成了"一叠卡片"，
+        // 而它们本来就该是一张连续的列表。
         react.createElement(
           'div',
           {
             'data-staging-scroll': '',
-            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', padding: '0 2px 6px' },
+            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', padding: '0 2px 6px' },
           },
           fileGroups,
         ),
@@ -12791,10 +12248,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 侧边栏里的审查标签正文。
+     * **官方右侧栏里「Git」标签的正文**（项目级 Git，workspace scope）。
+     *
+     * 这是「整个项目相对 HEAD 是什么状态」的唯一入口，由 Harness 官方 Git 图标打开。它与
+     * 「本轮修改审查」是两套界面：这里的 `GitSidebarTab` 只渲染项目 Git 面板，不会去开、
+     * 也不会去关本轮审查抽屉（抽屉由 `TurnReviewChip` → `TurnReviewDrawer` 那条链路负责）。
+     *
      * @param props - 槽注入的属性（含会话标识与本地化函数）。
      */
-    function ReviewTab(props) {
+    function GitSidebarTab(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       const sessionId = props?.sessionId
       const useSessions = useLatchedHook(props?.useSessions, absentSessions)
@@ -12806,22 +12268,24 @@ window.__ModuleLoader__.load({
         return activeId === undefined ? undefined : asPath(state?.byId?.[activeId]?.cwd)
       })
       const switching = sessionId !== undefined && workspace === undefined
+      /**
+       * 诊断快照：这块面板的数据取决于"官方侧栏认为的当前会话"，而那个值来自渲染器注入的
+       * `useSessions`。实机上出问题时从界面只能看到"对不上项目"，无法判断是哪一环。
+       * 挂到 window 上之后，`scripts/test-project-git-smoke.mjs` 这类需要真实 Electron 的
+       * 脚本可以直接读到它（键名带插件前缀，避免与官方冲突）。
+       */
+      if (typeof window !== 'undefined') {
+        window.__dshDesktopGitTab = { sessionId: sessionId ?? null, workspace: workspace ?? null, switching }
+      }
       return react.createElement(
         ProjectGitPanelErrorBoundary,
-        { t, workspace, embedded: true },
-        react.createElement(ReviewPanel, {
-          t,
-          workspace,
-          sessionId,
-          scope: 'workspace',
-          switching,
-          embedded: true,
-        }),
+        { t, workspace },
+        react.createElement(ProjectGitPanel, { t, workspace, sessionId, switching }),
       )
     }
 
-    /** 侧边栏标签的标题。 */
-    function ReviewTabTitle(props) {
+    /** 官方右侧栏 Git 标签的标题（图标 + `Git`）。 */
+    function GitSidebarTabTitle(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       const Icon = primitives.IconBranchOutline16
       return react.createElement(
@@ -13070,7 +12534,7 @@ window.__ModuleLoader__.load({
      * 连续两次提交经常在同一分钟里完成，只显示到分钟就分不出先后。
      *
      * 形状不对时安全降级**到空串**：宁可这一格空着，也不能抛错——这个函数跑在提交图的
-     * **每一行**上，一次抛错就是整棵树被 React 卸掉（抽屉和右上角入口一起消失）。
+     * **每一行**上，一次抛错就是整棵树被 React 卸掉（面板看起来像被关掉了）。
      *
      * @param value - host 给的提交时间（期望是 ISO 字符串）。
      * @returns `YYYY-MM-DD HH:mm:ss`；非字符串或空串返回 `''`，认不出的形状返回原样文本。
@@ -13105,7 +12569,7 @@ window.__ModuleLoader__.load({
      * 渲染层里有一批"看起来天经地义"的写法——`commit.parents.length`、
      * `(commit.refs ?? []).slice(0,3).map(...)`、`commit.committedAt.slice(0,10)`——只要
      * host 少给一个字段（版本不一致、路由被改、响应被截断），它们就是 TypeError。而 React
-     * 没有错误边界时会把**整棵树**卸掉：抽屉和右上角入口一起消失，看起来像"面板被关掉了"。
+     * 没有错误边界时会把**整棵树**卸掉：面板整块消失，看起来像"面板被关掉了"。
      *
      * 因此这里把每个字段都收敛到渲染层假定的形状：
      *   * `parents` / `refs` 一定是数组；
@@ -13173,7 +12637,7 @@ window.__ModuleLoader__.load({
      *
      * 与 `fetchGraph` 一样，这里是 host 详情数据进入渲染层的唯一入口：`files` 不是数组时
      * `CommitFileList` 会在 `files.length` 上抛，`commit` 缺字段会让 `CommitSummary` 抛，
-     * 而它们都在抽屉里——一次 TypeError 就把整个抽屉和右上角入口一起卸掉。
+     * 而它们都在项目 Git 面板里——一次 TypeError 就把整个面板卸掉。
      *
      * @param workspace - 工作区路径。
      * @param revision - 提交哈希。
@@ -13201,7 +12665,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 左栏：分支筛选（本地 / 远程 / 标签）。
+     * **分支 / ref 清单**（本地 / 远程 / 标签）——它是顶部选择器下拉里的内容。
      *
      * ## 数据源是**权威 refs 清单**，不是已加载的提交
      *
@@ -13210,13 +12674,20 @@ window.__ModuleLoader__.load({
      *     `/`**——`feature/foo`、`release/1.6.4`、`bugfix/windows/path` 都是本地分支；
      *   * 一个尖端在 300 条提交之前的分支照样在这里列出来（旧实现从第一页的 `%D` 聚合，
      *     那种分支在第一页里根本不存在）；
-     *   * 点某个分支筛选、或者加载更多提交，都**不会**改变左栏的内容。
+     *   * 点某个分支筛选、或者加载更多提交，都**不会**改变这份清单的内容。
+     *
+     * ## 它不再是左栏
+     *
+     * 这里曾经是 Log 左侧一整列常驻的分支树：`左侧分支栏 + 中间提交图 + 右栏详情` 的三栏
+     * 结构里，最左那一栏占着宽度却只回答"选哪个分支"这一个问题。现在它只作为**顶部首行
+     * 选择器的下拉内容**出现（见 `GraphRefSelector`），Log 的横向空间全部留给提交图与详情。
+     * `data-graph-ref-*` 是脚本与样式的稳定锚点。
      *
      * ## 没有单独的 HEAD 分组
      *
      * 早先是 `HEAD / 本地 / 远程 / 标签` 四段，而"当前分支"被单独放进 HEAD 那一段之后，
      * 「本地」在只有当前分支的仓库里就是空的（显示一个 `—`）——用户看到的是"我的本地分支
-     * 没取到"。现在当前分支**留在本地列表里**，前面加一个 ✓ 并高亮（需求 6/7）。
+     * 没取到"。现在当前分支**留在本地列表里**，前面加一个 ✓ 并高亮。
      *
      * 注意：这里刻意**不用 `ref` 命名"当前筛选的分支名"**——`ref` 是 React 在 createElement
      * 里的保留键，它永远不会进 props（`props.ref` 恒为 undefined），而传字符串更会触发
@@ -13226,7 +12697,7 @@ window.__ModuleLoader__.load({
      *   `refs` 是 `{ local, remote, tags }`（每项 `{ name, hash, current }`）或 null。
      * @returns React 元素。
      */
-    function GraphBranchTree(props) {
+    function GraphRefList(props) {
       const { t, refs, loading, error, selectedRef, onPickRef } = props
       const local = asArray(refs?.local)
       const remote = asArray(refs?.remote)
@@ -13235,10 +12706,10 @@ window.__ModuleLoader__.load({
       const section = (key, label, rows) =>
         react.createElement(
           'div',
-          { key, 'data-graph-tree-section': key },
+          { key, 'data-graph-ref-section': key },
           react.createElement(
             'div',
-            { style: { padding: '10px 10px 4px', fontSize: uiPx(11), fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } },
+            { style: { padding: '8px 10px 4px', fontSize: uiPx(11), fontWeight: 600, color: GRAPH_DIM, textTransform: 'uppercase' } },
             label,
           ),
           rows.length === 0
@@ -13249,14 +12720,14 @@ window.__ModuleLoader__.load({
                   {
                     type: 'button',
                     key: `${key}:${row.name}`,
-                    'data-graph-tree-row': row.name,
+                    'data-graph-ref-row': row.name,
                     // 当前分支：`✓` 前缀 + accent 色。用它表达"我在这个分支上"，
-                    // 而不是把它从本地列表里搬走（需求 7）。
-                    'data-graph-tree-current': row.current === true ? 'true' : 'false',
+                    // 而不是把它从本地列表里搬走。
+                    'data-graph-ref-current': row.current === true ? 'true' : 'false',
                     // 选中态同时用 ARIA 与一个 data 标记表达：ARIA 是给读屏与脚本用的稳定契约
                     // （视觉上只有背景色差异，靠样式断言很容易写成"看起来像"）。
                     'aria-selected': selectedRef === row.name,
-                    'data-graph-tree-selected': selectedRef === row.name ? 'true' : 'false',
+                    'data-graph-ref-selected': selectedRef === row.name ? 'true' : 'false',
                     onClick: () => onPickRef(row.name),
                     title: row.hash === '' ? row.name : `${row.name}\n${textSlice(row.hash, 8)}`,
                     style: {
@@ -13285,26 +12756,183 @@ window.__ModuleLoader__.load({
 
       return react.createElement(
         'div',
-        { 'data-graph-tree': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', fontFamily: UI_FONT } },
+        { 'data-graph-ref-list': '', style: { display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', fontFamily: UI_FONT } },
         // 清单还没到手 / 拉失败时给一句**事实说明**，而不是让三段各显示一个 `—`
         // ——那正是"本地分支没取到"的观感来源。
         loading === true && refs === null
           ? react.createElement(
               'div',
-              { 'data-graph-tree-loading': '', role: 'status', style: { padding: '10px', fontSize: uiPx(11.5), color: GRAPH_DIM } },
+              { 'data-graph-ref-loading': '', role: 'status', style: { padding: '10px', fontSize: uiPx(11.5), color: GRAPH_DIM } },
               t('graphTreeLoading'),
             )
           : null,
         error !== undefined && error !== ''
           ? react.createElement(
               'div',
-              { 'data-graph-tree-error': '', role: 'alert', title: error, style: { padding: '10px', fontSize: uiPx(11.5), color: REMOVED, lineHeight: 1.5 } },
+              { 'data-graph-ref-error': '', role: 'alert', title: error, style: { padding: '10px', fontSize: uiPx(11.5), color: REMOVED, lineHeight: 1.5 } },
               t('graphTreeError'),
             )
           : null,
         section('local', t('graphLocal'), local),
         section('remote', t('graphRemote'), remote),
         section('tags', t('graphTags'), tags),
+      )
+    }
+
+    /**
+     * **提交图首行的分支 / ref 选择器**。
+     *
+     * 它是"选哪个分支"这件事的唯一 UI：按钮上写着当前筛选的 ref（没筛选时写「全部分支」），
+     * 点开是一个下拉，里面是 `GraphRefList`（本地 / 远程 / 标签）。这样分支切换是一次**顶部
+     * 的选择动作**，而不再占掉 Log 左边一整列——提交图因此拿到完整的横向空间。
+     *
+     * 选择器**不持有数据**：清单与选中值都来自 `CommitGraphView` 的那一份状态
+     * （`fresh.refs` / `fresh.ref`），点一条就调 `onPickRef`，与原来左栏点分支是同一条路径
+     * ——因此"切分支 = 重新拉那一页提交"的行为一个字都没变。
+     *
+     * @param props - `{ t, refs, loading, error, selectedRef, onPickRef, disabled }`。
+     * @returns React 元素。
+     */
+    function GraphRefSelector(props) {
+      const { t, refs, loading, error, selectedRef, onPickRef } = props
+      const [open, setOpen] = react.useState(false)
+
+      // 点外部 / Escape 关闭：下拉是浮层，必须能一键退出（与仓库选择器同一套约定）。
+      const rootRef = react.useRef(null)
+      react.useEffect(() => {
+        if (!open) return undefined
+        const onPointerDown = (event) => {
+          const node = rootRef.current
+          if (node !== null && node.contains(event.target)) return
+          setOpen(false)
+        }
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('mousedown', onPointerDown, true)
+        document.addEventListener('keydown', onKeyDown)
+        return () => {
+          document.removeEventListener('mousedown', onPointerDown, true)
+          document.removeEventListener('keydown', onKeyDown)
+        }
+      }, [open])
+
+      /** 按钮上的文字：选了具体 ref 就写它，否则写「全部分支」。 */
+      const label = selectedRef === undefined || selectedRef === '' ? t('graphAllRefs') : selectedRef
+
+      return react.createElement(
+        'div',
+        { ref: rootRef, 'data-graph-ref-select': '', style: { position: 'relative', flexShrink: 0, maxWidth: '220px' } },
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            'data-graph-ref-select-button': '',
+            // 空字符串表示"没有筛选"（全部分支）；脚本按这个属性读当前值。
+            'data-graph-ref-value': selectedRef ?? '',
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open,
+            title: selectedRef === undefined || selectedRef === '' ? t('graphAllRefsHint') : selectedRef,
+            onClick: () => setOpen((value) => !value),
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              maxWidth: '220px',
+              height: '22px',
+              padding: '0 8px',
+              boxSizing: 'border-box',
+              border: `1px solid ${selectedRef === undefined || selectedRef === '' ? BORDER : `color-mix(in srgb, ${ACCENT} 45%, transparent)`}`,
+              borderRadius: '5px',
+              background: 'transparent',
+              color: selectedRef === undefined || selectedRef === '' ? 'inherit' : ACCENT,
+              fontFamily: UI_FONT,
+              fontSize: uiPx(12),
+              fontWeight: 600,
+              cursor: 'pointer',
+            },
+          },
+          // 分支图标。
+          react.createElement(
+            'svg',
+            { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', style: { flexShrink: 0 } },
+            react.createElement('path', {
+              d: 'M5 3.5a1.6 1.6 0 1 0 0 .01M5 12.5a1.6 1.6 0 1 0 0 .01M11 6.5a1.6 1.6 0 1 0 0 .01M5 5.1v5.8M6.6 4.2h2.9a1.5 1.5 0 0 1 1.5 1.5v.8',
+              stroke: 'currentColor',
+              strokeWidth: 1.3,
+              strokeLinecap: 'round',
+            }),
+          ),
+          react.createElement('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+          react.createElement('span', { 'aria-hidden': 'true', style: { flexShrink: 0, color: GRAPH_DIM, fontSize: uiPx(10) } }, '▾'),
+        ),
+        open
+          ? react.createElement(
+              'div',
+              {
+                'data-graph-ref-menu': '',
+                role: 'listbox',
+                style: {
+                  position: 'absolute',
+                  top: '24px',
+                  left: 0,
+                  zIndex: 5,
+                  width: '280px',
+                  maxWidth: 'min(320px, 80vw)',
+                  maxHeight: 'min(420px, 60vh)',
+                  overflowY: 'auto',
+                  padding: '4px',
+                  border: `1px solid ${BORDER}`,
+                  borderRadius: '8px',
+                  background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-base, #fff))',
+                  boxShadow: '0 12px 32px rgba(0,0,0,.18)',
+                },
+              },
+              // 「全部分支」= 清掉筛选。它以前是工具条上一个独立的 ✕ 胶囊
+              // （`data-graph-clear-ref`），现在它只是这个菜单里的第一项——与"选某个分支"
+              // 是同一件事的两个取值，放在同一个控件里。
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  'data-graph-clear-ref': '',
+                  'aria-selected': selectedRef === undefined || selectedRef === '',
+                  onClick: () => {
+                    setOpen(false)
+                    onPickRef('')
+                  },
+                  style: {
+                    display: 'block',
+                    boxSizing: 'border-box',
+                    width: '100%',
+                    padding: '4px 10px',
+                    border: 'none',
+                    borderRadius: '5px',
+                    background: selectedRef === undefined || selectedRef === '' ? `color-mix(in srgb, ${ACCENT} 10%, transparent)` : 'transparent',
+                    color: selectedRef === undefined || selectedRef === '' ? ACCENT : 'inherit',
+                    fontFamily: UI_FONT,
+                    fontSize: uiPx(12.5),
+                    fontWeight: 600,
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                  },
+                },
+                t('graphAllRefs'),
+              ),
+              react.createElement(GraphRefList, {
+                t,
+                refs,
+                loading,
+                error,
+                selectedRef,
+                // 选完就收起：下拉是"选一个"的动作，不是常驻面板。
+                onPickRef: (name) => {
+                  setOpen(false)
+                  onPickRef(name)
+                },
+              }),
+            )
+          : null,
       )
     }
 
@@ -13895,23 +13523,20 @@ window.__ModuleLoader__.load({
     }
 
     /** 分栏宽度的持久化键。 */
-    const GRAPH_TREE_WIDTH_KEY = 'dsh.review.graphTreeWidth'
     const GRAPH_DETAIL_WIDTH_KEY = 'dsh.review.graphDetailWidth'
     /** Diff Preview 高度的持久化键（px；没写过时用百分比默认值，见 graphDiffStore）。 */
     const GRAPH_DIFF_HEIGHT_KEY = 'dsh.review.graphDiffHeight'
     /**
-     * 左栏（分支筛选）的宽度范围。
+     * 右侧详情栏的宽度范围。
      *
-     * 默认 200：分支名一般十几到三十几个字符，200px 足够，**不动**它也不该占掉主区。
-     * 下限 160：再窄就只能看到 `feat…`，分支名之间分不出来。
-     * 上限 360：它只是筛选器，不是内容区；给到 420（早先的值）会让"提交图 + 详情"两边
-     * 同时变窄，而那两栏才是用户在看的东西。
+     * 默认 340，下限 200。上限允许用户主动向左拖到 `min(600, viewport * 0.4)`——完整 diff
+     * 已经移到下方的 Diff Preview，右栏只剩元信息与文件名，但长文件名与 commit body 仍然
+     * 需要空间。
+     *
+     * **分支栏的宽度常量（GRAPH_TREE_*）已经删除**：Log 不再有左侧分支栏，分支选择是顶部
+     * 首行的一个下拉，不占宽度。
      */
-    const GRAPH_TREE_MIN = 160
-    const GRAPH_TREE_MAX = 360
-    /** 右侧详情：默认 340（需求给的 320~360），下限 200。 */
     const GRAPH_DETAIL_MIN = 200
-    const GRAPH_TREE_DEFAULT = 200
     const GRAPH_DETAIL_DEFAULT = 340
     /**
      * Diff Preview 的高度。
@@ -13928,24 +13553,22 @@ window.__ModuleLoader__.load({
      * 分栏宽度：读/写 localStorage，并按视口夹取。
      *
      * 拖动调整宽度**必须持久化**：IDEA 里这个宽度是跟着用户的，重开一次窗口就复位会让人
-     * 每次都要重新拖。夹取上限是"视口的三分之一"，这样窄窗口下中间那栏仍然有可用宽度
-     * ——三栏硬挤的结果是每一栏都读不了（实际反馈里"窗口一小就什么都看不见"）。
+     * 每次都要重新拖。
      *
-     * @param which - `'tree'` 或 `'detail'`。
+     * 现在只有一栏（`'detail'`）：分支栏已经删除，它的宽度常量与夹取分支一并去掉。
+     *
+     * @param which - 目前只有 `'detail'`。
      * @param value - 期望宽度。
      * @returns 夹取后的宽度。
      */
     function clampGraphPane(which, value) {
-      const min = which === 'tree' ? GRAPH_TREE_MIN : GRAPH_DETAIL_MIN
+      const min = GRAPH_DETAIL_MIN
       const viewport = typeof window === 'undefined' ? 1440 : window.innerWidth
-      // 上限按用途分开：
-      //   * 左栏（分支筛选）是 `min(GRAPH_TREE_MAX, viewport / 3)`——固定上限保证它不会
-      //     把中间那栏挤没，随视口收窄则保证小窗口下三栏都还读得下去；
-      //   * **右栏（详情）不再死卡 420**：完整 diff 已经移走，右栏只剩元信息与文件名，但
-      //     长文件名与 commit body 仍然需要空间。因此允许用户主动向左拖到
-      //     `min(600, viewport * 0.4)`——默认值（340）不变，只是上限放开了。
-      const max = which === 'tree' ? Math.min(GRAPH_TREE_MAX, Math.round(viewport / 3)) : Math.min(600, Math.round(viewport * 0.4))
-      const raw = Number.isFinite(value) ? value : (which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
+      // 上限：**右栏（详情）不再死卡 420**——完整 diff 已经移走，右栏只剩元信息与文件名，
+      // 但长文件名与 commit body 仍然需要空间。因此允许用户主动向左拖到
+      // `min(600, viewport * 0.4)`——默认值（340）不变，只是上限放开了。
+      const max = Math.min(600, Math.round(viewport * 0.4))
+      const raw = Number.isFinite(value) ? value : GRAPH_DETAIL_DEFAULT
       return Math.max(min, Math.min(Math.max(min, max), Math.round(raw)))
     }
 
@@ -13968,37 +13591,41 @@ window.__ModuleLoader__.load({
       return Math.max(GRAPH_DIFF_MIN, Math.min(max, Math.round(raw)))
     }
 
-    /** 两个分栏的宽度与折叠状态的持久化（与抽屉宽度同一套做法）。 */
+    /**
+     * 详情栏宽度与折叠状态的持久化。
+     *
+     * **只有一栏**：分支栏删除之后 Log 只剩"提交图 | 详情"，因此 `which` 只有 `'detail'`
+     * 与 `'collapsed'`。（旧记录里的 `tree` 宽度会被忽略——读不到就当没有。）
+     */
     const graphPaneStore = {
       /**
-       * @param which - `'tree'` 或 `'detail'`；`'collapsed'` 读折叠状态。
+       * @param which - `'detail'`；`'collapsed'` 读折叠状态。
        * @returns 持久化值（读不到时给默认值）。
        */
       get(which) {
         if (which === 'collapsed') {
           try {
             const raw = window.localStorage.getItem('dsh.review.graphCollapsed')
-            if (raw === null) return { tree: false, detail: false }
+            if (raw === null) return { detail: false }
             const parsed = JSON.parse(raw)
-            return { tree: parsed?.tree === true, detail: parsed?.detail === true }
+            return { detail: parsed?.detail === true }
           } catch {
-            return { tree: false, detail: false }
+            return { detail: false }
           }
         }
-        const key = which === 'tree' ? GRAPH_TREE_WIDTH_KEY : GRAPH_DETAIL_WIDTH_KEY
         let stored = Number.NaN
         try {
-          stored = Number(window.localStorage.getItem(key))
+          stored = Number(window.localStorage.getItem(GRAPH_DETAIL_WIDTH_KEY))
         } catch {
           // 隐私模式等：读不到就用默认宽度，不影响功能。
         }
         // **必须排除 null / 0**：`localStorage.getItem` 在没有记录时返回 null，而
-        // `Number(null)` 是 0（有限值！），直接交给夹取会得到"最小值 120px"——新用户第一次
-        // 打开时左右两栏都贴到最窄（实测踩到过）。`panelWidthStore` 里同一处也是这么判的。
+        // `Number(null)` 是 0（有限值！），直接交给夹取会得到"最小值"——新用户第一次打开时
+        // 详情栏贴到最窄（实测踩到过）。
         return clampGraphPane(which, Number.isFinite(stored) && stored > 0 ? stored : Number.NaN)
       },
       /**
-       * @param which - `'tree'` / `'detail'` / `'collapsed'`。
+       * @param which - `'detail'` / `'collapsed'`。
        * @param value - 要写入的值。
        */
       set(which, value) {
@@ -14007,7 +13634,7 @@ window.__ModuleLoader__.load({
             window.localStorage.setItem('dsh.review.graphCollapsed', JSON.stringify(value))
             return
           }
-          window.localStorage.setItem(which === 'tree' ? GRAPH_TREE_WIDTH_KEY : GRAPH_DETAIL_WIDTH_KEY, String(value))
+          window.localStorage.setItem(GRAPH_DETAIL_WIDTH_KEY, String(value))
         } catch {
           // 写失败不影响本次会话（宽度只在这次打开期间生效）。
         }
@@ -14217,7 +13844,7 @@ window.__ModuleLoader__.load({
     /**
      * 提交区高度的持久化。
      *
-     * 与另外三个拖动尺寸（面板宽度 / 左栏宽度 / Diff 高度）同一套约定：**没拖过 = 不落盘**，
+     * 与另外两个拖动尺寸（左栏宽度 / Diff 高度）同一套约定：**没拖过 = 不落盘**，
      * 于是"默认高度"永远是算出来的（跟随 UI 字号），双击手柄就是回到这个默认值。用户拖过
      * 之后就存 px——那时他要的是那个精确高度。窗口变小导致当前高度被夹取**不改写**这份记录：
      * 换回大窗口时用户上次的选择还在。
@@ -14255,10 +13882,10 @@ window.__ModuleLoader__.load({
     /**
      * 拖动分栏手柄。
      *
-     * 与抽屉的宽度手柄同一套做法（见 ReviewPanel.startResize）：`mousemove`/`mouseup` 挂在
+     * 与提交区顶部那条手柄同一套做法（见 startCommitAreaResize）：`mousemove`/`mouseup` 挂在
      * document 上，指针移出手柄也不会断；拖动期间给 body 打标记禁掉文本选择。
      *
-     * @param which - `'tree'` 或 `'detail'`。
+     * @param which - `'detail'`（分支栏删除后只剩这一条竖向分栏）。
      * @param width - 当前宽度。
      * @param onChange - 拖动过程中的回调（每帧）。
      * @returns 鼠标按下的处理器。
@@ -14271,8 +13898,8 @@ window.__ModuleLoader__.load({
         const startWidth = width
         document.body.dataset.reviewDragging = '1'
         const onMove = (moveEvent) => {
-          // 左栏向右拖是变宽；右栏向左拖是变宽。
-          const delta = which === 'tree' ? moveEvent.clientX - startX : startX - moveEvent.clientX
+          // 详情栏在右边：向左拖是变宽。
+          const delta = startX - moveEvent.clientX
           onChange(clampGraphPane(which, startWidth + delta))
         }
         const onUp = () => {
@@ -14471,10 +14098,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 记录一次**项目 Git 面板**（抽屉整体）的渲染失败。
+     * 记录一次 **`ProjectGitPanel`（官方 Git 标签的正文）**的渲染失败。
      *
-     * 与 Log 那一层是两级的：Log 边界管的是提交图，这一层管的是整个抽屉——包括 Changes
-     * 页签、暂存区、提交框。面板层捕获意味着"这里有 bug，但入口还在、关掉面板就能继续用"。
+     * 与 Log 那一层是两级的：Log 边界管的是提交图，这一层管的是整个项目 Git 面板——包括
+     * Changes 页签、暂存区、提交框。面板层捕获意味着"这里有 bug，但官方 Git 标签本身还在，
+     * 切到别的标签再切回来就能重试"。
      *
      * @param error - 抛出的值。
      * @param componentStack - React 给的组件栈。
@@ -14484,7 +14112,7 @@ window.__ModuleLoader__.load({
     function reportPanelError(error, componentStack, workspace) {
       const panelTag = '[dsh-review:panel] 项目 Git 面板渲染失败' // i18n-allow
       return reportRenderError({
-        key: '__dshDesktopReviewPanelError',
+        key: '__dshDesktopProjectGitPanelError',
         tag: panelTag,
         scope: 'dsh-client-ui-review:panel',
         error,
@@ -14498,8 +14126,9 @@ window.__ModuleLoader__.load({
      *
      * 必须是**类组件**：React 只有 `getDerivedStateFromError`/`componentDidCatch` 这一条
      * 捕获路径，没有任何 hook 能做同样的事。位置也很关键——它包在 Log 页签的**内容**外面，
-     * 而不是包在整个抽屉外面：包在外面的话，图一出错整个 `ReviewPanel`（含 Changes 页签、
-     * 暂存区、提交框）都会被换成错误页，而用户其实完全可以切回 Changes 继续干活。
+     * 而不是包在整个项目 Git 面板外面：包在外面的话，图一出错整个 `ProjectGitPanel`（含
+     * Changes 页签、暂存区、提交框）都会被换成错误页，而用户其实完全可以切回 Changes
+     * 继续干活。
      *
      * 为什么写成工厂而不是直接 `class extends react.Component`：真实渲染器给的 React
      * 一定有 `Component`（官方渲染器自己的 `SlotErrorBoundary` 就是这么写的），但本仓库
@@ -14634,12 +14263,12 @@ window.__ModuleLoader__.load({
     const LogErrorBoundary = createLogErrorBoundary()
 
     /**
-     * 构造**项目 Git 面板**（整个抽屉）的错误边界。
+     * 构造**项目 Git 面板**（官方 Git 标签的正文）的错误边界。
      *
      * 这一层与 Log 那一层是"两级"的关系，缺一不可：
-     *   * 本层包住整个 `ReviewPanel`，因此 Changes 页签、暂存区、提交框里的渲染期异常
-     *     都只会让**面板**显示降级页，而右上角入口（`ProjectChangesTriggerButton`，
-     *     本层的兄弟）照常存在——这正是"入口永远不消失"这条硬要求的落点；
+     *   * 本层包住整个 `ProjectGitPanel`，因此 Changes 页签、暂存区、提交框里的渲染期异常
+     *     都只会让**面板**显示降级页，而官方侧栏的 Git 标签本身（以及图标）照常存在——
+     *     这正是"入口永远不消失"这条硬要求的落点；
      *   * `LogErrorBoundary` 更细一层，让提交图出错时连 Changes 页签都不用降级。
      *
      * 与 `createLogErrorBoundary` 同一套写法（类组件 + 工厂），原因也相同：React 只有
@@ -14934,8 +14563,12 @@ window.__ModuleLoader__.load({
       const [viewport, setViewport] = react.useState(600)
       const scrollRef = react.useRef(null)
 
-      /** 分栏宽度与折叠状态（持久化，见 graphPaneStore）。 */
-      const [treeWidth, setTreeWidth] = react.useState(() => graphPaneStore.get('tree'))
+      /**
+       * 详情栏宽度与折叠状态（持久化，见 graphPaneStore）。
+       *
+       * **没有左栏的宽度**：分支栏已经删除，Log 现在只有"提交图 | 详情"两栏 + 底部的
+       * Diff Preview。`collapsed` 里因此只剩 `detail` 这一项。
+       */
       const [detailWidth, setDetailWidth] = react.useState(() => graphPaneStore.get('detail'))
       const [collapsed, setCollapsed] = react.useState(() => graphPaneStore.get('collapsed'))
       const togglePane = react.useCallback((which) => {
@@ -15761,10 +15394,11 @@ window.__ModuleLoader__.load({
        * 追加下一页。
        *
        * 三条硬规则：
-       *   * 追加**只写 `commits`（中栏）**。左栏是**权威 refs 清单**（`fresh.refs`），
-       *     与提交分页毫无关系——分页既不改它、也不需要它。早先未过滤时会把并入的下一页
-       *     一起写进 `treeCommits`（本意是"让左栏看到更深历史里的分支"），结果是左栏内容
-       *     在滚动中悄悄变化；现在两者彻底分开（见 GraphBranchTree）。
+       *   * 追加**只写 `commits`（提交列表）**。refs 清单是**权威数据**（`fresh.refs`，
+       *     gitbar 的 for-each-ref），与提交分页毫无关系——分页既不改它、也不需要它。
+       *     早先未过滤时会把并入的下一页一起写进 `treeCommits`（本意是"让分支清单看到更深
+       *     历史里的分支"），结果是下拉里的清单在滚动中悄悄变化；现在两者彻底分开
+       *     （见 GraphRefList）。
        *   * `prev.ref` 与本次请求的 ref 不一致时直接丢弃：用户已经切到别的 ref 了。
        *   * 同一 `ref + skip` 只允许一个请求在飞（`moreInFlight`）。只靠 state 挡不住：两次
        *     滚动事件在同一帧里读到的都是更新前的 `hasMore`/`commits.length`，会各发一次
@@ -15944,7 +15578,7 @@ window.__ModuleLoader__.load({
         }
         // 依赖里带上"这个节点什么时候才存在"：整页 loading / notRepo 时它还没渲染出来，
         // 从 loading 变成 ready 之后必须重新观察。
-      }, [measureViewport, fresh.phase, collapsed.tree, collapsed.detail, diffVisible])
+      }, [measureViewport, fresh.phase, collapsed.detail, diffVisible])
 
       /**
        * 自动补足：**不依赖用户滚动**，只要底部余量不够就继续要下一页。
@@ -16039,21 +15673,26 @@ window.__ModuleLoader__.load({
           react.createElement('path', { d: path, strokeLinecap: 'round', strokeLinejoin: 'round' }),
         )
 
-      /** 一条分栏之间的可拖动手柄。 */
+      /**
+       * 提交图与详情之间的可拖动手柄。
+       *
+       * 只有一根：分支栏删除之后 Log 只剩"提交图 | 详情"这条分栏（Diff Preview 是纵向的，
+       * 由另一条横向手柄负责）。
+       */
       const splitter = (which, width, setWidth) =>
         react.createElement('div', {
           key: `split:${which}`,
           'data-graph-splitter': which,
           role: 'separator',
           'aria-orientation': 'vertical',
-          'aria-label': t(which === 'tree' ? 'graphCollapseTree' : 'graphCollapseDetail'),
+          'aria-label': t('graphCollapseDetail'),
           onMouseDown: startGraphResize(which, width, (next) => {
             if (typeof next === 'function') setWidth((current) => next(current))
             else setWidth(next)
           }),
           onDoubleClick: () =>
             setWidth(() => {
-              const reset = clampGraphPane(which, which === 'tree' ? GRAPH_TREE_DEFAULT : GRAPH_DETAIL_DEFAULT)
+              const reset = clampGraphPane(which, GRAPH_DETAIL_DEFAULT)
               graphPaneStore.set(which, reset)
               return reset
             }),
@@ -16073,30 +15712,11 @@ window.__ModuleLoader__.load({
             fontFamily: UI_FONT,
           },
         },
-        // ---- 左：分支树 ----
-        collapsed.tree
-          ? null
-          : react.createElement(
-              'div',
-              { 'data-graph-pane': 'tree', style: { flex: `0 0 ${treeWidth}px`, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${BORDER}` } },
-              react.createElement(GraphBranchTree, {
-                t,
-                // **权威 refs 清单**（gitbar 的 for-each-ref），与"当前加载了多少条提交"
-                // 无关：因此点某个分支筛选、或者加载更多提交，左栏都不会变（见 GraphBranchTree）。
-                refs: fresh.refs,
-                loading: fresh.refsLoading === true,
-                error: fresh.refsError,
-                // 名字里带 ref 但**不是** React 的 ref（见 GraphBranchTree 的说明）。
-                selectedRef: fresh.ref,
-                onPickRef: pickRef,
-              }),
-            ),
-        collapsed.tree ? null : splitter('tree', treeWidth, setTreeWidth),
-        // ---- 主区：上半（提交图 + 详情）+ 下半（Diff Preview）----
+        // **没有左栏**：这里曾经是"左侧分支树 + 中间提交图 + 右栏详情"的三栏结构。
+        // 分支选择已经上移到提交图首行的工具栏（见 GraphRefSelector），Log 的横向空间
+        // 因此全部留给提交图与提交详情——这是这一轮的主视觉变化。
         //
-        // 为什么把 Preview 放在**这一层**而不是塞进右栏：它要横跨"提交图 + 详情"，因此只
-        // 有在 main 区（= 左栏之外）里才能拿到真正的宽度。左栏（分支树）**不参与**这个
-        // 纵向切分，所以不管 Preview 多高，分支树都不会被压扁。
+        // ---- 主区：上半（提交图 + 详情）+ 下半（Diff Preview）----
         react.createElement(
           'div',
           {
@@ -16104,16 +15724,8 @@ window.__ModuleLoader__.load({
             'data-graph-main': '',
             style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' },
           },
-          react.createElement(
-            'div',
-            {
-              'data-graph-upper': '',
-              style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'row' },
-            },
-            // ---- 中：提交列表 ----
-            react.createElement(
-              'div',
-              { 'data-graph-pane': 'list', style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+          // **Log 首行工具栏（横跨提交图与详情）**：分支选择器在最前——它是这一页唯一的
+          // "看哪个分支"入口；后面依次是标题与计数、搜索、以及收起详情 / 收起 Diff / 刷新。
           react.createElement(
             'div',
             {
@@ -16128,103 +15740,124 @@ window.__ModuleLoader__.load({
                 fontSize: uiPx(12),
               },
             },
-            react.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, t('graphTitle')),
-            // 计数 = **中栏当前已加载且经搜索过滤后**的提交数，与列表行数同源。用
-            // `graphCommits` 而不是 `graphFiles`：提交图顶部的数字说的是提交，"个文件"
-            // 是另一件事（那是右栏详情里的文件数）。`hasMore` 时缀一句"继续滚动加载"，
-            // 免得这个数字被当成仓库的提交总数。
-            react.createElement(
-              'span',
-              { 'data-graph-count': '', 'data-graph-has-more': fresh.hasMore === true ? 'true' : 'false', style: { color: GRAPH_DIM, flexShrink: 0 } },
-              fresh.hasMore === true
-                ? t('graphCommitsMore', { count: visibleCommits.length })
-                : t('graphCommits', { count: visibleCommits.length }),
-            ),
-            // 后台刷新（换 ref / 手动刷新）：**不卸界面**，只在工具栏上给一个小提示，
-            // 列表本身压暗一点表示"这一份是上一次的结果，马上换"。
-            fresh.refreshing === true
-              ? react.createElement(
-                  'span',
-                  {
-                    'data-graph-refreshing': '',
-                    role: 'status',
-                    style: { color: GRAPH_DIM, fontSize: uiPx(11.5), flexShrink: 0 },
-                  },
-                  t('graphRefreshing'),
-                )
-              : null,
-            // 刷新失败但手上还有数据：**非阻塞**提示（不把整个 Log 换成错误页）。
-            fresh.refreshError === ''
-              ? null
-              : react.createElement(
-                  'span',
-                  { 'data-graph-refresh-error': '', role: 'alert', style: { color: REMOVED, fontSize: uiPx(11.5), flexShrink: 0, maxWidth: '18em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.refreshError },
-                  t('graphRefreshFailed', { detail: fresh.refreshError }),
-                ),
-            fresh.ref === ''
-              ? null
-              : react.createElement(
-                  'button',
-                  {
-                    type: 'button',
-                    'data-graph-clear-ref': '',
-                    onClick: () => update({ ref: '' }),
-                    style: {
-                      padding: '1px 6px',
-                      borderRadius: '4px',
-                      border: `1px solid ${BORDER}`,
-                      background: 'transparent',
-                      color: ACCENT,
-                      fontFamily: UI_FONT,
-                      fontSize: uiPx(11.5),
-                      cursor: 'pointer',
-                      flexShrink: 0,
-                    },
-                  },
-                  `${t('graphFilterRef')}: ${fresh.ref} ✕`,
-                ),
-            // 搜索：过滤**已加载**的提交。文案里不承诺"搜索全部历史"——那需要另一条路由，
-            // 而这里要解决的是"一屏几十条里找刚看到的那条"。
-            react.createElement('input', {
-              type: 'search',
-              value: query,
-              'data-graph-search': '',
-              placeholder: t('graphSearchPlaceholder'),
-              'aria-label': t('graphSearchPlaceholder'),
-              autoComplete: 'off',
-              spellCheck: false,
-              onChange: (event) => setQuery(event.target.value),
-              onKeyDown: (event) => event.stopPropagation(),
-              style: {
-                flex: '1 1 auto',
-                minWidth: 0,
-                height: '22px',
-                boxSizing: 'border-box',
-                padding: '0 6px',
-                border: `1px solid ${BORDER}`,
-                borderRadius: '4px',
-                background: 'transparent',
-                color: 'inherit',
-                fontFamily: UI_FONT,
-                fontSize: uiPx(11.5),
-              },
-            }),
-            layout.truncated
-              ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: reviewFont.meta, flexShrink: 0 } }, t('graphTruncatedLanes'))
-              : null,
-            // 收起/展开两侧分栏：窄窗口下唯一能保住"中间那栏还能读"的办法。
-            iconButton('tree', t('graphCollapseTree'), () => togglePane('tree'), toolIcon('M2.5 3.5h11M2.5 8h11M2.5 12.5h11'), collapsed.tree),
-            iconButton('detail', t('graphCollapseDetail'), () => togglePane('detail'), toolIcon('M3.5 2.5v11M8 2.5h5.5v11H8z'), collapsed.detail),
-            // 显示/隐藏在下面的 Diff Preview：选中过文件之后它就是"把代码区收起来"的开关。
-            iconButton(
-              'diff',
-              t('graphToggleDiff'),
-              () => setDiffVisible((current) => !current),
-              toolIcon('M2.5 3.5h11v9h-11z M2.5 9.5h11'),
-              diffVisible === true && selectedDiffFile !== null,
-            ),
-            iconButton('refresh', t('refresh'), () => refreshGraph(), refreshGlyph),
+            // 分支 / ref 选择器：占掉的是首行的一格，而不是左边一整列。
+            react.createElement(GraphRefSelector, {
+            t,
+            // 权威 refs 清单（gitbar 的 for-each-ref）：与"当前加载了多少条提交"无关。
+            refs: fresh.refs,
+            loading: fresh.refsLoading === true,
+            error: fresh.refsError,
+            // 名字里带 ref 但**不是** React 的 ref（见 GraphRefList 的说明）。
+            selectedRef: fresh.ref,
+            onPickRef: pickRef,
+          }),
+          react.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, t('graphTitle')),
+          // 计数 = **中栏当前已加载且经搜索过滤后**的提交数，与列表行数同源。用
+          // `graphCommits` 而不是 `graphFiles`：提交图顶部的数字说的是提交，"个文件"
+          // 是另一件事（那是右栏详情里的文件数）。`hasMore` 时缀一句"继续滚动加载"，
+          // 免得这个数字被当成仓库的提交总数。
+          react.createElement(
+            'span',
+            { 'data-graph-count': '', 'data-graph-has-more': fresh.hasMore === true ? 'true' : 'false', style: { color: GRAPH_DIM, flexShrink: 0 } },
+            fresh.hasMore === true
+              ? t('graphCommitsMore', { count: visibleCommits.length })
+              : t('graphCommits', { count: visibleCommits.length }),
           ),
+          // 后台刷新（换 ref / 手动刷新）：**不卸界面**，只在工具栏上给一个小提示，
+          // 列表本身压暗一点表示"这一份是上一次的结果，马上换"。
+          fresh.refreshing === true
+            ? react.createElement(
+                'span',
+                {
+                  'data-graph-refreshing': '',
+                  role: 'status',
+                  style: { color: GRAPH_DIM, fontSize: uiPx(11.5), flexShrink: 0 },
+                },
+                t('graphRefreshing'),
+              )
+            : null,
+          // 刷新失败但手上还有数据：**非阻塞**提示（不把整个 Log 换成错误页）。
+          fresh.refreshError === ''
+            ? null
+            : react.createElement(
+                'span',
+                { 'data-graph-refresh-error': '', role: 'alert', style: { color: REMOVED, fontSize: uiPx(11.5), flexShrink: 0, maxWidth: '18em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: fresh.refreshError },
+                t('graphRefreshFailed', { detail: fresh.refreshError }),
+              ),
+          fresh.ref === ''
+            ? null
+            : react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  'data-graph-clear-ref': '',
+                  onClick: () => update({ ref: '' }),
+                  style: {
+                    padding: '1px 6px',
+                    borderRadius: '4px',
+                    border: `1px solid ${BORDER}`,
+                    background: 'transparent',
+                    color: ACCENT,
+                    fontFamily: UI_FONT,
+                    fontSize: uiPx(11.5),
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  },
+                },
+                `${t('graphFilterRef')}: ${fresh.ref} ✕`,
+              ),
+          // 搜索：过滤**已加载**的提交。文案里不承诺"搜索全部历史"——那需要另一条路由，
+          // 而这里要解决的是"一屏几十条里找刚看到的那条"。
+          react.createElement('input', {
+            type: 'search',
+            value: query,
+            'data-graph-search': '',
+            placeholder: t('graphSearchPlaceholder'),
+            'aria-label': t('graphSearchPlaceholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            onChange: (event) => setQuery(event.target.value),
+            onKeyDown: (event) => event.stopPropagation(),
+            style: {
+              flex: '1 1 auto',
+              minWidth: 0,
+              height: '22px',
+              boxSizing: 'border-box',
+              padding: '0 6px',
+              border: `1px solid ${BORDER}`,
+              borderRadius: '4px',
+              background: 'transparent',
+              color: 'inherit',
+              fontFamily: UI_FONT,
+              fontSize: uiPx(11.5),
+            },
+          }),
+          layout.truncated
+            ? react.createElement('span', { 'data-graph-truncated': '', style: { color: GRAPH_DIM, fontSize: reviewFont.meta, flexShrink: 0 } }, t('graphTruncatedLanes'))
+            : null,
+          // 收起/展开右侧详情栏：窄窗口下唯一能保住"提交图还能读"的办法。
+          // （以前这里还有一个"收起分支树"的按钮——分支栏已经删除，按钮一并去掉。）
+          iconButton('detail', t('graphCollapseDetail'), () => togglePane('detail'), toolIcon('M3.5 2.5v11M8 2.5h5.5v11H8z'), collapsed.detail),
+          // 显示/隐藏在下面的 Diff Preview：选中过文件之后它就是"把代码区收起来"的开关。
+          iconButton(
+            'diff',
+            t('graphToggleDiff'),
+            () => setDiffVisible((current) => !current),
+            toolIcon('M2.5 3.5h11v9h-11z M2.5 9.5h11'),
+            diffVisible === true && selectedDiffFile !== null,
+          ),
+          iconButton('refresh', t('refresh'), () => refreshGraph(), refreshGlyph),
+        ),
+          react.createElement(
+            'div',
+            {
+              'data-graph-upper': '',
+              style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'row' },
+            },
+            // ---- 中：提交列表 ----
+            react.createElement(
+              'div',
+              { 'data-graph-pane': 'list', style: { flex: '1 1 auto', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } },
           /**
            * 重置结果 + **撤销入口**（安全的历史恢复）。
            *
@@ -16638,13 +16271,19 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 输入框上方的改动概览入口：显示本轮改动文件数，点击在侧边栏查看详情。
+     * 输入框上方的**「本轮修改」入口**：显示本轮 agent 改了几个文件，点击开/关独立的本轮
+     * 修改审查抽屉。
+     *
+     * 点击只做一件事——切换 `turnDrawerStore`。它**不碰**官方右侧栏：不 `openTab`、不
+     * `openTabIn`、不 `toggleExpanded`。历史上这里调用的是 `sidebarRight.openTab('git')`，
+     * 而 `KIND` 又同时被项目级 Git 用着，于是"本轮修改 5"打开的是整个项目的 Git Changes。
+     * 回归测试 `scripts/test-review-entry-isolation.mjs` 钉住了"这里一次都不许调用它"。
      *
      * 同时负责**记录基线**：观察到会话由"未运行"转为"运行"时记一次，那一轮结束后的
      * 改动就都能对上；若发现没有基线而当前空闲，也补记一次（见下方注释）。
      * @param props - 槽注入的属性。
      */
-    function ReviewChip(props) {
+    function TurnReviewChip(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       const { sessionId } = props ?? {}
 
@@ -16657,6 +16296,7 @@ window.__ModuleLoader__.load({
       const running = useSessions((state) =>
         sessionId === undefined ? false : state?.byId?.[sessionId]?.isRunning === true,
       )
+      const open = useTurnDrawerOpen()
 
       const [count, setCount] = react.useState(null)
       const [trouble, setTrouble] = react.useState('')
@@ -16712,38 +16352,18 @@ window.__ModuleLoader__.load({
         'button',
         {
           type: 'button',
+          // 脚本、样式与自动化依赖的稳定锚点：`data-desktop-review` 是入口本身，
+          // `data-review-turn-chip` 明确表达"这是本轮修改的入口，不是 Git 标签"。
           'data-desktop-review': '',
+          'data-review-turn-chip': '',
           'aria-label': t('title'),
-          title: trouble === '' ? t('openInSidebar') : trouble,
-          onClick: () => {
-            const sidebar = props?.sidebarRight
-            if (sidebar === undefined) {
-              setTrouble(t('sidebarUnavailable'))
-              return
-            }
-            try {
-              // 每次读取侧栏的真实状态，兼容手动收起、关闭标签和切换其它标签。
-              // 收起保留标签及已展开的差异，下一次点击可以继续查看。
-              if (sidebar.isExpanded?.() && sidebar.active?.()?.kind === KIND &&
-                  typeof sidebar.toggleExpanded === 'function') {
-                sidebar.toggleExpanded()
-              } else if (sessionId !== undefined && typeof sidebar.openTabIn === 'function') {
-                sidebar.openTabIn(sessionId, KIND, {})
-              } else if (typeof sidebar.openTab === 'function') {
-                sidebar.openTab(KIND, {})
-              } else {
-                // 诊断信息，面向开发者，列出服务实际提供的键名以便定位契约变化。
-                // 标记必须与代码同一行——检查器是逐行判定的。
-                setTrouble(`sidebarRight 没有 openTab/openTabIn（实际键：${Object.keys(sidebar).join(',')}）`) // i18n-allow
-                return
-              }
-              setTrouble('')
-            } catch (cause) {
-              // 不静默吞掉：打不开侧边栏时把原因显示在悬停提示里，否则表现只是"点了没反应"，
-              // 从界面完全看不出是服务缺失、方法名不符，还是标签类型没登记。
-              setTrouble(String(cause?.message ?? cause))
-            }
-          },
+          // 展开态：屏幕阅读器与测试都能看出这个按钮控制的是哪个抽屉。
+          'aria-expanded': open,
+          'aria-controls': TURN_DRAWER_ID,
+          title: trouble === '' ? t('openTurnReview') : trouble,
+          // **唯一的动作**：切换本轮审查抽屉。它不接触 `sidebarRight`——项目级 Git 由官方
+          // 侧栏的 Git 图标打开，两者是不同的 surface（见文件头的说明）。
+          onClick: () => turnDrawerStore.set(!turnDrawerStore.get()),
           style: {
             display: 'inline-flex',
             alignItems: 'center',
@@ -16754,9 +16374,9 @@ window.__ModuleLoader__.load({
             padding: '0 8px',
             height: '28px',
             borderRadius: '8px',
-            border: `1px solid ${trouble === '' ? 'var(--dsw-alias-border-l1, #eceef2)' : '#6b3b3b'}`,
+            border: `1px solid ${trouble === '' ? (open ? ACCENT : 'var(--dsw-alias-border-l1, #eceef2)') : '#6b3b3b'}`,
             background: 'var(--dsh-review-chip-bg, var(--dsw-alias-bg-base, #fff))',
-            color: trouble === '' ? (hasChanges ? ACCENT : 'var(--dsw-alias-label-secondary)') : 'var(--dsw-alias-state-error-primary, #d44747)',
+            color: trouble === '' ? (hasChanges || open ? ACCENT : 'var(--dsw-alias-label-secondary)') : 'var(--dsw-alias-state-error-primary, #d44747)',
             fontSize: uiPx(12),
             fontFamily: UI_FONT,
             fontWeight: 500,
@@ -16776,6 +16396,206 @@ window.__ModuleLoader__.load({
           }),
         ),
         react.createElement('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, label),
+      )
+    }
+
+    /**
+     * **本轮修改审查抽屉**（turn scope）。
+     *
+     * 挂在 `shell.overlay`（官方文档里为"自己的整帧浮层"准备的座位：在所有列之上、在它们的
+     * 滚动容器之外），因此不会被输入框所在的卡片裁掉。开合只由 `turnDrawerStore` 决定：
+     *
+     *   * 入口（`TurnReviewChip`）切换它；
+     *   * 抽屉自己的 × 与 Escape 关掉它；
+     *   * 官方 Git 侧栏的开关**完全不影响它**（反之亦然）。
+     *
+     * 几何是固定的、不依赖侧栏展开与否：右上方一块浮层，宽度 `min(760px, 100vw - 24px)`，
+     * 高度 `min(620px, 100vh - 140px)`，因此两个 surface 可以同时开着。
+     *
+     * @param props - 槽注入的属性（root 作用域：只有 `useSessions`，没有 `sessionId`）。
+     */
+    function TurnReviewDrawer(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const open = useTurnDrawerOpen()
+      const { sessionId, workspace } = useCurrentTurn(props)
+      const rootRef = react.useRef(null)
+
+      /**
+       * Escape 关闭。
+       *
+       * 只在展开时挂监听：收起状态下按 Escape 不该有任何副作用。用 `document` 上的监听
+       * 而不是抽屉自身的 keydown，是因为焦点可能停在入口按钮或对话输入框上——用户按下
+       * Escape 时并不保证焦点在抽屉里。
+       */
+      react.useEffect(() => {
+        if (!open) return undefined
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') turnDrawerStore.set(false)
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [open])
+
+      // 所有 hook 都在这个提前返回**之前**（React #310：hook 数量不能随分支变化）。
+      if (!open) return null
+
+      return react.createElement(
+        'aside',
+        {
+          ref: rootRef,
+          id: TURN_DRAWER_ID,
+          // 两个稳定锚点：`data-review-turn-surface` 说明这是哪个 surface（drawer，而不是
+          // 官方侧栏的 panel），`data-review-turn-drawer` 供测试与样式直接命中。
+          'data-review-turn-surface': 'drawer',
+          'data-review-turn-drawer': '',
+          'aria-label': t('title'),
+          style: {
+            position: 'fixed',
+            // 避开窗口顶部的系统按钮（Windows 的 caption 区）与对话页头部的图标。
+            top: 'clamp(12px, 8vh, 72px)',
+            right: 'clamp(12px, 3vw, 40px)',
+            zIndex: 9999,
+            // 视口限制写成 `min()`：窄窗口里抽屉跟着变窄，绝不横向溢出（也就绝不会出现
+            // "关闭按钮在屏幕外、点不到"）。高度留出上下边距。
+            width: 'min(760px, calc(100vw - 24px))',
+            maxHeight: 'min(620px, calc(100vh - 140px))',
+            display: 'flex',
+            flexDirection: 'column',
+            borderRadius: '10px',
+            border: '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
+            background: 'var(--dsw-alias-bg-base, #fff)',
+            color: 'var(--dsw-alias-label-primary)',
+            fontFamily: UI_FONT,
+            boxShadow: '0 16px 48px rgba(0,0,0,.28)',
+            overflow: 'hidden',
+            // 浮层默认点击穿透；这里显式收回指针事件，抽屉本身才能被点。
+            pointerEvents: 'auto',
+          },
+        },
+        react.createElement(TurnReviewPanel, {
+          t,
+          workspace,
+          sessionId,
+          onClose: () => turnDrawerStore.set(false),
+        }),
+      )
+    }
+
+    /**
+     * **本轮修改审查面板**（turn scope）——"这一轮 agent 改了什么"。
+     *
+     * 数据只有一条来源：`/changes`，它的基线是本轮开始时记录的快照（`/baseline`）。这与
+     * 项目级 Git 的 `/workspace`（基线是 HEAD）是两件事：用户在 agent 开始之前自己改过的
+     * 文件在项目 Changes 里会出现，**在"本轮修改"里绝不出现**。
+     *
+     * 内容刻意精简：这不是第二套 Git 客户端。没有 Changes/Log 页签、没有暂存与提交、没有
+     * 分支/标签/储藏/提交图——那些都属于项目级 Git（官方侧栏的 Git 标签）。这里只有
+     * "本轮改了哪些文件 + 每个文件的差异"，差异渲染器与项目级 Git 共用同一套
+     * （`FileList` → `LazyFileDiff` / `FileDiff` / 并排与统一视图 / 字符级高亮）。
+     *
+     * @param props - `{ t, workspace, sessionId, onClose }`。
+     */
+    function TurnReviewPanel(props) {
+      const { t, workspace, sessionId, onClose } = props
+      const turn = useChanges(workspace, sessionId)
+      const { files, added, removed } = summarize(turn.state.result)
+
+      return react.createElement(
+        react.Fragment,
+        null,
+        react.createElement(
+          'div',
+          {
+            'data-review-turn-header': '',
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              padding: '10px 12px',
+              borderBottom: `1px solid ${BORDER}`,
+              flexShrink: 0,
+            },
+          },
+          react.createElement('strong', { style: { fontWeight: 600, fontSize: uiPx(13) } }, t('title')),
+          react.createElement(
+            'span',
+            { 'data-review-turn-count': '', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } },
+            t('files', { count: files.length }),
+          ),
+          // `+120 / -36`：本轮的总增删。数字来自 `/changes` 已经给出的每个文件的行数，
+          // 不额外发请求。
+          react.createElement(
+            'span',
+            { 'data-review-turn-stats': '', style: { display: 'inline-flex', gap: '6px', fontSize: uiPx(12), fontFamily: CODE_FONT } },
+            react.createElement('span', { style: { color: ADDED } }, `+${added}`),
+            react.createElement('span', { style: { color: REMOVED } }, `-${removed}`),
+          ),
+          react.createElement('span', { style: { flex: 1 } }),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-review-icon-button': '',
+              onClick: () => turn.reload(),
+              title: t('refresh'),
+              'aria-label': t('refresh'),
+            },
+            react.createElement(
+              'svg',
+              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5.5H10',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }),
+            ),
+          ),
+          // 独立的关闭入口（×）。它只关这个抽屉，与官方侧栏的关开毫无关系。
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              'data-review-turn-close': '',
+              'data-review-icon-button': '',
+              onClick: onClose,
+              title: t('close'),
+              'aria-label': t('close'),
+            },
+            react.createElement(
+              'svg',
+              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+              react.createElement('path', {
+                d: 'M4 4l8 8M12 4l-8 8',
+                stroke: 'currentColor',
+                strokeWidth: 1.5,
+                strokeLinecap: 'round',
+              }),
+            ),
+          ),
+        ),
+        // 正文：本轮的文件清单 + 点开的逐行差异。与项目级 Git 共用 `FileList`（因此并排/
+        // 统一视图、自动换行、字符级高亮、二进制与大文件处理都是同一套实现），但数据是
+        // **turn scope**：`result.scope` 不是 'workspace' 时 `FileList` 走内联差异与
+        // `scope: 'turn'` 的还原，这两条分支本来就按数据自身的 scope 判定。
+        react.createElement(
+          'div',
+          {
+            'data-review-turn-body': '',
+            style: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px 16px 18px' },
+          },
+          react.createElement(FileList, {
+            t,
+            result: turn.state.result,
+            phase: turn.state.phase,
+            message: turn.state.message,
+            workspace,
+            sessionId,
+            revision: turn.state.result?.revision ?? '',
+            onChanged: turn.reload,
+          }),
+        ),
       )
     }
 
@@ -16858,9 +16678,12 @@ window.__ModuleLoader__.load({
             })
             // 打开官方 Git Sidebar 并落在 Log 页签：不这么做的话，请求会一直挂到用户
             // 自己切到 Log 为止，用户点「与当前比较」之后看起来"什么都没发生"。
+            //
+            // 这里是**项目级 Git** 的合法用法：比较视图住在 Git 标签的 Log 页签里。它不
+            // 触碰本轮审查抽屉（`turnDrawerStore`），两者互不影响。
             panelLogIntent.request()
             const sidebar = ctx.sidebarRight
-            if (typeof sidebar?.openTab === 'function') sidebar.openTab(KIND, {})
+            if (typeof sidebar?.openTab === 'function') sidebar.openTab(GIT_KIND, {})
           },
         }
         ctx.effect(() => () => {
@@ -16871,25 +16694,55 @@ window.__ModuleLoader__.load({
 
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'review: dictionaries')
 
+      // 「本轮修改」入口：只显示本轮改动数并切换本轮审查抽屉。
+      //
+      // **不再注入 `sidebarRight`**：入口与官方侧栏之间没有任何调用关系——那正是这次修复
+      // 的核心。注入得多一点，下一个人就又能顺手 `openTab` 一次。
       ctx.effect(
         () =>
-          ctx.slots.inject(CHIP_SLOT, () =>
+          ctx.slots.inject(TURN_CHIP_SLOT, () =>
             ctx.slots.register(
               {
-                name: CHIP_SLOT,
-                id: ID,
-                order: ORDER,
+                name: TURN_CHIP_SLOT,
+                id: TURN_CHIP_ID,
+                order: TURN_CHIP_ORDER,
                 locale: NS,
-                // 把官方侧边栏服务交给概览入口，供它打开差异标签。
-                inject: () => ({ t: ctx.locale.bind(NS), sidebarRight: ctx.sidebarRight }),
+                inject: () => ({ t: ctx.locale.bind(NS) }),
               },
-              ReviewChip,
+              TurnReviewChip,
             ),
           ),
-        'dsh-client-ui-review: review chip',
+        'dsh-client-ui-review: turn review chip',
       )
 
-      // 把标签**类型**注册进侧边栏的类型表。
+      // 「本轮修改审查」抽屉：挂在 `shell.overlay`（整帧浮层，在所有列之上、在滚动容器
+      // 之外），因此不会被输入框所在的卡片裁掉。
+      //
+      // 它与下面的 Git 标签是**两个互不相关的注册**：不同的槽位、不同的作用域、不同的
+      // 开合状态。这里只有一个 `id`，不注册任何 `sidebarRightTabs` 类型——因此抽屉永远
+      // 不可能出现在官方侧栏的标签列表里，也不可能被 `openTab` 打开。
+      ctx.effect(
+        () =>
+          ctx.slots.inject(TURN_DRAWER_SLOT, () =>
+            ctx.slots.register(
+              {
+                name: TURN_DRAWER_SLOT,
+                id: TURN_DRAWER_ID,
+                // 浮层条目之间按 order 排序；本轮审查要盖在其它提示之上。
+                order: 30,
+                locale: NS,
+                inject: () => ({ t: ctx.locale.bind(NS) }),
+              },
+              TurnReviewDrawer,
+            ),
+          ),
+        'dsh-client-ui-review: turn review drawer',
+      )
+
+      // 把**项目级 Git 标签的类型**注册进侧边栏的类型表。
+      //
+      // 只有项目级 Git 注册标签类型 ——「本轮修改审查」不在这里，它是 `shell.overlay` 里的
+      // 独立浮层，因此永远不会出现在侧栏的标签列表里，也不可能被 `openTab` 打开。
       //
       // 这一步与下面的槽位注册是两件事，缺一不可：
       //   * 类型表（这里）决定 `openTab(kind)` 能否找到该类型——缺了会抛
@@ -16900,8 +16753,8 @@ window.__ModuleLoader__.load({
         const registry = ctx.sidebarRightTabs
         if (registry === undefined) return () => undefined
         return registry.register({
-          id: SIDEBAR_ID,
-          kind: KIND,
+          id: GIT_SIDEBAR_ID,
+          kind: GIT_KIND,
           priority: 'extension',
           title: () => 'Git',
           guide: [{
@@ -16911,48 +16764,48 @@ window.__ModuleLoader__.load({
             icon: primitives.IconBranchOutline16,
           }],
         })
-      }, 'dsh-client-ui-review: tab type')
+      }, 'dsh-client-ui-review: git tab type')
 
       // 差异正文：keyed 槽位，key 即上面注册的标签类型。
       ctx.effect(
         () =>
-          ctx.slots.inject(TAB_SLOT, () =>
+          ctx.slots.inject(GIT_TAB_SLOT, () =>
             ctx.slots.register(
               {
-                name: TAB_SLOT,
-                key: SIDEBAR_ID,
+                name: GIT_TAB_SLOT,
+                key: GIT_SIDEBAR_ID,
                 locale: NS,
                 inject: () => ({ t: ctx.locale.bind(NS) }),
               },
-              ReviewTab,
+              GitSidebarTab,
             ),
           ),
-        'dsh-client-ui-review: review tab body',
+        'dsh-client-ui-review: git sidebar tab body',
       )
 
       ctx.effect(
         () =>
-          ctx.slots.inject(TAB_TITLE_SLOT, () =>
+          ctx.slots.inject(GIT_TAB_TITLE_SLOT, () =>
             ctx.slots.register(
               {
-                name: TAB_TITLE_SLOT,
-                key: SIDEBAR_ID,
+                name: GIT_TAB_TITLE_SLOT,
+                key: GIT_SIDEBAR_ID,
                 locale: NS,
                 inject: () => ({ t: ctx.locale.bind(NS) }),
               },
-              ReviewTabTitle,
+              GitSidebarTabTitle,
             ),
           ),
-        'dsh-client-ui-review: review tab title',
+        'dsh-client-ui-review: git sidebar tab title',
       )
 
       // 提交图**不再单独注册成一个面板**。
       //
       // 早先这里是两处注册：`sidebar.panellist`（主界面左侧那一列图标里的「提交图」入口）与
-      // `main`（按同一个 key 渲染内容）。它与**项目级 Git 抽屉的 Log 页签**画的是同一个
+      // `main`（按同一个 key 渲染内容）。它与**Git 标签的 Log 页签**画的是同一个
       // `CommitGraphView`，因此用户在左侧多看到一个重复入口——点它打开的"独立提交图页面"
-      // 与抽屉里的 Log 没有任何区别。现在两处注册都删掉，提交图只由抽屉的 Log 页签渲染
-      // （见 `data-review-tab-body: 'log'` 那一段）。
+      // 与 Git 标签里的 Log 没有任何区别。现在两处注册都删掉，提交图只由 Git 标签的 Log
+      // 页签渲染（见 `data-review-tab-body: 'log'` 那一段）。
       //
       // 删掉的只是**入口**：`CommitGraphView`（含泳道 / 分支筛选 / 详情 / Diff Preview）
       // 一个字都没动。
@@ -17048,7 +16901,7 @@ window.__ModuleLoader__.load({
     // Log 页签与主区域共用的那个视图，都需要能被单独驱动。
     exports.__workspaceGateForTest = createWorkspaceGate
     exports.__commitGraphViewForTest = CommitGraphView
-    // Log 页签的错误边界也导出：它是"图炸了不能把抽屉和右上角入口一起带走"这条要求的
+    // Log 页签的错误边界也导出：它是"图炸了不能把整个项目 Git 面板一起带走"这条要求的
     // 唯一落点，测试要能直接驱动它（抛一个错进去、断言降级页与重试）。
     exports.__logErrorBoundaryForTest = LogErrorBoundary
     // 面板级边界也导出：它是"入口永远不消失"这条硬要求的落点（面板崩了只降级面板本体）。
@@ -17068,17 +16921,24 @@ window.__ModuleLoader__.load({
     // 文件列表也导出给测试：它是"总变动行数"与"暂存标记"的渲染处，而这两个正是
     // "外部数字对不上""看不出哪些已暂存"两个反馈的落点，必须能被断言钉住。
     exports.__fileListForTest = FileList
-    // 抽屉本体也导出给测试：外观层（头栏、提交卡片、分组头、行内动作的悬停规则）都在它
-    // 的 DOM 结构上，隔着两层入口组件（`HeroChangesTrigger` → `ReviewPanel`）断言会让
-    // 测试被无关的状态耦合住（实测踩到过：换一个 hook key 也拿不到干净状态，因为嵌套
-    // 组件的 hook 槽按树中位置归属）。
-    exports.__reviewPanelForTest = ReviewPanel
-    // 常驻开关（模块级 store）也导出：抽屉的关闭方式（点外部 / Escape / 入口自身 toggle）
-    // 全部以它为状态源，而"关掉之后要靠它才能再打开"——不导出的话离线测试只能测一次关闭，
-    // 后面几条豁免断言就没有干净的初态可用。
-    exports.__panelStoreForTest = panelStore
-    // 四个必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
-    // sidebarRight 用于打开标签，sidebarRightTabs 用于把标签类型注册进它的类型表。
+    // 项目级 Git 面板本体也导出给测试：外观层（头栏、提交卡片、分组头、行内动作的悬停规则）
+    // 都在它的 DOM 结构上，隔着官方侧边栏的挂载层断言会让测试被无关的状态耦合住
+    // （实测踩到过：换一个 hook key 也拿不到干净状态，因为嵌套组件的 hook 槽按树中位置归属）。
+    exports.__projectGitPanelForTest = ProjectGitPanel
+    // 本轮修改审查的两个组件也导出：抽屉的几何/开关与面板的内容都是离线断言的对象，
+    // 而"入口只切换抽屉、绝不碰官方侧栏"这条契约要靠它们直接驱动。
+    exports.__turnReviewDrawerForTest = TurnReviewDrawer
+    exports.__turnReviewPanelForTest = TurnReviewPanel
+    exports.__turnReviewChipForTest = TurnReviewChip
+    // 入口隔离与 scope 语义的断言点：抽屉的开关是模块级 store（不是组件 state），
+    // 因此"点入口 -> 抽屉开"与"点 Git 图标 -> 抽屉不动"都能被直接读出。
+    exports.__turnDrawerStoreForTest = turnDrawerStore
+    // 必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
+    // sidebarRight 只用于**项目级 Git**（跨插件的「与当前比较」要打开 Git 标签），
+    // sidebarRightTabs 用于把 Git 标签类型注册进它的类型表。
+    //
+    // **「本轮修改」入口不注入 sidebarRight**：入口与官方侧栏之间没有任何调用关系，
+    // 注入得多一点下一个人就又能顺手 `openTab` 一次——那正是这次修复的回归点。
     //
     // `sessions` 与 `workspaces` 已不再被本插件直接读取（当前工作区改用渲染器注入的
     // 标准钩子 `useSessions`），但仍然声明：官方 `dsh-client-ui-session` /

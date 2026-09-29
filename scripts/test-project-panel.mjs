@@ -1,9 +1,21 @@
-// 验证项目级面板：入口存在、可展开、能取到工作区、并且显示提交历史。
+// ⚠️ 历史脚本，**当前不可用**——它对准的面板形态已经不存在。
 //
-//   node scripts/test-project-panel.mjs
+// 它验证的是"项目级面板是自绘的、挂在全局覆盖层上"的那一版实现：入口是插件自己的浮动按钮
+// （`[data-review-trigger]`），面板是 `aside[style*=fixed]`。那一版**已经删除**：
+// 项目级 Git 现在是**官方右侧栏里的 Git 标签**（入口 = 侧栏 Git 图标，正文 =
+// `<aside data-desktop-review-surface="panel">`），开合与尺寸由官方侧栏管理。
 //
-// 需求是"进入项目就能点开侧边栏，不必先在对话里"。官方右侧栏做不到（其内容槽带
-// scope: "session"），因此这块面板是自绘的、挂在全局覆盖层上。
+// 同样地，Log 的布局也变了：没有左侧分支栏，分支选择是提交图**首行工具栏**里的下拉
+// （`data-graph-ref-select`），主干只剩"提交图 + 详情"两栏 + 底部 Diff Preview。
+//
+// 重新对准上面这套 DOM 之前，本文件跑不出结论。不需要 Electron 的等价回归在
+// `scripts/test-git-sidebar-contract.mjs`、`scripts/test-review-project-git.mjs`、
+// `scripts/test-review-graph-view.mjs`、`scripts/test-review-graph-branch-filter.mjs`、
+// `scripts/test-project-git-panel-style.mjs`，它们都在 `npm run test:git-sidebar` /
+// `npm run test:git` 里。
+//
+// 需求是"进入项目就能点开侧边栏，不必先在对话里"——官方侧栏做不到（其内容槽带
+// scope: "session"），因此这一版面板当初是自绘的、挂在全局覆盖层上。
 //
 // 需要 dev 实例带 --remote-debugging-port 启动。
 const PORT = Number(process.env.DSH_CDP_PORT ?? 9333)

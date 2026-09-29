@@ -755,13 +755,18 @@ async function click(node) {
 }
 
 console.log('')
-console.log('=== 3. 三栏结构与数据 ===')
+console.log('=== 3. 布局与数据（**没有左侧分支栏**）===')
 await mount()
 check('3) 视图已渲染', find('data-graph-view') !== null, 'true')
-// 左栏：**权威 refs 清单**的三段（本地 / 远程 / 标签）。**没有 HEAD 段**——当前分支留在
-// 「本地」里并用 ✓ 标记（需求 6/7）。
-const sections = findAll('data-graph-tree-section').map((n) => n.props['data-graph-tree-section'])
-check('   分支树三段（本地/远程/标签，没有单独 HEAD）', sections.join(','), 'local,remote,tags')
+// 结构：Log 只有"提交列表 + 详情"两栏，分支选择在首行工具栏。
+check('   没有左侧分支栏', find('data-graph-pane', 'tree'), null)
+check('   首行工具栏里有分支选择器', find('data-graph-ref-select') !== null, 'true')
+check('   下拉未打开时 ref 清单不渲染', find('data-graph-ref-list'), null)
+// 打开下拉：**权威 refs 清单**的三段（本地 / 远程 / 标签）。**没有 HEAD 段**——当前分支留在
+// 「本地」里并用 ✓ 标记。
+await click(find('data-graph-ref-select-button'))
+const sections = findAll('data-graph-ref-section').map((n) => n.props['data-graph-ref-section'])
+check('   ref 清单三段（本地/远程/标签，没有单独 HEAD）', sections.join(','), 'local,remote,tags')
 // 提交行数 = 4 条提交。
 check('   提交行数', findAll('data-graph-row').length, 4)
 // 中栏每行一个点；根提交也在内（它的颜色来自 commit 边）。
@@ -798,6 +803,9 @@ checkTrue('3) 请求了 graph 路由', graphRequest !== undefined)
 check('   带上工作区', graphRequest.body.workspace, 'F:\\code\\projA')
 check('   带上分页大小', graphRequest.body.limit, 80)
 check('   第一页 skip=0', graphRequest.body.skip, 0)
+// 收起下拉：它是浮层，后面的小节从"关着"的干净状态开始（也顺带验证能收起）。
+await click(find('data-graph-ref-select-button'))
+check('   再点一次收起下拉', find('data-graph-ref-list'), null)
 
 console.log('')
 console.log('=== 4. 选中提交：右栏取详情 ===')
@@ -971,16 +979,24 @@ console.log('')
 console.log('=== 6. 按分支筛选 ===')
 {
   const before = requests.filter((r) => r.url.includes('/review/graph')).length
-  // 左栏现在是**权威清单**里的分支名。用带斜杠的那个：它同时验证"带 `/` 的本地分支确实
-  // 出现在本地列表里、并且可以被点来筛选"（需求 8 / 53）。
-  await click(find('data-graph-tree-row', 'feature/foo'))
+  // 分支名来自**权威清单**，选择动作在首行下拉里。用带斜杠的那个：它同时验证"带 `/` 的
+  // 本地分支确实出现在本地列表里、并且可以被点来筛选"。
+  await click(find('data-graph-ref-select-button'))
+  checkTrue('6) 下拉已打开', find('data-graph-ref-list') !== null)
+  await click(find('data-graph-ref-row', 'feature/foo'))
   const after = requests.filter((r) => r.url.includes('/review/graph'))
-  check('6) 点分支行会按它重新拉图', after.length, before + 1)
+  check('   点分支行会按它重新拉图', after.length, before + 1)
   check('   请求带 ref', after[after.length - 1].body.ref, 'feature/foo')
-  check('   出现清除筛选按钮', find('data-graph-clear-ref') !== null, 'true')
+  // 选完自动收起，并且按钮上写着选中的那个 ref。
+  check('   选完自动收起下拉', find('data-graph-ref-list'), null)
+  check('   选择器上写着选中的 ref', textOf(find('data-graph-ref-select-button')), 'feature/foo▾')
+  // 「清除筛选」现在就是下拉里的第一项（「全部分支」）。
+  await click(find('data-graph-ref-select-button'))
+  check('   下拉里出现「全部分支」', find('data-graph-clear-ref') !== null, 'true')
   await click(find('data-graph-clear-ref'))
   const cleared = requests.filter((r) => r.url.includes('/review/graph'))
   check('   清除后不带 ref', cleared[cleared.length - 1].body.ref, undefined)
+  check('   清除后按钮回到「全部分支」', textOf(find('data-graph-ref-select-button')), 'graphAllRefs▾')
 }
 
 console.log('')
@@ -1105,7 +1121,7 @@ console.log('=== 9. 滚到底自动加载下一页（item 5）===')
   check('   hasMore=false 后不再请求', calls.length - settled, 0)
 
   // 左栏数据源不被分页改动：第二页里的新提交**不许**出现在左栏。
-  const treeText = viewText('data-graph-tree')
+  const treeText = viewText('data-graph-ref-list')
   check('   左栏没有被分页扩展', treeText.includes('older one'), 'false')
   graphPages = null
 }
@@ -1128,8 +1144,10 @@ console.log('=== 9b. 分页在飞的那一帧：列表不白屏，底部只说"�
   const during = collectHostNodes(render(GraphView, mountProps, rootKey).tree, rootKey)
   const duringText = (attr) =>
     during.filter((node) => node.props?.[attr] !== undefined).map((node) => textOf(node)).join(' ')
-  // 1) 三栏与列表**原地保留**（不是被整页 loading 换掉）。
-  check('   分页在飞时三栏仍在', during.filter((n) => n.props?.['data-graph-pane'] !== undefined).length, 3)
+  // 1) 两栏与列表**原地保留**（不是被整页 loading 换掉）。
+  //    只有 list + detail：分支栏已经删除，因此这里从 3 变 2。
+  check('   分页在飞时两栏仍在', during.filter((n) => n.props?.['data-graph-pane'] !== undefined).length, 2)
+  check('   两栏就是 list + detail', during.map((n) => n.props?.['data-graph-pane']).filter((v) => v !== undefined).sort().join(','), 'detail,list')
   check('   已有的 4 条仍然渲染', findAll('data-graph-row').length, 4)
   check('   没有退化成整页 loading', /\bgraphLoading\b/.test(duringText('data-graph-view')), 'false')
   // 2) 底部只多一行"正在加载更多…"，按钮让位（避免"点了没反应"）。
@@ -1435,21 +1453,20 @@ console.log('=== 11. Diff Preview：高度拖动/持久化、Escape、工具栏�
     checkTrue('   加号用饱和绿色', String(marker?.props?.style?.color ?? '').startsWith('#'))
   }
 
-  // ---- 11i. 窄窗口：可以收起 branch tree 与 detail，但图形与 Preview 仍在 ----
+  // ---- 11i. 窄窗口：可以收起详情栏，但提交图与 Preview 仍在 ----
+  //
+  // 「收起分支栏」已经不存在了：Log 没有左侧分支栏，那条工具栏按钮一并删除。
   if (find('data-graph-diff-preview') === null) await click(find('data-graph-file-row', 'src/app.ts'))
-  const collapseTree = findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'tree')
+  check('   没有「收起分支树」按钮（分支栏已删除）', findAll('data-graph-tool').some((n) => n.props?.['data-graph-tool'] === 'tree'), 'false')
   const collapseDetail = findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'detail')
-  if (collapseTree !== undefined && collapseDetail !== undefined) {
-    if (find('data-graph-pane', 'tree') !== null) await click(collapseTree)
+  if (collapseDetail !== undefined) {
     if (find('data-graph-pane', 'detail') !== null) await click(collapseDetail)
-    check('   收起后没有左栏', find('data-graph-pane', 'tree'), null)
     check('   收起后没有右栏', find('data-graph-pane', 'detail'), null)
-    check('   中栏仍在（提交图优先保留）', find('data-graph-pane', 'list') !== null, 'true')
+    check('   提交列表仍在（提交图优先保留）', find('data-graph-pane', 'list') !== null, 'true')
     check('   Diff Preview 仍在（优先保留）', find('data-graph-diff-preview') !== null, 'true')
     // 恢复：不影响后续断言（下一次 mount 会重新读折叠状态，因此这里必须还原持久化值）。
-    await click(findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'tree'))
     await click(findAll('data-graph-tool').find((n) => n.props?.['data-graph-tool'] === 'detail'))
-    check('   恢复后左右两栏回来了', find('data-graph-pane', 'tree') !== null && find('data-graph-pane', 'detail') !== null, 'true')
+    check('   恢复后详情栏回来了', find('data-graph-pane', 'detail') !== null, 'true')
   } else {
     console.log('   SKIP  收起按钮：未找到')
   }
@@ -1959,17 +1976,20 @@ console.log('=== 15. 交互式变基：计划对话框 / 进度横幅 / 停点�
 }
 
 console.log('')
-console.log('=== 20. 左栏分支筛选：权威 refs 清单（含带 `/` 的本地分支）===')
+console.log('=== 20. 分支选择器下拉：权威 refs 清单（含带 `/` 的本地分支）===')
 {
   await mount()
-  /** 某一栏里的分支名（按 data-graph-tree-section 的容器收窄）。 */
+  /** 某一栏里的分支名（按 data-graph-ref-section 的容器收窄）。 */
   const rowsIn = (key) => {
-    const section = findAll('data-graph-tree-section').find((node) => node.props['data-graph-tree-section'] === key)
+    const section = findAll('data-graph-ref-section').find((node) => node.props['data-graph-ref-section'] === key)
     if (section === undefined) return []
     return collectHostNodes(section, 'section')
-      .filter((node) => node.props?.['data-graph-tree-row'] !== undefined)
-      .map((node) => node.props['data-graph-tree-row'])
+      .filter((node) => node.props?.['data-graph-ref-row'] !== undefined)
+      .map((node) => node.props['data-graph-ref-row'])
   }
+  // 清单在下拉里：先打开它。
+  await click(find('data-graph-ref-select-button'))
+  checkTrue('20) 下拉已打开', find('data-graph-ref-list') !== null)
   const local = rowsIn('local')
   const remote = rowsIn('remote')
   const tags = rowsIn('tags')
@@ -1981,11 +2001,11 @@ console.log('=== 20. 左栏分支筛选：权威 refs 清单（含带 `/` 的本
     check(`   ${name} 属于本地`, local.includes(name) && !remote.includes(name), 'true')
   }
   // 没有单独的 HEAD 分组；当前分支留在本地，并带 ✓ 标记（需求 6/7/55）。
-  check('   没有 HEAD 分组', findAll('data-graph-tree-section').some((n) => n.props['data-graph-tree-section'] === 'head'), 'false')
-  const masterRow = collectHostNodes(find('data-graph-tree', undefined) ?? { props: {} }, 'probe').find(
-    (node) => node.props?.['data-graph-tree-row'] === 'master',
+  check('   没有 HEAD 分组', findAll('data-graph-ref-section').some((n) => n.props['data-graph-ref-section'] === 'head'), 'false')
+  const masterRow = collectHostNodes(find('data-graph-ref-list', undefined) ?? { props: {} }, 'probe').find(
+    (node) => node.props?.['data-graph-ref-row'] === 'master',
   )
-  check('   当前分支带 current 标记', masterRow?.props?.['data-graph-tree-current'], 'true')
+  check('   当前分支带 current 标记', masterRow?.props?.['data-graph-ref-current'], 'true')
   check('   当前分支行文案带 ✓', textOf(masterRow), '\u2713 master')
   // 数据源确实是 gitbar 的两条只读路由，而不是提交页里的 decoration（需求 12/13/17）。
   check('   清单取自 gitbar /branches', requests.some((r) => r.url.includes('/dsh-desktop/gitbar/branches')), 'true')

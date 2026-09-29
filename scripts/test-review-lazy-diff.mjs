@@ -3,9 +3,9 @@
 //   node scripts/test-review-lazy-diff.mjs
 //
 // 为什么单独一个文件：这个测试把 `StagingSection` 直接当**根组件**渲染。假渲染器按"树中
-// 位置 + key"分配 hook 槽，多级嵌套（入口 → 面板边界 → ReviewPanel → StagingSection）时，
-// 桩里的槽归属很容易与真实 React 不一致，于是"点一下到底触发了什么"会被误判；把它当根
-// 组件就只剩一个实例，槽的归属是确定的。整个抽屉级的交互（切项目、边界降级）由
+// 位置 + key"分配 hook 槽，多级嵌套（Git 标签 → 面板边界 → ProjectGitPanel → StagingSection）
+// 时，桩里的槽归属很容易与真实 React 不一致，于是"点一下到底触发了什么"会被误判；把它当根
+// 组件就只剩一个实例，槽的归属是确定的。整个面板级的交互（切项目、边界降级）由
 // `test-review-project-git.mjs` 覆盖。
 //
 // 覆盖的真实契约：

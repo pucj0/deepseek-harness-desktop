@@ -22,6 +22,12 @@ assert.match(review, /callGitbarGet\('auto-saves'/u)
 assert.match(review, /data-auto-save-reminder/u)
 assert.match(review, /data-auto-save-latest/u)
 assert.match(review, /data-auto-save-find/u)
+// 统一视图：提示与动作都在**分组标题行**里（`note:` + 统一小按钮），不是在列表顶部另起一块
+// 独立的告警盒子——那正是"下面又临时塞了几块"的来源。
+assert.match(review, /note: autoSaveNotice/u)
+assert.match(review, /'data-auto-save-reminder-restore': ''/u)
+assert.match(review, /'data-review-row-button': ''/u)
+assert.match(review, /'data-review-list-row': ''/u)
 assert.match(review, /git stash apply --index \$\{oid\}/u)
 assert.match(host, /SMART_STASH_PREFIX = 'dsh-smart-switch:'/u)
 assert.match(host, /candidate\.sha === smart\.stashOid/u)

@@ -563,25 +563,31 @@ console.log('=== 6. Log 页签的三栏：拖动分栏（持久化）、搜索�
 
   hold = () => false
   let nodes = await renderGraph()
-  check('6) 左栏默认宽度', paneFlex(nodes, 'tree'), '0 0 200px')
+  // **没有左侧分支栏**：这一节原本断言"左栏默认 200px + 能拖能收"。分支栏已经删除
+  // （分支选择上移到首行下拉），因此这里反过来钉住"它确实不存在"。
+  check('6) 没有左侧分支栏', paneFlex(nodes, 'tree'), '(none)')
+  check('   也没有分支栏手柄', nodes.some((n) => n.props?.['data-graph-splitter'] === 'tree'), 'false')
+  check('   也没有「收起分支树」按钮', nodes.some((n) => n.props?.['data-graph-tool'] === 'tree'), 'false')
+  check('   首行工具栏里有分支选择器', nodes.some((n) => n.props?.['data-graph-ref-select'] !== undefined), 'true')
   check('   右栏默认宽度', paneFlex(nodes, 'detail'), '0 0 340px')
-  const splitter = nodes.find((n) => n.props?.['data-graph-splitter'] === 'tree')
+  const splitter = nodes.find((n) => n.props?.['data-graph-splitter'] === 'detail')
+  // 详情栏在右边：**向左拖是变宽**。
   splitter.props.onMouseDown({ button: 0, clientX: 500, preventDefault() {} })
-  emitDocument('mousemove', { clientX: 560 })
+  emitDocument('mousemove', { clientX: 440 })
   nodes = await renderGraph(1)
-  check('   向右拖 60px 后左栏变宽', paneFlex(nodes, 'tree'), '0 0 260px')
+  check('   向左拖 60px 后详情栏变宽', paneFlex(nodes, 'detail'), '0 0 400px')
   emitDocument('mouseup', {})
-  check('   松手后宽度已持久化', stored.get('dsh.review.graphTreeWidth'), '260')
-  // 收起 / 展开：窄窗口下唯一能保住中间那栏可读的办法。
-  const collapseTree = nodes.find((n) => n.props?.['data-graph-tool'] === 'tree')
-  collapseTree.props.onClick()
+  check('   松手后宽度已持久化', stored.get('dsh.review.graphDetailWidth'), '400')
+  // 收起 / 展开详情栏：窄窗口下唯一能保住"提交图还能读"的办法。
+  const collapseDetail = nodes.find((n) => n.props?.['data-graph-tool'] === 'detail')
+  collapseDetail.props.onClick()
   nodes = await renderGraph(1)
-  check('   收起后左栏消失', paneFlex(nodes, 'tree'), '(none)')
-  check('   中间那栏仍在', nodes.some((n) => n.props?.['data-graph-pane'] === 'list'), 'true')
-  check('   折叠状态已持久化', stored.get('dsh.review.graphCollapse'.replace('Collapse', 'Collapsed')), '{"tree":true,"detail":false}')
-  nodes.find((n) => n.props?.['data-graph-tool'] === 'tree').props.onClick()
+  check('   收起后详情栏消失', paneFlex(nodes, 'detail'), '(none)')
+  check('   提交列表仍在（提交图优先保留）', nodes.some((n) => n.props?.['data-graph-pane'] === 'list'), 'true')
+  check('   折叠状态已持久化', stored.get('dsh.review.graphCollapsed'), '{"detail":true}')
+  nodes.find((n) => n.props?.['data-graph-tool'] === 'detail').props.onClick()
   nodes = await renderGraph(1)
-  check('   再点展开', paneFlex(nodes, 'tree'), '0 0 260px')
+  check('   再点展开', paneFlex(nodes, 'detail'), '0 0 400px')
   // 搜索：过滤**已加载**的提交。
   const search = nodes.find((n) => n.props?.['data-graph-search'] !== undefined)
   check('   顶部有搜索框', search !== undefined, 'true')

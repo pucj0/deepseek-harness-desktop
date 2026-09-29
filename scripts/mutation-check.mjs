@@ -113,52 +113,84 @@ const mutate = ({ file, from, to, script, label, prepare }) => {
 
 console.log('=== 变异验证（改回旧写法必须变红）===')
 
+// ===========================================================================
+// 0. 两个 surface 的隔离（本轮修改 = 独立抽屉；项目级 Git = 官方侧栏）
+//
+// 这几条覆盖的正是"两者被接回同一个界面"的那次回归。它们都指向**新增的**两个测试：
+//   * `test-turn-review-drawer.mjs`  —— 入口/开合状态的隔离
+//   * `test-turn-review-scope.mjs`   —— 数据 scope 的隔离（真实仓库）
+// ===========================================================================
+
 mutate({
   file: CLIENT,
-  label: '1) 默认宽度 50% → 宽度断言变红',
-  from: '    const PANEL_WIDTH_RATIO = 0.8',
-  to: '    const PANEL_WIDTH_RATIO = 0.5',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0) 「本轮修改」入口改回 sidebarRight.openTab(git) → 入口隔离断言变红',
+  // 这就是回归发生时的写法：入口借官方侧栏打开 `git` 标签。测试里 `window.__dshDesktopReview`
+  // 指向记录桩，因此这一次调用会被记下来，Case A 立刻变红。
+  from: '          onClick: () => turnDrawerStore.set(!turnDrawerStore.get()),',
+  to: "          onClick: () => {\n            window.__dshDesktopReview?.openTab?.(GIT_KIND, {})\n            turnDrawerStore.set(!turnDrawerStore.get())\n          },",
+  script: 'test-turn-review-drawer.mjs',
 })
 
 mutate({
   file: CLIENT,
-  label: '1b) 恢复 1600 像素上限 → 宽屏 80% 断言变红',
-  from: '      const ratio = Math.max(PANEL_WIDTH_MIN, Math.round(width * PANEL_WIDTH_RATIO))',
-  to: '      const ratio = Math.max(PANEL_WIDTH_MIN, Math.min(1600, Math.round(width * PANEL_WIDTH_RATIO)))',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0b) Git 标签正文换成 TurnReviewPanel → 侧栏契约断言变红',
+  from: '        react.createElement(ProjectGitPanel, { t, workspace, sessionId, switching }),',
+  to: '        react.createElement(TurnReviewPanel, { t, workspace, sessionId, onClose: () => undefined }),',
+  script: 'test-git-sidebar-contract.mjs',
+})
+
+mutate({
+  file: HOST,
+  label: '0c) 本轮差异改用 HEAD 当基线（= 把项目改动当成本轮改动）→ scope 语义断言变红',
+  // 这正是"两个 scope 又混在一起"的**数据层**写法：`/changes` 一旦拿 HEAD 当基线，
+  // 用户在本轮之前自己改的文件就会出现在"本轮修改"里。真实仓库测试必须因此变红。
+  from: "          git(['diff', '--numstat', stored.revision, current], cwd),\n          git(['diff', '--name-status', stored.revision, current], cwd),",
+  to: "          git(['diff', '--numstat', 'HEAD', current], cwd),\n          git(['diff', '--name-status', 'HEAD', current], cwd),",
+  script: 'test-turn-review-scope.mjs',
 })
 
 mutate({
   file: CLIENT,
-  label: '1c) 读回旧键 dsh.review.panelWidth → "不迁移旧像素值"断言变红',
-  from: "    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth.v2'",
-  to: "    const PANEL_WIDTH_KEY = 'dsh.review.panelWidth'",
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0d) 抽屉改读项目级数据（useWorkspaceGitSnapshot）→ 抽屉 scope 断言变红',
+  from: '      const turn = useChanges(workspace, sessionId)',
+  to: '      const turn = useChanges(undefined, undefined)',
+  script: 'test-turn-review-drawer.mjs',
+})
+
+// ===========================================================================
+// 0.5 项目 Git 两个视图的重构（Changes 统一视图 / Log 去掉左栏）
+// ===========================================================================
+
+mutate({
+  file: CLIENT,
+  label: '0e) 把左侧分支栏加回来（选择器那一格标成 tree 分栏）→ "没有左侧分支栏"断言变红',
+  from: "        { ref: rootRef, 'data-graph-ref-select': '', style: { position: 'relative', flexShrink: 0, maxWidth: '220px' } },",
+  to: "        { ref: rootRef, 'data-graph-ref-select': '', 'data-graph-pane': 'tree', style: { position: 'relative', flexShrink: 0, maxWidth: '220px' } },",
+  script: 'test-review-graph-branch-filter.mjs',
 })
 
 mutate({
   file: CLIENT,
-  label: '1d) 去掉"视口比最小宽度还窄"的分支 → 480 视口占满断言变红',
-  from: '      if (width < PANEL_WIDTH_MIN) return { min: width, max: width, default: width }',
-  to: '      if (false) return { min: width, max: width, default: width }',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0f) 分支选择器不再占首行第一格 → "首行第一格就是分支选择器"断言变红',
+  from: '              // 分支 / ref 选择器：占掉的是首行的一格，而不是左边一整列。\n              react.createElement(GraphRefSelector, {',
+  to: "              react.createElement('span', null, 'x'),\n              // 分支 / ref 选择器：占掉的是首行的一格，而不是左边一整列。\n              react.createElement(GraphRefSelector, {",
+  script: 'test-review-graph-branch-filter.mjs',
 })
 
 mutate({
   file: CLIENT,
-  label: '1e) 抽屉下限退回 320 → 窄视口 500 断言变红',
-  from: '    const PANEL_WIDTH_MIN = 500',
-  to: '    const PANEL_WIDTH_MIN = 320',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0g) 未跟踪汇总栏又变回软底色盒子 → "没有底色"断言变红',
+  from: "                          { key: 'bar', 'data-review-untracked-bar': '' },",
+  to: "                          { key: 'bar', 'data-review-untracked-bar': '', style: { background: 'var(--dsh-review-soft)' } },",
+  script: 'test-project-git-panel-style.mjs',
 })
 
 mutate({
   file: CLIENT,
-  label: '2) 恢复"项目级不点外关"→ 点外关闭断言变红',
-  from: '        document.addEventListener(\'mousedown\', onPointerDown, true)\n        document.addEventListener(\'keydown\', onKeyDown)',
-  to: '        if (scope !== \'workspace\') document.addEventListener(\'mousedown\', onPointerDown, true)\n        document.addEventListener(\'keydown\', onKeyDown)',
-  script: 'test-review-overlay-hooks.mjs',
+  label: '0h) 自动保存提示从分组标题里拿掉 → "提示仍然存在"断言变红',
+  from: '                note: autoSaveNotice,',
+  to: '                note: null,',
+  script: 'test-project-git-panel-style.mjs',
 })
 
 mutate({
@@ -664,12 +696,12 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '38) 把已删除的独立「提交图」入口重新注册回去 → 重复入口断言变红',
-  // 需求 A：那个入口与抽屉的 Log 是同一个视图，用户看到的是"多了一个重复入口"。
-  // 这里把它加回源码，断言必须变红。
-  from: '      // 项目页的常驻面板入口。挂在这个槽位是因为它**在没有会话时也渲染**——',
-  to: "      ctx.slots.register({ name: 'sidebar.panellist', id: 'git-graph' }, CommitGraphView)\n      // 项目页的常驻面板入口。挂在这个槽位是因为它**在没有会话时也渲染**——",
-  script: 'test-review-overlay-hooks.mjs',
+  label: '38) 再注册一个标签类型（= 让本轮审查也能被 openTab 打开）→ 单类型断言变红',
+  // 项目级 Git 是**唯一**注册标签类型的 surface。多注册一个，就说明有人又想给本轮审查
+  // 开一条"能被官方侧栏打开"的路——那正是这次回归的形状。
+  from: '        return registry.register({',
+  to: "        registry.register({ id: 'dsh-client-ui-review/turn-review', kind: 'turn-review' })\n        return registry.register({",
+  script: 'test-git-sidebar-contract.mjs',
 })
 
 mutate({
@@ -693,10 +725,10 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '41) 抽屉 CSS 上限改回 calc(100vw - 64px) → 窄视口"占满视口"断言变红',
-  from: "            maxWidth: '100vw',",
-  to: "            maxWidth: 'calc(100vw - 64px)',",
-  script: 'test-review-overlay-hooks.mjs',
+  label: '41) 本轮抽屉去掉视口宽度限制（写死 900px）→ 视口限制断言变红',
+  from: "            width: 'min(760px, calc(100vw - 24px))',",
+  to: "            width: '900px',",
+  script: 'test-turn-review-drawer.mjs',
 })
 
 console.log('')

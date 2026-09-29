@@ -1,16 +1,14 @@
-// 验证「项目改动」抽屉的**结构与样式契约**：头栏、提交卡片、分组头、行内动作的收敛规则，
-// 以及样式块本身确实注入了、括号是闭合的。
+// 验证**项目级 Git 面板**（官方 Git 标签的正文，`ProjectGitPanel`）的**结构与样式契约**：
+// 头栏、提交卡片、分组头、行内动作的收敛规则，以及样式块本身确实注入了、括号是闭合的。
 //
-//   node scripts/test-review-drawer-style.mjs
+//   node scripts/test-project-git-panel-style.mjs
 //
-// 为什么要单独一个文件、而不是塞进 test-review-overlay-hooks.mjs：
-//
-//   那个测试的桩渲染器把组件的 hook 槽**按树中位置**归属（`root.2.0:StagingSection`），
-//   而它前七节已经把若干行的展开状态写进了那些槽里。于是"换一个挂载 key 重新挂载"并不
-//   等于新挂载——嵌套组件根本不参与 key，状态与 effect 的依赖记录都还在原处，最终表现
-//   是暂存区永远停在 loading（实测踩到：新加的断言全红，而产品代码是对的）。
-//
-//   这些外观断言需要的是**一次真正干净的渲染**，所以让它们跑在自己的进程里。
+// 为什么把面板直接当根组件渲染、而不去装配官方侧栏：这些断言需要**一次真正干净的渲染**。
+// 本仓库的桩渲染器把组件的 hook 槽**按树中位置**归属（`root.2.0:StagingSection`），而
+// `test-review-project-git.mjs` 的多节驱动已经把若干行的展开状态写进了那些槽里。于是
+// "换一个挂载 key 重新挂载"并不等于新挂载——嵌套组件根本不参与 key，状态与 effect 的
+// 依赖记录都还在原处，最终表现是暂存区永远停在 loading（实测踩到：新加的断言全红，
+// 而产品代码是对的）。因此这些外观断言跑在自己的进程里。
 //
 // 外观（颜色、间距）本身没法在桩里断言，能断言的是**结构与样式钩子**：类名、`data-*`
 // 标记、样式块里的选择器。这些是"悬停才浮出动作按钮""提交卡片""分支徽标"能生效的
@@ -150,11 +148,11 @@ globalThis.document = {
 /**
  * 持久化存储。
  *
- * `dsh.review.panelOpen` 必须是打开的：抽屉的开关状态存在这里，返回 `null` 时面板
- * 直接 `return null`，那样下面所有关于结构与样式的断言都会变成"元素不存在"——
- * 而原因跟外观毫无关系（实测第一次跑就是如此）。
+ * 面板本体**不再有自己的开关**（开合由官方侧栏管理，也没有宽度手柄要记住），因此这里
+ * 给一个空存储就够了；留着它是因为 `localStorage` 上还挂着"差异视图模式""换行""提交区
+ * 高度"等偏好，面板渲染时会读它们。
  */
-const panelStorage = { 'dsh.review.panelOpen': '1' }
+const panelStorage = {}
 globalThis.window = {
   innerWidth: 1400,
   innerHeight: 900,
@@ -200,13 +198,43 @@ const WORKSPACE = {
   truncated: false,
 }
 
+/**
+ * 储藏列表（`/gitbar/stash/list` + `/gitbar/auto-saves`）。
+ *
+ * 这里刻意同时给出**一条自动保存**和**一条普通储藏**：它们现在与"已暂存 / 更改 / 未跟踪"
+ * 是同一张列表里的分组，因此"五个分组属于同一套视觉系统"这件事必须有真实数据才断言得了。
+ */
+const AUTO_SAVE_UUID = '6f1c5b0a-2f4d-4c6e-9a3b-8d7e6f5a4b3c'
+const STASHES = [
+  {
+    ref: 'stash@{0}',
+    sha: 'a'.repeat(40),
+    // `dsh-smart-switch:<uuid>:<from>:<to>`：Smart Checkout 写下的安全副本。
+    message: `dsh-smart-switch:${AUTO_SAVE_UUID}:main:feature/x`,
+    subject: 'WIP on main',
+    date: '2026-01-04T10:00:00+08:00',
+  },
+  {
+    ref: 'stash@{1}',
+    sha: 'b'.repeat(40),
+    message: 'WIP on main: 手动储藏',
+    subject: 'WIP on main',
+    date: '2026-01-03T09:00:00+08:00',
+  },
+]
+const AUTO_SAVES = [{ stashOid: 'a'.repeat(40), id: AUTO_SAVE_UUID, fromBranch: 'main', toBranch: 'feature/x', files: 3 }]
+
 globalThis.fetch = async (url) => {
   const target = String(url)
   const payload = target.includes('/workspace')
     ? WORKSPACE
-    : target.includes('/roots')
-      ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
-      : { isRepo: true }
+    : target.includes('/stash/list')
+      ? { stashes: STASHES }
+      : target.includes('/auto-saves')
+        ? { autoSaves: AUTO_SAVES }
+        : target.includes('/roots')
+          ? { roots: ['F:\\code\\projA'], current: 'F:\\code\\projA' }
+          : { isRepo: true }
   return { ok: true, text: async () => JSON.stringify(payload) }
 }
 
@@ -249,10 +277,13 @@ const has = (label, actual) => is(label, actual === true, true)
 const rowsOf = (nodes, attr) => nodes.filter((n) => n.props?.[attr] !== undefined)
 
 // ---- 渲染 ------------------------------------------------------------------------
-const Panel = loaded.__reviewPanelForTest
-check('导出了抽屉本体', typeof Panel, 'function')
+const Panel = loaded.__projectGitPanelForTest
+check('导出了项目级 Git 面板本体', typeof Panel, 'function')
 
-const panelProps = { t: (key) => key, workspace: 'F:\\code\\projA', sessionId: 's1', scope: 'workspace' }
+// `ProjectGitPanel` 只有 `{ t, workspace, sessionId, switching }`：**没有** `scope`（它恒为
+// workspace）、**没有** `embedded`（它只由官方侧栏承载）。这两个属性一旦回来，就说明有人
+// 又开始把它当成"两种 scope 共用的抽屉"了。
+const panelProps = { t: (key) => key, workspace: 'F:\\code\\projA', sessionId: 's1' }
 // 快照 store 是抽屉里**唯一**的数据源。假渲染器的 `useSyncExternalStore` 只读快照、不订阅，
 // 因此不会自动触发 store 的首次加载——这里显式写入一份，等价于"打开抽屉时 store 已经拿到
 // 了这一次 `/workspace` 的结果"。
@@ -283,8 +314,11 @@ console.log('=== 1. 头栏：标题 + 分支 + 计数 + 图标动作 ===')
   check('分支徽标显示当前分支', textOf(branchBadge ?? null).includes('main'), 'true')
   has('头栏里有计数徽标', rowsOf(nodes, 'data-review-count').length >= 1)
   has('仍有刷新按钮（title 是脚本依赖）', nodes.some((n) => n.props?.title === 'refresh'))
-  has('仍有收起按钮（title 是脚本依赖）', nodes.some((n) => n.props?.title === 'collapse'))
-  has('图标按钮统一带样式钩子', nodes.filter((n) => n.props?.title === 'refresh' || n.props?.title === 'collapse').every((n) => n.props?.['data-review-icon-button'] === ''))
+  // **没有插件自定义的「收起」/拖拽手柄**：开合、尺寸、全屏都由官方侧栏提供，面板再造一个
+  // 只会与它打架（曾经正是如此：抽屉和侧栏各管一半）。
+  has('没有插件自定义的收起按钮', !nodes.some((n) => n.props?.title === 'collapse'))
+  has('没有宽度拖拽手柄', !nodes.some((n) => n.props?.['data-review-resizer'] !== undefined))
+  has('图标按钮统一带样式钩子', nodes.filter((n) => n.props?.title === 'refresh').every((n) => n.props?.['data-review-icon-button'] === ''))
 }
 
 console.log('')
@@ -365,6 +399,51 @@ console.log('=== 3. 分组与行：收敛的动作按钮 ===')
 }
 
 console.log('')
+console.log('=== 3b. 统一视图：五个分组属于**同一套列表系统** ===')
+{
+  // 这一节就是这一轮的验收标准：Changes 是一个"完整设计过的统一 Git Changes 工具窗口"，
+  // 而不是"上面 changes、下面又临时塞了 auto-save / stash 几块"。
+  const groups = rowsOf(nodes, 'data-staging-group').map((n) => n.props['data-staging-group'])
+  // 1) 五类内容都在（功能一个没少）。
+  for (const id of ['staged', 'unstaged', 'untracked', 'auto-saves', 'stashes']) {
+    has(`   仍有 ${id} 分组`, groups.includes(id))
+  }
+  check('   分组顺序：文件分组在前，自动保存/储藏在后', groups.join(','), 'staged,unstaged,untracked,auto-saves,stashes')
+  // 2) 每个分组都由**同一个**分组标题组件开头（标题层级一致，不是各写一套）。
+  const groupNodes = rowsOf(nodes, 'data-staging-group')
+  const headsOf = (node) => collectHostNodes(node, undefined, 'group-probe').filter((n) => n.props?.['data-staging-group-head'] !== undefined)
+  has('   每个分组都有统一的分组标题', groupNodes.every((node) => headsOf(node).length === 1))
+  // 3) 列表容器**没有 gap**：分组之间是一条发丝分隔线，而不是一叠卡片。
+  const scroll = rowsOf(nodes, 'data-staging-scroll')[0]
+  has('   列表容器存在', scroll !== undefined)
+  is('   列表容器没有 gap（不叠卡片）', scroll?.props?.style?.gap, undefined)
+  // 4) 自动保存的提示不再是列表顶部一块独立的告警盒子，而是**标题行里**的一段文字。
+  const reminder = rowsOf(nodes, 'data-auto-save-reminder')[0]
+  has('   自动保存提示仍然存在', reminder !== undefined)
+  has(
+    '   提示在分组标题行里（不是独立告警块）',
+    groupNodes.some((node) => headsOf(node).some((head) => collectHostNodes(head, undefined, 'head-probe').some((n) => n.props?.['data-auto-save-reminder'] !== undefined))),
+  )
+  // 5) 未跟踪的汇总栏是一条**平铺的行**：没有底色、没有圆角。
+  const bar = rowsOf(nodes, 'data-review-untracked-bar')
+  check('   未跟踪汇总栏存在', bar.length, 1)
+  is('   未跟踪汇总栏没有底色', bar[0]?.props?.style?.background, undefined)
+  is('   未跟踪汇总栏没有圆角', bar[0]?.props?.style?.borderRadius, undefined)
+  // 6) 自动保存行与储藏行用的是**同一套行**（行高/缩进/分隔线由 CSS 统一提供）。
+  has('   自动保存行是统一列表行', rowsOf(nodes, 'data-staging-auto-save').every((n) => n.props?.['data-review-list-row'] === ''))
+  has('   储藏行是统一列表行', rowsOf(nodes, 'data-staging-stash-row').every((n) => n.props?.['data-review-list-row'] === ''))
+  // 7) 这些行里的动作按钮都带统一的小按钮钩子——不再出现没有样式的原生 <button>。
+  const autoSaveButtons = collectHostNodes(rowsOf(nodes, 'data-staging-auto-save')[0] ?? { props: {} }, undefined, 'auto-probe').filter((n) => n.type === 'button')
+  has('   自动保存行的动作是统一按钮', autoSaveButtons.length >= 3 && autoSaveButtons.every((n) => n.props?.['data-review-row-button'] === ''))
+  const stashButtons = collectHostNodes(rowsOf(nodes, 'data-staging-stash-row')[0] ?? { props: {} }, undefined, 'stash-probe').filter((n) => n.type === 'button')
+  has('   储藏行本身就是一个行按钮', stashButtons.every((n) => n.props?.['data-review-list-row'] !== undefined))
+  // 8) 自动保存 / 储藏分组的动作按钮同样是统一按钮，而不是浏览器默认样式。
+  const autoGroup = groupNodes.find((node) => node.props['data-staging-group'] === 'auto-saves')
+  const groupButtons = collectHostNodes(autoGroup ?? { props: {} }, undefined, 'grp-probe').filter((n) => n.type === 'button' && n.props?.['data-staging-toggle'] === undefined)
+  has('   分组动作也是统一按钮', groupButtons.length >= 2 && groupButtons.every((n) => n.props?.['data-review-row-button'] === ''))
+}
+
+console.log('')
 console.log('=== 4. 样式块：现代观感层真的注入了 ===')
 {
   check('样式块已注入', styledBlocks.length >= 1, 'true')
@@ -402,5 +481,5 @@ console.log('=== 4. 样式块：现代观感层真的注入了 ===')
 }
 
 console.log('')
-console.log(failures === 0 ? '抽屉样式全部通过' : `${failures} 项失败`)
+console.log(failures === 0 ? '项目级 Git 面板样式全部通过' : `${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)

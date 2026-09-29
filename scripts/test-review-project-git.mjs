@@ -455,10 +455,10 @@ async function clickNow(attr, value) {
   return true
 }
 /**
- * 入口按钮上的文案（含文件数）。
+ * 头栏上的计数文案。
  *
- * 必须**只展开按钮自己**：入口容器（`[data-review-trigger]`）里还有面板，整棵展开会把
- * 抽屉里的文字也算进来（实测过：断言因此拿到一整屏文本，`includes` 永远不成立）。
+ * 必须**只展开计数节点自己**：整棵面板展开会把文件列表里的文字也算进来（实测过：断言因此
+ * 拿到一整屏文本，`includes` 永远不成立）。
  */
 const badgeText = (nodes) => {
   const count = textOf(rowsOf(nodes, 'data-review-count')[0] ?? null)
@@ -549,8 +549,8 @@ console.log('=== 3. 面板内部抛错：只降级面板，入口照旧 ===')
   const detail = textOf(rowsOf(crashed, 'data-review-panel-error-detail')[0] ?? null)
   has('   降级页带异常原文', detail.includes('注入的渲染期异常'))
   has('   降级页带组件栈', detail.includes('ProjectGitPanelErrorBoundary'))
-  has('   记录了面板错误', globalThis.window.__dshDesktopReviewPanelError !== undefined)
-  check('   记录带作用域', globalThis.window.__dshDesktopReviewPanelError?.scope, 'dsh-client-ui-review:panel')
+  has('   记录了面板错误', globalThis.window.__dshDesktopProjectGitPanelError !== undefined)
+  check('   记录带作用域', globalThis.window.__dshDesktopProjectGitPanelError?.scope, 'dsh-client-ui-review:panel')
   // 修好之后点「重新加载」→ 面板回来。
   throwOn = ''
   has('   点得中「重新加载」', await clickNow('data-review-panel-error-action', 'reload'))
@@ -569,7 +569,7 @@ console.log('=== 3. 面板内部抛错：只降级面板，入口照旧 ===')
   const closed = await drain()
   has('   Sidebar 内容仍由 Harness 挂载', rowsOf(closed, 'data-review-panel-error').length === 1)
   has('   Sidebar 槽仍由 Harness 管理', Hero !== undefined)
-  delete globalThis.window.__dshDesktopReviewPanelError
+  delete globalThis.window.__dshDesktopProjectGitPanelError
 }
 
 console.log('')
