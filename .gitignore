@@ -60,3 +60,16 @@ COMMIT_MSG.txt
 # 运行时压缩归档是构建产物：由 npm run stage 的 compress:runtime 生成，不入库
 build/runtime.br
 build/runtime.json
+
+# electron-builder / @electron/get 的下载缓存。默认落在
+# `%LOCALAPPDATA%\electron` 与 `%LOCALAPPDATA%\electron-builder`，但 CI 与本机都可能改成
+# 工作区内的路径（本机沙箱不允许写用户目录），因此两个位置都忽略掉，避免 300+ MB 的
+# 缓存出现在 git status 里。
+.electron-cache/
+.electron-builder-cache/
+
+# 本机测量构建用的配置覆盖（跳过 rcedit/签名工具链：那套工具归档含 macOS 符号链接，
+# 本机没有创建符号链接的特权，解压必然失败）。CI 上不需要它，因此不入库。
+.baseline-build.yml
+.local-build*.yml
+
