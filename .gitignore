@@ -73,3 +73,6 @@ build/runtime.json
 .baseline-build.yml
 .local-build*.yml
 
+
+# 裁剪后的 Desktop Runtime 树（npm run prepare:runtime 生成），构建产物不入库
+build/runtime-desktop/

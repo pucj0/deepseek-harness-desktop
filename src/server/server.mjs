@@ -140,6 +140,15 @@ function parseArgs(argv) {
     workspace: process.cwd(),
     registerWorkspace: false,
     forgetWorkspaces: [],
+    /**
+     * 内置插件的**真实**目录（外壳用 `resources/plugins` 传入）。
+     *
+     * 为什么需要它：插件要被链进 profile 的 node_modules，而 `symlinkSync` 的目标必须是
+     * 文件系统上真实存在的路径。Runtime 打在 `app.asar` 里时，`<runtime>/node_modules/…`
+     * 只存在于归档内部，OS 的 symlink 看不到它（ENOENT），四个内置插件会全部消失。
+     * 外壳因此显式告诉这里"插件在哪儿"；未传时退回旧行为（从运行时依赖树里找）。
+     */
+    bundledPluginsDir: process.env.DSH_BUNDLED_PLUGINS_DIR,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
@@ -154,6 +163,7 @@ function parseArgs(argv) {
     if (flag === '--dsh-home') options.dshHome = value
     else if (flag === '--install-anchor') options.installAnchor = value
     else if (flag === '--workspace') options.workspace = value
+    else if (flag === '--bundled-plugins-dir') options.bundledPluginsDir = value
     else if (flag === '--forget-workspace') options.forgetWorkspaces.push(value)
     else continue
     index += 1
@@ -257,18 +267,24 @@ function removeLinkEntry(link) {
  *
  * @param dir - profile 目录。
  * @param installAnchor - dsh 包的 package.json 绝对路径。
+ * @param bundledPluginsDir - 内置插件的**真实**目录；undefined 时退回运行时依赖树。
  * @returns 实际就位的插件名（用于写进 profile 的 bundle 列表）。
  */
-function linkBundledPlugins(dir, installAnchor) {
+function linkBundledPlugins(dir, installAnchor, bundledPluginsDir) {
   // runtime/node_modules —— 从 <runtime>/node_modules/@deepseek-ai/dsh/package.json 上溯三级。
   const runtimeModules = dirname(dirname(dirname(installAnchor)))
+  // 优先用外壳显式给出的真实目录：Runtime 打在 app.asar 里时，runtimeModules 只在归档内部
+  // 存在，symlink 的目标解析不到（ENOENT）。
+  const searchRoots = bundledPluginsDir === undefined || bundledPluginsDir === ''
+    ? [runtimeModules]
+    : [resolve(bundledPluginsDir), runtimeModules]
   const profileModules = join(dir, 'node_modules')
   mkdirSync(profileModules, { recursive: true })
 
   const ready = []
   for (const plugin of BUNDLED_PLUGINS) {
-    const source = join(runtimeModules, plugin)
-    if (!existsSync(join(source, 'package.json'))) continue
+    const source = searchRoots.map((root) => join(root, plugin)).find((candidate) => existsSync(join(candidate, 'package.json')))
+    if (source === undefined) continue
 
     const link = join(profileModules, plugin)
     try {
@@ -303,7 +319,7 @@ function linkBundledPlugins(dir, installAnchor) {
  * @param installAnchor - dsh 包的 package.json 绝对路径（用于定位内置插件）。
  * @returns the absolute profile directory.
  */
-function ensureProfile(home, installAnchor) {
+function ensureProfile(home, installAnchor, bundledPluginsDir) {
   const dir = join(home, 'profiles', PROFILE_NAME)
   mkdirSync(dir, { recursive: true })
 
@@ -328,7 +344,7 @@ function ensureProfile(home, installAnchor) {
 
   // 内置插件就位后才登记 bundle：先链接、再写列表，顺序反了会让 dsh 在启动时
   // 遇到一个解析不到的 bundle 而直接失败。
-  const plugins = linkBundledPlugins(dir, installAnchor)
+  const plugins = linkBundledPlugins(dir, installAnchor, bundledPluginsDir)
   reconcileBundles(dir, plugins)
 
   // The Loader needs a real include root to anchor `baseUrl` at the profile
@@ -814,7 +830,7 @@ async function main() {
   mkdirSync(workspace, { recursive: true })
   process.chdir(workspace)
 
-  const profileDir = ensureProfile(home, installAnchor)
+  const profileDir = ensureProfile(home, installAnchor, options.bundledPluginsDir)
   const profile = loadProfileDirectory(BIN_NAME, profileDir, installAnchor)
   mark(`profile 装载（${profile.layers.length} 个 bundle 层）`)
 

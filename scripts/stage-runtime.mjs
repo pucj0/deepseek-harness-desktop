@@ -242,6 +242,26 @@ async function main() {
    */
   const plugins = syncBundledPlugins()
 
+  /**
+   * 把外壳的 server 脚本放进 `runtime/`。
+   *
+   * `server.mjs` 必须**紧挨** runtime 的 node_modules 运行：Node 从脚本自身目录向上解析
+   * 裸包名，放在 `resources/server/` 里在 `D:\Program Files\…` 这类路径上会一路查到盘根，
+   * 然后以 ERR_MODULE_NOT_FOUND 收场。
+   *
+   * 这件事以前在**启动时**做（`DshServer` 把脚本复制过去）。现在 Runtime 打包进
+   * `app.asar`，而 asar 在启动时不可写，因此必须在打包前就放好。`DshServer` 仍会比对
+   * 内容，一致时什么都不做（见 `resolveServerEntry`）。
+   */
+  for (const name of ['server.mjs', 'client-module-cache.mjs']) {
+    const source = join(ROOT, 'src', 'server', name)
+    if (!existsSync(source)) continue
+    const destination = join(RUNTIME, name)
+    const content = readFileSync(source)
+    const current = existsSync(destination) ? readFileSync(destination) : undefined
+    if (current === undefined || !current.equals(content)) writeFileSync(destination, content)
+  }
+
   // 如果截止时间生效，实际装到的 dsh 版本应当就是解析出来的那一个——不一致说明 registry
   // 的 dist-tag 与 `--before` 打架了，**必须让人看见**，否则内置运行时与预期版本不符。
   if (closure.version !== undefined && closure.version !== version) {

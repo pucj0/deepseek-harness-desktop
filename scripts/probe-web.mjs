@@ -33,9 +33,9 @@ console.log(`[probe-web] installRoot = ${installRoot}`)
 console.log(`[probe-web] dshHome     = ${dshHome}`)
 console.log(`[probe-web] entry       = ${stagedEntry}`)
 
-const nodeBinary = existsSync(join(installRoot, 'node', 'node.exe'))
-  ? join(installRoot, 'node', 'node.exe')
-  : process.execPath
+// 这一版不再有便携 Node：子进程就是"以 Node 模式重新执行当前可执行文件"。
+// 手动跑探针时 process.execPath 就是跑这个脚本的 Node（本仓库要求 >= 22）。
+const nodeBinary = process.execPath
 
 const { spawn } = await import('node:child_process')
 const child = spawn(

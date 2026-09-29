@@ -137,24 +137,27 @@ check('运行时不存在时无失败记录', absent.failures.length, 0)
 
 console.log('')
 console.log('=== 8. 来源候选（打包 / 开发） ===')
+// 这一版只有两个候选：安装包里的 `resources/plugins`（插件源）与**当前运行时目录**
+// （同步目标，打包形态下它在 app.asar 里）。不再有 `runtime.br` 解包目录与
+// `<userData>/bundled-runtime`——那两条链路已经删除，候选表因此必须跟着收窄。
 const packaged = sync.pluginSourceCandidates({
   resourcesPath: 'C:\\app\\resources',
   repoRoot: 'C:\\repo',
-  userDataDir: 'C:\\data',
+  runtimeDir: join('C:\\app\\resources', 'app.asar', 'runtime'),
   packaged: true,
 })
 check('打包后首选 resources/plugins', packaged[0], join('C:\\app\\resources', 'plugins'))
-check('打包后含内置运行时解包位置', packaged.includes(join('C:\\data', 'bundled-runtime', 'runtime')), 'true')
+check('打包后第二候选就是当前运行时目录', packaged[1], join('C:\\app\\resources', 'app.asar', 'runtime'))
+check('打包后不再有 userData 解包目录', packaged.some((p) => p.includes('bundled-runtime')), 'false')
 
 const dev = sync.pluginSourceCandidates({
   resourcesPath: 'C:\\electron\\resources',
   repoRoot: ROOT,
-  userDataDir: 'C:\\data',
+  runtimeDir: join(ROOT, 'runtime'),
   packaged: false,
-  unpackedDir: 'C:\\data\\bundled-runtime\\runtime',
 })
 check('开发期首选仓库 plugins/', dev[0], join(ROOT, 'plugins'))
-check('本次解包目录排在前面', dev[1], 'C:\\data\\bundled-runtime\\runtime')
+check('开发期第二候选是仓库 runtime/', dev[1], join(ROOT, 'runtime'))
 
 console.log('')
 console.log('=== 9. 启动入口 syncPluginsAtStartup：修复时报告，正常时安静 ===')
@@ -194,16 +197,31 @@ check('第二次启动不重复写', again.outcome.written.length, 0)
 check('第二次启动不打日志', again.messages.length, 0)
 
 // 找不到任何来源时必须吭声——这正是当初故障"静默"的地方。
+//
+// 注意 `packaged: false`：**打包形态下这个函数整体不再同步**（Runtime 在 app.asar 里是
+// 只读的，而且应用与其插件同属一个不可变 Release，没有"运行时被换掉后要补齐"这回事）。
+// 因此"没有来源"的告警只在开发期这条路径上存在。
 const orphanRuntime = writeRuntime(join(work, 'runtime', 'orphan'))
 const orphan = sync.syncPluginsAtStartup({
   runtimeDir: orphanRuntime,
   resourcesPath: join(work, 'nowhere'),
   repoRoot: join(work, 'no-repo'),
   userDataDir: join(work, 'no-data'),
-  packaged: true,
+  packaged: false,
 })
 check('没有来源时给出警告', orphan.messages.length, 1)
 check('警告说明了后果', orphan.messages[0].includes('插件'), 'true')
+
+// 打包形态：不做任何写入、也不打印任何东西——启动关键路径上不该有递归指纹校验。
+const packagedNoop = sync.syncPluginsAtStartup({
+  runtimeDir: orphanRuntime,
+  resourcesPath: join(work, 'nowhere'),
+  repoRoot: join(work, 'no-repo'),
+  userDataDir: join(work, 'no-data'),
+  packaged: true,
+})
+check('打包形态不同步任何插件', packagedNoop.outcome.written.length, 0)
+check('打包形态不打印任何同步日志', packagedNoop.messages.length, 0)
 
 console.log('')
 console.log('=== 10. 真实仓库的 plugins/ 是可用的来源 ===')

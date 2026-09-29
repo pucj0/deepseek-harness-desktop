@@ -1,7 +1,10 @@
 /**
  * Where the bundled dsh runtime lives, in dev and in a packaged app.
  *
- * Packaged: electron-builder copies `runtime/` to `<app>/resources/runtime`.
+ * Packaged: the runtime ships **inside `app.asar`** (`<app>/runtime`), because that is
+ *           the only copy the installer needs — the JS/JSON assets are compressed by
+ *           NSIS once, instead of being delivered a second time as a brotli archive
+ *           that then has to be unpacked into userData on first launch.
  * Dev:      the same `runtime/` directory in the repo root.
  */
 import { existsSync, readFileSync } from 'node:fs'
@@ -29,11 +32,11 @@ export interface RuntimeLocation {
   /**
    * Node executable for the server child.
    *
-   * The bundled runtime requires Node 22.13+/24 APIs (`zlib.createZstdCompress`,
-   * `util.getSystemErrorMessage`, `module.stripTypeScriptTypes`) that Electron 33's
-   * Node 20 does not provide, so a pinned portable Node ships alongside it.
-   * `undefined` means "re-execute Electron as Node", which only works on an
-   * Electron whose bundled Node is new enough.
+   * `undefined` means "re-execute Electron as Node" (`ELECTRON_RUN_AS_NODE=1`), which is
+   * the normal case now: Electron ≥ 44 bundles Node 24, which satisfies the runtime's
+   * `^22.19.0 || >=24` requirement, so the release no longer ships a second portable
+   * Node. A value is only returned when a portable Node happens to be staged next to
+   * the runtime (development convenience — see `npm run stage:node`).
    */
   nodeBinary: string | undefined
   /** Version of the bundled Node, when one is present. */
@@ -54,7 +57,8 @@ export interface RuntimeLocation {
  * User workspaces, sessions and settings live elsewhere and are untouched.
  *
  * @param _userDataDir - Kept for API compatibility; legacy runtime caches here are ignored.
- * @param unpackedDir - 内置归档解包出来的运行时目录（打包运行时才有）。
+ * @param unpackedDir - 旧版 `runtime.br` 解包出来的目录。只在读取**旧版本遗留**的安装时才
+ *   会传入；新版不再解包，因此正常情况下是 undefined。
  * @returns the resolved runtime location.
  */
 export function resolveRuntime(_userDataDir: string, unpackedDir?: string): RuntimeLocation {
@@ -62,9 +66,10 @@ export function resolveRuntime(_userDataDir: string, unpackedDir?: string): Runt
   const candidates: string[] = []
 
   if (packaged) {
-    // 解包目录排在"安装包内的散文件运行时"之前：后者只可能来自开发期或旧包，
-    // 而解包出来的才是本次安装真正携带的那份。
+    // 顺序是有意的：先看本版真正携带的那份（app.asar 里的 `runtime/`），再兼容两种历史
+    // 形态——旧包的散文件 `resources/runtime`、以及更旧的 `runtime.br` 解包目录。
     if (unpackedDir !== undefined) candidates.push(unpackedDir)
+    candidates.push(join(app.getAppPath(), 'runtime'))
     candidates.push(join(process.resourcesPath, 'runtime'))
   } else {
     candidates.push(resolve(__dirname, '..', '..', 'runtime'))

@@ -99,7 +99,7 @@ async function probeOnce(label) {
       ) + '\n',
     )
     child = spawn(
-      join(RUNTIME, 'node', 'node.exe'),
+      process.execPath,
       [
         join(RUNTIME, 'server.mjs'),
         '--dsh-home',

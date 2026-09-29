@@ -190,7 +190,7 @@ try {
   mkdirSync(home, { recursive: true })
   resetTrace()
   child = spawn(
-    join(runtime, 'node', 'node.exe'),
+    process.execPath,
     [
       join(runtime, 'server.mjs'),
       '--dsh-home',

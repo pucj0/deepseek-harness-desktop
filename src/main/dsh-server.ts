@@ -19,7 +19,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import { resolve } from 'node:path'
 import type { RuntimeLocation } from './paths'
@@ -60,6 +60,14 @@ export interface ServerOptions {
   forgetWorkspaces?: readonly string[]
   /** Extra environment for the child, e.g. decrypted credentials. */
   env?: Record<string, string>
+  /**
+   * 内置插件的**真实**目录（`resources/plugins`，开发期是仓库的 `plugins/`）。
+   *
+   * 子进程要把这些插件链接进 profile 的 node_modules，而 `symlinkSync` 的目标必须是文件
+   * 系统上真实存在的路径。Runtime 现在打在 `app.asar` 里，`<runtime>/node_modules/…` 只存在
+   * 于归档内部，OS 看不到它——不显式给出这个目录，四个内置插件会在打包版里全部消失。
+   */
+  bundledPluginsDir?: string
   /** Milliseconds to wait for the readiness line before treating boot as failed. */
   readyTimeoutMs?: number
 }
@@ -104,9 +112,11 @@ function resolveServerEntry(runtime: RuntimeLocation): string {
     }
     return target
   } catch {
-    // If the copy fails, fall back to the shipped location: an install with a
-    // reachable ancestor node_modules still works, and a module-resolution error
-    // there is more informative than a failure in our own bookkeeping.
+    // 目标不可写时（Runtime 打包在 app.asar 里）**不需要**写：`npm run stage` 已经把
+    // 这两个脚本放进 `runtime/`，因此 target 本来就在、内容也对。只有"目标不存在"
+    // 才是真的没救——那时退回安装包里那份，让模块解析错误自己说话（比我们这里的记账
+    // 失败更有信息量）。
+    if (existsSync(target)) return target
     return runtime.serverEntry
   }
 }
@@ -146,9 +156,10 @@ export class DshServer extends EventEmitter {
     const registerWorkspace = this.options.registerWorkspace === true
     const forgetWorkspaces = this.options.forgetWorkspaces ?? []
 
-    // Prefer the pinned Node that ships with the runtime: Electron's own Node may
-    // be older than the dsh runtime requires. Falling back to re-executing
-    // Electron as Node is only correct on an Electron whose Node is new enough.
+    // Prefer a portable Node when one is staged next to the runtime (development
+    // convenience, `npm run stage:node`). In a packaged release there is none: the
+    // runtime requires Node ^22.19.0 || >=24 and Electron ≥ 44 bundles Node 24, so the
+    // child simply re-executes this same binary in Node mode (`ELECTRON_RUN_AS_NODE=1`).
     const useBundledNode = runtime.nodeBinary !== undefined
     const program = useBundledNode ? runtime.nodeBinary! : process.execPath
 
@@ -190,6 +201,10 @@ export class DshServer extends EventEmitter {
         dshHome,
         '--install-anchor',
         runtime.installAnchor,
+        // 插件必须从**真实**目录链接（app.asar 内部路径无法作为符号链接目标）。
+        ...(this.options.bundledPluginsDir === undefined
+          ? []
+          : ['--bundled-plugins-dir', this.options.bundledPluginsDir]),
         '--workspace',
         workspace,
         // 登记意图**必须**显式传递：只看到 `--workspace A` 就 `create(A)` 正是把

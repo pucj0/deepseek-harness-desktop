@@ -18,7 +18,7 @@ import { join } from 'node:path'
 //   * 仓库根或安装目录（其下有 runtime/ 或 resources/runtime）
 // 逐个探测，避免把"传了根目录"误判成"runtime 就是根目录"。
 function looksLikeRuntime(dir) {
-  return dir !== undefined && existsSync(join(dir, 'node', 'node.exe')) && existsSync(join(dir, 'node_modules'))
+  return dir !== undefined && existsSync(process.execPath) && existsSync(join(dir, 'node_modules'))
 }
 
 const arg = process.argv[2]
@@ -39,7 +39,7 @@ if (looksLikeRuntime(arg)) {
 
 const dshHome = join(arg ?? installDir, 'probe-home')
 
-const nodeExe = join(runtime, 'node', 'node.exe')
+const nodeExe = process.execPath
 const anchor = join(runtime, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
 const entry = join(runtime, 'server.mjs')
 

@@ -151,7 +151,7 @@ try {
   const home = join(root, 'home')
   mkdirSync(home, { recursive: true })
   child = spawn(
-    join(runtime, 'node', 'node.exe'),
+    process.execPath,
     [
       join(runtime, 'server.mjs'),
       '--dsh-home',

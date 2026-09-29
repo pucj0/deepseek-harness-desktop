@@ -25,8 +25,7 @@ import type { ApplicationMenuDeps } from './menu'
 import type { PanelRow } from './panel'
 import { resolveRuntime } from './paths'
 import type { RuntimeLocation } from './paths'
-import { syncPluginsAtStartup } from './plugin-sync'
-import { ensureRuntimeUnpacked } from './runtime-unpack'
+import { resolveBundledPlugins, syncPluginsAtStartup } from './plugin-sync'
 import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
 import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
@@ -454,40 +453,13 @@ async function main(): Promise<void> {
 
   void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
 
-  // 解包内置运行时（已解过则瞬间返回）。
-  let unpackedDir: string | undefined
+  // Runtime 已经在安装包里（app.asar 的 `runtime/`），**启动时没有任何解包/复制**：
+  // 这一版不再交付 `runtime.br`，因此"首次启动解压约 9 秒"这条路径整体消失。
   // Every packaged release boots the runtime bundled with that same release.
   // Legacy npm-updated runtimes under userData/runtime are intentionally ignored.
-  if (app.isPackaged) {
-    const archivePath = join(process.resourcesPath, 'runtime.br')
-    if (existsSync(archivePath)) {
-      try {
-        let lastPercent = -1
-        const result = await ensureRuntimeUnpacked(archivePath, userDataDir, (readBytes, archiveBytes) => {
-          // 钳制到 0-100：即使将来某一侧传参的量纲又不一致，也只是进度条不精确，
-          // 不会再显示出 "444%" 这种明显错误的数字（真发生过）。
-          const percent = Math.min(100, Math.max(0, Math.floor((readBytes / Math.max(archiveBytes, 1)) * 100)))
-          // 只在百分比变化时更新加载页文字。
-          if (percent === lastPercent) return
-          lastPercent = percent
-          mainWindow.setSplashHint(format(strings.splashUnpacking, { percent: String(percent) }))
-        })
-        unpackedDir = join(result.dir, 'runtime')
-        mainWindow.setSplashHint(strings.splashHint)
-      } catch (error) {
-        dialog.showErrorBox(
-          strings.startupFailedTitle,
-          `解包内置运行时失败：${error instanceof Error ? error.message : String(error)}`,
-        )
-        app.exit(1)
-        return
-      }
-    }
-  }
-
   let runtime
   try {
-    runtime = resolveRuntime(userDataDir, unpackedDir)
+    runtime = resolveRuntime(userDataDir)
   } catch (error) {
     dialog.showErrorBox(
       strings.startupFailedTitle,
@@ -497,16 +469,27 @@ async function main(): Promise<void> {
     return
   }
 
+  // 内置插件的位置。包装形态下是 `resources/plugins`（真实目录，extraResources），开发期
+  // 是仓库的 `plugins/`。它有两个用途：**只读**同步（开发期）与交给子进程做 profile 链接。
+  const bundledPlugins = resolveBundledPlugins({
+    resourcesPath: process.resourcesPath,
+    repoRoot: resolve(__dirname, '..', '..'),
+    runtimeDir: runtime.dir,
+    packaged: app.isPackaged,
+  })
+
   // 把本 Release 携带的客户端插件同步进同一 Release 的 bundled Runtime。
-  // 必须在服务端进程启动前、每次启动都做：插件不在官方 dsh 依赖闭包中，只随桌面包
-  // 发布；同步也能修复被用户误删的插件文件。旧 userData/runtime/current 不参与解析。
+  //
+  // **打包形态下不再需要**（因此直接跳过）：Runtime 在 app.asar 里是只读的，而且应用与其
+  // 插件同属一个不可变 Release——没有"运行时被换掉后要补齐"这种情形。子进程改为把
+  // `resources/plugins` 直接链进 profile（见 server.mjs 的 `--bundled-plugins-dir`），
+  // 于是既没有复制，也没有每次启动的递归指纹校验。
   const pluginSync = syncPluginsAtStartup({
     runtimeDir: runtime.dir,
     resourcesPath: process.resourcesPath,
     repoRoot: resolve(__dirname, '..', '..'),
     userDataDir,
     packaged: app.isPackaged,
-    ...(unpackedDir === undefined ? {} : { unpackedDir }),
   })
   for (const line of pluginSync.messages) process.stderr.write(`${line}\n`)
 
@@ -536,6 +519,9 @@ async function main(): Promise<void> {
     // Decrypted secrets ride the launching environment, which outranks every
     // stored layer in dsh's credential precedence.
     env: credentials.read(),
+    // 内置插件的**真实**目录：子进程用它把插件链进 profile。包装形态下 Runtime 在
+    // app.asar 内，归档内部路径不能作为符号链接目标，因此必须显式告诉它真实位置。
+    bundledPluginsDir: bundledPlugins.dir,
   })
 
   // Repair module-fallback links before boot. If the install directory ever moved,

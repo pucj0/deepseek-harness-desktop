@@ -25,7 +25,7 @@ env:
   # 上游 Node 与 electron-builder 工具的镜像。
   ELECTRON_MIRROR: https://registry.npmmirror.com/-/binary/electron/
   ELECTRON_BUILDER_BINARIES_MIRROR: https://registry.npmmirror.com/-/binary/electron-builder-binaries/
-  DSH_NODE_VERSION: v24.17.0
+  # 不再需要 DSH_NODE_VERSION：这一版不再 stage 第二份便携 Node。
   # 打印 electron-builder 的详细决策过程。CI 上一次失败只给一行结论，
   # 打开这个才能看到它在哪一步、为什么停下来。
   DEBUG: electron-builder,electron-builder:*
@@ -87,14 +87,6 @@ jobs:
       - name: 确认提交内容自洽
         run: node scripts/check-imports.mjs
 
-      - name: 校验便携 Node 归档名解析
-        # 早期哨兵：归档名拼错时本机会被 alreadyStaged() 短路掩盖，只有干净的
-        # CI checkout 才暴露。这一步零成本，几秒内就能把这类错误挡在下载之前。
-        # 注意：这里**不调用** npm run icon。build/icon.png 已入库且是有效 PNG，
-        # 重新生成只会把一个可能损坏的已入库资源悄悄覆盖掉；
-        # 它是否有效交给下一节的检查来说明。
-        run: node scripts/stage-node.mjs --names
-
       - name: 校验图标资源
         shell: bash
         run: |
@@ -122,12 +114,14 @@ jobs:
           "
           # .icns 与 .ico 都由 electron-builder 从这张 PNG 派生，不需要额外工具。
 
-      - name: 准备内置运行时与便携 Node
+      - name: 准备内置运行时
         run: npm run stage
-        # stage = stage:runtime + stage:node + link:runtime + compress:runtime。
-        # stage:node 不带参数时自动按当前平台/架构下载，无需在 CI 里区分。
-        # compress:runtime 用 brotli q6 生成归档。实测约 23 秒 / 51 MB；
-        # 原来的 q11 要约 11 分钟 / 40 MB，是每个平台共同的主要耗时。
+        # stage = stage:runtime + link:runtime。
+        #
+        # 这一版**不再** stage:node（第二份便携 Node）：Electron 自带 Node 24，子进程直接
+        # 用 `process.execPath` + `ELECTRON_RUN_AS_NODE=1` 跑运行时。
+        # 也**不再** compress:runtime：运行时直接进 app.asar，由 NSIS 统一 LZMA 压缩，
+        # 因此既没有 brotli 归档，也没有首次启动解包那 ~9 秒。
 
       - name: 确认运行时已就位
         shell: bash
@@ -135,25 +129,35 @@ jobs:
           set -e
           test -f runtime/node_modules/@deepseek-ai/dsh/package.json || {
             echo "::error::staged 运行时缺失"; exit 1; }
+          # 子进程要跑的脚本必须**已经在 runtime/ 里**：打包进 app.asar 之后启动时写不进去，
+          # 缺了它只会在用户机器上以 ERR_MODULE_NOT_FOUND 出现。
+          for f in server.mjs client-module-cache.mjs; do
+            test -f "runtime/$f" || { echo "::error::runtime/$f 缺失（stage:runtime 没同步）"; exit 1; }
+          done
+          # 第二份 Node 绝不能再出现：它曾占解压后 Runtime 的 46%（88 MiB）。
+          test ! -e runtime/node/node.exe || {
+            echo "::error::runtime/ 里又出现了便携 Node"; exit 1; }
           # 先落到变量再 echo：把 node -p "..." 直接嵌进双引号里会因为引号嵌套
           # 被 shell 拆坏，这是很容易忽略的写法错误。
           staged=$(node -p 'require("./runtime/node_modules/@deepseek-ai/dsh/package.json").version')
           echo "dsh staged: $staged"
-          ls -la runtime/node | head -20
 
-      # 归档缺失时直接失败。
-      #
-      # electron-builder.yml 的 extraResources 只携带 build/runtime.br；缺了它打包**不会
-      # 报错**，只会产出一个没有运行时的安装包——用户装完打不开。这种"成功但不可用"的
-      # 失败最难发现，所以在打包前先挡掉。
-      - name: 确认运行时归档已生成
+      # 裁剪成 **Desktop Production Runtime**（策略见 scripts/runtime-file-policy.mjs）。
+      # 每个平台按自己的 target 裁一次：非目标平台的 native 包必须在那一步就被去掉，
+      # 否则会被打进安装包。裁剪报告会打印每条理由各占多少字节。
+      - name: 裁剪桌面运行时
         shell: bash
         run: |
           set -e
-          test -f build/runtime.br || {
-            echo "::error::缺少 build/runtime.br —— npm run stage 里的 compress:runtime 没跑成功"; exit 1; }
-          ls -la build/runtime.br
-          cat build/runtime.json
+          case "${{ matrix.target }}/${{ matrix.arch }}" in
+            win/x64)     node scripts/prepare-desktop-runtime.mjs --platform=win32  --arch=x64 ;;
+            linux/x64)   node scripts/prepare-desktop-runtime.mjs --platform=linux  --arch=x64 ;;
+            mac/x64)     node scripts/prepare-desktop-runtime.mjs --platform=darwin --arch=x64 ;;
+            mac/arm64)   node scripts/prepare-desktop-runtime.mjs --platform=darwin --arch=arm64 ;;
+            *) echo "::error::未知的 matrix target/arch: ${{ matrix.target }}/${{ matrix.arch }}"; exit 1 ;;
+          esac
+          test -f build/runtime-desktop/node_modules/@deepseek-ai/dsh/package.json || {
+            echo "::error::裁剪后的 Runtime 缺少 dsh 包"; exit 1; }
 
       # ---------------------------------------------------------------- Windows
       - name: 打包 Windows (NSIS setup.exe)
@@ -163,6 +167,15 @@ jobs:
         run: npx electron-builder --win --x64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Size Gate：体积是这一版的**交付指标**，不是"感觉快了"。
+      #
+      # 它同时挡住四类回归（第二份便携 Node、生产 npm CLI、重复的 @deepseek-ai Runtime、
+      # runtime.br + 解压 Runtime 的双交付），越界即失败。门槛：第一阶段 <= 120 MiB，
+      # 目标 <= 100 MiB（用 --stretch-mib 记录，不阻断）。
+      - name: Windows 安装包体积门禁
+        if: matrix.target == 'win'
+        run: node scripts/report-package-size.mjs --limit-mib 120 --stretch-mib 100
 
       # 说明：这里原本还有一个「打包 Windows (MSI)」步骤，现已移除。
       #

@@ -22,7 +22,7 @@ import { syncBundledPlugins } from './sync-plugins.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const runtime = join(ROOT, 'runtime')
-const NODE = join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
+const NODE = process.execPath
 
 syncBundledPlugins()
 

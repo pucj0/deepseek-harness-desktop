@@ -20,39 +20,41 @@ directories:
   output: release/${version}
   buildResources: build
 
-# `compression` is a top-level option, not an nsis/msi child. Left at electron-builder's
-# default `normal`: `maximum` switches the packer to a heavier solid mode whose memory
-# use on a ~700 MB runtime tree is a real risk on a CI runner, and a slightly smaller
-# installer is not worth a build that dies without saying why.
+# 只随包携带应用真正会用的两套 Electron locale。
+#
+# 默认会带上 Chromium 的全部 55 种语言包，实测 **40.3 MiB**（最大几个：ml 1.41、
+# ta 1.40、kn 1.36、te 1.30、hi 1.26 MiB）。界面本身只有中英两套（见 src/main/i18n.ts），
+# 因此保留 en-US 与 zh-CN 即可；其余语言下 Chromium 会走它自己的 fallback（en-US）。
+#
+# 注意：这不影响**系统语言 fallback**——`app.getLocale()` 仍返回真实系统语言，
+# 只是找不到对应 .pak 时由 Chromium 回落到 en-US，而不是崩溃或白屏。
+electronLanguages:
+  - en-US
+  - zh-CN
+
+# `compression` is a top-level option, not an nsis/msi child.
+#
+# 刻意留到**最后**才比较：先做完 A–F 的架构优化（去掉第二份 Node、去掉 runtime.br 双交付、
+# 去掉生产 npm、精简 locale、裁剪 Runtime），再回来量 normal vs maximum 的
+# installer size / build duration / install duration。最大压缩不是主要手段：它换来的
+# 通常只有几个百分点，而代价是构建时间与内存（`maximum` 会切到更重的 solid 模式）。
 compression: normal
 
 # src/server/server.mjs ships as a resource rather than being compiled, since it is
-# a plain Node ESM script. It is only the transport: the main process copies it to
-# <runtime>/server.mjs before spawning, because Node resolves imports from the
-# script's own directory and resources/server/ has no reachable node_modules.
+# a plain Node ESM script. `stage-runtime.mjs` also copies it into `runtime/`, which
+# is where the child actually runs it from (see `serverRunEntry` in src/main/paths.ts):
+# inside app.asar nothing can be written at startup, so the copy must already be there.
 extraResources:
-  # 随应用携带的客户端插件（gitbar / review / typography）。
+  # 随应用携带的客户端插件（gitbar / review / typography / shell-bridge）。
   #
-  # 插件不在 dsh 的依赖闭包里；开发运行与 Release 首次解包后的 runtime 都需要外壳
-  # 在启动时同步与当前版本配套的插件（见 plugin-sync.ts）。这份散文件是不依赖运行时
-  # 目录布局的来源，也保证外壳、插件与 bundled Runtime 总是来自同一个 Release。
+  # 插件不在 dsh 的依赖闭包里；开发运行与打包运行都需要外壳在启动时同步与当前版本配套的
+  # 插件（见 plugin-sync.ts）。这份散文件是不依赖运行时目录布局的来源，也保证外壳、插件
+  # 与 bundled Runtime 总是来自同一个 Release。
   #
   # 刻意不加 `filter` 白名单：插件将来多一个 .mjs / .cjs 文件时，白名单会**静默漏掉**
   # 它，而那只有在打包后的应用里才暴露出来。整个目录只有十几 KB 的源码，全带上更安全。
   - from: plugins
     to: plugins
-  # 携带**压缩后的运行时归档**，而不是散开的 27 400 个文件。
-  #
-  # 实测：runtime/ 瘦身后约 199 MB，brotli q6 约 23 秒压到 51 MB。
-  # 首次启动把它解到 userData（实测 9.2 秒，加载页会显示进度）。这样安装包与解包
-  # 体积都小得多，代价只是首次启动多等几秒。
-  #
-  # 归档由 `npm run stage:runtime`（内部调用 scripts/compress-runtime.mjs）生成，
-  # 是构建前置产物；缺失时打包会失败——这是刻意的，以免又打出一个巨大的安装包。
-  - from: build/runtime.br
-    to: runtime.br
-  - from: build/runtime.json
-    to: runtime.json
   - from: src/server
     to: server
     filter:
@@ -61,25 +63,54 @@ extraResources:
   - from: build/icon.png
     to: icon.png
 
-# The staged runtime belongs in extraResources only. Excluding it here keeps the
-# runtime tree out of app.asar.
+# 应用代码 + **完整 Runtime** 一起进 app.asar。
+#
+# 这一版不再交付 `runtime.br`：那是 brotli 归档 + 首次启动解压（实测解压 189.7 MiB、
+# 约 9 秒），而且 .br 本身已经压缩过，NSIS 再也压不动它。Runtime 的 JS / JSON / 普通资源
+# 直接进 asar，由 NSIS 统一 LZMA 压缩——"安装包体积"与"解压等待"这两件事一起消失。
+#
+# 只有**必须真实落盘**的东西才排除在 asar 之外：
+#   * `runtime/node/**` —— 第二份 portable Node。Electron 自身在 Node 模式下就是
+#     Node 24（`process.execPath` + `ELECTRON_RUN_AS_NODE=1`），不再需要它；
+#   * native 可执行文件（.node/.dll/.exe/.so/.dylib）—— `dlopen` 与 `spawn` 都要真实
+#     文件，交给下面的 asarUnpack。
 files:
   - dist/**/*
   - package.json
+  # Runtime 是**裁剪后**的那棵树（`npm run prepare:runtime` 生成），不是 `runtime/` 原样。
+  # 策略见 scripts/runtime-file-policy.mjs：便携 Node、LibreOffice 平台负载、source map、
+  # .d.ts、tests/fixtures/examples、非目标平台 native 都会在这里被剔除，并且每条理由各占
+  # 多少字节都由 `--report` 打出来。进入 asar 后落在 `runtime/`，与开发期布局一致。
+  - from: build/runtime-desktop
+    to: runtime
   - '!**/*.map'
   - '!**/*.ts'
-  - '!runtime/**'
   - '!release/**'
   - '!scripts/**'
   # 插件只以 extraResources 的形式随包发布（见上面那段说明）：进 app.asar 没有用处。
   - '!plugins/**'
 
-# Native addons and anything the loader imports by path must exist as real files.
-# @deepseek-ai/* is unpacked because the boot chain resolves bundle packages via
-# require.resolve paths and creates junctions next to them at runtime.
+# 只有加载器必须按真实路径打开的 native 二进制才 unpack，其余一律留在 app.asar 里。
 asarUnpack:
-  - node_modules/npm/**
-  - node_modules/@deepseek-ai/**
+  - 'runtime/**/*.node'
+  - 'runtime/**/*.dll'
+  - 'runtime/**/*.exe'
+  - 'runtime/**/*.so'
+  - 'runtime/**/*.dylib'
+
+# **必须**打开：electron-builder 默认会跳过**任何**层级的 `node_modules` 目录
+# （`AppFileWalker.createAppFilter` 里只要 `file.endsWith('/node_modules')` 就返回
+# `includeSubNodeModules`，默认 false），而桌面版携带的 Runtime 正是一棵完整的嵌套安装树
+# （`runtime/node_modules/**`，其中还有 `@deepseek-ai/dsh/node_modules/**`）。
+#
+# 不打开时的表现极具误导性：打包**成功**、asar 里也有 `runtime/`，但只剩
+# `runtime/package.json`、`server.mjs` 这几个直接位于根下的文件，`runtime/node_modules`
+# 整个消失——装出来的应用启动即 "no bundled dsh runtime found"。
+#
+# 打开它不会让仓库根部的 node_modules 被重复收进 asar：根部依赖仍由 electron-builder 的
+# 依赖求解器（只装 production dependencies）负责，我们的 `files` 里并没有匹配根部
+# `node_modules` 的正向模式。
+includeSubNodeModules: true
 
 # ---------------------------------------------------------------- Windows -----
 win:

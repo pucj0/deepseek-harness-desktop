@@ -24,7 +24,6 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { join } from 'node:path'
-import { UNPACKED_DIRNAME } from './runtime-unpack'
 
 /** 一次同步的结果。 */
 export interface PluginSyncOutcome {
@@ -166,22 +165,42 @@ export function pluginSourceCandidates(options: {
   resourcesPath: string
   /** 仓库根目录（仅开发期使用）。 */
   repoRoot: string
-  /** 应用数据目录。 */
-  userDataDir: string
+  /** 当前实际使用的运行时目录：插件最终要同步到这里，因此它也是**首选来源**。 */
+  runtimeDir: string
   /** 是否运行在打包后的应用里。 */
   packaged: boolean
-  /** 本次启动解包出来的运行时目录（若有）。 */
-  unpackedDir?: string
 }): string[] {
-  const { resourcesPath, repoRoot, userDataDir, packaged, unpackedDir } = options
+  const { resourcesPath, repoRoot, runtimeDir, packaged } = options
   const candidates = [
     packaged ? join(resourcesPath, 'plugins') : join(repoRoot, 'plugins'),
-    ...(unpackedDir === undefined ? [] : [unpackedDir]),
-    // 归档解开后的常驻位置：运行时自动更新占的是旁边的 `runtime/`，两者并列不嵌套。
-    join(userDataDir, UNPACKED_DIRNAME, 'runtime'),
-    join(resourcesPath, 'runtime'),
+    // 运行时里那份（打包形态下它在 app.asar 内）：本版不再有 runtime.br 解包目录，
+    // 也不再有"运行时自动更新"留下的 `<userData>/bundled-runtime`，因此候选只有这两个。
+    runtimeDir,
   ]
   return [...new Set(candidates)]
+}
+
+/**
+ * 解析"内置插件在哪儿"，交给子进程做 profile 链接。
+ *
+ * 与 {@link pluginSourceCandidates} 同一个候选表，但只回答一个问题：**真实存在的**那个目录。
+ * 子进程需要真实路径（符号链接目标不能落在 app.asar 内部），所以这里必须做存在性检查，
+ * 而不是把 app.asar 里的路径递过去。
+ *
+ * @param options - 路径与形态。
+ * @returns 选中的插件目录（都不存在时退回首选候选，让子进程照常报"缺插件"）。
+ */
+export function resolveBundledPlugins(options: {
+  resourcesPath: string
+  repoRoot: string
+  runtimeDir: string
+  packaged: boolean
+}): { dir: string } {
+  const candidates = pluginSourceCandidates(options)
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return { dir: candidate }
+  }
+  return { dir: candidates[0] ?? join(options.resourcesPath, 'plugins') }
 }
 
 /**
@@ -205,9 +224,14 @@ export function syncPluginsAtStartup(options: {
   userDataDir: string
   /** 是否运行在打包后的应用里。 */
   packaged: boolean
-  /** 本次启动解包出来的运行时目录（若有）。 */
-  unpackedDir?: string
 }): { outcome: PluginSyncOutcome; messages: string[] } {
+  // **打包形态不再同步**：Runtime 在 `app.asar` 里，是只读的，写不进去也不该写——
+  // 应用与其插件同属一个不可变的 Release，没有"运行时被换掉后要补齐"这种情形。
+  // 子进程改为把 `resources/plugins`（真实目录）直接链进 profile（见 server.mjs 的
+  // `--bundled-plugins-dir`），因此这里既不需要复制，也不需要每次启动指纹校验。
+  if (options.packaged) {
+    return { outcome: { available: [], written: [], kept: [], failures: [] }, messages: [] }
+  }
   const outcome = syncPluginsIntoRuntime(options.runtimeDir, pluginSourceCandidates(options))
   const messages: string[] = []
   // 只在**确实写入**时报告：正常情况下插件已就位，每次启动都打一行日志只会淹没真正的

@@ -66,7 +66,7 @@ const runtime = {
   installAnchor: join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
   serverEntry: join(root, 'src', 'server', 'server.mjs'),
   serverRunEntry: join(runtimeDir, 'server.mjs'),
-  nodeBinary: join(runtimeDir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node'),
+  nodeBinary: process.execPath,
   packaged: false,
 }
 

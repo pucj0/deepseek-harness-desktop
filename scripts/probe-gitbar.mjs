@@ -11,7 +11,7 @@ import { join } from 'node:path'
 
 const home = join(process.cwd(), '.dev-home', 'home')
 const runtime = join(process.cwd(), 'runtime')
-const nodeExe = join(runtime, 'node', 'node.exe')
+const nodeExe = process.execPath
 const workspace = process.cwd()
 
 const child = spawn(

@@ -18,15 +18,18 @@
     "stage:node": "node scripts/stage-node.mjs",
     "sync:plugins": "node scripts/sync-plugins.mjs",
     "link:runtime": "node scripts/link-runtime.mjs",
-    "compress:runtime": "node scripts/compress-runtime.mjs",
-    "stage": "npm run stage:runtime && npm run stage:node && npm run link:runtime && npm run compress:runtime",
-    "dist": "npm run build && npm run stage && electron-builder --win --x64",
-    "dist:win": "npm run build && npm run stage && electron-builder --win --x64",
-    "dist:linux": "npm run build && npm run stage && electron-builder --linux --x64",
-    "dist:mac": "npm run build && npm run stage && electron-builder --mac",
-    "dist:all": "npm run build && npm run stage && electron-builder --win --linux --x64",
+    "stage": "npm run stage:runtime && npm run link:runtime",
+    "prepare:runtime": "node scripts/prepare-desktop-runtime.mjs",
+    "report:size": "node scripts/report-package-size.mjs",
+    "dist": "npm run build && npm run stage && npm run prepare:runtime && electron-builder --win --x64",
+    "dist:win": "npm run build && npm run stage && npm run prepare:runtime && electron-builder --win --x64",
+    "dist:linux": "npm run build && npm run stage && npm run prepare:runtime -- --platform=linux && electron-builder --linux --x64",
+    "dist:mac": "npm run build && npm run stage && npm run prepare:runtime -- --platform=darwin --arch=arm64 && electron-builder --mac",
+    "dist:all": "npm run build && npm run stage && npm run prepare:runtime && electron-builder --win --linux --x64",
     "release": "npm run dist:win && electron-builder --publish always",
     "test:i18n": "node scripts/test-i18n.cjs",
+    "test:runtime": "node scripts/test-desktop-runtime.mjs",
+    "test:size": "node scripts/report-package-size.mjs",
     "test:locale": "npm run build && node scripts/test-harness-locale.mjs && node scripts/test-shell-locale.mjs && node scripts/test-menu-inventory.mjs && node scripts/test-shell-cold-start.cjs && node scripts/test-titlebar.mjs && node scripts/test-titlebar-ui.cjs",
     "test:settings": "npm run build && node scripts/test-settings-composition.mjs && node scripts/test-typography-settings.mjs",
     "test:workspace": "npm run build && node scripts/test-workspace-switch.mjs && node scripts/test-workspace-registration.mjs && node scripts/test-workspace-lifecycle.mjs && node scripts/test-active-workspace.mjs",
@@ -43,12 +46,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "electron": "^33.2.0",
+    "electron": "44.0.0",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9",
-    "npm": "^10.9.0"
+    "electron-updater": "^6.3.9"
   }
 }

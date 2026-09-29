@@ -60,7 +60,7 @@ try {
     syncBundledPlugins()
   }
   child = spawn(
-    join(runtime, 'node', 'node.exe'),
+    process.execPath,
     [
       join(runtime, 'server.mjs'),
       '--dsh-home',

@@ -16,7 +16,7 @@ import { syncBundledPlugins } from './sync-plugins.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const runtime = join(ROOT, 'runtime')
-const NODE = join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node')
+const NODE = process.execPath
 
 // The server loads plugins from `runtime/node_modules`, so the copies must be refreshed
 // first — otherwise this suite would test the previous version of the plugins.
