@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "dshRuntimeVersion": "0.2.0-rc.1",
   "private": true,
   "description": "DeepSeek Harness 桌面客户端：分别检查 Desktop 与官方 Runtime 的 GitHub Releases，并以内置完整 Runtime 交付。",
