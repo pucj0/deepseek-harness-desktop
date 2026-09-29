@@ -1,3 +1,14 @@
+# 1.7.2
+
+本版恢复并明确展示 Harness Runtime 更新，同时保持终端用户侧完全不运行 npm：
+
+- **双 GitHub 更新轨道：**「更新 → 检查更新」现在同时检查本项目 Desktop Releases 与官方 `deepseek-ai/deepseek-harness` Runtime Releases，分别显示已安装版本和最新版本；Runtime 条目可打开精确的官方 Release 页面。
+- **Runtime 真正升级：**本版内置官方最新 `0.2.0-rc.1`。构建配置用 `dshRuntimeVersion` 固定版本，并在准备依赖前校验对应的 `dsh-v0.2.0-rc.1` 官方 GitHub Release；用户安装完整 Desktop Release 后直接启用已构建 Runtime，不下载残缺的源码包，也不在用户机器查询 npm registry。
+- **0.2.0 兼容修复：**为新版 Web profile 提供 `DSH_CLIENT_VERSION`；兼容 Node 24 在 Windows 上把 junction 报成普通目录的行为，确保第二次启动仍能重新挂载 Git Sidebar、Review、字号与外壳桥接插件。新版 Runtime 已原生缓存惰性客户端响应时，不再强制套用旧版本的启动缓存适配器。
+- **安全模型不变：**旧 `<userData>/runtime/current` 仍不能覆盖 Release 内置 Runtime；session、workspace、设置、登录状态和用户项目均保留。Runtime 安装仍随完整 Desktop Release 一起完成，避免 Shell/Runtime 协议不匹配。
+
+---
+
 # 1.7.1
 
 本版同时收口桌面更新与项目 Git 工作流：

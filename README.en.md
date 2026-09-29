@@ -10,7 +10,7 @@ It packages the official `@deepseek-ai/dsh` runtime, a portable Node.js runtime,
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-Repository version: **1.7.1**. See [release notes](RELEASE_NOTES.md) for the version history.
+Repository version: **1.7.2**, bundling Harness Runtime **0.2.0-rc.1**. See [release notes](RELEASE_NOTES.md) for the version history.
 
 ## Why a desktop client?
 
@@ -98,7 +98,7 @@ This compares launch methods and additions provided by this project's shell. Bot
 | Workspace access | Harness workspace controls | Also offers a native picker and recent list |
 | Tray and native menu | — | Included |
 | Git toolbar, Changes, Log, per-turn review | — | Desktop plugins |
-| Product updates | npm | The complete app checks and installs this project's GitHub Releases; shell and bundled runtime ship together |
+| Product updates | npm | Desktop and Runtime check their respective GitHub Releases; the complete runtime ships in the Desktop Release |
 
 ## Architecture
 
@@ -128,9 +128,10 @@ The code includes a credential store that wraps a key with Electron `safeStorage
 
 ## Updates
 
-- **Complete product updates:** packaged builds use only `electron-updater` and this project's GitHub Releases metadata. **Update → Check for Updates** checks, downloads, and restarts into a Release containing the desktop shell, its matching Harness runtime, desktop plugins, platform installers, and `latest*.yml` metadata.
+- **Two GitHub check tracks:** **Update → Check for Updates** checks both the `pucj0/deepseek-harness-desktop` Releases for the Desktop app and the official `deepseek-ai/deepseek-harness` Releases for Harness Runtime. Each track shows its installed and latest versions; the Runtime track links to the matching official Release.
+- **Complete-product installation:** `electron-updater` downloads this project's Desktop GitHub Release. Each Release carries the shell, a compatibility-tested official Harness runtime, desktop plugins, platform installers, and `latest*.yml`. The app never mistakes upstream source archives—which have no built `lib` tree and contain `workspace:*` dependencies—for an executable runtime.
 - **The Release runtime always wins:** after installation the app boots the runtime bundled with that Release. A legacy `<userData>/runtime/current` left by an older version is ignored and cannot override it; sessions, workspaces, settings, sign-in data, and user projects are not deleted.
-- **npm remains a build-time tool:** `npm ci`, `npm run build`, and `npm run stage` still fetch build dependencies and prepare the official runtime. Only end-user npm-registry checks and hot installation of `@deepseek-ai/dsh` have been removed. App self-update is explicitly unavailable in development mode.
+- **Verifiable version source:** `package.json#dshRuntimeVersion` pins the runtime shipped by a build. `npm run stage` first verifies that the matching official `dsh-v*` GitHub Release is published, then prepares its complete dependency closure on the build machine. An installed app never runs npm, queries the npm registry, or compiles the upstream source. App self-update is explicitly unavailable in development mode.
 
 ## Project structure
 

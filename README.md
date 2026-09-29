@@ -10,7 +10,7 @@ DeepSeek Harness Desktop 是 [DeepSeek Harness (`dsh`)](https://github.com/deeps
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms: Windows, macOS, Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-当前仓库版本：**1.7.1**。详细变更见 [发布记录](RELEASE_NOTES.md)。
+当前仓库版本：**1.7.2**，内置 Harness Runtime **0.2.0-rc.1**。详细变更见 [发布记录](RELEASE_NOTES.md)。
 
 ## 为什么需要桌面版
 
@@ -97,7 +97,7 @@ Windows 构建未配置代码签名，SmartScreen 可能提示“未知发布者
 | 工作区入口 | Harness 自身的工作区操作 | 加上原生目录选择器和最近打开列表 |
 | 托盘与原生菜单 | — | 提供 |
 | Git 工具条、Changes、Log、本轮审查 | — | 由桌面插件提供 |
-| 产品更新 | npm | 完整应用通过本项目 GitHub Releases 检查、下载并重启安装；内置 Runtime 与外壳同版交付 |
+| 产品更新 | npm | Desktop 与 Runtime 分别检查各自 GitHub Releases；完整 Runtime 随 Desktop Release 安装 |
 
 ## 架构
 
@@ -127,9 +127,10 @@ Electron Desktop Shell
 
 ## 更新机制
 
-- **完整产品更新：**打包应用只使用 `electron-updater` 与本项目 GitHub Releases 的元数据。用户从 **更新 → 检查更新** 检查、下载并重启安装；一个 Release 同时携带桌面外壳、对应的 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`。
+- **两条 GitHub 检查轨道：** **更新 → 检查更新** 同时检查本项目 `pucj0/deepseek-harness-desktop` Releases（Desktop 应用）与官方 `deepseek-ai/deepseek-harness` Releases（Harness Runtime），分别显示已安装版本、最新版本与状态；Runtime 项可直接打开对应的官方 Release。
+- **完整产品安装：**Desktop 应用继续通过 `electron-updater` 下载本项目 GitHub Release。一个 Release 同时携带桌面外壳、经过兼容验证的官方 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`；不会把只有源码、缺少 `lib` 与 `workspace:*` 依赖的上游源码压缩包误当作可运行 Runtime。
 - **Runtime 随 Release 生效：**安装新版后始终启动该版本随包携带的 Runtime。旧版本可能留下的 `<userData>/runtime/current` 仅作为遗留缓存忽略，不会覆盖新 Release；session、workspace、设置、登录数据与用户项目均不删除。
-- **开发与发布仍使用 npm：**`npm ci`、`npm run build` 与 `npm run stage` 仍用于取得构建依赖和准备官方 Runtime；取消的只是安装完成后面向终端用户的 npm registry 查询与 `@deepseek-ai/dsh` 热安装。开发模式明确不支持应用自更新。
+- **版本来源可验证：**`package.json#dshRuntimeVersion` 固定本次打包的 Runtime。`npm run stage` 会先确认同名 `dsh-v*` 官方 GitHub Release 已发布，再在构建机准备完整依赖闭包；安装后的应用不会运行 npm、查询 npm registry 或现场编译源码。开发模式明确不支持应用自更新。
 
 ## 项目结构
 
