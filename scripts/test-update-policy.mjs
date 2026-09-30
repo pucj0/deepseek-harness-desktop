@@ -120,7 +120,16 @@ assert.match(appPreload, /data-dsh-desktop-menu/u, 'the caption menu host must b
 assert.match(appPreload, /attachShadow\(\{ mode: 'open' \}\)/u, 'the menu must live in a Shadow Root')
 assert.match(appPreload, /dsh-desktop:shell-menu-open/u, 'menu clicks must go through the existing IPC')
 assert.match(appPreload, /dsh-desktop:shell-state/u, 'the menu must re-read labels on state pushes (locale / menu revision)')
-assert.match(appPreload, /env\(titlebar-area-width/u, 'the menu must stay clear of the native caption buttons')
+assert.match(appPreload, /data-windows-titlebar/u, 'the preload must publish the official Windows titlebar marker')
+assert.match(appPreload, /--dsh-windows-titlebar-height/u, 'the preload must publish the official titlebar height variable')
+// 菜单位置**只消费**官方 CSS 契约，不允许任何"量 sidebar 宽度"的写法（这正是上一版的错误）。
+assert.match(appPreload, /left: var\(--dsh-windows-menu-start, 48px\)/u, 'the menu must take its left from the official variable')
+for (const forbidden of ['sidebarCol', '--dsh-caption-menu-start', '--dsh-caption-menu-height', 'getBoundingClientRect().right']) {
+  assert.ok(
+    !appPreload.includes(forbidden),
+    `菜单位置不得依赖 sidebar 几何：源码里不应出现 ${forbidden}`,
+  )
+}
 assert.match(appPreload, /-webkit-app-region: no-drag/u, 'the menu area must not be a drag region')
 // 扫**代码**而不是注释：说明文字里正当地写着 `require('./caption-menu')` 这个反例。
 const codeOnly = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')

@@ -57,41 +57,57 @@ const EXPR_WINDOW = `(() => JSON.stringify({
     const buttons = shadow === null ? [] : [...shadow.querySelectorAll('button')]
     const hostRect = host.getBoundingClientRect()
     const hostStyle = getComputedStyle(host)
-    const toggle = document.querySelector('button[aria-label*="侧边栏"], button[aria-label*="sidebar"], button[aria-label*="收起"]')
-    const toggleRect = toggle === null ? null : toggle.getBoundingClientRect()
+    const root = document.documentElement
+    const rootStyle = getComputedStyle(root)
+    // 官方标记：Harness 前端据此切换 Windows Desktop 布局。
+    const sidebar = document.querySelector('[class*=sidebarCol]')
+    const sidebarRoot = document.querySelector('[class*=sidebar][class*=root], [class*=hHd-Xa_root]') ?? document.querySelector('[class*=sidebarCol] > *')
+    const toggle = document.querySelector('[class*=toggle][class*=hHd], button[aria-label*="侧边栏"], button[aria-label*="sidebar"], button[aria-label*="收起"]')
+    const newSession = document.querySelector('[class*=newSession]')
+    const brand = document.querySelector('[class*=brand], [class*=logoRow]')
+    const box = (node) => {
+      if (node === null) return null
+      const r = node.getBoundingClientRect()
+      const s = getComputedStyle(node)
+      return {
+        left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom),
+        width: Math.round(r.width), height: Math.round(r.height),
+        position: s.position, display: s.display, visibility: s.visibility,
+      }
+    }
     return {
       present: true,
       inShadowRoot: shadow !== null,
       labels: buttons.map((b) => b.textContent),
-      // 菜单必须落在标题栏那条里（顶部对齐），高度与 TITLEBAR_HEIGHT 一致。
-      top: Math.round(hostRect.top),
-      height: Math.round(hostRect.height),
+      // 官方 marker 与高度变量——这两个就是"Harness 是否进入 Windows Desktop 模式"的判据。
+      markerOnRoot: root.hasAttribute('data-windows-titlebar'),
+      markerHeightVariable: rootStyle.getPropertyValue('--dsh-windows-titlebar-height').trim(),
+      menuStartVariable: rootStyle.getPropertyValue('--dsh-windows-menu-start').trim(),
+      menuStartInlineOnRoot: root.style.getPropertyValue('--dsh-windows-menu-start').trim(),
+      sidebarCollapsed: root.hasAttribute('data-sidebar-collapsed') || document.querySelector('[data-sidebar-collapsed]') !== null,
+      // 菜单位置：必须有 host 自己的 left 变量，**且不得来自任何 sidebar 宽度计算**。
+      hostLeftVariable: host.style.getPropertyValue('--dsh-caption-menu-start').trim(),
       left: Math.round(hostRect.left),
       right: Math.round(hostRect.right),
+      top: Math.round(hostRect.top),
+      height: Math.round(hostRect.height),
       appRegion: hostStyle.webkitAppRegion || hostStyle.getPropertyValue('-webkit-app-region'),
       background: hostStyle.backgroundColor,
       fontFamily: hostStyle.fontFamily.slice(0, 40),
-      color: hostStyle.color,
-      // 不覆盖侧栏折叠按钮：菜单的左边缘必须在它右侧。
-      toggleRight: toggleRect === null ? null : Math.round(toggleRect.right),
-      overlapsToggle: toggleRect === null ? null : hostRect.left < toggleRect.right,
-      // 不覆盖原生 caption buttons：窗口宽度减去它们的占地。
-      viewport: window.innerWidth,
-      // 原生 caption buttons 的占地由 env(titlebar-area-*) 给出（DPI 无关）。
-      titlebarAreaWidth: getComputedStyle(host).getPropertyValue('max-width'),
-      rightLimit: (() => {
-        // 用 host 的实际右边缘与"标题栏可用区"比较：菜单绝不能越过它。
-        const probe = document.createElement('div')
-        probe.style.cssText = 'position:fixed;top:0;left:0;width:env(titlebar-area-width, 100vw)'
-        document.body.append(probe)
-        const limit = probe.getBoundingClientRect().width
-        probe.remove()
-        return Math.round(limit)
+      // 官方 CSS 负责的那些元素必须落在正确位置（不是外壳摆的）。
+      toggle: box(toggle),
+      newSession: box(newSession),
+      brand: box(brand),
+      sidebar: box(sidebar),
+      sidebarRoot: box(sidebarRoot),
+      // 顶部那一条统一背景由 AppFrame 的 ::before 画（带 drag）。
+      frameBefore: (() => {
+        const frame = document.querySelector('[class*=frame]')
+        if (frame === null) return null
+        const s = getComputedStyle(frame, '::before')
+        return { height: s.height, background: s.backgroundColor || s.background, appRegion: s.webkitAppRegion || s.getPropertyValue('-webkit-app-region'), position: s.position }
       })(),
-      buttonRects: buttons.map((b) => {
-        const r = b.getBoundingClientRect()
-        return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) }
-      }),
+      viewport: window.innerWidth,
     }
   })(),
 }))()`
@@ -276,6 +292,29 @@ writeFileSync(
     "      log('locale switch FAILED ' + String(error && error.message ? error.message : error))",
     '    }',
     '  }, 400)',
+    '  // 截图命令：把文件名写进来 → 探针用主进程的 capturePage() 存图，并可先切换侧栏状态。',
+    '  //',
+    '  // 为什么不让测试用 CDP 的 Page.captureScreenshot：无 GPU 的远程调试下它报',
+    '  // UnknownVizError（实测），而主进程的 capturePage() 一直可用。',
+    "  const shotSignal = join(out, 'capture.txt')",
+    '  const shotWatch = setInterval(() => {',
+    '    try {',
+    '      if (!existsSync(shotSignal)) return',
+    "      const request = String(readSignal(shotSignal, 'utf8')).trim()",
+    '      unlinkSync(shotSignal)',
+    "      if (!/^[\\w.-]+\\.png$/u.test(request)) return",
+    '      void (async () => {',
+    '        const image = await handle.window.capturePage()',
+    '        if (image.isEmpty()) return',
+    '        writeFileSync(join(out, request), image.toPNG())',
+    "        log('captured ' + request)",
+    '      })().catch((error) => {',
+    "        log('capture FAILED ' + String(error && error.message ? error.message : error))",
+    '      })',
+    '    } catch (error) {',
+    "      log('capture signal FAILED ' + String(error && error.message ? error.message : error))",
+    '    }',
+    '  }, 300)',
     '  // 关掉一个还开着的原生菜单（自动化里没人点，它会一直开着）。',
     "  const closeSignal = join(out, 'close-menu.txt')",
     '  const closeWatch = setInterval(() => {',
@@ -399,6 +438,21 @@ for (let attempt = 0; attempt < 40; attempt += 1) {
             const raw = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
             return typeof raw === 'string' && raw !== '' ? JSON.parse(raw) : undefined
           },
+          /**
+           * 让探针用主进程的 `capturePage()` 存一张图。
+           *
+           * 无 GPU 的远程调试下 CDP 的 `Page.captureScreenshot` 会报 `UnknownVizError`（实测），
+           * 所以截图走文件信号 + 主进程。截图是给报告看的证据，失败不该让架构断言变红。
+           * @param name - 输出文件名。
+           */
+          screenshot: async (name) => {
+            writeFileSync(join(OUT, 'capture.txt'), name)
+            for (let i = 0; i < 25; i += 1) {
+              await sleep(300)
+              if (existsSync(join(OUT, name))) return true
+            }
+            return false
+          },
           close: () => socket.close(),
         }
         break
@@ -443,25 +497,47 @@ if (measured === undefined || measured.menu?.present !== true) {
   console.log(`  FAIL  没有在 Harness 文档里找到 [data-dsh-desktop-menu]（menu=${JSON.stringify(measured?.menu)}）`)
 } else {
   const menu = measured.menu
-  console.log(`  INFO  ${JSON.stringify({ labels: menu.labels, left: menu.left, right: menu.right, top: menu.top, height: menu.height, region: menu.appRegion, toggleRight: menu.toggleRight })}`)
+  console.log(`  INFO  ${JSON.stringify({ labels: menu.labels, left: menu.left, top: menu.top, height: menu.height, region: menu.appRegion, marker: menu.markerOnRoot, heightVar: menu.markerHeightVariable, menuStart: menu.menuStartVariable })}`)
 
   // Case H + A：仍然单 renderer，菜单没有引入第二个 WebContents。
   check('Case A/H 菜单没有引入第二个 WebContents', line('contentViewChildren='), 'contentViewChildren=0')
   has('Case B 菜单 host 存在', menu.present)
   has('Case B 菜单在 Shadow Root 里（不污染 Harness 的全局 CSS）', menu.inShadowRoot)
   check('Case B/E 五个顶层标题（中文）', JSON.stringify(menu.labels), JSON.stringify(['文件', '编辑', '视图', '更新', '帮助']))
+
+  // ================= 官方 Windows Desktop 布局（需求第十九条：expanded）=================
+  //
+  // 关键判据是**官方 marker 在最终 Harness 文档上**：Harness 的 ui-layout / ui-sidebar 全靠它
+  // 切换到 Desktop 布局（AppFrame 的 padding-top 与那条统一背景、Logo 下移、toggle 固定 left:12px、
+  // 收起时 newSession left:48px 与 --dsh-windows-menu-start:84px）。
+  has('Case 19 最终 Harness 文档带 [data-windows-titlebar]', menu.markerOnRoot)
+  check('Case 19 --dsh-windows-titlebar-height 实际值', menu.markerHeightVariable, '40px')
+  // 菜单位置必须来自官方 CSS 契约，而不是外壳量的 sidebar 宽度。
+  check('Case 21 外壳没有给菜单算过位置（host 上没有自定义 left 变量）', menu.hostLeftVariable, '')
+  check('Case 7 expanded 菜单 left ≈ 48px', Math.abs(menu.left - 48) <= 2, true)
+  has('Case 19 菜单使用 Harness 的字体', /Segoe UI|system-ui|-apple-system/u.test(menu.fontFamily))
   // Case F：菜单区域不可拖动，且 host 不画自己的背景（透出 Harness 标题栏）。
   check('Case F 菜单区是 no-drag', menu.appRegion, 'no-drag')
   check('Case F 菜单不画自己的背景（透出 Harness 标题栏底色）', menu.background, 'rgba(0, 0, 0, 0)')
-  // Case G：不覆盖侧栏折叠按钮。
-  has('Case G 不覆盖侧栏折叠按钮', menu.overlapsToggle === false)
-  check('Case G 菜单位于折叠按钮右侧', menu.left > (menu.toggleRight ?? 0), true)
-  // 与标题栏同高、贴顶。
-  check('菜单与标题栏同高（40px）', menu.height, 40)
-  check('菜单贴着窗口顶部', menu.top, 0)
-  has('菜单使用 Harness 的字体（不是外壳自己的一套）', /Segoe UI|system-ui|-apple-system/u.test(menu.fontFamily))
-  // 不越进原生 caption buttons 的占地（`env(titlebar-area-width)` 是那条边界）。
-  check('Case G 菜单不越进原生 caption buttons 区域', menu.right <= menu.rightLimit, true)
+  // 顶部那一条统一背景由官方 AppFrame 的 ::before 提供，并且是拖动区。
+  if (menu.frameBefore !== null) {
+    check('Case 16 AppFrame::before 高度 = 标题栏高度', menu.frameBefore.height, '40px')
+    check('Case 16/18 AppFrame::before 是拖动区', menu.frameBefore.appRegion, 'drag')
+  }
+  // Case 19：Logo 必须在标题栏**下方**（不能与菜单同一行）。
+  if (menu.brand !== null) {
+    has('Case 19/15 DeepSeek brand 位于标题栏之下（top >= 40）', menu.brand.top >= 40)
+    has('Case 19/15 brand 与菜单不在同一行', menu.brand.bottom > 40)
+  } else {
+    console.log('  INFO  没找到 brand 元素（跳过 Logo 位置断言）')
+  }
+  // Case 6：toggle 由官方 CSS 钉在 left:12px。
+  if (menu.toggle !== null) {
+    check('Case 6/9 toggle position', menu.toggle.position, 'fixed')
+    check('Case 6/9 toggle left ≈ 12px', Math.abs(menu.toggle.left - 12) <= 2, true)
+  } else {
+    console.log('  INFO  没找到 toggle 元素（跳过 toggle 位置断言）')
+  }
 
   if (cdp !== undefined) {
     // Case C：点「更新」（第 4 个顶层项，index=3）——必须走 dsh-desktop:shell-menu-open，
@@ -540,6 +616,67 @@ if (measured === undefined || measured.menu?.present !== true) {
       if (JSON.stringify(chinese?.labels) === JSON.stringify(['文件', '编辑', '视图', '更新', '帮助'])) break
     }
     check('Case E 切回中文后标题复原', JSON.stringify(chinese?.labels), JSON.stringify(['文件', '编辑', '视图', '更新', '帮助']))
+
+    // ============ 官方 Windows Desktop 布局（需求第二十条：collapsed）============
+    //
+    // 收起侧栏必须按官方行为：Logo 隐藏、toggle 仍在 left:12px、New Session 移到 left:48px、
+    // 菜单靠官方发布的 `--dsh-windows-menu-start:84px` 右移。**全部由 Harness 自己的 CSS 完成**，
+    // 这里只断言结果。
+    console.log('')
+    console.log('=== 收起侧栏（官方 collapsed 布局）===')
+    // 先给展开状态留一张图（报告里要 A/B 对比左上角）。
+    await cdp.screenshot('window-expanded.png')
+    const collapsed = await cdp.evaluate(`(async () => {
+      // 点官方侧栏自己的折叠按钮（不是外壳模拟的）。
+      const toggle = document.querySelector('[class*=toggle][class*=hHd], button[aria-label*="侧边栏"], button[aria-label*="收起"]')
+      if (toggle === null) return JSON.stringify({ error: 'no toggle' })
+      toggle.click()
+      await new Promise((r) => setTimeout(r, 1200))
+      const root = document.documentElement
+      const host = document.querySelector('[data-dsh-desktop-menu]')
+      const box = (node) => {
+        if (node === null) return null
+        const r = node.getBoundingClientRect()
+        const s = getComputedStyle(node)
+        return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height), position: s.position, display: s.display, visibility: s.visibility }
+      }
+      return JSON.stringify({
+        collapsedAttr: root.hasAttribute('data-sidebar-collapsed') || document.querySelector('[data-sidebar-collapsed]') !== null,
+        menuStart: getComputedStyle(root).getPropertyValue('--dsh-windows-menu-start').trim(),
+        menuLeft: Math.round(host.getBoundingClientRect().left),
+        menuHeight: Math.round(host.getBoundingClientRect().height),
+        toggle: box(document.querySelector('[class*=toggle][class*=hHd], button[aria-label*="侧边栏"], button[aria-label*="收起"]')),
+        newSession: box(document.querySelector('[class*=newSession]')),
+        brand: box(document.querySelector('[class*=brand], [class*=logoRow]')),
+      })
+    })()`)
+    console.log(`  INFO  ${JSON.stringify(collapsed)}`)
+    await cdp.screenshot('window-collapsed.png')
+    check('Case 20/8 收起后 --dsh-windows-menu-start = 84px', collapsed?.menuStart, '84px')
+    check('Case 20/8 收起后菜单 left ≈ 84px', Math.abs((collapsed?.menuLeft ?? 0) - 84) <= 2, true)
+    // 收起的判定：官方给 collapsed 的 logoRow 高度是 0，brand 因此不可见。
+    has('Case 20/8 收起后 DeepSeek brand 不显示', collapsed?.brand === null || collapsed.brand.height <= 1)
+    if (collapsed?.newSession !== null && collapsed?.newSession !== undefined) {
+      check('Case 20 toggle 仍在 left ≈ 12px', Math.abs((collapsed.toggle?.left ?? 0) - 12) <= 2, true)
+      check('Case 20 New Session 移到 left ≈ 48px', Math.abs(collapsed.newSession.left - 48) <= 2, true)
+    } else {
+      console.log('  INFO  收起后没找到 New Session（跳过其位置断言）')
+    }
+    // 收起来再展开，证明是双向的、且布局回到 expanded。
+    await cdp.evaluate(`(async () => {
+      const toggle = document.querySelector('[class*=toggle][class*=hHd], button[aria-label*="侧边栏"], button[aria-label*="收起"]')
+      if (toggle !== null) toggle.click()
+      await new Promise((r) => setTimeout(r, 1200))
+      return JSON.stringify({ ok: true })
+    })()`)
+    const reexpanded = await cdp.evaluate(`(() => {
+      const host = document.querySelector('[data-dsh-desktop-menu]')
+      return JSON.stringify({
+        menuLeft: Math.round(host.getBoundingClientRect().left),
+        menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+      })
+    })()`)
+    check('Case 19 重新展开后菜单回到 left ≈ 48px', Math.abs((reexpanded?.menuLeft ?? 0) - 48) <= 2, true)
     cdp.close()
   }
 

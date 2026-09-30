@@ -1,83 +1,97 @@
 # 1.7.8
 
-修掉 1.7.7 的 UI 回归：**顶部菜单（文件/编辑/视图/更新/帮助）整体消失了**。菜单回来了，而且现在真正属于 Harness 那一层。
+修掉 1.7.7 的两个 UI 回归：**顶部菜单整体消失**，以及**左上角仍是浏览器版侧栏布局**。菜单回来了，而且这次真正走官方 Desktop 的 Windows Caption Layout。
 
-## 为什么 1.7.7 菜单没了
+## 修复一：顶部菜单回来了（文件 / 编辑 / 视图 / 更新 / 帮助）
 
-1.7.7 把窗口从"外壳页面 + Harness 子视图"改成单 renderer 之后，原来画顶部菜单的那一层（`shell-page.ts` 的自绘标题栏）不再作为窗口文档存在，于是**那一行菜单没有任何人画**。同时 Windows 原生菜单栏是**故意隐藏**的（否则会出现"网页菜单 + 系统菜单栏"两行），所以顶部就彻底空了。
+1.7.7 把窗口改成单 renderer 之后，原来画菜单的那一层（自绘标题栏）不再存在，而 Windows 原生菜单栏又是**故意隐藏**的（否则会出现两行菜单）——于是顶部空了。
 
-## 现在菜单由谁画
-
-**由 Harness 自己的文档画，与官方 Desktop 同样的思路**：不是第二个外壳，而是在**同一个 Harness 渲染进程**里挂一个极轻量的 Shadow DOM host。
+现在菜单画在 **Harness 自己的文档**里，与官方 Desktop 同一思路：不是第二个外壳，而是同一个渲染进程里的一个 Shadow DOM host。
 
 ```text
 document.body
   ├─ Harness React Root
-  └─ <div data-dsh-desktop-menu>      ← 菜单 host
+  └─ <div data-dsh-desktop-menu>
        └─ #shadow-root (open)
-            └─ .bar > 文件 编辑 视图 更新 帮助
+            └─ 文件 编辑 视图 更新 帮助
 ```
 
-- **不新增 WebContents**：窗口子视图数量仍然是 0（有断言）。
-- **不引入第二套设计系统**：颜色、字体、hover 全部用 Harness 的真实 token（`--dsw-font-family`、`--dsw-alias-label-secondary`、`--dsw-alias-interactive-bg-hover`…），host 自己 `background: transparent`，因此顶上那一条底色就是 Harness 当前标题栏的底色——不会再出现"独立底色 / 独立边框 / 独立 Logo"。
-- **不复制菜单命令**：五个按钮只负责显示标题与弹出坐标，子菜单仍然是那份**唯一的**原生 Application Menu（`openMenuAt()`），所以"打开文件夹 / 最近打开 / 缩放 / 检查更新 / 版本信息"等行为与以前逐字一致。
-- **Shadow DOM 隔离**：菜单样式不进 Harness 主文档，Harness 的全局 CSS 也命中不了菜单按钮。
+- **不新增 WebContents**：窗口子视图数量仍然是 0。
+- **不复制菜单命令**：按钮只报"哪个顶层下标 + 什么坐标"，子菜单仍是那份唯一的原生 Application Menu。
+- **样式与官方 `preload-menu.ts` 逐条对齐**：高 28px、内边距 `0 10px`、圆角 6px、字号 14px、hover 与展开态用同一组 `--dsw-alias-*` token、`:focus-visible` 的 2px / offset -2px。
+- **焦点不丢**：点击菜单按钮不抢焦点；菜单关闭后焦点与选区回到原来那个编辑器（"点编辑 → 粘贴"不会再丢 Composer 焦点）。
+- 裸 `Alt` 被吃掉：不会突然冒出第二行 Windows 原生菜单栏；`Ctrl+O`、`Ctrl+Shift+U` 等快捷键不受影响。
 
-## 菜单位置
+## 修复二：左上角改成官方 Windows Caption Layout
 
-不是无脑硬编码，而是**实测**当前 Harness 的标题栏布局后定的（1440×920）：
+上一版是**用手量侧栏宽度**来摆菜单的（`sidebar.right + 16px`），所以菜单从 280px 之后才开始，Logo 也还挤在第一行——那正是"看起来还是浏览器版 Sidebar"的原因。
 
-| 元素 | 实测位置 |
+现在改成官方那套**CSS 契约**：preload 在最早时机给根元素打上官方标记
+
+```
+html[data-windows-titlebar]
+--dsh-windows-titlebar-height: 40px
+```
+
+Harness 前端（`ui-layout` / `ui-sidebar` / `ui-sidebar-right`，已核对本 Runtime 里打包的那份）**自己**就实现了整套 Desktop 布局：
+
+| 官方规则（已随 Runtime 打包） | 效果 |
 |---|---|
-| 侧栏列 | `0 … 280` |
-| 侧栏折叠按钮 | `240 … 268`（垂直居中于 22…50） |
-| 侧栏拖拽把手 | `276 … 284` |
-| **菜单起点** | **296**（= 侧栏右边缘 + 16px，运行时读 DOM 计算，侧栏拖宽或折叠会跟着变） |
+| `[data-windows-titlebar] .frame { padding-top: var(--dsh-windows-titlebar-height) }` | 整块内容从 40px 标题栏**下方**开始 |
+| `[data-windows-titlebar] .frame::before { height: 40px; background: var(--dsw-specific-sidebar-fill); -webkit-app-region: drag }` | 顶部那一条是**一条连续背景**，并且是拖动区 |
+| `[data-windows-titlebar] .logoRow { height: 40px }` | DeepSeek Logo 落到标题栏**下方** |
+| `[data-windows-titlebar] .toggle { position: fixed; left: 12px; ... }` | 折叠按钮钉在窗口左上角 |
+| `[data-windows-titlebar] .collapsed .newSession { position: fixed; left: 48px }` | 收起后新会话按钮移到 48px |
+| `html[data-windows-titlebar]:has([data-sidebar-collapsed=true]) { --dsh-windows-menu-start: 84px }` | 收起后菜单起点由 Harness 发布为 84px |
 
-菜单与标题栏同高（40px）、贴顶，右侧不超过 `env(titlebar-area-width)`——也就是永远不会压到最小化/最大化/关闭按钮上（窄窗口下宁可裁掉最后几项）。
+外壳因此**只消费**这一个变量：`left: var(--dsh-windows-menu-start, 48px)`。所有"量侧栏宽度 / 用 `sidebarCol.getBoundingClientRect()` / `left: 300px`"的代码已全部删除（契约测试会扫源码，出现即失败）。
 
-## 焦点与拖动
+实测（1440×920，真实 Electron + 真实打包 Host）：
 
-- 菜单区域是 `no-drag`，**其余标题栏区域照旧可拖动**。
-- 点击菜单按钮不抢焦点（`mousedown` 上 `preventDefault`），菜单关闭后焦点与选区**回到原来那个编辑器**——所以"点编辑菜单 → 粘贴"不会再把 Composer 的焦点弄丢。
-- 裸 `Alt` 被吃掉：不会突然再冒出一行 Windows 原生菜单栏。`Ctrl+O`、`Ctrl+Shift+U` 等快捷键不受影响。
+| | expanded | collapsed |
+|---|---|---|
+| `--dsh-windows-menu-start` | （未设置 → 回退 48px） | **84px** |
+| 菜单 left | **48** | **84** |
+| 折叠按钮 left | **12**（`position: fixed`） | **12** |
+| 新会话 left | 侧栏内 | **48** |
+| DeepSeek brand | top **≥ 40**（标题栏之下） | 高度 0（不显示） |
 
-## 语言切换
+## 保留的原生窗口按钮
 
-中文 ⇄ 英文运行时切换，五个标题立即跟着变（文件/编辑/视图/更新/帮助 ⇄ File/Edit/View/Update/Help），不需要重启；"最近打开"变化引起菜单重建时同样会重新同步标题。
-
-## 一个被这次回归暴露的坑（已加守卫）
-
-**沙箱化的 preload 不能 `require` 相对路径的文件。** 最初把菜单实现拆成了
-`require('./caption-menu')`，结果是整个 preload 加载失败 → `window.dshDesktop` 与顶部菜单**一起消失**，而主进程收不到任何错误（Electron 只在渲染进程 console 里留一行）。
-
-现在菜单实现内联在 preload 里（与本仓库其它 preload 一致），并且新增了两道守卫：
-- 契约测试会扫**编译产物**，任何 `require('./…')` 直接判失败；
-- preload 启动时可选地写一行 trace（`DSH_DESKTOP_PRELOAD_TRACE=1`），把"preload 没被加载"与"preload 跑到一半抛错"区分开。
+右上角最小化 / 最大化 / 关闭仍是系统按钮（`titleBarStyle: 'hidden'` + `titleBarOverlay`），悬停态、Win11 贴靠布局、DPI 缩放都不受影响，颜色跟随 Harness 主题。
 
 ## 验证
 
-`npm run test:shell`（真实 Electron + 真实打包 Host + 产品代码路径）现在覆盖全部菜单用例：
+`npm run test:shell`（真实 Electron + 真实打包 Host + 产品代码路径）在原有单 renderer / warm reopen 用例之上，新增并全部通过：
 
 ```
-PASS  Case A/H 菜单没有引入第二个 WebContents: contentViewChildren=0
-PASS  Case B 菜单 host 存在 / 在 Shadow Root 里
-PASS  Case B/E 五个顶层标题（中文）: ["文件","编辑","视图","更新","帮助"]
-PASS  Case F 菜单区是 no-drag / 不画自己的背景: rgba(0, 0, 0, 0)
-PASS  Case G 不覆盖侧栏折叠按钮 / 不越进原生 caption buttons 区域
-PASS  Case C 点击菜单真的请求主进程 popup
-PASS  Case D 原生子菜单被 popup（openMenuAt 接受该下标）；越界下标被拒绝
-PASS  Case C/D 菜单关闭后没有按钮留在展开态
-PASS  Case 19 菜单关闭后焦点回到 Harness 编辑器
-PASS  Case E 切到英文后五个标题变成 File/Edit/View/Update/Help（同一个地址，不重启）；切回中文复原
-PASS  Case I 原生 menu row 保持隐藏；裸 Alt 之后仍然隐藏
+PASS  Case 19 最终 Harness 文档带 [data-windows-titlebar]: true
+PASS  Case 19 --dsh-windows-titlebar-height 实际值: 40px
+PASS  Case 21 外壳没有给菜单算过位置（host 上没有自定义 left 变量）
+PASS  Case 7  expanded 菜单 left ≈ 48px: true
+PASS  Case 16 AppFrame::before 高度 = 标题栏高度: 40px / 是拖动区: drag
+PASS  Case 19/15 DeepSeek brand 位于标题栏之下（top >= 40）；与菜单不在同一行
+PASS  Case 6/9  toggle position: fixed / left ≈ 12px
+PASS  Case 20/8 收起后 --dsh-windows-menu-start = 84px；菜单 left ≈ 84px；brand 不显示
+PASS  Case 20    toggle 仍在 left ≈ 12px；New Session 移到 left ≈ 48px
+PASS  Case 19    重新展开后菜单回到 left ≈ 48px
+PASS  Case B/E   五个顶层标题（中文）: ["文件","编辑","视图","更新","帮助"]
+PASS  Case C/D   点击菜单真的 popup 原生子菜单；越界下标被拒绝；关闭后无残留展开态
+PASS  Case 19    菜单关闭后焦点回到 Harness 编辑器
+PASS  Case E     英文标题 File/Edit/View/Update/Help（同一地址，不重启）+ 切回中文复原
+PASS  Case I     原生 menu row 隐藏；裸 Alt 之后仍隐藏
+PASS  Case A/H   菜单没有引入第二个 WebContents（contentViewChildren=0）
 ```
 
-其余回归（Git / Review 侧栏、Runtime 版本与安装、更新窗口、字号设置、react 规则）全部通过。
+`npm run test:shell` 还会输出两张截图（`window-expanded.png` / `window-collapsed.png`），可直接核对左上角。
 
 ## 本轮没有动的
 
-单 renderer、Harness 铺满窗口、官方侧栏与折叠控件、无 WebContentsView、Host 并行启动、关闭到托盘与 warm reopen、Git / Review / Typography 插件、Runtime 应用内更新——全部保持不变。
+单 renderer、Harness 铺满窗口、无 WebContentsView、Host 并行启动、关闭到托盘与 warm reopen、Git / Review / Typography 插件、Runtime 应用内更新、五个顶部菜单的功能数量——全部保持不变（**布局行为跟官方，功能数量不跟**）。
+
+## 已知未完成
+
+启动耗时的冷/热 P50/P95 仍未取到（打包后的可执行文件在开发宿主上无法带开关启动 GUI，测量脚本已就绪）。
 # 1.7.7
 
 这一版改的是窗口的**结构**，不是配色：桌面外壳不再自己画一层界面，官方 Harness 界面直接铺满整个窗口。

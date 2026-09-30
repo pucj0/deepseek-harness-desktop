@@ -301,6 +301,17 @@ export function createMainWindow(options: MainWindowOptions): {
     },
   }
 
+  /**
+   * 告诉 preload 现在是哪种结构。
+   *
+   * 单 renderer 下 preload 必须打上 `data-windows-titlebar` 标记让 Harness 进入 Windows Desktop
+   * 布局（见 `src/preload/app.ts` 的 `enableWindowsTitlebar`）。两层结构下**不能**打：那时
+   * Harness 上方还有外壳自绘的 40px 标题栏，Harness 再自己留一条 40px 就变成 80px 的空白。
+   *
+   * 通过环境变量传而不是在页面里猜：渲染进程拿不到"窗口里有几个文档"这件事。
+   */
+  process.env.DSH_DESKTOP_SINGLE_RENDERER = SINGLE_RENDERER ? '1' : '0'
+
   const window = new BrowserWindow(constructorOptions)
   /**
    * 原生菜单栏的视觉处理。

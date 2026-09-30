@@ -235,156 +235,167 @@ interface MenuShellState {
   menuRevision?: number
 }
 
-/** 记住的编辑器焦点。 */
-interface RememberedEditor {
-  element: HTMLElement
-  start: number | null
-  end: number | null
-}
-
 /** host 上的标记属性；测试与诊断脚本靠它找菜单。 */
 const MENU_HOST_ATTRIBUTE = 'data-dsh-desktop-menu'
+
+/** 标题栏高度（CSS px）。必须与 `titleBarOverlay.height`（`src/main/titlebar.ts`）一致。 */
+const WINDOWS_TITLEBAR_HEIGHT = 40
+
+/** 官方标记属性：Harness 前端据此切换到 Windows Desktop 布局。 */
+const WINDOWS_TITLEBAR_ATTRIBUTE = 'data-windows-titlebar'
+
+/** 标题栏高度交给 Harness 的 CSS 变量名（与官方 `preload-windows.ts` 同名）。 */
+const WINDOWS_TITLEBAR_HEIGHT_VARIABLE = '--dsh-windows-titlebar-height'
+
+/**
+ * 打开 Windows Desktop 的标题栏模式。
+ *
+ * ## 为什么只有几行代码，却决定了整个左上角布局
+ *
+ * Harness 前端的 `ui-layout` / `ui-sidebar` / `ui-sidebar-right` **已经完整实现**了 Windows
+ * Desktop 布局（已核对本仓库 Runtime 里打包的那份），但它们是靠这个标记切换的：
+ *
+ * ```text
+ * [data-windows-titlebar] .frame                 padding-top 40px，背景换 --dsw-specific-sidebar-fill
+ * [data-windows-titlebar] .frame::before         顶部那一条统一背景 + -webkit-app-region:drag
+ * [data-windows-titlebar] .logoRow               height:40px —— Logo 因此落在标题栏**下方**
+ * [data-windows-titlebar] .toggle                position:fixed; left:12px; 垂直居中于标题栏
+ * [data-windows-titlebar] .collapsed .newSession fixed; left:48px
+ * html[data-windows-titlebar]:has([data-sidebar-collapsed=true])  --dsh-windows-menu-start:84px
+ * ```
+ *
+ * 也就是说：**Logo 该下移多少、折叠按钮钉在哪、菜单从哪个 x 开始**，Harness 自己都写好了，
+ * 并且通过 `--dsh-windows-menu-start`（展开时不存在、回退 48px；收起时 84px）对外发布这个
+ * 契约。外壳只需要在 preload 阶段把标记打上——**不要**去量侧栏宽度再摆菜单位置，那正是
+ * "看起来还是浏览器版 Sidebar"的原因。
+ *
+ * ## 必须尽早打
+ *
+ * 官方 `preload-windows.ts` 在文档还是 `loading` 时先 mark 一次，`DOMContentLoaded` 再补一次
+ * （解析器建出 `documentElement` 之前它可能不存在）。这里照做，Harness 首帧就是 Desktop 布局，
+ * 不会先闪一下浏览器版布局。
+ */
+function enableWindowsTitlebar(): void {
+  if (process.platform !== 'win32') return
+  // 两层结构下不打这个标记：那时 Harness 上方还有外壳自绘的 40px 标题栏，Harness 再自己留一条
+  // 40px 就变成 80px 空白。标记由主进程通过环境变量告知（渲染进程无从判断窗口里有几个文档）。
+  if (process.env.DSH_DESKTOP_SINGLE_RENDERER !== '1') return
+  const mark = (): void => {
+    const root = document.documentElement
+    if (root === null) return
+    root.setAttribute(WINDOWS_TITLEBAR_ATTRIBUTE, '')
+    root.style.setProperty(WINDOWS_TITLEBAR_HEIGHT_VARIABLE, `${WINDOWS_TITLEBAR_HEIGHT}px`)
+  }
+  if (document.documentElement !== null) mark()
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mark, { once: true })
+  }
+}
+
+enableWindowsTitlebar()
 
 /** 字体栈的最后兜底（Harness 一定会提供 `--dsw-font-family`，这里只防它还没生效）。 */
 const FALLBACK_FONT = 'system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
 
-/** 菜单 host 的样式（全部在 Shadow Root 内，因此不会与 Harness 的全局 CSS 互相污染）。 */
+/**
+ * 菜单 host 的样式。
+ *
+ * **与官方 `preload-menu.ts` 逐条对齐**（高度 28 / 内边距 0 10px / 圆角 6px / 字号 14px /
+ * hover 与 aria-expanded 用同一组 token / `:focus-visible` 的 2px + offset -2px），这样顶部这
+ * 一行看起来就是 Harness 自己的控件，而不是又一层外壳。
+ *
+ * 位置**只消费** `--dsh-windows-menu-start`：展开时它不存在（回退 48px），侧栏收起时 Harness
+ * 会把它设成 84px。外壳不做任何"量侧栏宽度"的计算（需求第 21 条）。
+ */
 const CAPTION_MENU_STYLE = `
 :host {
   position: fixed;
   top: 0;
-  left: var(--dsh-caption-menu-start, 296px);
-  // 右侧留出原生 caption buttons 的占地：env(titlebar-area-width) 就是"标题栏里不被系统
-  // 按钮占用"的那段宽度（DPI 缩放与 100/125/150% 下都成立），因此不需要硬编码 138px。
-  // 读不到时（非 Windows）退回视口宽度，菜单自然铺到右边缘。
-  max-width: calc(env(titlebar-area-width, 100vw) - var(--dsh-caption-menu-start, 296px));
-  height: var(--dsh-caption-menu-height, 40px);
+  left: var(--dsh-windows-menu-start, 48px);
   z-index: 1100;
-  display: none;
-  align-items: center;
-  gap: 2px;
-  /* 不画背景：透出 Harness 当前标题栏的底色。自己涂一条就等于又出现一层外壳。 */
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  font-family: var(--dsw-font-family, ${FALLBACK_FONT});
-  font-size: 12px;
-  line-height: 1;
-  /* 菜单本身永远不能当拖拽区，否则点不动。 */
-  -webkit-app-region: no-drag;
-}
-:host([data-visible]) { display: flex; }
-.bar {
+  height: var(--dsh-windows-titlebar-height, ${WINDOWS_TITLEBAR_HEIGHT}px);
   display: flex;
   align-items: center;
-  gap: 2px;
-  /* 窗口太窄时宁可把最后几项裁掉，也不能压到最小化/最大化/关闭按钮上。 */
-  min-width: 0;
-  overflow: hidden;
+  font-family: var(--dsw-font-family, ${FALLBACK_FONT});
+  -webkit-app-region: no-drag;
 }
+[role=menubar] { display: flex; gap: 2px; }
 button {
   height: 28px;
-  padding: 0 9px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
   font: inherit;
+  font-size: 14px;
   cursor: default;
   white-space: nowrap;
-  -webkit-app-region: no-drag;
 }
 button:hover,
-button[aria-expanded="true"] {
+button[aria-expanded=true] {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-primary);
 }
-button:active,
-button[aria-expanded="true"] {
-  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover));
-}
 button:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary, var(--dsw-alias-label-primary));
-  outline-offset: -1px;
+  outline-offset: -2px;
 }
+:host-context(html[data-input-modality='pointer']) button:focus-visible { outline-color: transparent; }
 `
 
 /**
- * 判断一个元素是不是可编辑控件。
- * @param node - 候选元素。
- * @returns 是否是输入框 / 文本域 / contenteditable。
- */
-function isEditable(node: Element | null): node is HTMLElement {
-  if (node === null || !(node instanceof HTMLElement)) return false
-  const tag = node.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return true
-  return node.isContentEditable
-}
-
-/**
- * 记录当前编辑器焦点与选区。
+ * 记住"刚刚失去焦点的那个编辑器"及其选区，供菜单关闭后恢复。
  *
- * 返回 `undefined` 表示"焦点不在编辑器上"——那时恢复焦点是错的（用户可能正在看别处）。
- * @returns 记住的编辑器，或 undefined。
+ * ## 为什么用 `focusout` 委托，而不是在点击菜单时读 `document.activeElement`
+ *
+ * 原生菜单弹出时会**抢走焦点**，而 `focusout` 正好在那一刻触发（焦点还在原来的编辑器上）。
+ * 在点击处理里读 `document.activeElement` 则要依赖"按钮不抢焦点"这一条成立——两处条件叠加
+ * 才偶然正确。官方 `preload-menu.ts` 用的就是这个委托方式，这里对齐它。
+ *
+ * `contenteditable`（Harness 的 Composer）没有 `selectionStart`，选区只能走 `document.getSelection()`
+ * 的 Range，因此这里把 Range 也一起克隆保存。
  */
-function rememberEditor(): RememberedEditor | undefined {
-  const active = document.activeElement
-  if (!isEditable(active)) return undefined
-  if (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') {
-    const field = active as HTMLInputElement | HTMLTextAreaElement
-    return { element: active, start: field.selectionStart, end: field.selectionEnd }
-  }
-  // contenteditable（Harness 的 Composer 用的就是它）：选区不在 selectionStart 上，
-  // 恢复焦点本身会让浏览器把光标放回原处。
-  return { element: active, start: null, end: null }
-}
+let restoreEditor: () => void = () => {}
 
-/**
- * 恢复编辑器焦点与选区。
- * @param remembered - {@link rememberEditor} 的返回值。
- */
-function restoreEditor(remembered: RememberedEditor | undefined): void {
-  if (remembered === undefined) return
-  const { element, start, end } = remembered
-  if (!element.isConnected) return
-  try {
-    element.focus({ preventScroll: true })
-    if (start !== null && end !== null && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')) {
-      ;(element as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(start, end)
+function rememberEditor(event: FocusEvent): void {
+  const target = event.composedPath()[0]
+  if (!(target instanceof HTMLElement)) return
+  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement) && !target.matches('[contenteditable="true"]')) {
+    return
+  }
+  const selection = document.getSelection()
+  const ranges =
+    selection === null ? [] : Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange())
+  const input = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? target : undefined
+  const start = input?.selectionStart
+  const end = input?.selectionEnd
+  const direction = input?.selectionDirection
+  restoreEditor = (): void => {
+    if (!target.isConnected) return
+    try {
+      target.focus({ preventScroll: true })
+      if (input !== undefined && start !== null && start !== undefined && end !== null && end !== undefined) {
+        input.setSelectionRange(start, end, direction ?? undefined)
+      } else if (selection !== null && ranges.length > 0) {
+        selection.removeAllRanges()
+        for (const range of ranges) selection.addRange(range)
+      }
+    } catch {
+      // 元素在菜单打开期间被卸载（例如会话切换）：忽略。
     }
-  } catch {
-    // 元素在菜单打开期间被卸载（例如会话切换）：忽略。
   }
 }
 
-/**
- * 算出菜单应该从哪个 x 开始。
- *
- * 实测（Harness 0.2.0-rc.1 / 本仓库 1.7.7，1440×920）：
- *   * 侧栏列 `[class*=sidebarCol]` 占 `0..280`；
- *   * 侧栏底部的折叠按钮在 `240..268`（垂直居中于 `22..50`）；
- *   * 侧栏与内容区之间的拖拽把手 `[class*=handle][data-side=sidebar]` 在 `276..284`。
- *
- * 因此"侧栏右边缘 + 一点空隙"就是安全起点——而不是硬编码官方那个 48px。这里优先读真实 DOM
- * （侧栏宽度可由用户拖拽改变，也会随折叠状态改变），读不到时退回上面那个实测值。
- * @returns 起始 x（CSS px，窗口客户区坐标）。
- */
-function captionMenuStart(): number {
-  const fallback = 296
-  try {
-    const column = document.querySelector('[class*=sidebarCol]')
-    if (column === null) return fallback
-    const right = column.getBoundingClientRect().right
-    if (!Number.isFinite(right) || right <= 0) return fallback
-    return Math.round(right + 16)
-  } catch {
-    return fallback
-  }
-}
+document.addEventListener('focusout', rememberEditor, true)
 
 /**
  * 把 Caption Menu 挂到当前文档。
  *
  * 幂等：同一个文档里只挂一个 host。返回卸载函数（本应用不主动卸载，但让它可以被测试调用）。
+ *
+ * **位置完全交给 CSS**：`left: var(--dsh-windows-menu-start, 48px)`，这个变量由 Harness 的
+ * `ui-sidebar` 在侧栏收起时设成 84px。这里不做任何"量侧栏宽度"的计算。
  *
  * @returns 卸载函数。
  */
@@ -397,28 +408,28 @@ function mountCaptionMenu(): () => void {
   const style = document.createElement('style')
   style.textContent = CAPTION_MENU_STYLE
   const bar = document.createElement('div')
-  bar.className = 'bar'
   bar.setAttribute('role', 'menubar')
   shadow.append(style, bar)
-  // 挂在 body 末尾：Harness 的 React root 通常在它自己的容器里，菜单作为兄弟节点存在，
-  // 不会被它的重渲染带走。
+  // 挂在 body 末尾：Harness 的 React root 在它自己的容器里，菜单作为兄弟节点存在，不会被它的
+  // 重渲染带走。
   document.body.append(host)
 
   let buttons: HTMLButtonElement[] = []
-  let remembered: RememberedEditor | undefined
   let openIndex: number | undefined
   let disposed = false
 
-  /** 应用状态里的高度与可见性。 */
+  /**
+   * 应用状态里的可见性。
+   *
+   * 高度与位置**不在这里设**：它们由 `--dsh-windows-titlebar-height`（预加载阶段就打上的官方
+   * 标记）与 `--dsh-windows-menu-start`（Harness 自己发布）两个 CSS 变量决定，也就是需求第 21
+   * 条那条"完全解耦"的契约。外壳越少参与布局，越不会退回"浏览器版 Sidebar"。
+   */
   const applyState = (state: MenuShellState): void => {
     if (disposed) return
-    const height = typeof state.height === 'number' && state.height > 0 ? state.height : 40
-    host.style.setProperty('--dsh-caption-menu-height', `${height}px`)
-    host.style.setProperty('--dsh-caption-menu-start', `${captionMenuStart()}px`)
     // `menus === false`（macOS）时不画：那里的菜单应该在系统菜单栏。
     //
-    // **不看 `ready`**：菜单是标题栏的一部分，应当与侧栏同一帧出现，等"界面就绪"只会让它
-    // 姗姗来迟。
+    // **不看 `ready`**：菜单是标题栏的一部分，应当与侧栏同一帧出现。
     if (state.menus !== false) host.setAttribute('data-visible', '')
     else host.removeAttribute('data-visible')
   }
@@ -434,12 +445,27 @@ function mountCaptionMenu(): () => void {
     }
     if (disposed) return
     bar.textContent = ''
+    if (process.env.DSH_DESKTOP_PRELOAD_TRACE === '1') {
+      // 诊断：菜单标题到底有没有被重新取到（语言切换 / 菜单重建时用）。
+      try {
+        require('node:fs').appendFileSync(
+          require('node:path').join(process.env.DSH_DESKTOP_HOME ?? process.cwd(), 'preload-trace.log'),
+          `[preload] menu labels = ${JSON.stringify(entries.map((entry) => entry.label))}\n`,
+        )
+      } catch {
+        // 诊断写不进去无所谓。
+      }
+    }
     buttons = entries.map((entry) => {
       const button = document.createElement('button')
       button.type = 'button'
       button.textContent = entry.label
-      // **不抢焦点**：`mousedown` 上 preventDefault，点击后 Harness 的 Composer 仍然是
-      // `document.activeElement`。否则"点 Edit → Paste"会因为焦点已经跑到按钮上而失败。
+      button.setAttribute('role', 'menuitem')
+      button.setAttribute('aria-haspopup', 'menu')
+      button.setAttribute('aria-expanded', 'false')
+      // **不抢焦点**：`pointerdown` / `mousedown` 上 preventDefault，点击后 Harness 的 Composer
+      // 仍然是 `document.activeElement`。否则"点编辑 → 粘贴"会因为焦点跑到按钮上而失败。
+      button.addEventListener('pointerdown', (event) => event.preventDefault())
       button.addEventListener('mousedown', (event) => event.preventDefault())
       button.addEventListener('click', () => {
         void toggle(entry.index, button)
@@ -456,7 +482,6 @@ function mountCaptionMenu(): () => void {
    */
   const toggle = async (index: number, button: HTMLButtonElement): Promise<void> => {
     if (openIndex === index) return
-    remembered = rememberEditor()
     const rect = button.getBoundingClientRect()
     for (const other of buttons) other.setAttribute('aria-expanded', 'false')
     button.setAttribute('aria-expanded', 'true')
@@ -475,14 +500,11 @@ function mountCaptionMenu(): () => void {
     } catch {
       // 焦点交回失败不影响功能：下面的 restoreEditor 还会再试一次。
     }
-    restoreEditor(remembered)
+    restoreEditor()
   }
 
-  // 窗口尺寸变化会改变侧栏宽度（用户拖拽 / 折叠），重新算一次落点。
-  const onResize = (): void => {
-    host.style.setProperty('--dsh-caption-menu-start', `${captionMenuStart()}px`)
-  }
-  window.addEventListener('resize', onResize)
+  // 注意：**没有 resize 监听**。菜单位置不依赖窗口尺寸，也不依赖侧栏几何——侧栏收起时
+  // Harness 会把 `--dsh-windows-menu-start` 改成 84px，CSS 自己就会重排。
 
   // 初次立即拉一次状态（推送可能还没到，否则菜单要等一次推送才出现）。
   void ipcRenderer
@@ -497,7 +519,6 @@ function mountCaptionMenu(): () => void {
 
   return () => {
     disposed = true
-    window.removeEventListener('resize', onResize)
     host.remove()
   }
 }
