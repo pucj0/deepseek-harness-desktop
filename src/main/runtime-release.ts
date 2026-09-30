@@ -7,6 +7,8 @@ interface GithubRelease {
   tag_name?: unknown
   html_url?: unknown
   draft?: unknown
+  /** Release 的发布时间（ISO 8601）。它是依赖闭包截止时间（npm `--before`）的唯一依据。 */
+  published_at?: unknown
 }
 
 export interface RuntimeReleaseCheck {
@@ -14,6 +16,13 @@ export interface RuntimeReleaseCheck {
   current: string
   latest?: string
   releaseUrl?: string
+  /**
+   * 最新那个 Release 的 `published_at`。
+   *
+   * 应用内安装 Runtime 时，它决定 `npm --before`（见 runtime-updater.ts）：按"该版本发布
+   * 当时的仓库状态"装依赖，避免上游半波发布时 `^` 范围把还没上架的兄弟包解析进来。
+   */
+  publishedAt?: string
   reason?: string
 }
 
@@ -66,9 +75,10 @@ export function compareRuntimeVersions(left: string, right: string): number {
 }
 
 /**
- * Query the upstream repository directly. This is deliberately read-only: a
- * runtime is activated only when a compatible Desktop GitHub Release carries
- * the complete, built dependency tree.
+ * Query the upstream repository directly. This is deliberately read-only: an
+ * installable runtime is authorised by a published official `dsh-v*` GitHub
+ * Release, never by a source archive (those carry no built dependency tree) and
+ * never by a dist-tag alone.
  */
 export async function checkRuntimeRelease(
   current: string,
@@ -87,12 +97,19 @@ export async function checkRuntimeRelease(
     const body: unknown = await response.json()
     if (!Array.isArray(body)) throw new Error('GitHub API returned an invalid release list')
 
-    const releases = body.flatMap((value): Array<{ version: string; releaseUrl: string }> => {
+    const releases = body.flatMap((value): Array<{ version: string; releaseUrl: string; publishedAt?: string }> => {
       if (typeof value !== 'object' || value === null) return []
       const release = value as GithubRelease
       if (release.draft === true || typeof release.tag_name !== 'string' || typeof release.html_url !== 'string') return []
       const version = versionFromRuntimeTag(release.tag_name)
-      return version === undefined ? [] : [{ version, releaseUrl: release.html_url }]
+      if (version === undefined) return []
+      return [
+        {
+          version,
+          releaseUrl: release.html_url,
+          ...(typeof release.published_at === 'string' ? { publishedAt: release.published_at } : {}),
+        },
+      ]
     })
     releases.sort((a, b) => compareRuntimeVersions(b.version, a.version))
     const latest = releases[0]
@@ -102,6 +119,7 @@ export async function checkRuntimeRelease(
       current,
       latest: latest.version,
       releaseUrl: latest.releaseUrl,
+      ...(latest.publishedAt === undefined ? {} : { publishedAt: latest.publishedAt }),
     }
   } catch (error) {
     return {

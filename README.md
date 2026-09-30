@@ -44,7 +44,10 @@ dsh web
 这些能力由本仓库的 `gitbar` 和 `review` 插件提供，运行在官方 Harness Web UI 中：
 
 - **Git 工具条与 Smart Checkout：**显示当前分支、未提交状态及相对上游的领先/落后；切换分支时先让 Git 正常携带兼容修改。只有 Git 明确拒绝覆盖本地修改时，宿主才用带唯一标记与稳定 OID 的安全储藏执行“储藏 → 切换 → `apply --index` → 验证 → 精确删除”。已暂存、未暂存和未跟踪文件都会保护；恢复冲突时留在目标分支并进入现有冲突编辑器，安全储藏绝不删除。
-- **官方 Git Sidebar：**项目级 Changes 与 Log 已注册到 Harness 官方右侧 Sidebar（Git 分支图标），不再使用右上角 fixed Drawer。它以当前 Harness 会话的 `cwd` 为唯一 active workspace，项目切换会清空旧选择并由 generation guard 丢弃迟到响应；多仓库选择按 workspace 保存。Changes 包含 Conflicts / Staged / Changes / Unversioned / Auto-saved Changes / Stashes，Log 保留提交图、分支筛选、详情、比较、重置、摘取与标签。
+- **官方右侧 Sidebar 有两个标签：**「审查」与「Git」，语义完全不同。
+  - **审查（Review）** 回答"这一轮 agent 改了什么"：turn scope，基线是本轮开始时记录的快照，数据来自 `/changes`。输入框上方的「本轮修改 N」点击后直接打开这个标签（`sidebarRight.openTab('review')`），关掉/宽度/全屏/拖动全部交给官方侧栏；入口与标签**共用同一个会话上下文解析器**，因此按钮上的数字与面板里的文件数必然一致。
+  - **Git** 回答"整个仓库相对 HEAD 是什么状态"：workspace scope，数据来自 `/workspace`。它以当前 Harness 会话的 `cwd` 为唯一 active workspace，项目切换会清空旧选择并由 generation guard 丢弃迟到响应；多仓库选择按 workspace 保存。Changes 包含 Conflicts / Staged / Changes / Unversioned / Auto-saved Changes / Stashes，Log 保留提交图、分支筛选、详情、比较、重置、摘取与标签。
+  - 两个标签各有独立的 `kind`（`review` / `git`）、sidebar id、数据 API 与正文组件，互不触发；不再有右上角 fixed Drawer 这类自制浮层。
 - **储藏（Stash）与自动保存：**`stash` 统一译为“储藏”，`stage` 才是“暂存”。普通储藏可查看、应用、弹出和删除；Smart Checkout 未能自动恢复的安全副本列在 **自动保存的改动**，应用重启后通过扫描 `dsh-smart-switch:` 标记重新发现，可查看文件、恢复或切回来源分支并恢复。自动删除必须同时匹配应用标记、唯一 id 与 OID，绝不按动态的 `stash@{0}` 猜测，也绝不删除用户自己的普通储藏。
 - **更新与推送：**「更新项目」（fetch → pull）与「推送」直接执行，不再弹二次确认，进度显示在动作行上。首次推送自动建立上游（等价 `push -u`）；被拒绝时给出「更新项目」与受确认保护的**强制推送**（只用 `--force-with-lease`，不会覆盖协作者刚推上去的提交）；没有上游、没有配置远端、认证失败、远端不可达各有各的提示。除破坏性操作（还原、删除分支、强制推送、签出标记或修订）外都不再二次确认。
 - **合并冲突：**Changes 里冲突文件单独成组（不再同时出现在已暂存/未暂存里，也不再提供会丢掉改动的还原按钮）；点开是**合并编辑器**——逐块显示 Current / Incoming 两侧、按块选择「用当前 / 用对方 / 两者都要」（选择立刻反映到 Result 面板，但只算不写）、可直接编辑结果（Tab 缩进），另有「标记为已解决」（宿主会复扫文件，残留标记一律拒绝）与按操作类型给出的「继续 / 中止」（合并 / 变基 / 摘取 / 还原）。变基/摘取是一提交一提交地往前的：继续之后若下一个提交又冲突（甚至落在**别的文件**上），宿主会照实回报"前进到下一次冲突"，界面继续处理而不是宣布完成。合并、变基、摘取、还原的进行中状态由宿主判定，界面不猜。
@@ -56,7 +59,7 @@ dsh web
 - **交互式变基（Interactive Rebase）：**提交图 / Log 里右键任意提交（或直接用它上方的提交）选「从此处开始交互式变基…」，会打开一份**结构化计划**：从这条提交到 HEAD 的每个提交一行，动作可选 **Pick / Reword / Edit / Squash / Fixup / Drop**，顺序用行内的上移/下移调整，**不需要（也没有）**任何 todo 文本或终端编辑器。`Squash` 可以在行内直接写合并后的提交信息（默认值与 git 自己拼的一致），`Reword` 写新的信息；`Drop` 在行内标红并计入"会被丢弃的提交数"，已经推送到上游的历史另有一行警告——整段改写只在点「开始交互式变基」时确认**一次**。执行的是**真正的** `git rebase -i`（宿主生成 todo、并用一个只读宿主文件的脚本充当 `GIT_SEQUENCE_EDITOR`/`GIT_EDITOR`，因此既不会打开 vim/nano，也不可能让界面把 shell 或编辑器命令传进来）：停在 `Edit` 上时横幅显示「变基已暂停（Edit）」并给出改文件 / 暂存 / **Amend Commit**（应用内的提交信息编辑器）/ 继续 / 中止；遇到冲突则回到既有的冲突面板（逐块解决 → 标记为已解决 → 继续），**多轮冲突照旧**；`Fixup` 合并内容但丢弃信息，`Reword` 只换信息不动内容（提交数与文件树都不变）。横幅始终显示具体进度（`正在变基 2/5 · 当前：abc1234 提交标题`，不是转圈），并提供「跳过这个提交」（`git rebase --skip`，按钮上点名是谁）与「中止交互式变基」（`git rebase --abort`）。改写之后普通推送会被拒绝，界面只提供 `--force-with-lease`（远端被别人推进过时同样会被拒绝，绝不覆盖协作者的提交）。
 - **提交记录（Log）：**分支树、提交图与提交详情；可查看提交中的文件差异，并可把当前分支重置到任意一条提交。
 - **多仓库工作区：**识别工作区所属 Git 仓库，并在工作区下有多个独立仓库时提供仓库选择器；所有 Git 操作（含更新、推送、提交、冲突解决）都只作用于当前选中的仓库。发现过程有目录深度、数量和时间上限，不保证遍历任意深度的目录。
-- **本轮修改审查：**在任务轮次开始时记录 Git 快照，比较轮次后的工作区状态，以区分本轮修改和开始前已有的未提交改动。
+- **本轮修改审查：**在任务轮次开始时记录 Git 快照，比较轮次后的工作区状态，以区分本轮修改和开始前已有的未提交改动。它是官方右侧 Sidebar 的**审查**标签（第二个标签，与 Git 并列），入口仍是输入框上方的「本轮修改 N」。回归测试：`scripts/test-turn-review-sidebar.mjs`（入口打开哪个 kind、入口与标签是否共用同一份 session/workspace、切换会话与竞态）与 `scripts/test-turn-review-scope.mjs`（真实仓库上的 turn vs workspace 语义隔离）。
 - **实现约定：**所有 Git 命令都以仓库根为工作目录、用 `execFile` + 参数数组执行（不拼字符串），客户端只能传标量，引用/远端/提交号逐一校验；网络与 `--continue` 类操作以非交互方式执行（不会挂在不存在的终端提示或编辑器上）。
 
 ## 下载安装
@@ -97,27 +100,28 @@ Windows 构建未配置代码签名，SmartScreen 可能提示“未知发布者
 | 工作区入口 | Harness 自身的工作区操作 | 加上原生目录选择器和最近打开列表 |
 | 托盘与原生菜单 | — | 提供 |
 | Git 工具条、Changes、Log、本轮审查 | — | 由桌面插件提供 |
-| 产品更新 | npm | Desktop 与 Runtime 分别检查各自 GitHub Releases；完整 Runtime 随 Desktop Release 安装 |
+| 产品更新 | npm | Desktop 与 Runtime 分别检查各自 GitHub Releases；Runtime 可在应用内直接安装 |
 
 ## 架构
 
 ```text
 Electron Desktop Shell
-  窗口 / 菜单 / 托盘 / 工作区 / 更新 / 插件同步
-                    │ 启动并监督
-                    ▼
-           便携 Node.js Runtime
-                    │ 运行
+  窗口 / 菜单 / 托盘 / 工作区 / 更新 / 插件同步 / 内置 npm（应用内更新 Runtime 用）
+                     │ 启动并监督（ELECTRON_RUN_AS_NODE=1：用 Electron 自带的 Node 24）
                     ▼
         官方 @deepseek-ai/dsh
+        内置：app.asar 的 runtime/
+        更新：<userData>/runtime/<version>（current 链接指向它）
         dsh-base + dsh-web-app
         官方 Agent Runtime 与 Web UI
-                    ▲
-                    │ 官方 bundle / UI 插件机制
+                     ▲
+                     │ 官方 bundle / UI 插件机制
         gitbar / review / typography
 ```
 
 外壳在独立子进程中，通过官方 `loadProfileDirectory()` 等入口加载应用拥有的 `desktop` profile。Web 服务监听本机随机端口，由 Electron 窗口承载。官方运行时包不被 fork；桌面插件随外壳发布，并在每次启动时同步到当前使用的运行时。
+
+**没有第二份便携 Node。** Electron 44 自带 Node 24，Runtime 与 npm 都由 `process.execPath` 以 `ELECTRON_RUN_AS_NODE=1` 的 Node 模式执行，因此安装包里只有一份 node 可执行文件。应用内更新 Runtime 所需的 npm CLI 作为**生产依赖**随包发布（版本精确锁定），由 `asarUnpack` 解到真实路径 `resources/app.asar.unpacked/node_modules/npm/bin/npm-cli.js`——npm 是被 `spawn` 出来的进程，不能住在 `app.asar` 内部。
 
 ## 凭据与数据
 
@@ -127,10 +131,18 @@ Electron Desktop Shell
 
 ## 更新机制
 
-- **两条 GitHub 检查轨道：** **更新 → 检查更新** 同时检查本项目 `pucj0/deepseek-harness-desktop` Releases（Desktop 应用）与官方 `deepseek-ai/deepseek-harness` Releases（Harness Runtime），分别显示已安装版本、最新版本与状态；Runtime 项可直接打开对应的官方 Release。
-- **完整产品安装：**Desktop 应用继续通过 `electron-updater` 下载本项目 GitHub Release。一个 Release 同时携带桌面外壳、经过兼容验证的官方 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`；不会把只有源码、缺少 `lib` 与 `workspace:*` 依赖的上游源码压缩包误当作可运行 Runtime。
-- **Runtime 随 Release 生效：**安装新版后始终启动该版本随包携带的 Runtime。旧版本可能留下的 `<userData>/runtime/current` 仅作为遗留缓存忽略，不会覆盖新 Release；session、workspace、设置、登录数据与用户项目均不删除。
-- **版本来源可验证：**`package.json#dshRuntimeVersion` 固定本次打包的 Runtime。`npm run stage` 会先确认同名 `dsh-v*` 官方 GitHub Release 已发布，再在构建机准备完整依赖闭包；安装后的应用不会运行 npm、查询 npm registry 或现场编译源码。开发模式明确不支持应用自更新。
+- **两条 GitHub 检查轨道：** **更新 → 检查更新** 同时检查本项目 `pucj0/deepseek-harness-desktop` Releases（Desktop 应用）与官方 `deepseek-ai/deepseek-harness` Releases（Harness Runtime），分别显示已安装版本、最新版本与状态。
+- **完整产品安装：**Desktop 应用继续通过 `electron-updater` 下载本项目 GitHub Release。一个 Release 同时携带桌面外壳、经过兼容验证的官方 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`。
+- **Runtime 可在应用内直接安装：** Runtime 有新版时，更新窗口的 Runtime 轨道出现 **「安装 Runtime 并重启」**（`data-action=runtime-install`）。实现在 `src/main/runtime-updater.ts`：
+  - **版本由官方 GitHub Release 授权。** 目标版本必须等于官方 `dsh-v*` Release 的最新版本；GitHub 的 source archive 永远不会被当作可运行 Runtime（源码 tag 没有构建好的依赖闭包）。同时用该 Release 的 `published_at` 算出 npm `--before = published_at + 24h`，让依赖按"该版本发布当时的仓库状态"解析——上游半波发布时 `^` 范围会把还没上架的兄弟包卷进来，24 小时窗口能等到同一次发布的兄弟包、又不会跨进下一波。与 `npm run stage` 同一条规则。
+  - **用应用内置的 npm。** `process.execPath` + `ELECTRON_RUN_AS_NODE=1` 执行解包后的 `npm-cli.js`，参数为 `install @deepseek-ai/dsh@<版本> --prefix <staging> --registry … --no-audit --no-fund --loglevel http [--before …]`。首选 `registry.npmmirror.com`，失败回退 `registry.npmjs.org`；npm cache 在应用数据目录下独立一份。**用户机器不需要安装 Node.js 或 npm。**
+  - **同级 staging 安装，成功才切换。** 先装到 `<userData>/runtime/.staging-<version>-<随机>`，校验**真实** `node_modules/@deepseek-ai/dsh/package.json` 的版本等于目标版本，写入 `runtime.json`（version / installedAt / registry / sourceRelease / closureBefore），再 rename 成 `<userData>/runtime/<version>`，最后把 `current`（junction / 目录符号链接）指过去。中断或失败只留下一个 staging 目录，**当前 Runtime 一个字节都不会被动**。
+  - **选择规则：** `<userData>/runtime/current` 只有在它的版本**不低于**内置版本时才会被使用。Desktop 升级带来更新的内置 Runtime 时，旧的 `current` 不会被选中；`current` 损坏、断链或版本读不出来时同样回退内置。session、workspace、设置与登录数据一律不删。
+  - **失败自动回退：** 启动时若用的是更新装出来的 Runtime 且 Harness server 起不来，应用先摘掉 `current`、提示「Runtime 更新已回退」并重启，回到内置 Runtime。
+  - **两条轨道互斥：** Runtime 安装期间不能同时下载 Desktop 安装包，反之亦然。
+  - 安装完成会询问「立即重启 / 稍后」；立即重启前先停掉当前 Harness server，避免两个实例争用同一个 harness home。
+- **Release 后备入口：** 无法直接安装时（开发模式、包里没有 npm CLI），Runtime 轨道只显示「打开 Runtime Release」，与本版之前的行为一致。
+- **版本来源可验证：**`package.json#dshRuntimeVersion` 固定本次打包的 Runtime。`npm run stage` 会先确认同名 `dsh-v*` 官方 GitHub Release 已发布，再在构建机准备完整依赖闭包；打包形态下的应用不会现场编译源码。开发模式明确不支持应用自更新，也不会执行 Runtime 安装。
 
 ## 项目结构
 
@@ -144,11 +156,11 @@ build/                    图标和打包资源
 .github/workflows/        跨平台发布工作流
 ```
 
-关键实现位于 `src/main/index.ts`、`window.ts`、`titlebar.ts`、`menu.ts`、`dsh-server.ts`、`shell-updater.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`workspace-switch.ts`、`git.ts` 和 `i18n.ts`。
+关键实现位于 `src/main/index.ts`、`window.ts`、`titlebar.ts`、`menu.ts`、`dsh-server.ts`、`shell-updater.ts`、`runtime-release.ts`、`runtime-updater.ts`、`paths.ts`、`credentials.ts`、`plugin-sync.ts`、`workspace.ts`、`workspace-switch.ts`、`git.ts`、`i18n.ts`。
 
 ## 开发与测试
 
-开发环境使用 Node.js 22（与 CI 一致）和 npm。首次准备需要下载 Electron、官方 Harness 及便携 Node。
+开发环境使用 Node.js 22+（与 CI 一致）和 npm。首次准备需要下载 Electron 与官方 Harness Runtime；`npm ci` 也会装上应用自己携带的那份 npm 生产依赖。
 
 ```bash
 git clone https://github.com/pucj0/deepseek-harness-desktop.git
@@ -163,6 +175,14 @@ npm run dev
 ```bash
 npm run typecheck
 npm run test:i18n
+npm run test:runtime-updater   # 应用内安装 Runtime：staging / 版本校验 / 回退（注入 fake npm，不联网）
+npm run test:runtime-paths     # 内置 vs 已下载 Runtime 的选择规则
+npm run test:update-policy     # 版本授权来源、npm 打包、互斥与两条回退路径
+npm run test:update-window     # 更新窗口：Runtime 直装按钮、安装中状态、520px 布局
+npm run test:runtime           # 打包后 Runtime 的启动 smoke（需要 release/ 产物）
+npm run test:npm               # 打包 npm CLI 存在且能跑（需要 release/ 产物）
+npm run test:packaged-plugin   # 打包后的 resources/plugins 里的 review 插件是新版，且 profile 链接指向它
+npm run test:size              # 产物体积清单 + Size Gate
 npm run test:startup
 npm run test:locale
 npm run test:git
@@ -173,7 +193,7 @@ npm run dist:mac
 
 - **提交右键菜单：**提交图 / Log 里右键任意提交可以复制完整的提交 SHA、与当前比较、选择用于比较、在此创建分支、在此创建标记、摘取（cherry-pick）、还原（revert），以及**单独成组**的两个会改写历史的重动作：「从此处开始交互式变基…」与「把当前分支重置到这里…」（会改写当前分支的动作与只读动作在视觉上分开，并带一句说明）。
 
-打包需在对应平台执行。`npm run test:locale` 验证外壳语言跟随 Harness：语言归一化、设置文档解析与监听、菜单模板（中英对照 + 命令不变）、运行中切换（真实应用实例，不重启）、切换工作区不重置语言，以及标题栏按钮与文档 `lang` 的同步。`npm run test:workspace` 覆盖工作区生命周期：哪些来源算"用户明确要打开这个目录"、`settings.json` 的 prune + persist 对账、Harness 注册表里没有记住的那个工作区时如何让位、目录已不存在的注册记录如何经**真实 dsh 服务端**用官方 `workspaceRegistry.delete()` 清掉、删除 → 重启 → 重新打开的完整序列，以及"每个文件菜单项都在点击时读当前 active workspace（含语言重建菜单之后）"这条不变量。`npm run test:workspace-ui` 则在真实 Electron 窗口里驱动**真实 Harness 界面**：在另一个项目里新建会话后，外壳的当前工作区必须**不重启**就跟随过去，随后项目信息 / 在文件管理器中打开 / 复制路径三者都指向新项目；运行中把**当前**工作区从注册表移除后，外壳必须立刻不再操作它（并给出「工作区已不存在」而不是静默失败）；另有一条完整走"删除当前工作区 → 完全退出 → 重新启动"的回归，逐条断言注册表、Desktop settings、Shell active、Harness active 与三个菜单入口都不再指向被删的那个目录，同时「最近打开」仍然保留它、用户可以再显式打开并重新登记；同时验证渲染进程送来的未注册路径与对不上的 workspaceId 会被拒绝。`npm run test:git` 依次跑 Git 工作流的全部回归测试：**修改提交与重置**、**标签与修订比较**（轻量/附注标签、签出进入游离 HEAD、从标签建分支、删除本地标签、只推单个标签、提交 ↔ HEAD / A ↔ B / 分支 ↔ 当前 的比较、改名跟踪的文件历史、多仓库隔离）、**交互式变基**（pick / reword / squash / fixup / drop / 重排 / edit 停点与 amend / 跳过 / 中止 / 多轮冲突 / 计划校验 / 已发布历史与 `--force-with-lease` 的过期 lease / 多仓库隔离，逐项核对提交数、顺序、父链、信息与文件树）、冲突（合并 / 变基 / 摘取 / 还原，含**多轮变基**）、**储藏全流程**、端到端发布流程、分支条交互与源面板（含标签分组与提交菜单）、改动审查的冲突界面、并排/统一差异视图、储藏面板、提交区（amend / 撤销 / 提交并推送）、暂存区（含文件历史）与提交图视图（含交互式变基的计划对话框与进度横幅）。`scripts/` 还包含 Git 分支、仓库发现、改动审查、暂存与提交、插件同步、运行时准备及 Electron/CDP 冒烟测试；涉及真实窗口的测试需要图形环境。
+`npm run test:git-sidebar` 里的 `scripts/test-turn-review-sidebar.mjs` 钉住本轮审查的**上下文不变式**：入口（输入框上方的「本轮修改 N」）与官方右侧栏的「审查」标签共用同一个 `useTurnContext`，因此按钮上的数字与面板里的文件数必然一致；用例覆盖点击打开的是 `review` 而不是 `git`、`openTab` 失败时退回 `openTabIn` 而不是静默无反应、切换会话后 workspace 跟着变、以及"A 的响应晚于 B 到达时必须被丢弃"这条竞态。`scripts/test-turn-review-scope.mjs` 继续在**真实仓库**上验证 turn 与 workspace 两个 scope 的语义隔离（用户在 agent 开始前改的文件属于 Git，不属于本轮审查）。`npm run test:packaged-plugin` 则回答"安装包装的到底是哪一份插件"：比对 `resources/plugins/dsh-client-ui-review` 与开发目录那一份逐字节相同、启动后通过 profile 的链接读到的内容就是安装包里那一份，并且新版标识齐全、旧的自制浮层标识一个不剩。打包需在对应平台执行。`npm run test:runtime-updater` 用一个几十行的 fake `npm-cli.js` 把应用内安装走完一遍：参数（`--prefix` / `--registry` / `--no-audit` / `--no-fund` / `--loglevel http` / `--before`）、registry 回退、真实 package.json 的版本校验、staging → `<version>` 的 rename、`current` 的切换、以及**失败/版本不符时绝不切换 current**；重复点击共享同一个 Promise 也在其中。`npm run test:runtime-paths` 钉住选择规则：下载版本不低于内置版本时才优先，旧下载版本不能压住新内置版本，损坏/断链的 `current` 一律回退内置。`npm run test:update-window` 先在纯 node 的最小 DOM 桩里驱动真实的页面脚本（按钮可见性、点击回传的 action、安装中文案与进度、两条轨道互斥），再在真实 Electron 窗口里量布局几何；后者需要能启动 Electron 的图形环境，宿主不支持时会失败而不是被跳过。`npm run test:locale` 验证外壳语言跟随 Harness：语言归一化、设置文档解析与监听、菜单模板（中英对照 + 命令不变）、运行中切换（真实应用实例，不重启）、切换工作区不重置语言，以及标题栏按钮与文档 `lang` 的同步。`npm run test:workspace` 覆盖工作区生命周期：哪些来源算"用户明确要打开这个目录"、`settings.json` 的 prune + persist 对账、Harness 注册表里没有记住的那个工作区时如何让位、目录已不存在的注册记录如何经**真实 dsh 服务端**用官方 `workspaceRegistry.delete()` 清掉、删除 → 重启 → 重新打开的完整序列，以及"每个文件菜单项都在点击时读当前 active workspace（含语言重建菜单之后）"这条不变量。`npm run test:workspace-ui` 则在真实 Electron 窗口里驱动**真实 Harness 界面**：在另一个项目里新建会话后，外壳的当前工作区必须**不重启**就跟随过去，随后项目信息 / 在文件管理器中打开 / 复制路径三者都指向新项目；运行中把**当前**工作区从注册表移除后，外壳必须立刻不再操作它（并给出「工作区已不存在」而不是静默失败）；另有一条完整走"删除当前工作区 → 完全退出 → 重新启动"的回归，逐条断言注册表、Desktop settings、Shell active、Harness active 与三个菜单入口都不再指向被删的那个目录，同时「最近打开」仍然保留它、用户可以再显式打开并重新登记；同时验证渲染进程送来的未注册路径与对不上的 workspaceId 会被拒绝。`npm run test:git` 依次跑 Git 工作流的全部回归测试：**修改提交与重置**、**标签与修订比较**（轻量/附注标签、签出进入游离 HEAD、从标签建分支、删除本地标签、只推单个标签、提交 ↔ HEAD / A ↔ B / 分支 ↔ 当前 的比较、改名跟踪的文件历史、多仓库隔离）、**交互式变基**（pick / reword / squash / fixup / drop / 重排 / edit 停点与 amend / 跳过 / 中止 / 多轮冲突 / 计划校验 / 已发布历史与 `--force-with-lease` 的过期 lease / 多仓库隔离，逐项核对提交数、顺序、父链、信息与文件树）、冲突（合并 / 变基 / 摘取 / 还原，含**多轮变基**）、**储藏全流程**、端到端发布流程、分支条交互与源面板（含标签分组与提交菜单）、改动审查的冲突界面、并排/统一差异视图、储藏面板、提交区（amend / 撤销 / 提交并推送）、暂存区（含文件历史）与提交图视图（含交互式变基的计划对话框与进度横幅）。`scripts/` 还包含 Git 分支、仓库发现、改动审查、暂存与提交、插件同步、运行时准备及 Electron/CDP 冒烟测试；涉及真实窗口的测试需要图形环境。
 
 ## 发布
 
@@ -187,7 +207,7 @@ npm run dist:mac
 - 外壳自更新代码已接入，仓库记录的跨版本真机完整升级验证有限。
 - 完整应用更新依赖 GitHub Releases、各平台 `latest*.yml` 与安装资源严格匹配；跨版本真机升级验证仍少于仓库内自动化验证。
 - 本轮审查的基线保存在运行中的宿主进程内存里；应用重启后需新轮次重新建立。
-- Electron 与内置运行时会增加安装包体积；首次启动需要解包内置运行时。
+- Electron 与内置运行时会增加安装包体积；应用自带的 npm CLI 解包后约 11 MiB。Runtime 直接位于 `app.asar`，启动时不再解压。
 - 桌面 `safeStorage` 凭据写入尚未接入可见的设置流程。
 
 ## 许可证

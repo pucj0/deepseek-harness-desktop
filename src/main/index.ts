@@ -30,6 +30,7 @@ import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
 import { markStartup, reportStartup } from './startup-timeline'
 import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
+import { RuntimeUpdater } from './runtime-updater'
 import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
@@ -464,10 +465,10 @@ async function main(): Promise<void> {
   // 但它与 Runtime 启动（本版最贵的区间，实测约 3.4 s）抢同一段时间的 CPU 与磁盘。
   // 移到界面可用之后（见下面 `reportStartup()` 之后），启动区间只剩真正必需的工作。
 
-  // Runtime 已经在安装包里（app.asar 的 `runtime/`），**启动时没有任何解包/复制**：
-  // 这一版不再交付 `runtime.br`，因此"首次启动解压约 9 秒"这条路径整体消失。
-  // Every packaged release boots the runtime bundled with that same release.
-  // Legacy npm-updated runtimes under userData/runtime are intentionally ignored.
+  // Runtime 已经在安装包里（app.asar 的 `runtime/`），**启动时没有任何解包/复制**。
+  // 应用内更新装出来的那份在 `<userData>/runtime/current`：只有在它的版本**不低于**
+  // 内置版本时才会被选中（见 paths.ts），因此旧 Desktop 的内置 Runtime 永远不会被
+  // 一个更旧的下载版本压住。`RuntimeUpdater` 是它的写方：安装、激活、回退都在那里。
   let runtime
   try {
     runtime = resolveRuntime(userDataDir)
@@ -481,6 +482,24 @@ async function main(): Promise<void> {
   }
   markStartup('runtimeReady')
 
+  /**
+   * Runtime 的应用内安装器。必须在 `server.start()` **之前**建好：启动失败时的"这次是不是
+   * 更新装出来的 Runtime"判定（`runtime.source`）要用到它，而回退动作（摘掉 `current`）
+   * 就发生在失败那一刻。
+   */
+  const runtimeUpdater = new RuntimeUpdater({
+    userDataDir,
+    resourcesPath: process.resourcesPath,
+    appPath: app.getAppPath(),
+    packaged: app.isPackaged,
+    bundledVersion: runtime.bundledVersion ?? runtime.version,
+  })
+  if (runtime.source === 'downloaded') {
+    process.stderr.write(
+      `[shell] 使用应用内更新装好的 Runtime ${runtime.version ?? '?'}（${runtime.dir}）\n`,
+    )
+  }
+
   // 内置插件的位置。包装形态下是 `resources/plugins`（真实目录，extraResources），开发期
   // 是仓库的 `plugins/`。它有两个用途：**只读**同步（开发期）与交给子进程做 profile 链接。
   const bundledPlugins = resolveBundledPlugins({
@@ -490,12 +509,13 @@ async function main(): Promise<void> {
     packaged: app.isPackaged,
   })
 
-  // 把本 Release 携带的客户端插件同步进同一 Release 的 bundled Runtime。
+  // 把本 Release 携带的客户端插件同步进**当前实际使用**的 Runtime。
   //
-  // **打包形态下不再需要**（因此直接跳过）：Runtime 在 app.asar 里是只读的，而且应用与其
-  // 插件同属一个不可变 Release——没有"运行时被换掉后要补齐"这种情形。子进程改为把
-  // `resources/plugins` 直接链进 profile（见 server.mjs 的 `--bundled-plugins-dir`），
-  // 于是既没有复制，也没有每次启动的递归指纹校验。
+  // **打包形态下仍然跳过**，但理由变了：Runtime 可能住两处——`app.asar` 里的那份（只读，
+  // 写不进去）与应用内更新装出来的 `<userData>/runtime/<version>`（可写）。与其分两种情况
+  // 判断"该不该复制"，不如统一交给子进程：它把**真实**的 `resources/plugins` 目录直接链进
+  // profile（见 server.mjs 的 `--bundled-plugins-dir`），于是两份 Runtime 用的是同一个
+  // Release 的同一批插件，既没有复制，也没有每次启动的递归指纹校验。
   const pluginSync = syncPluginsAtStartup({
     runtimeDir: runtime.dir,
     resourcesPath: process.resourcesPath,
@@ -507,9 +527,12 @@ async function main(): Promise<void> {
   markStartup('pluginSyncFinished')
 
   try {
-    runtimeVersion = (JSON.parse(readFileSync(runtime.installAnchor, 'utf8')) as { version?: string }).version ?? runtime.stagedVersion ?? 'unknown'
+    runtimeVersion = runtime.version
+      ?? (JSON.parse(readFileSync(runtime.installAnchor, 'utf8')) as { version?: string }).version
+      ?? runtime.stagedVersion
+      ?? 'unknown'
   } catch {
-    runtimeVersion = runtime.stagedVersion ?? 'unknown'
+    runtimeVersion = runtime.version ?? runtime.stagedVersion ?? 'unknown'
   }
   activeRuntime = runtime
   process.env.DSH_DESKTOP_SHELL_VERSION = SHELL_VERSION
@@ -536,6 +559,26 @@ async function main(): Promise<void> {
     // app.asar 内，归档内部路径不能作为符号链接目标，因此必须显式告诉它真实位置。
     bundledPluginsDir: bundledPlugins.dir,
   })
+
+  /**
+   * Runtime 更新回退之后的自动重启。
+   *
+   * 与「切换工作区」共用同一套重启协议（`workspace-switch.ts` 的 `restartIntoWorkspace`
+   * 是同一形状）：先把服务端子进程停掉，再 `app.relaunch()`，最后退出——不先停子进程的话
+   * 新实例与旧实例会争用同一个 harness home。
+   *
+   * @param server - 本次进程的服务端（可能已经失败/未起来，`stop` 对两种情况都安全）。
+   */
+  const restartIntoBundledRuntime = async (): Promise<void> => {
+    if (session !== undefined) session.quitting = true
+    try {
+      await server.stop(2000)
+    } catch {
+      // 停不掉也不该挡住重启：relaunch 之后旧进程会随本次 exit 一起结束。
+    }
+    app.relaunch()
+    app.exit(0)
+  }
 
   // Repair module-fallback links before boot. If the install directory ever moved,
   // dsh's own staleness check compares link *target strings*, so a dangling link can
@@ -731,10 +774,25 @@ async function main(): Promise<void> {
     takePendingForgets(userDataDir)
   } catch (error) {
     mainWindow.close()
-    dialog.showErrorBox(
-      strings.startupFailedTitle,
-      error instanceof Error ? error.message : String(error),
-    )
+    /**
+     * 启动失败 + 当前用的是"应用内更新装出来的 Runtime" = 这次更新把应用弄坏了。
+     *
+     * 处理方式刻意不是"就地再试一次"：`current` 是链接，移除它就等于让下一次启动回到
+     * 内置 Runtime——而那**正是**我们要的结果（内置那份一定与本 Release 配套）。
+     * 因此：回退 → 告诉用户"已恢复内置版本" → relaunch（复用与切换工作区同一条重启路径，
+     * 它先停服务端再退出，避免两个实例争用同一个 harness home）→ 本次进程退出。
+     *
+     * 只有回退确实发生（`rollback()` 真的移除了链接）时才走到这里；内置 Runtime 自己起不来
+     * 是另一类故障，仍旧是"显示错误并退出"。
+     */
+    const detail = error instanceof Error ? error.message : String(error)
+    if (runtime.source === 'downloaded' && runtimeUpdater.rollback()) {
+      process.stderr.write(`[shell] Runtime ${runtime.version ?? '?'} 启动失败，已回退到内置 Runtime\n${detail}\n`)
+      dialog.showErrorBox(strings.updateRuntimeRollbackTitle, `${strings.updateRuntimeRollbackDetail}\n\n${detail}`)
+      await restartIntoBundledRuntime()
+      return
+    }
+    dialog.showErrorBox(strings.startupFailedTitle, detail)
     app.exit(1)
     return
   }
@@ -761,6 +819,7 @@ async function main(): Promise<void> {
     openUpdatesFor({
       window,
       shellUpdater,
+      runtimeUpdater,
       userDataDir,
       strings,
     })
@@ -868,7 +927,10 @@ function showProjectInfoFor(
     { label: strings.projectRuntimeVersion, value: runtimeVersion },
     {
       label: strings.projectRuntimeSource,
-      value: runtime.dir.startsWith(join(userDataDir, 'runtime'))
+      // 来源直接读解析结果（`paths.ts` 的决定），不再靠"路径像不像 userData 下的 runtime"猜：
+      // 应用内更新装出来的那份就是 `downloaded`，其余（app.asar / resources/runtime / 仓库）
+      // 都是随包内置。
+      value: runtime.source === 'downloaded'
         ? strings.projectRuntimeDownloaded
         : strings.projectRuntimeBundled,
     },
@@ -893,10 +955,18 @@ function showProjectInfoFor(
 }
 
 /**
- * 打开「更新」窗口。用户侧只有 GitHub Releases 这一条完整产品更新轨道。
+ * 打开「更新」窗口：两条轨道（Desktop 应用 / 官方 Harness Runtime）。
  *
  * 窗口立刻打开并显示"正在检查"，GitHub 结果随后推送。这样网络慢时用户看得到
  * 进展，而不是等十几秒后突然弹出一个窗口。
+ *
+ * Runtime 轨道这一版多了**直接安装**：有新版时显示「安装 Runtime 并重启」，由
+ * `RuntimeUpdater` 用随包的 npm CLI 装 `@deepseek-ai/dsh@<版本>`（安装流程、staging 与
+ * 回退都在 runtime-updater.ts）。安装期间：
+ *   * 按钮变"正在安装…"并禁用，轨道状态也变成同一句话；
+ *   * 进度文本按**节流**后的 npm 日志行刷新（npm 的 http 级别日志每几百毫秒好几行，
+ *     逐行推 IPC 既浪费又会把界面刷得看不清）；
+ *   * 应用内安装与 Desktop 安装包下载**互斥**（两边都要写用户目录/带宽，同时跑只会互相拖慢）。
  *
  * 完整应用更新的两个守卫：
  *   * 未打包运行时不可用（没有 `app-update.yml`），此时明确说明而不是给个
@@ -904,28 +974,30 @@ function showProjectInfoFor(
  *   * 外壳版本比较用 `app.getVersion()`。开发运行时 Electron 从 package.json
  *     取名，打包后来自 productName —— 两者可能不同，所以只在打包后启用安装。
  *
- * @param deps - 窗口、更新器与版本信息。
+ * @param deps - 窗口、更新器、Runtime 安装器与版本信息。
  */
 function openUpdatesFor(deps: {
   window: BrowserWindow
   shellUpdater: ShellUpdater
+  runtimeUpdater: RuntimeUpdater
   userDataDir: string
   strings: ReturnType<typeof t>
 }): void {
-  const { window, shellUpdater, userDataDir, strings: s } = deps
+  const { window, shellUpdater, runtimeUpdater, userDataDir, strings: s } = deps
 
   const shellVersion = app.getVersion()
-  const runtimeVersion = activeRuntime?.stagedVersion ?? (() => {
-    try {
-      return (JSON.parse(readFileSync(activeRuntime?.installAnchor ?? '', 'utf8')) as { version?: string }).version ?? 'unknown'
-    } catch {
-      return 'unknown'
-    }
-  })()
+  const runtimeVersion = activeRuntime?.version ?? activeRuntime?.stagedVersion ?? 'unknown'
+  // 内置 Runtime 的版本：Runtime 轨道要同时说清"现在用的是哪一份、内置的是哪一份"。
+  const bundledRuntimeVersion = activeRuntime?.bundledVersion ?? runtimeVersion
+  const canInstallRuntime = runtimeUpdater.canInstall
+  /** Desktop 安装包是否正在下载：两条轨道互斥要**双向**成立（见下面的 action 分支）。 */
+  let desktopDownloading = false
   let currentState: UpdatePanelState = {
     desktop: { installed: shellVersion, state: 'checking' },
     runtime: { installed: runtimeVersion, state: 'checking' },
     canInstall: false,
+    canInstallRuntime,
+    runtimeInstalling: runtimeUpdater.installing,
   }
 
   const panel = openUpdateWindow(
@@ -948,6 +1020,9 @@ function openUpdatesFor(deps: {
       runtimeBundledNote: s.updateRuntimeBundledNote,
       runtimeAvailableNote: s.updateRuntimeAvailableNote,
       buttonRuntimeRelease: s.updateButtonRuntimeRelease,
+      buttonRuntimeInstall: s.updateButtonRuntimeInstall,
+      runtimeInstalling: s.updateRuntimeInstalling,
+      runtimeProgress: s.updateRuntimeProgress,
     },
     (action) => {
       if (action === 'close') {
@@ -956,6 +1031,9 @@ function openUpdatesFor(deps: {
       }
       if (action === 'download') {
         void (async () => {
+          // 互斥：Runtime 安装进行中不下载 Desktop 安装包。
+          if (runtimeUpdater.installing) return
+          desktopDownloading = true
           try {
             await shellUpdater.download((percent) => {
               panel.update({ ...currentState, progress: percent })
@@ -976,6 +1054,70 @@ function openUpdatesFor(deps: {
               detail: error instanceof Error ? error.message : String(error),
               buttons: [s.buttonOk],
             })
+          } finally {
+            desktopDownloading = false
+          }
+        })()
+      }
+      if (action === 'runtime-install') {
+        const target = currentState.runtime.latest
+        // 版本只能来自官方 GitHub Release 的检查结果：没有它就没有可安装的目标。
+        if (target === undefined || currentState.runtime.state !== 'available') return
+        // 互斥（与 download 那一侧对称）：Desktop 安装包正在下载时不能同时装 Runtime。
+        if (desktopDownloading) return
+        void (async () => {
+          const publishedAt = releaseInfo?.publishedAt
+          /**
+           * 进度节流。
+           *
+           * npm 在 `--loglevel http` 下每个请求写好几行，逐行推 IPC 会让更新窗口的进度文本
+           * 每秒变十几次（读不清），而这期间面板还要重排。这里只在"距上次推送超过 120ms"、
+           * 且文本确实变了时推。安装结束时 `runtimeInstalling` 会置回 false 并推一次最终
+           * 状态，因此不存在"停在半句话上"的问题。
+           */
+          let lastPush = 0
+          let lastMessage = ''
+          const onProgress = ({ message }: { message: string }): void => {
+            const now = Date.now()
+            if (message === lastMessage) return
+            if (now - lastPush < 120) return
+            lastPush = now
+            lastMessage = message
+            currentState = { ...currentState, runtimeInstalling: true, runtimeProgress: message }
+            panel.update(currentState)
+          }
+          currentState = { ...currentState, runtimeInstalling: true, runtimeProgress: s.updateRuntimeProgress.replace('{line}', '…') }
+          panel.update(currentState)
+          try {
+            const result = await runtimeUpdater.install({ version: target, publishedAt, onProgress })
+            currentState = { ...currentState, runtimeInstalling: false, runtimeProgress: `${result.version} · ${result.registry}` }
+            panel.update(currentState)
+            const choice = await dialog.showMessageBox(window, {
+              type: 'info',
+              message: s.updateRuntimeReadyTitle,
+              detail: `${s.updateRuntimeReadyDetail}\n\n@deepseek-ai/dsh@${result.version}`,
+              buttons: [s.updateShellRestartNow, s.updateShellRestartLater],
+              defaultId: 0,
+              cancelId: 1,
+            })
+            if (choice.response === 0) {
+              // 立即重启：**先停掉当前 Harness server**，否则新实例会与它争用同一个
+              // harness home（与「切换工作区」同一条协议）。
+              if (session !== undefined) session.quitting = true
+              const running = session?.server
+              if (running !== undefined) await running.stop(2000)
+              app.relaunch()
+              app.exit(0)
+            }
+          } catch (error) {
+            currentState = { ...currentState, runtimeInstalling: false }
+            panel.update(currentState)
+            await dialog.showMessageBox(window, {
+              type: 'error',
+              message: s.updateRuntimeFailedTitle,
+              detail: error instanceof Error ? error.message : String(error),
+              buttons: [s.buttonOk],
+            })
           }
         })()
       }
@@ -987,6 +1129,9 @@ function openUpdatesFor(deps: {
   )
 
   panel.update(currentState)
+
+  /** 最近一次官方 Runtime Release 的检查结果（安装时要它的 `publishedAt`）。 */
+  let releaseInfo: Awaited<ReturnType<typeof checkRuntimeRelease>> | undefined
 
   void (async () => {
     const [shellResult, runtimeResult] = await Promise.allSettled([
@@ -1012,16 +1157,22 @@ function openUpdatesFor(deps: {
           state: runtimeResult.value.available ? 'available' as const : runtimeResult.value.reason === undefined ? 'latest' as const : 'unknown' as const,
           ...(runtimeResult.value.reason === undefined ? {} : { reason: runtimeResult.value.reason }),
           ...(runtimeResult.value.releaseUrl === undefined ? {} : { releaseUrl: runtimeResult.value.releaseUrl }),
+          // 正在使用的是"应用内更新装出来的那份"时明确说明来源：否则用户只会看到
+          // 一个与内置版本不同的号，不知道它是哪来的。
+          ...(runtimeVersion === bundledRuntimeVersion ? {} : { reason: s.updateRuntimeDownloadedNote }),
         }
       : {
           installed: runtimeVersion,
           state: 'unknown' as const,
           reason: runtimeResult.reason instanceof Error ? runtimeResult.reason.message : String(runtimeResult.reason),
         }
+    if (runtimeResult.status === 'fulfilled') releaseInfo = runtimeResult.value
     currentState = {
       desktop,
       runtime,
       canInstall: desktop.state === 'available' && app.isPackaged,
+      canInstallRuntime,
+      runtimeInstalling: runtimeUpdater.installing,
     }
     panel.update(currentState)
   })()

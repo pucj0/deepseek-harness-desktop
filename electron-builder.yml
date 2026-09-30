@@ -89,14 +89,34 @@ files:
   - '!scripts/**'
   # 插件只以 extraResources 的形式随包发布（见上面那段说明）：进 app.asar 没有用处。
   - '!plugins/**'
+  #
+  # ⚠️ **不要**在这里写 `!node_modules/npm/**`。试过，结果是 npm 从产物里**整个消失**：
+  # electron-builder 只有一份文件模式列表，`files` 里的排除先于 `asarUnpack` 生效，
+  # 于是"只想让它别进 asar"变成了"哪儿都没有"。npm 必须由下面的 asarUnpack 解到真实
+  # 路径，所以它留在 files 里（它在 asar 里的条目会被标记为 unpacked，内容落在
+  # app.asar.unpacked/ 而不是归档中）。`scripts/report-package-size.mjs` 把"解包后的
+  # npm CLI 不存在"判为失败，`scripts/test-desktop-runtime.mjs` 有同一条断言。
 
 # 只有加载器必须按真实路径打开的 native 二进制才 unpack，其余一律留在 app.asar 里。
+#
+# `node_modules/npm/**` 是唯一的例外，理由值得写清楚：npm 不是被 `require` 进来的库，
+# 而是被 `spawn(process.execPath, [npm-cli.js, …])` 以**真实路径**执行的 CLI。Electron
+# 的 Node 模式读不了 asar 内部路径，npm 自己也要在 `node_modules/npm` 下解析它自带的
+# 依赖树，因此它必须完整解到 `resources/app.asar.unpacked/node_modules/npm/**`——
+# `scripts/report-package-size.mjs` 把"这个文件不存在"当成**失败**（而不是像以前那样
+# 把"生产 npm"整个当禁止项）。
+#
+# 刻意**不**在这里再排除 `npm/docs` 与 `npm/man`（约 2.5 MiB）：asarUnpack 的负向模式是
+# 全局的，`'!node_modules/npm/docs/**'` 会把**任何**包路径下的 `docs/` 都排除掉，而那正是
+# runtime-file-policy 明确要求保留的东西（`yaml/dist/doc/` 那类误删踩过真实的坑）。
+# 2.5 MiB 不值得换这种风险。
 asarUnpack:
   - 'runtime/**/*.node'
   - 'runtime/**/*.dll'
   - 'runtime/**/*.exe'
   - 'runtime/**/*.so'
   - 'runtime/**/*.dylib'
+  - 'node_modules/npm/**'
 
 # **必须**打开：electron-builder 默认会跳过**任何**层级的 `node_modules` 目录
 # （`AppFileWalker.createAppFilter` 里只要 `file.endsWith('/node_modules')` 就返回

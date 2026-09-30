@@ -94,22 +94,42 @@ if (!existsSync(APP)) {
   console.log(`  SKIP  没有打包产物（${APP}）；先跑 npx electron-builder --win --x64 --dir`)
   console.log('        ——第 4/5 节未验证，不当作通过。')
 } else {
-  // 树里不能有第二份 Node、也不能有生产 npm CLI：两者都是这一版明确删掉的东西。
+  // 树里不能有第二份 Node；但**必须有**应用自己携带的那份 npm CLI——应用内更新 Runtime
+  // 就是靠它以 `ELECTRON_RUN_AS_NODE=1` 执行 `npm install`，用户机器上不需要装 node/npm。
   const { getRawHeader } = await import('@electron/asar')
   const header = getRawHeader(APP).header
   const asarPaths = []
+  /** 解包条目的**规范路径**集合（asar 头表里它们带 `unpacked: true`，没有额外后缀）。 */
+  const asarUnpacked = new Set()
   const visit = (node, prefix) => {
     for (const [name, value] of Object.entries(node.files ?? {})) {
       const path = prefix === '' ? name : `${prefix}/${name}`
       if (value.files !== undefined) visit(value, path)
-      else asarPaths.push(path)
+      else {
+        asarPaths.push(path)
+        if (value.unpacked === true) asarUnpacked.add(path)
+      }
     }
   }
   visit(header, '')
   has('app.asar 里有 runtime/', asarPaths.some((path) => path.startsWith('runtime/')))
   has('app.asar 里有 runtime/server.mjs', asarPaths.includes('runtime/server.mjs'))
   has('没有运行时的 node.exe', asarPaths.some((path) => /(^|\/)node\.exe$/iu.test(path)) === false)
-  has('没有生产 npm CLI', asarPaths.some((path) => /node_modules\/npm\/bin\/npm-cli\.js$/u.test(path)) === false)
+  // npm 是生产依赖，走 asarUnpack：在 asar 头表里它的每个条目都带 `unpacked: true`
+  // （内容真实落在 app.asar.unpacked/ 下，不在归档里）。因此这里断言"CLI 存在且**只**
+  // 以解包形式出现"——若归档里另有一份未标记的副本，说明它被交付了两遍。
+  has(
+    'npm CLI 以 unpacked 条目出现',
+    asarUnpacked.has('node_modules/npm/bin/npm-cli.js'),
+  )
+  has(
+    'npm CLI 在归档里没有第二份',
+    asarPaths.filter((path) => path === 'node_modules/npm/bin/npm-cli.js').length === 1,
+  )
+  // 真实落点：这正是 runtime-updater.locateBundledNpm 的第一个候选，也是"用户不必装 npm"
+  // 这句话的物理载体。缺失即失败（scripts/report-package-size.mjs 同样判它失败）。
+  const npmCliOnDisk = join(UNPACKED, 'resources', 'app.asar.unpacked', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+  has('解包后的 npm CLI 真实存在', existsSync(npmCliOnDisk))
   // 注意断言的是**平台负载**而不是包名：`@deepseek-ai/libreoffice-kit` 这个 JS 包装层是
   // dsh-web-app / dsh-skill-office 的必需依赖，必须保留；不该携带的是它那 170 MiB 的
   // 平台二进制（`libreoffice-kit-win32-x64` 等）。

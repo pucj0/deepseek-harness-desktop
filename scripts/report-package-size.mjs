@@ -12,8 +12,13 @@
 //   2. 最大的 N 个文件与 N 个目录；
 //   3. **重复内容**：同一个 `@deepseek-ai/*` 包是否同时出现在 `app.asar`、
 //      `app.asar.unpacked` 与 runtime 归档里（三份副本是这一版要根除的浪费）；
-//   4. **门禁**：NSIS 安装包与上面那些"不允许再出现的东西"（第二份 portable Node、
-//      生产 npm CLI、runtime.br 解压双交付）是否越界——越界即 exit 1，CI 直接失败。
+//   4. **门禁**：NSIS 安装包与下面这三条是否越界——越界即 exit 1，CI 直接失败：
+//        * 第二份 portable Node（Electron 自带 Node 24，再带一份纯浪费）；
+//        * 重复交付的 @deepseek-ai Runtime；
+//        * **打包 npm CLI 缺失**（应用内更新 Runtime 要用它；它必须被解包到真实路径
+//          `resources/app.asar.unpacked/node_modules/npm/bin/npm-cli.js`，见
+//          electron-builder.yml 的 asarUnpack）。npm 本身不再是禁止项——它现在是
+//          生产依赖，约 9 MiB 解包体积，是"用户不必装 node/npm"的代价。
 //
 // 它只读产物，不改任何东西；`app.asar` 用 `@electron/asar` 的原始头解析（与运行时读到的
 // 是同一份表），runtime 归档按 `scripts/compress-runtime.mjs` 的格式流式解析头（不落盘）。
@@ -35,7 +40,7 @@ const DIR = resolve(ROOT, argValue('--dir', join('release', version, 'win-unpack
 const TOP = Number(argValue('--top', '100'))
 const JSON_ONLY = args.includes('--json')
 /** Size Gate 的两阶段上限（MiB）。第一阶段的硬门槛，第二阶段的目标。 */
-const LIMIT_MIB = Number(argValue('--limit-mib', '120'))
+const LIMIT_MIB = Number(argValue('--limit-mib', '136'))
 const STRETCH_MIB = Number(argValue('--stretch-mib', '100'))
 
 const MIB = 1024 * 1024
@@ -267,11 +272,45 @@ const archiveJunk = ARCHIVE_JUNK.map(([label, test]) => {
 }).sort((a, b) => b.bytes - a.bytes)
 
 // ------------------------------------------------------------------ 禁止项 ---------
+//
+// 这一版的"允许/必须/禁止"三张单子：
+//
+//   * **必须**：`node_modules/npm/**` 被解包到真实路径（应用内更新 Runtime 要用它）。
+//     缺失即失败——这正是"用户不需要装 node/npm"这句话的物理载体。
+//   * **允许**：Runtime 归档/裁剪树里出现 npm。上游 `@deepseek-ai/dsh` 把 npm 当普通
+//     依赖带进来时，它只是被解包多占几 MiB；以前把它整个当禁止项会让一次上游改动
+//     莫名其妙地挂在体积门禁上。真正要挡的是"同一份内容交付两遍"（下面的重复检测）
+//     与"第二份 portable Node"。
+//   * **禁止**：第二份 portable `node.exe`（Electron 自带 Node 24，再带一份纯浪费）。
 /** 归档里是否带着第二份 portable Node。 */
 const archiveNodeExe = archiveFiles.filter((file) => /(^|\/)node\.exe$/iu.test(file.path) || /(^|\/)bin\/node$/u.test(file.path))
-const asarNpmCli = asarFiles.filter((file) => /node_modules\/npm\/bin\/npm-cli\.js$/u.test(file.path))
-const unpackedNpmCli = unpackedFiles.filter((file) => /node_modules[\\/]npm[\\/]bin[\\/]npm-cli\.js$/u.test(file.rel))
-const unpackedNodeExe = unpackedFiles.filter((file) => /(^|[\\/])node\.exe$/iu.test(file.rel))
+/** 裁剪后的 Runtime 里是否带着 portable Node（打包后落在 app.asar 的 `runtime/`）。 */
+const asarRuntimeNodeExe = asarFiles.filter((file) => /^runtime\/(?:.*\/)?node(?:\.exe)?$/iu.test(file.path))
+
+/**
+ * npm CLI 的三处落点。
+ *
+ * `app.asar.unpacked/...` 是**必须存在**的那一份（electron-builder 的 asarUnpack 结果）；
+ * 另外两处只要出现就说明同一份 npm 被交付了第二遍，属于体积回归。
+ */
+const NPM_CLI_SUFFIX = 'node_modules/npm/bin/npm-cli.js'
+const minifiedPath = (path) => path.split(/[\\/]/u).join('/')
+/**
+ * asar 头表里的条目名 → 规范路径。
+ *
+ * `readAsarFiles` 给解包条目加的是 `" (unpacked)"` 后缀（那是人读的大小报告里要的标记），
+ * 这里做判断时先摘掉它，否则同一份文件会被当成两条。同时也丢掉 `' (unpacked)'` 后可能
+ * 残留的反斜杠差异——`files` 与 `unpackedFiles` 用不同的分隔符。
+ */
+const asarRegularPath = (path) => minifiedPath(path.replace(/ \(unpacked\)$/u, ''))
+const unpackedNpmCli = unpackedFiles.filter((file) => minifiedPath(file.rel).endsWith(NPM_CLI_SUFFIX))
+const asarNpmCli = asarFiles.filter((file) => asarRegularPath(file.path).endsWith(NPM_CLI_SUFFIX) && !file.path.endsWith(' (unpacked)'))
+const asarUnpackedNpmCli = asarFiles.filter((file) => file.path.endsWith(`${NPM_CLI_SUFFIX} (unpacked)`))
+const archiveNpmCli = archiveFiles.filter((file) => minifiedPath(file.path).endsWith(NPM_CLI_SUFFIX))
+/** 解包出来的整棵生产 npm（体积报告用）。 */
+const unpackedNpmBytes = unpackedFiles
+  .filter((file) => minifiedPath(file.rel).startsWith('node_modules/npm/'))
+  .reduce((sum, file) => sum + file.size, 0)
 
 const installer = ['dsh-desktop-x64.exe', 'dsh-desktop-arm64.exe'].map((name) => join(ROOT, 'release', version, name)).find((path) => existsSync(path))
 const installerBytes = installer === undefined ? 0 : statSync(installer).size
@@ -302,9 +341,15 @@ const report = {
   },
   forbidden: {
     archiveNodeExe: archiveNodeExe.map((file) => file.path),
+    asarRuntimeNodeExe: asarRuntimeNodeExe.map((file) => file.path),
     asarNpmCli: asarNpmCli.map((file) => file.path),
-    unpackedNpmCli: unpackedNpmCli.map((file) => file.rel),
-    unpackedNodeExe: unpackedNodeExe.map((file) => file.rel),
+    archiveNpmCli: archiveNpmCli.map((file) => file.path),
+  },
+  /** 打包 npm CLI 的落点与体积（见上面的"允许/必须/禁止"单子）。 */
+  bundledNpm: {
+    unpackedCli: unpackedNpmCli.map((file) => file.rel),
+    asarUnpackedMarker: asarUnpackedNpmCli.map((file) => file.path),
+    unpackedBytes: unpackedNpmBytes,
   },
   installer: { path: installer ?? null, bytes: installerBytes, mib: Number((installerBytes / MIB).toFixed(2)) },
   gate: { limitMib: LIMIT_MIB, stretchMib: STRETCH_MIB },
@@ -352,11 +397,14 @@ if (!JSON_ONLY) {
   console.log(`  runtime 归档      : ${inArchive.size} 个包（${mib(archiveDeepseekBytes)} MiB）`)
   console.log(`  **重复交付**      : ${duplicated.length === 0 ? '无' : duplicated.join(', ')}`)
   console.log('')
+  console.log('=== 打包 npm（应用内更新 Runtime 用） ===')
+  console.log(`  解包后的 npm CLI  : ${unpackedNpmCli.length > 0 ? unpackedNpmCli.map((f) => f.rel).join(', ') : '**缺失**'}`)
+  console.log(`  解包后的 npm 体积 : ${mib(unpackedNpmBytes)} MiB`)
+  console.log(`  app.asar 内 npm   : ${asarNpmCli.length === 0 ? '无（只有 unpacked 条目）' : asarNpmCli.map((f) => f.path).join(', ')}`)
+  console.log('')
   console.log('=== 禁止项 ===')
   console.log(`  归档内第二份 node  : ${archiveNodeExe.length === 0 ? '无' : archiveNodeExe.map((f) => `${f.path}（${mib(f.size)} MiB）`).join(', ')}`)
-  console.log(`  app.asar 内 npm CLI: ${asarNpmCli.length === 0 ? '无' : asarNpmCli.map((f) => f.path).join(', ')}`)
-  console.log(`  unpacked 内 npm CLI: ${unpackedNpmCli.length === 0 ? '无' : unpackedNpmCli.map((f) => `${f.rel}（${mib(f.size)} MiB）`).join(', ')}`)
-  console.log(`  unpacked 内 node   : ${unpackedNodeExe.length === 0 ? '无' : unpackedNodeExe.map((f) => `${f.rel}（${mib(f.size)} MiB）`).join(', ')}`)
+  console.log(`  asar 内第二份 node: ${asarRuntimeNodeExe.length === 0 ? '无' : asarRuntimeNodeExe.map((f) => f.path).join(', ')}`)
   console.log('')
   console.log('=== Size Gate ===')
   if (installer === undefined) {
@@ -384,7 +432,14 @@ if (outPath !== undefined) {
 const problems = []
 if (duplicated.length > 0) problems.push(`@deepseek-ai 重复交付：${duplicated.join(', ')}`)
 if (archiveNodeExe.length > 0) problems.push('runtime 归档里仍带第二份 portable Node')
-if (asarNpmCli.length > 0 || unpackedNpmCli.length > 0) problems.push('产物里仍带生产 npm CLI')
+if (asarRuntimeNodeExe.length > 0) problems.push(`app.asar 的 runtime/ 里仍带 portable Node：${asarRuntimeNodeExe.map((f) => f.path).join(', ')}`)
+// 打包 npm 是**必须项**：没有它，应用内更新 Runtime 就只能退回"打开 Release"。
+if (unpackedNpmCli.length === 0) {
+  problems.push('app.asar.unpacked 里缺少 node_modules/npm/bin/npm-cli.js（应用内更新 Runtime 依赖它）')
+}
+// 同一份 npm 出现在三处中的多处 = 体积回归（它不是被 require 的库，只需要解包那一份）。
+if (asarNpmCli.length > 0) problems.push('app.asar 里仍带一份 npm CLI（应只保留解包后的那一份）')
+if (archiveNpmCli.length > 0) problems.push('裁剪后的 Runtime 里仍带一份 npm CLI（应由应用自己携带）')
 if (installer !== undefined && installerBytes > LIMIT_MIB * MIB) problems.push(`NSIS ${mib(installerBytes)} MiB > ${LIMIT_MIB} MiB`)
 
 if (problems.length > 0) {

@@ -170,19 +170,21 @@ jobs:
 
       # Size Gate：体积是这一版的**交付指标**，不是"感觉快了"。
       #
-      # 它同时挡住四类回归（第二份便携 Node、生产 npm CLI、重复的 @deepseek-ai Runtime、
-      # runtime.br + 解压 Runtime 的双交付），越界即失败。第二份 Node 约 +25 MiB、
-      # LibreOffice 平台负载约 +45 MiB，因此 131 MiB 这个门槛对它们都仍然有效。
+      # 它挡住三类回归，越界即失败：
+      #   * 第二份便携 Node（约 +25 MiB）；
+      #   * 重复交付的 @deepseek-ai Runtime（同一份内容既进 asar 又进 unpacked）；
+      #   * **打包 npm CLI 缺失**——应用内更新 Runtime 靠它执行 `npm install`，缺了就只能
+      #     退回「打开 Runtime Release」这条备用路径。
+      #     npm 现在是**生产依赖**，因此不再是禁止项：解包后约 9 MiB（docs/man 的 2.5 MiB
+      #     已排除）。`scripts/report-package-size.mjs` 因此把"npm CLI 不存在"判为失败，
+      #     而不是像以前那样把"生产 npm"整个当越界。
       #
-      # ⚠️ **第一阶段目标（<= 120 MiB）本版未达标**：实测 127.63 MiB（133,832,858 字节，
-      # 本机 win32-x64 staging）。这里把门槛锁在实测值之上 3 MiB，是为了：
-      #   * 不让"超限"悄悄通过（任何 >3 MiB 的回归都会失败）；
-      #   * 同时容忍 CI 重新 stage 出来的依赖闭包与本地不完全一致带来的抖动
-      #     （闭包漂移是真实存在的：09-27 与 09-29 两次 staging 相差 392 MiB）。
-      # 下一版的硬要求是把门槛收到 120，然后是 100（--stretch-mib）。
+      # ⚠️ 门槛 131 -> 136 的唯一理由就是上面那份 npm。历史实测：1.7.4 = 127.63 MiB
+      # （133,832,858 字节，本机 win32-x64 staging）。这不是"无限放宽"：
+      # 再多 5 MiB 的回归依旧会失败，而 --stretch-mib 100 这个下一阶段目标没有动。
       - name: Windows 安装包体积门禁
         if: matrix.target == 'win'
-        run: node scripts/report-package-size.mjs --limit-mib 131 --stretch-mib 100
+        run: node scripts/report-package-size.mjs --limit-mib 136 --stretch-mib 100
 
       # 说明：这里原本还有一个「打包 Windows (MSI)」步骤，现已移除。
       #

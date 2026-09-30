@@ -76,6 +76,19 @@ export interface ShellStrings {
   updateRuntimeBundledNote: string
   updateRuntimeAvailableNote: string
   updateButtonRuntimeRelease: string
+  /** Runtime 直装按钮：有新版且本安装包能直接安装时显示。 */
+  updateButtonRuntimeInstall: string
+  /** 安装中的按钮/状态文案。 */
+  updateRuntimeInstalling: string
+  /** 安装进度文本前的说明（后面接 npm 的日志行）。 */
+  updateRuntimeProgress: string
+  updateRuntimeFailedTitle: string
+  updateRuntimeReadyTitle: string
+  updateRuntimeReadyDetail: string
+  /** 已下载更新的来源说明（内置 Runtime 与下载 Runtime 的差别）。 */
+  updateRuntimeDownloadedNote: string
+  updateRuntimeRollbackTitle: string
+  updateRuntimeRollbackDetail: string
   updateShellFailedTitle: string
   updateShellReadyTitle: string
   updateShellReadyDetail: string
@@ -226,9 +239,21 @@ const en: ShellStrings = {
   updateShellUnavailable: 'App self-update is unavailable in development mode',
   updateShellProgress: 'Downloading… {percent}%',
   updateButtonDownloading: 'Downloading {percent}%…',
-  updateRuntimeBundledNote: 'The complete, built runtime is installed together with a compatible Desktop release; npm is never run on the user device.',
-  updateRuntimeAvailableNote: 'Official runtime {version} is available. Install the compatible Desktop release when it appears.',
+  updateRuntimeBundledNote:
+    'The runtime bundled with this Desktop release is what runs today. When an official runtime release is newer, the app installs it in place with the npm CLI it ships — no Node.js or npm on your machine.',
+  updateRuntimeAvailableNote:
+    'Official runtime {version} is published. Install it in place; the app downloads @deepseek-ai/dsh with its bundled npm and switches over on restart.',
   updateButtonRuntimeRelease: 'Open Runtime Release',
+  updateButtonRuntimeInstall: 'Install Runtime and Restart',
+  updateRuntimeInstalling: 'Installing runtime…',
+  updateRuntimeProgress: 'npm: {line}',
+  updateRuntimeFailedTitle: 'Runtime update failed',
+  updateRuntimeReadyTitle: 'Runtime update ready',
+  updateRuntimeReadyDetail: 'The new runtime is installed. Restart the app to start using it.',
+  updateRuntimeDownloadedNote: 'downloaded update — installed in place with the bundled npm',
+  updateRuntimeRollbackTitle: 'Runtime update rolled back',
+  updateRuntimeRollbackDetail:
+    'The updated runtime did not start, so the app restored the bundled runtime.',
   updateShellFailedTitle: 'App update failed',
   updateShellReadyTitle: 'Application update ready',
   updateShellReadyDetail: 'The new version has been downloaded. Restart to apply it.',
@@ -282,7 +307,7 @@ const en: ShellStrings = {
   projectRuntimeVersion: 'Agent runtime',
   projectRuntimeSource: 'Runtime source',
   projectRuntimeBundled: 'bundled with the application',
-  projectRuntimeDownloaded: 'legacy downloaded runtime (not selected)',
+  projectRuntimeDownloaded: 'downloaded update (installed in place)',
   projectElectron: 'Electron',
   projectNode: 'Bundled Node',
   projectHarnessHome: 'Harness home',
@@ -374,9 +399,18 @@ const zh: ShellStrings = {
   updateShellUnavailable: '开发模式不支持应用自更新',
   updateShellProgress: '正在下载… {percent}%',
   updateButtonDownloading: '下载中 {percent}%…',
-  updateRuntimeBundledNote: '完整且已构建的 Runtime 随兼容的 Desktop Release 一并安装；不会在用户电脑运行 npm。',
-  updateRuntimeAvailableNote: '官方 Runtime {version} 已发布；包含该版本的 Desktop Release 上线后即可安装。',
+  updateRuntimeBundledNote: '当前运行的是随本 Desktop Release 内置的 Runtime。官方 Runtime 有新版本时，应用会用自带的 npm CLI 直接就地安装，你的电脑不需要安装 Node.js 或 npm。',
+  updateRuntimeAvailableNote: '官方 Runtime {version} 已发布。可以直接就地安装：应用用自带的 npm 下载 @deepseek-ai/dsh，重启后切换过去。',
   updateButtonRuntimeRelease: '打开 Runtime Release',
+  updateButtonRuntimeInstall: '安装 Runtime 并重启',
+  updateRuntimeInstalling: '正在安装 Runtime…',
+  updateRuntimeProgress: 'npm：{line}',
+  updateRuntimeFailedTitle: 'Runtime 更新失败',
+  updateRuntimeReadyTitle: 'Runtime 更新已就绪',
+  updateRuntimeReadyDetail: '新 Runtime 已安装，重启应用后开始使用。',
+  updateRuntimeDownloadedNote: '已下载更新——由应用内置 npm 就地安装',
+  updateRuntimeRollbackTitle: 'Runtime 更新已回退',
+  updateRuntimeRollbackDetail: '更新后的 Runtime 未能启动，已恢复使用应用内置版本。',
   updateShellFailedTitle: '应用更新失败',
   updateShellReadyTitle: '应用更新已就绪',
   updateShellReadyDetail: '新版本已下载完成，重启后生效。',
@@ -384,7 +418,6 @@ const zh: ShellStrings = {
   updateShellRestartLater: '稍后',
   updateRuntimeLatestLabel: 'GitHub Release 最新版本',
   updateShellLatestLabel: 'GitHub Release 最新版本',
-
   splashTitle: 'DeepSeek Harness',
   splashHint: '正在启动智能体运行时，首次启动可能需要十几秒…',
 
@@ -430,7 +463,7 @@ const zh: ShellStrings = {
   projectRuntimeVersion: '智能体运行时',
   projectRuntimeSource: '运行时来源',
   projectRuntimeBundled: '随应用内置',
-  projectRuntimeDownloaded: '旧版下载运行时（不再选用）',
+  projectRuntimeDownloaded: '已下载更新（应用内就地安装）',
   projectElectron: 'Electron',
   projectNode: '内置 Node',
   projectHarnessHome: 'Harness 主目录',

@@ -1,15 +1,23 @@
 /**
- * Where the bundled dsh runtime lives, in dev and in a packaged app.
+ * Which dsh runtime this process runs on, in dev and in a packaged app.
  *
  * Packaged: the runtime ships **inside `app.asar`** (`<app>/runtime`), because that is
  *           the only copy the installer needs — the JS/JSON assets are compressed by
  *           NSIS once, instead of being delivered a second time as a brotli archive
  *           that then has to be unpacked into userData on first launch.
  * Dev:      the same `runtime/` directory in the repo root.
+ * Updated:  an in-app runtime update installs into `<userData>/runtime/<version>` and
+ *           points `<userData>/runtime/current` at it (see runtime-updater.ts). That
+ *           copy is used **only** when its real version is at least the bundled one —
+ *           a Desktop release that ships a newer runtime must never be shadowed by an
+ *           older download.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
+
+/** 一次 Runtime 解析的**来源**。 */
+export type RuntimeSource = 'bundled' | 'downloaded'
 
 export interface RuntimeLocation {
   /** Directory that contains runtime/package.json (the install anchor root). */
@@ -41,60 +49,136 @@ export interface RuntimeLocation {
   nodeBinary: string | undefined
   /** Version of the bundled Node, when one is present. */
   nodeVersion?: string
-  /** Version recorded by scripts/stage-runtime.mjs, when present. */
+  /** Version recorded by scripts/stage-runtime.mjs (or the updater's runtime.json). */
   stagedVersion?: string
+  /** 真实读到的 dsh 版本（来自 package.json，不是我们自己记的账）。 */
+  version?: string
+  /** 这份 Runtime 是随包内置的，还是应用内更新下载下来的。 */
+  source: RuntimeSource
+  /** 内置 Runtime 的版本（启动失败回退时用它做提示；下载形态下是另一个目录的版本）。 */
+  bundledVersion?: string
   /** True when running from a packaged installer rather than the repo. */
   packaged: boolean
 }
 
+/** semver 形状（与 runtime-updater.ts 同一口径；这里只做宽松判断）。 */
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u
+
+/** 读 `node_modules/@deepseek-ai/dsh/package.json` 的真实版本号。 */
+function readDshVersion(dir: string): string | undefined {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'),
+    ) as { version?: unknown }
+    return typeof manifest.version === 'string' && VERSION_PATTERN.test(manifest.version)
+      ? manifest.version
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 核心三段比较；解析不出来时按 0（保守：不认为它更新）。 */
+function compareVersions(left: string, right: string): number {
+  const parse = (version: string): number[] | undefined => {
+    const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version)
+    return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a === undefined || b === undefined) return 0
+  for (let index = 0; index < 3; index += 1) {
+    const difference = a[index]! - b[index]!
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+/** 组装一个候选目录的 RuntimeLocation。 */
+function locationFor(dir: string, packaged: boolean, source: RuntimeSource): RuntimeLocation {
+  const anchor = join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+  const nodeBinary = resolveNodeBinary(dir)
+  const version = readDshVersion(dir)
+  return {
+    dir,
+    installAnchor: anchor,
+    serverEntry: packaged
+      ? join(process.resourcesPath, 'server', 'server.mjs')
+      : resolve(__dirname, '..', '..', 'src', 'server', 'server.mjs'),
+    serverRunEntry: join(dir, 'server.mjs'),
+    nodeBinary,
+    ...(nodeBinary !== undefined ? { nodeVersion: readNodeVersion(dir) } : {}),
+    stagedVersion: readStagedVersion(dir),
+    ...(version === undefined ? {} : { version }),
+    source,
+    packaged,
+  }
+}
+
 /**
- * Resolve the bundled runtime.
+ * Resolve the runtime this process should run on.
  *
- * Packaged releases always run the runtime shipped by that same release. Older
- * versions could install an npm-updated runtime under
- * `<userData>/runtime/current`; deliberately ignoring that legacy location is
- * what prevents an old hot-updated runtime from overriding a newer full release.
- * User workspaces, sessions and settings live elsewhere and are untouched.
+ * 选择规则（三条，缺一不可）：
+ *   1. **内置优先**——`app.asar` 里的 `runtime/` 是本 Release 携带的那份，只有它一定与
+ *      本 Release 的插件、启动脚本配套；
+ *   2. **下载的只有在"版本不低于内置"时才优先**——应用内更新装出来的
+ *      `<userData>/runtime/current` 只有在比内置版本新（或相同）时才被选中。旧 Desktop
+ *      的内置 Runtime 因此永远不会被一个更旧的下载版本压住；
+ *   3. **无效/损坏一律忽略**——`current` 是断链、目录里没有 `@deepseek-ai/dsh`、版本号
+ *      读不出来，都退回内置，而不是让应用起不来。
  *
- * @param _userDataDir - Kept for API compatibility; legacy runtime caches here are ignored.
- * @param unpackedDir - 旧版 `runtime.br` 解包出来的目录。只在读取**旧版本遗留**的安装时才
- *   会传入；新版不再解包，因此正常情况下是 undefined。
+ * 用户的 session、workspace、设置与登录数据都在别处（`<userData>/home`、Harness 自己的
+ * 存储），这里不动它们任何一个字节。
+ *
+ * @param userDataDir - 应用数据目录：应用内更新的版本目录与 `current` 都在它下面。
+ * @param unpackedDir - 旧版 `runtime.br` 解包出来的目录。只在读取**旧版本遗留**的安装时
+ *   才会传入；新版不再解包，因此正常情况下是 undefined。
  * @returns the resolved runtime location.
  */
-export function resolveRuntime(_userDataDir: string, unpackedDir?: string): RuntimeLocation {
+export function resolveRuntime(userDataDir: string, unpackedDir?: string): RuntimeLocation {
   const packaged = app.isPackaged
-  const candidates: string[] = []
+  const bundledCandidates: string[] = []
 
   if (packaged) {
     // 顺序是有意的：先看本版真正携带的那份（app.asar 里的 `runtime/`），再兼容两种历史
     // 形态——旧包的散文件 `resources/runtime`、以及更旧的 `runtime.br` 解包目录。
-    if (unpackedDir !== undefined) candidates.push(unpackedDir)
-    candidates.push(join(app.getAppPath(), 'runtime'))
-    candidates.push(join(process.resourcesPath, 'runtime'))
+    if (unpackedDir !== undefined) bundledCandidates.push(unpackedDir)
+    bundledCandidates.push(join(app.getAppPath(), 'runtime'))
+    bundledCandidates.push(join(process.resourcesPath, 'runtime'))
   } else {
-    candidates.push(resolve(__dirname, '..', '..', 'runtime'))
+    bundledCandidates.push(resolve(__dirname, '..', '..', 'runtime'))
   }
 
-  for (const dir of candidates) {
-    const anchor = join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
-    if (!existsSync(anchor)) continue
-    const nodeBinary = resolveNodeBinary(dir)
-    return {
-      dir,
-      installAnchor: anchor,
-      serverEntry: packaged
-        ? join(process.resourcesPath, 'server', 'server.mjs')
-        : resolve(__dirname, '..', '..', 'src', 'server', 'server.mjs'),
-      serverRunEntry: join(dir, 'server.mjs'),
-      nodeBinary,
-      ...(nodeBinary !== undefined ? { nodeVersion: readNodeVersion(dir) } : {}),
-      stagedVersion: readStagedVersion(dir),
-      packaged,
+  const bundledDir = bundledCandidates.find((dir) =>
+    existsSync(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
+  )
+  const bundled = bundledDir === undefined ? undefined : locationFor(bundledDir, packaged, 'bundled')
+
+  // 应用内更新装出来的那份。`current` 是 junction/symlink；不存在的目录直接跳过，
+  // 因此"从没更新过"与"更新被回退掉"走的是同一条路（用内置）。
+  const currentDir = join(userDataDir, 'runtime', 'current')
+  const downloaded =
+    existsSync(join(currentDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+      ? locationFor(currentDir, packaged, 'downloaded')
+      : undefined
+
+  if (downloaded !== undefined && downloaded.version !== undefined) {
+    // 没有内置版本可以比较（旧包形态）：下载的就是唯一可用的一份。
+    const bundledVersion = bundled?.version
+    if (bundledVersion === undefined || compareVersions(downloaded.version, bundledVersion) >= 0) {
+      return { ...downloaded, ...(bundledVersion === undefined ? {} : { bundledVersion }) }
     }
+    process.stderr.write(
+      `[shell] 忽略已下载的 Runtime ${downloaded.version}：不高于内置版本 ${bundledVersion}\n`,
+    )
+  }
+
+  if (bundled !== undefined) {
+    return { ...bundled, ...(bundled.version === undefined ? {} : { bundledVersion: bundled.version }) }
   }
 
   throw new Error(
-    `dsh-desktop: no bundled dsh runtime found. Looked in:\n  ${candidates.join('\n  ')}\n` +
+    `dsh-desktop: no bundled dsh runtime found. Looked in:\n  ${bundledCandidates.join('\n  ')}\n` +
       `Run "npm run stage" before packaging.`,
   )
 }
@@ -124,12 +208,16 @@ function readNodeVersion(runtimeDir: string): string | undefined {
   }
 }
 
-/** Read the version recorded by the staging script, when it exists. */
+/**
+ * Read the version recorded by the staging script (or the runtime updater), when it exists.
+ *
+ * 这只是**我们自己记的账**，用于诊断与菜单展示；"这份 Runtime 到底装了什么版本"一律以
+ * {@link readDshVersion} 读到的真实 package.json 为准。
+ */
 function readStagedVersion(dir: string): string | undefined {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const meta = require(join(dir, 'runtime.json')) as { version?: string }
-    return meta.version
+    const meta = JSON.parse(readFileSync(join(dir, 'runtime.json'), 'utf8')) as { version?: string }
+    return typeof meta.version === 'string' ? meta.version : undefined
   } catch {
     return undefined
   }
