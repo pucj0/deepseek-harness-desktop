@@ -129,6 +129,52 @@ function main() {
   activate(bogus, makeRuntime(join(bogus, 'runtime', '9.9.9'), 'not-a-version'))
   assert.equal(resolveRuntime(bogus).source, 'bundled', 'an unparsable version must not be trusted')
 
+  // ------------------------------------------- 8. 预发布版本的选择（1.7.5 的同类 bug） ----
+  //
+  // `paths.ts` 以前有一份自己的 `compareVersions()`，只看 major.minor.patch，于是
+  // `0.2.0-rc.1`、`0.2.0-rc.2`、甚至 `0.2.0` 全都"相等"——"下载版没比内置新"和"下载版更新"
+  // 分不出来。下面四组把预发布的四种关系都钉住（内置固定为 0.2.0-rc.1，见文件开头）。
+  //
+  //   内置 0.2.0-rc.1 为基准：
+  //     下载 0.2.0-rc.2  → 更新      → 用 downloaded
+  //     下载 0.2.0-rc.1  → 相同      → 用 downloaded（就是同一版本）
+  //     下载 0.2.0-rc.10 → 更新      → 用 downloaded（按数值，不是字符串）
+  //     下载 0.2.0       → 更新      → 用 downloaded（正式版 > 预发布）
+  //     下载 0.2.0-alpha.1 → 更旧    → 用 bundled
+  const prereleaseCases = [
+    ['0.2.0-rc.2', 'downloaded', 'rc.2 比内置的 rc.1 新'],
+    ['0.2.0-rc.1', 'downloaded', '与内置同版本时继续用下载的那份'],
+    ['0.2.0-rc.10', 'downloaded', 'rc.10 比 rc.1 新（数字按数值比）'],
+    ['0.2.0', 'downloaded', '正式版比预发布新'],
+    ['0.2.0-alpha.1', 'bundled', 'alpha 比 rc 旧，必须回退内置'],
+    ['0.1.9', 'bundled', '旧的正式版不能压住新的预发布'],
+  ]
+  for (const [downloadedVersion, expected, why] of prereleaseCases) {
+    const dir = join(root, `pre-${downloadedVersion.replace(/[^\w.-]/gu, '_')}`)
+    mkdirSync(dir, { recursive: true })
+    activate(dir, makeRuntime(join(dir, 'runtime', downloadedVersion), downloadedVersion))
+    const picked = resolveRuntime(dir)
+    assert.equal(picked.source, expected, `${why}：期望 ${expected}，实际 ${picked.source}`)
+    assert.equal(picked.version, expected === 'downloaded' ? downloadedVersion : '0.2.0-rc.1')
+  }
+
+  // -------------------------------------------- 9. 内置更新时不能被旧下载版压住 ----
+  // 内置 0.2.0（正式版），下载 0.2.0-rc.99：预发布再"大"也小于同核心的正式版。
+  {
+    const newerBundledApp = join(root, 'app-020')
+    const bundled020 = makeRuntime(join(newerBundledApp, 'runtime'), '0.2.0')
+    const fresh = loadPackaged(newerBundledApp, resourcesPath)
+    const dir = join(root, 'pre-stable-bundled')
+    mkdirSync(dir, { recursive: true })
+    activate(dir, makeRuntime(join(dir, 'runtime', '0.2.0-rc.99'), '0.2.0-rc.99'))
+    const picked = fresh.resolveRuntime(dir)
+    assert.equal(picked.source, 'bundled', '0.2.0-rc.99 不能覆盖内置的 0.2.0')
+    assert.equal(picked.version, '0.2.0')
+    assert.equal(picked.dir, bundled020)
+    // 换回原来的打包形态，后续断言（如果有）仍然按 0.2.0-rc.1 的内置版本走。
+    loadPackaged(appPath, resourcesPath)
+  }
+
   // ---------------------------------------------------------- 开发形态（说明） ----
   // 开发形态下内置 Runtime 取自仓库根的 `runtime/`，而 `import { app } from 'electron'`
   // 在纯 node 进程里会去加载 Electron 的原生模块（GUI 进程才能安全求值），因此开发形态
@@ -138,6 +184,7 @@ function main() {
 
   rmSync(root, { recursive: true, force: true })
   console.log('PASS downloaded runtime is preferred only when its version is not older than the bundled one')
+  console.log('PASS prerelease ordering decides the choice (rc.2 > rc.1, rc.10 > rc.1, 0.2.0 > rc.99)')
   console.log('PASS a broken or dangling current always falls back to the bundled runtime')
 }
 

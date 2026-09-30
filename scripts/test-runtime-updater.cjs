@@ -189,8 +189,111 @@ async function main() {
   })
   await assert.rejects(
     () => newerBundled.install({ version: '0.1.0', publishedAt: '2025-09-20T08:30:00Z' }),
-    /不低于目标版本/u,
+    /低于内置 Runtime|拒绝降级/u,
   )
+
+  // ================================================================ 1.7.5 的故障 =====
+  //
+  // 线上现象：Desktop 1.7.5（内置 0.2.0-rc.1）检测到官方 0.2.0-rc.2，点「安装 Runtime 并
+  // 重启」却立刻报「内置 Runtime 0.2.0-rc.1 不低于目标版本 0.2.0-rc.2，无需安装」。
+  // 根因是 installer 自己那份 compareCore() 只看 major.minor.patch，把 rc.1 与 rc.2 当成相等。
+  //
+  // 下面五条把"升级 / 相同 / 降级"三态逐一钉死。每条用一个**独立的 userData**，互不干扰。
+  const caseRoot = (name) => {
+    const dir = join(root, `case-${name}`, 'userData')
+    mkdirSync(dir, { recursive: true })
+    return dir
+  }
+  const caseUpdater = (name, bundledVersion, authorized) =>
+    new RuntimeUpdater({
+      userDataDir: caseRoot(name),
+      resourcesPath: join(root, 'resources'),
+      appPath: join(root, 'app'),
+      packaged: true,
+      bundledVersion,
+      locateNpm: () => npmCli,
+      // 授权由 GitHub Release 决定；默认"目标就是官方最新"。
+      checkRelease: releaseCheck(authorized),
+    })
+
+  // ---- Case 1：0.2.0-rc.1 → 0.2.0-rc.2 必须**真的安装**（这就是线上那条链）----
+  {
+    const before = readInvocations(npmDir).length
+    const target = caseUpdater('rc1-to-rc2', '0.2.0-rc.1', '0.2.0-rc.2')
+    const result = await target.install({ version: '0.2.0-rc.2', publishedAt: '2025-09-20T08:30:00Z' })
+    assert.equal(result.status, 'installed', 'rc.1 → rc.2 必须是一次真正的安装')
+    assert.equal(result.relation, 1, 'relation 必须是"升级"')
+    assert.equal(result.version, '0.2.0-rc.2')
+    // 真的走了 npm（不再是"提前抛错"）。
+    assert.ok(readInvocations(npmDir).length > before, '必须调用过 npm')
+    // 完整链路：装出来的目录 → 真实 package.json → runtime.json → current。
+    const dir = join(caseRoot('rc1-to-rc2'), 'runtime', '0.2.0-rc.2')
+    assert.equal(readRuntimeVersion(dir), '0.2.0-rc.2')
+    assert.equal(JSON.parse(readFileSync(join(dir, 'runtime.json'), 'utf8')).version, '0.2.0-rc.2')
+    assert.equal(readRuntimeVersion(join(caseRoot('rc1-to-rc2'), 'runtime', 'current')), '0.2.0-rc.2', 'current 必须指向 rc.2')
+    assert.deepEqual(
+      readdirSync(join(caseRoot('rc1-to-rc2'), 'runtime')).filter((name) => name.startsWith('.staging-')),
+      [],
+      'staging 必须已经改名或被清掉',
+    )
+    console.log('PASS  Case 1: bundled 0.2.0-rc.1 + target 0.2.0-rc.2 → 真正安装并激活 rc.2')
+  }
+
+  // ---- Case 2：0.2.0-rc.2 → 0.2.0-rc.1 必须**拒绝降级** ----
+  {
+    const down = caseUpdater('rc2-to-rc1-down', '0.2.0-rc.2', '0.2.0-rc.1')
+    await assert.rejects(
+      () => down.install({ version: '0.2.0-rc.1', publishedAt: '2025-09-20T08:30:00Z' }),
+      /低于内置 Runtime|拒绝降级/u,
+    )
+    assert.equal(existsSync(join(caseRoot('rc2-to-rc1-down'), 'runtime', '0.2.0-rc.1')), false)
+    console.log('PASS  Case 2: bundled 0.2.0-rc.2 + target 0.2.0-rc.1 → 拒绝降级')
+  }
+
+  // ---- Case 3：0.2.0-rc.2 → 0.2.0（预发布转正式）必须**允许升级** ----
+  {
+    const stable = new RuntimeUpdater({
+      userDataDir: caseRoot('rc2-to-stable'),
+      resourcesPath: join(root, 'resources'),
+      appPath: join(root, 'app'),
+      packaged: true,
+      bundledVersion: '0.2.0-rc.2',
+      locateNpm: () => npmCli,
+      checkRelease: releaseCheck('0.2.0'),
+    })
+    const result = await stable.install({ version: '0.2.0', publishedAt: '2025-09-20T08:30:00Z' })
+    assert.equal(result.status, 'installed')
+    assert.equal(result.relation, 1)
+    assert.equal(readRuntimeVersion(join(caseRoot('rc2-to-stable'), 'runtime', 'current')), '0.2.0')
+    console.log('PASS  Case 3: bundled 0.2.0-rc.2 + target 0.2.0 → 允许升级并激活正式版')
+  }
+
+  // ---- Case 4：0.2.0 → 0.2.0-rc.99（正式版转预发布）必须**拒绝降级** ----
+  {
+    const backToRc = new RuntimeUpdater({
+      userDataDir: caseRoot('stable-to-rc'),
+      resourcesPath: join(root, 'resources'),
+      appPath: join(root, 'app'),
+      packaged: true,
+      bundledVersion: '0.2.0',
+      locateNpm: () => npmCli,
+      checkRelease: releaseCheck('0.2.0-rc.99'),
+    })
+    await assert.rejects(
+      () => backToRc.install({ version: '0.2.0-rc.99', publishedAt: '2025-09-20T08:30:00Z' }),
+      /低于内置 Runtime|拒绝降级/u,
+    )
+    console.log('PASS  Case 4: bundled 0.2.0 + target 0.2.0-rc.99 → 拒绝降级')
+  }
+
+  // ---- Case 5：目标 == 当前 → `already-current`，**不是失败** ----
+  {
+    const same = caseUpdater('same-version', '0.2.0-rc.2', '0.2.0-rc.2')
+    const result = await same.install({ version: '0.2.0-rc.2', publishedAt: '2025-09-20T08:30:00Z' })
+    assert.equal(result.status, 'already-current', '同版本必须返回 already-current，而不是抛错')
+    assert.equal(result.relation, 0)
+    console.log('PASS  Case 5: target == bundled 0.2.0-rc.2 → already-current（不弹失败框）')
+  }
 
   // ------------------------------------------------- 安装失败不切换 current（关键） ----
   const brokenRoot = join(root, 'broken')

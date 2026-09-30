@@ -48,6 +48,40 @@ async function run() {
     publishedAt: '2025-09-20T08:30:00Z',
   })
 
+  /**
+   * **1.7.5 的线上场景**：内置 0.2.0-rc.1，官方已发布 0.2.0-rc.2。
+   *
+   * release checker 必须给出 `available: true`（它一直是对的）；而 installer 那侧曾经因为
+   * 自己的比较器只看 major.minor.patch 而拒绝安装。这里同时断言"谁能发现"与"发现的就是 rc.2"。
+   */
+  const rc2 = await checkRuntimeRelease('0.2.0-rc.1', async () => response([
+    { tag_name: 'dsh-v0.2.0-rc.1', html_url: 'https://example.invalid/rc1', draft: false, published_at: '2025-09-20T08:30:00Z' },
+    { tag_name: 'dsh-v0.2.0-rc.2', html_url: 'https://example.invalid/rc2', draft: false, published_at: '2025-09-25T08:30:00Z' },
+  ]))
+  assert.equal(rc2.available, true, 'rc.2 必须被认成有更新')
+  assert.equal(rc2.latest, '0.2.0-rc.2')
+  assert.equal(rc2.releaseUrl, 'https://example.invalid/rc2')
+  assert.equal(rc2.publishedAt, '2025-09-25T08:30:00Z')
+  // 已经是 rc.2 时不再报有更新（rc.10 > rc.2 > rc.1 的排序也随之被覆盖）。
+  const rc10 = await checkRuntimeRelease('0.2.0-rc.2', async () => response([
+    { tag_name: 'dsh-v0.2.0-rc.10', html_url: 'https://example.invalid/rc10', draft: false, published_at: '2025-09-26T08:30:00Z' },
+    { tag_name: 'dsh-v0.2.0-rc.2', html_url: 'https://example.invalid/rc2', draft: false, published_at: '2025-09-25T08:30:00Z' },
+    { tag_name: 'dsh-v0.2.0-rc.9', html_url: 'https://example.invalid/rc9', draft: false, published_at: '2025-09-24T08:30:00Z' },
+  ]))
+  assert.equal(rc10.latest, '0.2.0-rc.10', 'rc.10 必须排在 rc.9 与 rc.2 之前（按数值）')
+  assert.equal(rc10.available, true)
+  const upToDate = await checkRuntimeRelease('0.2.0-rc.10', async () => response([
+    { tag_name: 'dsh-v0.2.0-rc.10', html_url: 'https://example.invalid/rc10', draft: false, published_at: '2025-09-26T08:30:00Z' },
+  ]))
+  assert.equal(upToDate.available, false)
+  // 正式版排在预发布之前。
+  const stable = await checkRuntimeRelease('0.2.0-rc.10', async () => response([
+    { tag_name: 'dsh-v0.2.0-rc.10', html_url: 'https://example.invalid/rc10', draft: false, published_at: '2025-09-26T08:30:00Z' },
+    { tag_name: 'dsh-v0.2.0', html_url: 'https://example.invalid/stable', draft: false, published_at: '2025-09-27T08:30:00Z' },
+  ]))
+  assert.equal(stable.latest, '0.2.0')
+  assert.equal(stable.available, true)
+
   // 最新那个 Release 才是权威：publishedAt 必须来自它，而不是列表里的第一条。
   const latest = await checkRuntimeRelease('0.2.0-rc.1', async () => response([
     { tag_name: 'dsh-v0.1.7-rc.2', html_url: 'https://example.invalid/old', draft: false, published_at: '2025-09-01T00:00:00Z' },

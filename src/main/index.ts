@@ -1092,6 +1092,24 @@ function openUpdatesFor(deps: {
             const result = await runtimeUpdater.install({ version: target, publishedAt, onProgress })
             currentState = { ...currentState, runtimeInstalling: false, runtimeProgress: `${result.version} · ${result.registry}` }
             panel.update(currentState)
+            // **"已经是这个版本"不是失败**：目标版本就是当前正在用的那个，什么都不用装。
+            // 以前它和"降级"被一起当成错误抛出，界面于是弹红色的「Runtime 更新失败」，
+            // 用户看到的是一句"无需安装"却包在失败框里。现在它走正常路径，只说明一句。
+            if (result.status === 'already-current') {
+              currentState = {
+                ...currentState,
+                runtime: { ...currentState.runtime, installed: result.version, state: 'latest' },
+                runtimeProgress: s.updateRuntimeCurrentDetail,
+              }
+              panel.update(currentState)
+              await dialog.showMessageBox(window, {
+                type: 'info',
+                message: s.updateRuntimeCurrentTitle,
+                detail: `${s.updateRuntimeCurrentDetail}\n\n@deepseek-ai/dsh@${result.version}`,
+                buttons: [s.buttonOk],
+              })
+              return
+            }
             const choice = await dialog.showMessageBox(window, {
               type: 'info',
               message: s.updateRuntimeReadyTitle,
@@ -1112,10 +1130,21 @@ function openUpdatesFor(deps: {
           } catch (error) {
             currentState = { ...currentState, runtimeInstalling: false }
             panel.update(currentState)
+            /**
+             * 用户先看到"哪一步失败了"，内部细节放在后面。
+             *
+             * 以前正文第一句就是 `dsh-desktop: …`（内部前缀 + 内部措辞），而用户真正需要
+             * 知道的是"从哪个版本到哪个版本没成功"。因此这里组装成：
+             *   无法从 <当前> 更新到 <目标>。
+             *   （空行）
+             *   详细信息：<原始消息>
+             * 原始消息仍然完整保留——诊断时它才是关键。
+             */
+            const detail = error instanceof Error ? error.message : String(error)
             await dialog.showMessageBox(window, {
               type: 'error',
               message: s.updateRuntimeFailedTitle,
-              detail: error instanceof Error ? error.message : String(error),
+              detail: `${format(s.updateRuntimeFailedDetail, { from: runtimeVersion, to: target })}\n\n${s.updateRuntimeFailedRaw}\n${detail}`,
               buttons: [s.buttonOk],
             })
           }

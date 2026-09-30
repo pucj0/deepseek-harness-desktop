@@ -83,6 +83,13 @@ export interface ShellStrings {
   /** 安装进度文本前的说明（后面接 npm 的日志行）。 */
   updateRuntimeProgress: string
   updateRuntimeFailedTitle: string
+  /** 失败正文的第一句用户文案，`{from}` / `{to}` 会被替换成版本号。 */
+  updateRuntimeFailedDetail: string
+  /** 失败正文里"详细信息"的引导语（后面接原始错误消息）。 */
+  updateRuntimeFailedRaw: string
+  /** 目标版本就是当前版本时的提示（**不是**失败）。 */
+  updateRuntimeCurrentTitle: string
+  updateRuntimeCurrentDetail: string
   updateRuntimeReadyTitle: string
   updateRuntimeReadyDetail: string
   /** 已下载更新的来源说明（内置 Runtime 与下载 Runtime 的差别）。 */
@@ -240,14 +247,17 @@ const en: ShellStrings = {
   updateShellProgress: 'Downloading… {percent}%',
   updateButtonDownloading: 'Downloading {percent}%…',
   updateRuntimeBundledNote:
-    'The runtime bundled with this Desktop release is what runs today. When an official runtime release is newer, the app installs it in place with the npm CLI it ships — no Node.js or npm on your machine.',
-  updateRuntimeAvailableNote:
+    'The runtime bundled with this Desktop release is what runs today. When an official runtime release is newer, the app installs it in place with the npm CLI it ships — no Node.js or npm on your machine.',  updateRuntimeAvailableNote:
     'Official runtime {version} is published. Install it in place; the app downloads @deepseek-ai/dsh with its bundled npm and switches over on restart.',
   updateButtonRuntimeRelease: 'Open Runtime Release',
   updateButtonRuntimeInstall: 'Install Runtime and Restart',
   updateRuntimeInstalling: 'Installing runtime…',
   updateRuntimeProgress: 'npm: {line}',
   updateRuntimeFailedTitle: 'Runtime update failed',
+  updateRuntimeFailedDetail: 'Could not update the runtime from {from} to {to}.',
+  updateRuntimeFailedRaw: 'Details:',
+  updateRuntimeCurrentTitle: 'The runtime is already up to date',
+  updateRuntimeCurrentDetail: 'The runtime is already at this version; nothing needed to be installed.',
   updateRuntimeReadyTitle: 'Runtime update ready',
   updateRuntimeReadyDetail: 'The new runtime is installed. Restart the app to start using it.',
   updateRuntimeDownloadedNote: 'downloaded update — installed in place with the bundled npm',
@@ -399,13 +409,24 @@ const zh: ShellStrings = {
   updateShellUnavailable: '开发模式不支持应用自更新',
   updateShellProgress: '正在下载… {percent}%',
   updateButtonDownloading: '下载中 {percent}%…',
-  updateRuntimeBundledNote: '当前运行的是随本 Desktop Release 内置的 Runtime。官方 Runtime 有新版本时，应用会用自带的 npm CLI 直接就地安装，你的电脑不需要安装 Node.js 或 npm。',
+  /**
+   * 内置 Runtime 的说明。
+   *
+   * **刻意短**：它是更新窗口里最长的可变文本，直接决定 Runtime 轨道的高度，而窗口高度是
+   * 按"三种状态（最新 / 有新版 / 安装中）都不出现滚动条"量出来的（见 update-window.ts）。
+   * 中文比英文占宽，因此中文这一份尤其要压住两行以内。
+   */
+  updateRuntimeBundledNote: '内置的 Runtime 会随 Desktop Release 一起更新；官方有新版本时，也可以用自带的 npm 就地在应用内安装，你的电脑不需要 Node.js 或 npm。',
   updateRuntimeAvailableNote: '官方 Runtime {version} 已发布。可以直接就地安装：应用用自带的 npm 下载 @deepseek-ai/dsh，重启后切换过去。',
   updateButtonRuntimeRelease: '打开 Runtime Release',
   updateButtonRuntimeInstall: '安装 Runtime 并重启',
   updateRuntimeInstalling: '正在安装 Runtime…',
   updateRuntimeProgress: 'npm：{line}',
   updateRuntimeFailedTitle: 'Runtime 更新失败',
+  updateRuntimeFailedDetail: '无法从 {from} 更新到 {to}。',
+  updateRuntimeFailedRaw: '详细信息：',
+  updateRuntimeCurrentTitle: 'Runtime 已是最新版本',
+  updateRuntimeCurrentDetail: '当前已经是这个版本，无需安装。',
   updateRuntimeReadyTitle: 'Runtime 更新已就绪',
   updateRuntimeReadyDetail: '新 Runtime 已安装，重启应用后开始使用。',
   updateRuntimeDownloadedNote: '已下载更新——由应用内置 npm 就地安装',

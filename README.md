@@ -142,6 +142,7 @@ Electron Desktop Shell
   - **两条轨道互斥：** Runtime 安装期间不能同时下载 Desktop 安装包，反之亦然。
   - 安装完成会询问「立即重启 / 稍后」；立即重启前先停掉当前 Harness server，避免两个实例争用同一个 harness home。
 - **Release 后备入口：** 无法直接安装时（开发模式、包里没有 npm CLI），Runtime 轨道只显示「打开 Runtime Release」，与本版之前的行为一致。
+- **版本比较只有一份实现：**`src/main/runtime-version.ts` 是 Runtime 版本语义的**唯一**来源（标准 SemVer 2.0.0 优先级：核心三段 → 正式版高于预发布 → 数字 identifier 按数值比较，因此`rc.10 > rc.2`、`0.2.0 > 0.2.0-rc.99`）。Release 检查、应用内安装与启动时的 Runtime 选择都 import 它。这一点是硬约束：1.7.5 的线上故障正是"三套比较器各自为政"——检查器用对了规则、发现 `0.2.0-rc.2` 可用，而安装器自己那份只比 major.minor.patch，把 `rc.1` 与 `rc.2` 当成同一个版本，于是拒绝安装并报"内置 Runtime 不低于目标版本"。`scripts/test-runtime-version.mjs` 除了跑完整的比较矩阵，还会断言源码里不再出现第二套解析/比较实现。
 - **版本来源可验证：**`package.json#dshRuntimeVersion` 固定本次打包的 Runtime。`npm run stage` 会先确认同名 `dsh-v*` 官方 GitHub Release 已发布，再在构建机准备完整依赖闭包；打包形态下的应用不会现场编译源码。开发模式明确不支持应用自更新，也不会执行 Runtime 安装。
 
 ## 项目结构
@@ -175,6 +176,8 @@ npm run dev
 ```bash
 npm run typecheck
 npm run test:i18n
+npm run test:runtime-version   # SemVer 2.0.0 比较矩阵 +「只有一份实现」的架构断言
+npm run test:update-layout    # 真实 Electron 量更新窗口：三种状态都不出滚动条
 npm run test:runtime-updater   # 应用内安装 Runtime：staging / 版本校验 / 回退（注入 fake npm，不联网）
 npm run test:runtime-paths     # 内置 vs 已下载 Runtime 的选择规则
 npm run test:update-policy     # 版本授权来源、npm 打包、互斥与两条回退路径

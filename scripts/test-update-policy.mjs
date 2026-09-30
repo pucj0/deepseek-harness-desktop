@@ -19,6 +19,7 @@ const main = read('src/main/index.ts')
 const paths = read('src/main/paths.ts')
 const runtimeRelease = read('src/main/runtime-release.ts')
 const runtimeUpdater = read('src/main/runtime-updater.ts')
+const runtimeVersion = read('src/main/runtime-version.ts')
 const updateWindow = read('src/main/update-window.ts')
 const builder = read('electron-builder.yml')
 const workflow = read('.github/workflows/release.yml')
@@ -40,6 +41,30 @@ assert.match(runtimeUpdater, /release\.latest !== version/u)
 assert.match(runtimeUpdater, /SAME_WAVE_WINDOW_MS = 24 \* 60 \* 60 \* 1000/u)
 assert.match(runtimeUpdater, /closureBefore/u)
 assert.match(main, /publishedAt/u, 'the window must pass the release publishedAt into the installer')
+
+// -------------------------------------- 1b. 版本比较只有一份实现（1.7.5 的回归） ----
+// 三套比较器各自为政时，"有更新"与"能安装"会得出相反结论：release 那套认出 0.2.0-rc.2，
+// installer 那套只看 major.minor.patch、把 rc.1 与 rc.2 当成相等，于是拒绝安装。
+assert.match(runtimeVersion, /export function parseRuntimeVersion/u, 'runtime-version.ts is the only parser')
+assert.match(runtimeVersion, /export function compareRuntimeVersions/u, 'runtime-version.ts is the only comparator')
+assert.match(runtimeVersion, /export function isRuntimeVersionNewer/u)
+assert.match(runtimeVersion, /export function isRuntimeVersionAtLeast/u)
+for (const [name, source] of [['runtime-release.ts', runtimeRelease], ['runtime-updater.ts', runtimeUpdater], ['paths.ts', paths]]) {
+  assert.match(source, /from '\.\/runtime-version'/u, `${name} must import the single version module`)
+}
+// 旧的两套必须彻底消失。
+const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')
+assert.doesNotMatch(stripComments(runtimeUpdater), /compareCore/u)
+assert.doesNotMatch(stripComments(paths), /compareVersions/u)
+assert.doesNotMatch(stripComments(runtimeRelease), /function parseVersion\b/u)
+// 升级 / 相同 / 降级三态必须分开表达："相同"不是失败。
+assert.match(runtimeUpdater, /compareRuntimeVersions\(version, bundled\)/u)
+assert.match(runtimeUpdater, /relation < 0/u, 'a downgrade must be rejected explicitly')
+assert.match(runtimeUpdater, /'already-current'/u, 'target === current is a normal status, not a failure')
+assert.match(runtimeUpdater, /RuntimeInstallStatus/u)
+// 报错文案里不再把内部前缀当第一句给用户看。
+assert.doesNotMatch(stripComments(runtimeUpdater), /dsh-desktop:/u)
+assert.match(main, /updateRuntimeFailedDetail/u, 'the failure text must lead with a user-facing sentence')
 
 // --------------------------------------------------- 2. 内置 npm，不装 Node ----
 assert.equal(manifest.dependencies?.npm, '11.20.0', 'npm must be a pinned (exact) production dependency')
@@ -70,6 +95,16 @@ assert.match(updateWindow, /runtime-install-progress/u)
 assert.match(updateWindow, /releaseButton\.hidden = !payload\.runtime\.releaseUrl \|\| canInstallRuntime \|\| runtimeInstalling/u)
 // 直装按钮在同一轨道内，不能只放在页脚（否则用户看不出它属于哪条轨道）。
 assert.match(updateWindow, /track\('runtime', strings\.sectionRuntime, 'runtime-install'\)/u)
+// ---- 布局：窗口必须一屏显示完（真实数值见 scripts/test-update-window-layout.mjs）----
+// 判据不是"文档有没有滚动条"——panelCss 把 body 固定成 100% 高，溢出的其实是内部那个
+// `main`（`overflow-y:auto`），右侧那条滚动条来自它。这里只做源码级守卫：
+// 尺寸不能退回 520x460 那一组（实测 520x460 时 main 内容 381 > 358，必然出滚动条）。
+assert.match(updateWindow, /width: 560, height: 560/u, 'the update window must keep the measured size')
+assert.doesNotMatch(updateWindow, /width: 520, height: 460/u)
+// 进度文本必须被截成一行：npm 的 http 日志一行可以很长，换行就会把面板顶出滚动条。
+assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*white-space:nowrap/u)
+assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*text-overflow:ellipsis/u)
+assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*max-height:1\.4em/u)
 
 // ---------------------------------------------- 4. 两条回退路径必须存在 ----
 // 启动失败 → 回退（摘掉 current）→ 重启并回到内置 Runtime。
@@ -79,9 +114,9 @@ assert.match(main, /restartIntoBundledRuntime/u)
 assert.match(main, /app\.relaunch\(\)/u)
 // 立即重启前先停掉当前的 Harness server。
 assert.match(main, /await running\.stop\(2000\)/u)
-// `current` 只有"下载版本不低于内置版本"时才被选中。
+// `current` 只有"下载版本不低于内置版本"时才被选中，且比较走同一个版本模块。
 assert.match(paths, /join\(userDataDir, 'runtime', 'current'\)/u)
-assert.match(paths, /compareVersions\(downloaded\.version, bundledVersion\) >= 0/u)
+assert.match(paths, /compareRuntimeVersions\(downloaded\.version, bundledVersion\) >= 0/u)
 assert.doesNotMatch(paths, /Legacy npm-updated runtimes|legacy location/iu)
 
 // ------------------------------------------------ 5. 其余更新轨道仍然成立 ----

@@ -1,4 +1,14 @@
-/** Check the official DeepSeek Harness GitHub Releases for the newest runtime. */
+/**
+ * 查询官方 DeepSeek Harness GitHub Releases，找出最新的 Runtime。
+ *
+ * 这个模块**只负责一件事**：把 GitHub 的 Release 列表变成"最新版本 + 它的发布信息"。
+ * 版本语义（谁比谁新）一律来自 `runtime-version.ts`——那是唯一的事实来源，不要在这里
+ * 再写一遍 SemVer 解析或比较（历史上一共有三套，正是 1.7.5 的安装器拒绝 `rc.2` 的原因）。
+ *
+ * 刻意只读：可安装的 Runtime 必须由**已发布的官方 `dsh-v*` GitHub Release** 授权，绝不
+ * 使用源码压缩包（那些 tag 没有构建好的依赖闭包），也不能只凭一个 dist-tag。
+ */
+import { compareRuntimeVersions, isRuntimeVersionNewer } from './runtime-version'
 
 export const RUNTIME_RELEASES_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases'
 export const RUNTIME_RELEASES_API = 'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=30'
@@ -26,59 +36,30 @@ export interface RuntimeReleaseCheck {
   reason?: string
 }
 
-/** Convert the upstream `dsh-v1.2.3` release tag to a semver string. */
+/**
+ * 把上游的 `dsh-v1.2.3` 标签转成版本号。
+ *
+ * 这里做的是**标签形状**的校验（必须是 `dsh-v` 前缀 + 合法 semver），不是版本比较：
+ * `desktop-v1.2.3`、`v1.2.3`、`dsh-v1.2` 都要被拒掉。
+ *
+ * @param tag - Release 的 `tag_name`。
+ * @returns 版本号；不是官方 Runtime 标签时 undefined。
+ */
 export function versionFromRuntimeTag(tag: string): string | undefined {
   const match = /^dsh-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/u.exec(tag)
   return match?.[1]
 }
 
-interface ParsedVersion {
-  core: readonly [number, number, number]
-  prerelease: readonly string[]
-}
-
-function parseVersion(version: string): ParsedVersion | undefined {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/u.exec(version)
-  if (match === null) return undefined
-  const major = Number(match[1])
-  const minor = Number(match[2])
-  const patch = Number(match[3])
-  if (![major, minor, patch].every(Number.isSafeInteger)) return undefined
-  return { core: [major, minor, patch], prerelease: match[4]?.split('.') ?? [] }
-}
-
-/** Semver ordering needed by the release checker, including rc/alpha identifiers. */
-export function compareRuntimeVersions(left: string, right: string): number {
-  const a = parseVersion(left)
-  const b = parseVersion(right)
-  if (a === undefined || b === undefined) return left.localeCompare(right)
-  for (let index = 0; index < 3; index += 1) {
-    const difference = a.core[index]! - b.core[index]!
-    if (difference !== 0) return difference
-  }
-  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
-    return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length === 0 ? 1 : -1
-  }
-  const length = Math.max(a.prerelease.length, b.prerelease.length)
-  for (let index = 0; index < length; index += 1) {
-    const av = a.prerelease[index]
-    const bv = b.prerelease[index]
-    if (av === undefined || bv === undefined) return av === bv ? 0 : av === undefined ? -1 : 1
-    if (av === bv) continue
-    const an = /^\d+$/u.test(av) ? Number(av) : undefined
-    const bn = /^\d+$/u.test(bv) ? Number(bv) : undefined
-    if (an !== undefined && bn !== undefined) return an - bn
-    if (an !== undefined || bn !== undefined) return an !== undefined ? -1 : 1
-    return av.localeCompare(bv)
-  }
-  return 0
-}
+// 兼容旧的导入路径：早先 `compareRuntimeVersions` 就导出在本模块，而测试与其它模块一直
+// 从这里 import。真正实现已经搬到 runtime-version.ts（唯一事实来源），这里只是转发。
+export { compareRuntimeVersions }
 
 /**
- * Query the upstream repository directly. This is deliberately read-only: an
- * installable runtime is authorised by a published official `dsh-v*` GitHub
- * Release, never by a source archive (those carry no built dependency tree) and
- * never by a dist-tag alone.
+ * 查询上游仓库，给出最新 Runtime 与"相对 current 是否有更新"。
+ *
+ * @param current - 当前正在使用的 Runtime 版本。
+ * @param fetchImpl - fetch 实现（测试注入用）。
+ * @returns 检查结果；失败时 `available: false` 并带 `reason`。
  */
 export async function checkRuntimeRelease(
   current: string,
@@ -115,7 +96,7 @@ export async function checkRuntimeRelease(
     const latest = releases[0]
     if (latest === undefined) throw new Error('No dsh-v* GitHub Release was found')
     return {
-      available: compareRuntimeVersions(latest.version, current) > 0,
+      available: isRuntimeVersionNewer(latest.version, current),
       current,
       latest: latest.version,
       releaseUrl: latest.releaseUrl,

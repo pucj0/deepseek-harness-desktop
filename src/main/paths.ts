@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
+import { compareRuntimeVersions, parseRuntimeVersion } from './runtime-version'
 
 /** 一次 Runtime 解析的**来源**。 */
 export type RuntimeSource = 'bundled' | 'downloaded'
@@ -61,37 +62,17 @@ export interface RuntimeLocation {
   packaged: boolean
 }
 
-/** semver 形状（与 runtime-updater.ts 同一口径；这里只做宽松判断）。 */
-const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u
-
 /** 读 `node_modules/@deepseek-ai/dsh/package.json` 的真实版本号。 */
 function readDshVersion(dir: string): string | undefined {
   try {
     const manifest = JSON.parse(
       readFileSync(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'),
     ) as { version?: unknown }
-    return typeof manifest.version === 'string' && VERSION_PATTERN.test(manifest.version)
-      ? manifest.version
-      : undefined
+    // 用版本模块的解析器校验：它同时保证"是个合法 semver"，因此后面的比较不会退回字符串序。
+    return parseRuntimeVersion(manifest.version) === undefined ? undefined : (manifest.version as string)
   } catch {
     return undefined
   }
-}
-
-/** 核心三段比较；解析不出来时按 0（保守：不认为它更新）。 */
-function compareVersions(left: string, right: string): number {
-  const parse = (version: string): number[] | undefined => {
-    const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version)
-    return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
-  }
-  const a = parse(left)
-  const b = parse(right)
-  if (a === undefined || b === undefined) return 0
-  for (let index = 0; index < 3; index += 1) {
-    const difference = a[index]! - b[index]!
-    if (difference !== 0) return difference
-  }
-  return 0
 }
 
 /** 组装一个候选目录的 RuntimeLocation。 */
@@ -165,11 +146,23 @@ export function resolveRuntime(userDataDir: string, unpackedDir?: string): Runti
   if (downloaded !== undefined && downloaded.version !== undefined) {
     // 没有内置版本可以比较（旧包形态）：下载的就是唯一可用的一份。
     const bundledVersion = bundled?.version
-    if (bundledVersion === undefined || compareVersions(downloaded.version, bundledVersion) >= 0) {
+    /**
+     * 选择规则（唯一阈值，语义与 installer 完全一致）：
+     *   `downloaded > bundled`  → 用 downloaded（用户装过更新的版本）
+     *   `downloaded == bundled` → 用 downloaded（就是同一个版本，不必退回）
+     *   `downloaded < bundled`  → 用 bundled（Desktop 升级带来了更新的内置版本）
+     *
+     * 比较必须走版本模块：以前这里有一份自己的 `compareVersions()`，只看 major.minor.patch，
+     * 于是 `0.2.0-rc.1`、`0.2.0-rc.2`、甚至 `0.2.0` 全被当成同一个版本——"下载版没比内置新"
+     * 与"下载版更新"这两件事因此分不出来。
+     */
+    // 比较走版本模块（唯一事实来源，见 runtime-version.ts）：`>=` 而不是 `>`，因为
+    // "下载版与内置同版本"时继续用下载的那份（用户刚装的就是它）。
+    if (bundledVersion === undefined || compareRuntimeVersions(downloaded.version, bundledVersion) >= 0) {
       return { ...downloaded, ...(bundledVersion === undefined ? {} : { bundledVersion }) }
     }
     process.stderr.write(
-      `[shell] 忽略已下载的 Runtime ${downloaded.version}：不高于内置版本 ${bundledVersion}\n`,
+      `[shell] 忽略已下载的 Runtime ${downloaded.version}：低于内置版本 ${bundledVersion}\n`,
     )
   }
 

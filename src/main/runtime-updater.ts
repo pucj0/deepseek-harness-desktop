@@ -31,6 +31,18 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { RuntimeReleaseCheck } from './runtime-release'
+// 版本语义的**唯一事实来源**。这里刻意不重新实现任何比较规则：曾经
+// `runtime-updater.ts` 自己有一份只看 major.minor.patch 的 compareCore()，于是
+// `0.2.0-rc.1` 与 `0.2.0-rc.2` 被当成相等，安装器直接抛出"不低于目标版本，无需安装"。
+import {
+  compareRuntimeVersions,
+  isRuntimeVersionNewer,
+  isSafeRuntimeVersion,
+} from './runtime-version'
+
+// 这两个符号历史上从本模块导出（`scripts/test-runtime-updater.cjs` 等一直在用）。
+// 实现只留在 runtime-version.ts，这里转发，避免出现"第二个可以 import 的比较器"。
+export { compareRuntimeVersions, isRuntimeVersionNewer, isSafeRuntimeVersion }
 
 /** 随包携带的 npm 所安装的包名。 */
 export const RUNTIME_PACKAGE = '@deepseek-ai/dsh'
@@ -43,9 +55,6 @@ export const SAME_WAVE_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /** `<userData>/runtime` 下 staging 目录的前缀（也是"这是半成品"的标记）。 */
 const STAGING_PREFIX = '.staging-'
-
-/** 严格 semver（含预发布标识），且长度有界——它来自 network，不能无界。 */
-const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u
 
 /** `runtime/current` 这个链接的文件名。 */
 const CURRENT_NAME = 'current'
@@ -61,14 +70,33 @@ export interface RuntimeInstallProgress {
   registry: string
 }
 
+/**
+ * 安装结果。
+ *
+ * `status` 是本版新增的：**"已经是这个版本"不是失败**。以前它和"降级"一起被当成错误抛出，
+ * 界面于是弹一个红色的「Runtime 更新失败」，而其实什么都没坏。三个状态现在必须分开：
+ *
+ *   * `installed`——真的装了（或复用了已装好的版本目录），`current` 已切换；
+ *   * `already-current`——目标版本就是当前/内置正在用的那个，没有可装的东西；
+ *   * （失败仍然走 reject，只留真正的异常：下载失败、校验不符、授权失败、文件系统错误）。
+ */
+export type RuntimeInstallStatus = 'installed' | 'already-current'
+
 /** 安装并激活成功后的结果。 */
 export interface RuntimeInstallResult {
+  status: RuntimeInstallStatus
   version: string
-  /** 实际被激活的版本目录。 */
+  /** 实际被激活（或已经在用）的版本目录。 */
   dir: string
   registry: string
   /** 本次是复用已存在的版本目录（没有跑 npm）。 */
   reused: boolean
+  /**
+   * 目标版本相对基准（内置版本）的关系：`1` 更新、`0` 相同、`-1` 更旧。
+   *
+   * 由 `runtime-version.ts` 的 `compareRuntimeVersions()` 给出——**唯一**的版本判断处。
+   */
+  relation: -1 | 0 | 1
 }
 
 /** 写进 `<version>/runtime.json` 的元数据。 */
@@ -103,23 +131,6 @@ export interface RuntimeUpdaterOptions {
   registries?: readonly string[]
   /** 允许安装的形态判定；默认 `packaged === true`。测试可放开。 */
   allowUnpackaged?: boolean
-}
-
-/**
- * 校验一个 Runtime 版本号是否可以安全地当成路径片段。
- *
- * 它同时是**安全边界**（拒绝 `../`、绝对路径、空串）与**格式校验**（必须是 semver）。
- * 版本号一路来自 GitHub Release 与 npm，属于不受本进程控制的数据。
- *
- * @param version - 待校验的版本字符串。
- * @returns 是否是安全、合法的 semver。
- */
-export function isSafeRuntimeVersion(version: unknown): version is string {
-  if (typeof version !== 'string') return false
-  if (version.length === 0 || version.length > 64) return false
-  if (version.includes('/') || version.includes('\\') || version.includes('\0')) return false
-  if (version.startsWith('.')) return false
-  return VERSION_PATTERN.test(version)
 }
 
 /**
@@ -170,28 +181,6 @@ export function closureBefore(publishedAt: unknown, windowMs: number = SAME_WAVE
   if (!Number.isFinite(published)) return undefined
   if (!Number.isFinite(windowMs) || windowMs < 0) return undefined
   return new Date(published + windowMs).toISOString()
-}
-
-/** 版本段比较（数字段按数值比，其余按字典序），供本地大小判断使用。 */
-function compareCore(left: string, right: string): number {
-  const parse = (version: string): number[] | undefined => {
-    const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version)
-    return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
-  }
-  const a = parse(left)
-  const b = parse(right)
-  if (a === undefined || b === undefined) return 0
-  for (let index = 0; index < 3; index += 1) {
-    const difference = a[index]! - b[index]!
-    if (difference !== 0) return difference
-  }
-  return 0
-}
-
-/** 目标版本是否比当前正在使用的版本更新（只比核心三段的**保守**判断）。 */
-export function isNewerRuntimeVersion(target: string, current: string | undefined): boolean {
-  if (current === undefined) return true
-  return compareCore(target, current) > 0
 }
 
 /**
@@ -383,12 +372,12 @@ export class RuntimeUpdater {
   /** 把 `<version>` 拼到 root 下，并断言结果仍在 root 之内。 */
   private resolveUnderRoot(segment: string): string {
     if (!isSafeRuntimeVersion(segment)) {
-      throw new Error(`dsh-desktop: 不安全的 Runtime 版本号 "${segment}"`)
+      throw new Error(`不安全的 Runtime 版本号 "${segment}"`)
     }
     const target = resolve(this.root, segment)
     const root = resolve(this.root)
     if (target !== root && !target.startsWith(root + sep)) {
-      throw new Error(`dsh-desktop: Runtime 版本号越界 "${segment}"`)
+      throw new Error(`Runtime 版本号越界 "${segment}"`)
     }
     return target
   }
@@ -401,13 +390,13 @@ export class RuntimeUpdater {
   }): Promise<RuntimeInstallResult> {
     const { version, onProgress } = options
     if (!isSafeRuntimeVersion(version)) {
-      throw new Error(`dsh-desktop: 非法 Runtime 版本号 "${version}"`)
+      throw new Error(`非法 Runtime 版本号 "${version}"`)
     }
     if (this.npmCli === undefined) {
-      throw new Error('dsh-desktop: 安装包内未找到 npm CLI，无法直接安装 Runtime')
+      throw new Error('安装包内未找到 npm CLI，无法直接安装 Runtime')
     }
     if (!this.options.packaged && this.options.allowUnpackaged !== true) {
-      throw new Error('dsh-desktop: 开发模式下不执行 Runtime 安装')
+      throw new Error('开发模式下不执行 Runtime 安装')
     }
 
     // 1. 授权：必须是一个**官方 GitHub Release**里发布过的版本。
@@ -415,18 +404,50 @@ export class RuntimeUpdater {
       this.options.bundledVersion ?? '0.0.0',
     )
     if (release.reason !== undefined && release.latest === undefined) {
-      throw new Error(`dsh-desktop: 无法确认官方 Runtime Release：${release.reason}`)
+      throw new Error(`无法确认官方 Runtime Release：${release.reason}`)
     }
     if (release.latest !== version) {
       throw new Error(
-        `dsh-desktop: Runtime ${version} 未获官方 GitHub Release 授权（最新官方版本：${release.latest ?? '未知'}）`,
+        `Runtime ${version} 未获官方 GitHub Release 授权（最新官方版本：${release.latest ?? '未知'}）`,
       )
     }
 
-    // 2. 内置版本更新的情形：不能把用户降到旧版本上（paths.ts 也会拒绝激活它）。
+    /**
+     * 2. 目标版本相对**内置版本**的关系：`1` 升级、`0` 相同、`-1` 降级。
+     *
+     * 三个状态必须分开表达（这是本版修的第二件事）：
+     *   * `< 0` **降级**——拒绝。内置的那份更新，装旧的毫无意义，而且会覆盖掉更新的运行时。
+     *   * `= 0` **相同**——不是失败。目标就是当前正在用的版本，返回 `already-current`，
+     *     界面显示"已是最新版本"，**不弹红色「Runtime 更新失败」**。
+     *   * `> 0` **升级**——继续往下走 npm 安装。
+     *
+     * 比较只经 `runtime-version.ts`：`0.2.0-rc.2` 对 `0.2.0-rc.1` 必须是 `> 0`
+     * （历史 bug 就出在这里——旧实现只看 major.minor.patch，把两者当成相等）。
+     */
     const bundled = this.options.bundledVersion
-    if (bundled !== undefined && !isNewerRuntimeVersion(version, bundled) && bundled !== version) {
-      throw new Error(`dsh-desktop: 内置 Runtime ${bundled} 不低于目标版本 ${version}，无需安装`)
+    const relation: -1 | 0 | 1 =
+      bundled === undefined ? 1 : (Math.sign(compareRuntimeVersions(version, bundled)) as -1 | 0 | 1)
+
+    if (relation < 0) {
+      throw new Error(`目标 Runtime ${version} 低于内置 Runtime ${bundled ?? '?'}，拒绝降级`)
+    }
+
+    if (relation === 0) {
+      // 目标与内置版本相同：没有任何东西需要下载。已装好的同版本目录如果存在就顺手指过去
+      // （把"用户之前装过这个版本"这件事表达清楚），否则保持现状。
+      const installed = this.installedVersionDir(version)
+      if (installed !== undefined) {
+        this.activate(installed.dir)
+      }
+      onProgress?.({ message: `Runtime ${version} 已经是当前版本`, registry: this.registries[0] ?? '' })
+      return {
+        status: 'already-current',
+        version,
+        dir: installed?.dir ?? this.options.userDataDir,
+        registry: 'none',
+        reused: installed !== undefined,
+        relation,
+      }
     }
 
     // 3. 已经装好且版本正确的目录直接复用：没有网络、没有 npm。
@@ -434,7 +455,7 @@ export class RuntimeUpdater {
     if (existing !== undefined) {
       this.activate(existing.dir)
       onProgress?.({ message: `已复用已安装的 Runtime ${version}`, registry: this.registries[0] ?? '' })
-      return { version, dir: existing.dir, registry: 'reused', reused: true }
+      return { status: 'installed', version, dir: existing.dir, registry: 'reused', reused: true, relation }
     }
 
     mkdirSync(this.root, { recursive: true })
@@ -481,7 +502,7 @@ export class RuntimeUpdater {
 
         // 7. 切换 `current`：只有到这一步，下一次启动才会用上新 Runtime。
         this.activate(target)
-        return { version, dir: target, registry, reused: false }
+        return { status: 'installed', version, dir: target, registry, reused: false, relation }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         failures.push(`${registry}: ${reason}`)
@@ -495,7 +516,7 @@ export class RuntimeUpdater {
       }
     }
 
-    throw new Error(`dsh-desktop: Runtime ${version} 安装失败\n${failures.join('\n')}`)
+    throw new Error(`Runtime ${version} 安装失败\n${failures.join('\n')}`)
   }
 
   /** 跑一次 npm install，并把 http 级别日志行转成进度回调。 */
