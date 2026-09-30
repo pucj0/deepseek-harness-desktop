@@ -2,24 +2,28 @@
 //
 //   node scripts/test-git-sidebar-contract.mjs
 //
-// 与 `scripts/test-turn-review-drawer.mjs` 是**刻意分开**的两个文件：
-//   * 这里只回答"项目级 Git 走官方侧栏"——Git 标签类型、keyed 槽位、图标、正文组件；
-//   * 那个文件只回答"本轮修改走自己的抽屉，绝不碰官方侧栏"。
+// 与 `scripts/test-turn-review-sidebar.mjs` 是**刻意分开**的两个文件：
+//   * 这里只回答"项目级 Git 走官方侧栏，且 kind / 数据 / 正文都属于项目"；
+//   * 那个文件只回答"本轮审查是**另一个**标签，且与入口共用同一份会话上下文"。
 //
 // 为什么要分成两个文件、而不是一个文件里两节：这两个 surface 曾经共用过一个 `KIND`，
 // 结果「本轮修改 5」打开的是整个项目的 Git Changes。把契约写在同一处，恰好方便下一次
-// 顺手把两者的常量、开关或组件接回去——分开之后，任何"合流"都要同时改两个文件的意图。
+// 顺手把两者的常量、数据或组件接回去——分开之后，任何"合流"都要同时改两个文件的意图。
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../plugins/dsh-client-ui-review/lib/client.js', import.meta.url), 'utf8')
+const code = source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')
 
 // ---- 1. 标签类型注册进官方侧栏的类型表 -----------------------------------------
 assert.match(source, /const GIT_KIND = 'git'/u)
 assert.match(source, /const GIT_SIDEBAR_ID = 'dsh-client-ui-review\/git'/u)
 assert.match(source, /sidebarRightTabs[\s\S]*register\(\{[\s\S]*kind: GIT_KIND/u)
 assert.match(source, /id: GIT_SIDEBAR_ID/u)
-assert.match(source, /IconBranchOutline16/u)
+// 图标必须是 primitives 里**真实存在**的名字：`IconBranchOutline16` 从来不存在，
+// 用它只会静默变成"没有图标的标签"。
+assert.match(source, /primitives\.IconBranchOutlineRegular/u)
+assert.doesNotMatch(code, /IconBranchOutline16/u)
 
 // 正文与标题是 keyed 槽位，key 就是上面注册的标签类型。
 assert.match(source, /name: GIT_TAB_SLOT,\s*\n\s*key: GIT_SIDEBAR_ID/u)
@@ -42,16 +46,18 @@ assert.match(source, /state\?\.byId\?\.\[activeId\]\?\.cwd/u)
 // ---- 4. 跨插件的「与当前比较」仍然走官方 Git 标签 + Log 意图 ---------------------
 assert.match(source, /panelLogIntent\.request\(\)[\s\S]*sidebar\.openTab\(GIT_KIND, \{\}\)/u)
 
-// ---- 5. 项目级 Git 的正文**不碰**本轮审查抽屉 -----------------------------------
-// 这是这次修复的对称面：Git 标签只能读项目数据，绝不能改本轮审查的开关。
-assert.doesNotMatch(source, /function ProjectGitPanel\(props\)[\s\S]{0,4000}turnDrawerStore/u)
-assert.doesNotMatch(source, /function GitSidebarTab\(props\)[\s\S]{0,2000}turnDrawerStore/u)
-// 本轮审查也不注册成侧栏标签类型（整份客户端只有**一次**标签类型注册）。
-assert.equal((source.match(/registry\.register\(/gu) ?? []).length, 1)
+// ---- 5. 项目级 Git 的正文**不碰**本轮审查 ---------------------------------------
+// 这是这次修复的对称面：Git 标签只能读项目数据，绝不能改审查标签、也不能渲染它的数据。
+assert.doesNotMatch(code, /turnDrawerStore/u)
+assert.doesNotMatch(code, /function GitSidebarTab\(props\)[\s\S]{0,2000}REVIEW_KIND/u)
+// 两个标签**各注册一次类型**（总共两次），且 kind 不同名。早先只有 Git 一次注册。
+assert.equal((code.match(/registry\.register\(/gu) ?? []).length, 2)
+assert.match(source, /kind: REVIEW_KIND/u)
+assert.match(source, /const REVIEW_SIDEBAR_ID = 'dsh-client-ui-review\/review'/u)
 assert.match(source, /const registry = ctx\.sidebarRightTabs/u)
 
 console.log('PASS Git is registered through the official right Sidebar API and icon system')
 console.log('PASS the Git tab body is ProjectGitPanel and never a turn-review surface')
 console.log('PASS Sidebar Git derives its workspace from the active Harness session')
 console.log('PASS compare navigation opens the official Git Sidebar and preserves refresh')
-console.log('PASS the project Git surface never touches the turn-review drawer state')
+console.log('PASS the project Git surface never touches review-tab state, and both kinds stay distinct')

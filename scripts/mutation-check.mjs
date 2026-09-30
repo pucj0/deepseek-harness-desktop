@@ -114,21 +114,22 @@ const mutate = ({ file, from, to, script, label, prepare }) => {
 console.log('=== 变异验证（改回旧写法必须变红）===')
 
 // ===========================================================================
-// 0. 两个 surface 的隔离（本轮修改 = 独立抽屉；项目级 Git = 官方侧栏）
+// 0. 两个侧栏标签的隔离（本轮审查 = review 标签；项目级 Git = git 标签）
 //
-// 这几条覆盖的正是"两者被接回同一个界面"的那次回归。它们都指向**新增的**两个测试：
-//   * `test-turn-review-drawer.mjs`  —— 入口/开合状态的隔离
+// 这几条覆盖的正是"两者被接回同一个界面 / 同一份上下文"的两次真实回归：
+//   * `test-turn-review-sidebar.mjs` —— 入口 → 打开哪个 kind、上下文是否同源
+//   * `test-git-sidebar-contract.mjs` —— 项目级 Git 的 kind / 数据 / 正文
 //   * `test-turn-review-scope.mjs`   —— 数据 scope 的隔离（真实仓库）
 // ===========================================================================
 
 mutate({
   file: CLIENT,
-  label: '0) 「本轮修改」入口改回 sidebarRight.openTab(git) → 入口隔离断言变红',
-  // 这就是回归发生时的写法：入口借官方侧栏打开 `git` 标签。测试里 `window.__dshDesktopReview`
-  // 指向记录桩，因此这一次调用会被记下来，Case A 立刻变红。
-  from: '          onClick: () => turnDrawerStore.set(!turnDrawerStore.get()),',
-  to: "          onClick: () => {\n            window.__dshDesktopReview?.openTab?.(GIT_KIND, {})\n            turnDrawerStore.set(!turnDrawerStore.get())\n          },",
-  script: 'test-turn-review-drawer.mjs',
+  label: '0) 「本轮修改」入口改回打开 Git 标签 → 入口断言变红',
+  // 这就是最初那次回归的写法：入口借官方侧栏打开 `git` 标签，用户在"本轮修改"里看到的是
+  // 整个项目的 Git。现在 kind 必须是 review。
+  from: '            sidebar.openTab(REVIEW_KIND, { revealIfOpened: true })',
+  to: '            sidebar.openTab(GIT_KIND, { revealIfOpened: true })',
+  script: 'test-turn-review-sidebar.mjs',
 })
 
 mutate({
@@ -151,10 +152,22 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '0d) 抽屉改读项目级数据（useWorkspaceGitSnapshot）→ 抽屉 scope 断言变红',
-  from: '      const turn = useChanges(workspace, sessionId)',
-  to: '      const turn = useChanges(undefined, undefined)',
-  script: 'test-turn-review-drawer.mjs',
+  label: '0d) 审查面板改读空上下文（= 又变成"没有可用的工作区"）→ 上下文断言变红',
+  // 这条正是本轮故障的形状：面板拿到的 workspace 一旦不是当前会话的 cwd，
+  // `useChanges` 就进入 noWorkspace，而入口明明已经算出了 4 个文件。
+  from: '      return react.createElement(ReviewSidebarTabBody, { t, workspace, sessionId })',
+  to: '      return react.createElement(ReviewSidebarTabBody, { t, workspace: undefined, sessionId })',
+  script: 'test-turn-review-sidebar.mjs',
+})
+
+mutate({
+  file: CLIENT,
+  label: '0d2) 侧栏正文退回"只有 t"的注入面（= 拿不到会话）→ 上下文断言变红',
+  // `shell.overlay` 时代的注册只注入 `t`；这里把注入面换成空的 props，等价于那个槽位
+  // 根本没有 `useSessions`，于是上下文解析不出来（正文不再由审查标签的会话渲染）。
+  from: '      const { sessionId, workspace } = useTurnContext(props)',
+  to: '      const { sessionId, workspace } = useTurnContext({})',
+  script: 'test-turn-review-sidebar.mjs',
 })
 
 // ===========================================================================
@@ -725,10 +738,12 @@ mutate({
 
 mutate({
   file: CLIENT,
-  label: '41) 本轮抽屉去掉视口宽度限制（写死 900px）→ 视口限制断言变红',
-  from: "            width: 'min(760px, calc(100vw - 24px))',",
-  to: "            width: '900px',",
-  script: 'test-turn-review-drawer.mjs',
+  label: '41) 审查标签的 kind 改成 git（两个标签同名）→ 隔离断言变红',
+  // `kind` 同名正是最初那次回归：`openTab` 分不出两者，「本轮修改」打开的是项目 Git。
+  // 另外也顺带钉住"两个标签的 id 必须不同"。
+  from: "    const REVIEW_KIND = 'review'",
+  to: "    const REVIEW_KIND = 'git'",
+  script: 'test-turn-review-sidebar.mjs',
 })
 
 console.log('')

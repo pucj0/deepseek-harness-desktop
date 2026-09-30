@@ -9,11 +9,12 @@
 //     尺寸/拖动/关闭/全屏全部由官方侧栏管理，插件不再自造；
 //   * 定位 = `window.__dshDesktopGitTab`（`{ sessionId, workspace, switching }`）。
 //
-// 顺带一提：「本轮修改」是**另一个完全独立的 surface**（`TurnReviewChip` →
-// `TurnReviewDrawer`，挂在 `shell.overlay`），不是这个 Git 标签，也不再经 `sidebarRight`。
+// 顺带一提：「本轮修改」现在也在**同一个官方右侧栏**里，但是另一个标签（`REVIEW_KIND` =
+// `review`，正文 `ReviewSidebarTab` → `TurnReviewPanel`）：入口还是输入框上方那个，
+// 点击走 `sidebarRight.openTab(REVIEW_KIND)`，不再有自制浮层。
 //
 // 因此：重新对准上面这套 DOM 之前，本文件跑不出结论。不需要 Electron 的等价回归在
-// `scripts/test-git-sidebar-contract.mjs`、`scripts/test-turn-review-drawer.mjs`、
+// `scripts/test-git-sidebar-contract.mjs`、`scripts/test-turn-review-sidebar.mjs`、
 // `scripts/test-turn-review-scope.mjs`、`scripts/test-review-project-git.mjs`，
 // 它们都在 `npm run test:git-sidebar` 里。
 // （它验证的"点外部关闭 / 入口 toggle"已整体移除：开合改由官方侧栏负责。）

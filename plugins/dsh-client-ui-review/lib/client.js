@@ -1,20 +1,22 @@
 // review 的客户端半边。它承载**两个语义完全不同的界面**，两者只共享最底层的差异渲染器：
 //
-//   1. 本轮修改审查（turn scope）——"这一轮 agent 改了什么"
-//      入口：输入框上方的 `TurnReviewChip`（`dsh.desktop.composer.actions`）
-//      抽屉：`TurnReviewDrawer`（`shell.overlay`，独立开合状态）
+//   1. 本轮审查（turn scope）——"这一轮 agent 改了什么"
+//      入口：输入框上方的 `TurnReviewChip`（`dsh.desktop.composer.actions`）**与**
+//            Harness 官方右侧栏的 **审查 / Review 标签**
+//      正文：`ReviewSidebarTab` → `TurnReviewPanel`（`sidebar.right.pane.tab`）
 //      数据：`/changes`，基线 = 本轮开始时记录的快照（baseline vs 当前工作区）
 //
 //   2. 项目级 Git（workspace scope）——"整个仓库相对 HEAD 是什么状态"
-//      入口：Harness 官方右侧栏的 **Git 图标**（`sidebarRightTabs` 注册的标签类型）
+//      入口：Harness 官方右侧栏的 **Git 标签**
 //      正文：`GitSidebarTab` → `ProjectGitPanel`（Changes | Log）
 //      数据：`/workspace`（HEAD 基线），提交图等另走各自路由
 //
-// **这两条链路不得互相触发**：点「本轮修改」绝不会打开/切换/收起官方 Git 标签；打开 Git
-// 标签也绝不会改变本轮审查抽屉的开关。历史上两者共用过一个 `KIND`，本轮修改的入口因此
-// 指向了 `git` 标签，用户在"本轮修改"里看到的是整个项目的 Git——回归测试
-// `scripts/test-turn-review-turn-scope.mjs` 与 `scripts/test-review-entry-isolation.mjs`
-// 就是为了让这件事不能再发生。
+// **两者是同一个侧栏里的两个标签，但绝不是同一个 surface**：不同的 `kind`、不同的 sidebar id、
+// 不同的数据 API、不同的 state、不同的正文组件。它们各自还有一个完全独立的后备入口（Git 在
+// 官方 Git 图标上，本轮审查在输入框上方的「本轮修改」入口上），点一个绝不会切换/收起另一个。
+// 历史上两者共用过一个 `KIND`（`'git'`），于是「本轮修改 5」打开的是整个项目的 Git Changes —
+// `scripts/test-review-entry-isolation.mjs`、`scripts/test-git-sidebar-contract.mjs` 与
+// `scripts/test-turn-review-sidebar.mjs` 就是为了让这件事不能再发生。
 //
 // 数据来自 host 半边（同源 HTTP 路由）：
 //   POST /dsh-desktop/review/baseline   记录本轮基线（本轮开始时调用一次）
@@ -294,9 +296,10 @@ window.__ModuleLoader__.load({
        * 避免原生 checkbox / scrollbar 在深色系统主题下被画成深色。
        *
        * **两处都要挂**：FileList 与差异渲染器是共用的，但两个 surface 的根节点不是同一个
-       * （项目级 Git 由官方侧栏挂载，本轮审查抽屉挂在 shell.overlay）。只挂一处的话，
-       * 另一处会拿不到这些令牌，共用组件的行高与配色就会走各自的兜底值。 */
-      [data-desktop-review-surface='panel'], [data-review-turn-surface='drawer'] {
+       * （项目级 Git 是 panel 标记，本轮审查在官方侧栏的标签里、由 ReviewErrorBoundary 挂
+       * sidebar 标记）。只挂一处的话，另一处会拿不到这些令牌，共用组件的行高与配色就会走
+       * 各自的兜底值。 */
+      [data-desktop-review-surface='panel'], [data-review-turn-surface='sidebar'] {
         color-scheme: light;
         --dsh-review-row-h: 28px;
         --dsh-review-line: var(--dsw-alias-border-l1, #e9ebf0);
@@ -516,20 +519,7 @@ window.__ModuleLoader__.load({
      */
     const TURN_CHIP_SLOT = 'dsh.desktop.composer.actions'
 
-    /**
-     * 「本轮修改审查」抽屉所在的槽位。
-     *
-     * `shell.overlay` 是官方槽位文档里为"自己的整帧浮层"准备的座位：在所有列之上、且在它们
-     * 的滚动容器之外。用 `position: fixed` 挂在输入框槽位里时，只要祖先里有一个
-     * transform/filter 就会被当成包含块并裁掉——这里是官方给出的、不会踩到那条的路。
-     *
-     * 作用域是 root：拿不到 `sessionId`，当前会话由 `useSessions` 的 `state.current` 取
-     * （见 useCurrentTurn）。**抽屉不读、也不依赖官方 Git Sidebar 的展开状态**。
-     */
-    const TURN_DRAWER_SLOT = 'shell.overlay'
-    const TURN_DRAWER_ID = 'dsh-client-ui-review/turn-drawer'
-
-    /** 项目级 Git 标签正文与标题的槽位。 */
+    /** 官方右侧栏：标签正文与标签标题的两个 keyed 槽位（两个标签各占一个 key）。 */
     const GIT_TAB_SLOT = 'sidebar.right.pane.tab'
     const GIT_TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
 
@@ -547,12 +537,22 @@ window.__ModuleLoader__.load({
     /**
      * 项目级 Git 标签的类型标识：同时作为两个槽位的 key，也是 `openTab` 用的 kind。
      *
-     * **只有项目级 Git 用这个名字**。本轮修改审查是另一个 surface——它有自己的槽位、自己的
-     * 开合状态，从不经过 `sidebarRight`。两者曾经共用过一个 `KIND`，于是「本轮修改」的入口
-     * 打开了 `git` 标签、用户看到的是整个项目的 Git；这次修复把它拆成了两个常量。
+     * **只有项目级 Git 用这个名字。** 本轮审查是另一个 `kind`（`REVIEW_KIND`）、另一个
+     * sidebar id、另一条数据 API。两者曾经共用过 `'git'`，于是「本轮修改」的入口打开了
+     * `git` 标签、用户看到的是整个项目的 Git；这次把它拆成两组互不相干的常量。
      */
     const GIT_KIND = 'git'
     const GIT_SIDEBAR_ID = 'dsh-client-ui-review/git'
+
+    /**
+     * 本轮审查标签（官方右侧栏里的第二个标签）的类型标识。
+     *
+     * `kind` 是 `openTab` / `openTabIn` 的入参，`REVIEW_SIDEBAR_ID` 是那两个 keyed 槽位的 key。
+     * 两者都**必须**与 Git 那组不同：`openTab(REVIEW_KIND)` 只可能落在审查标签上，不可能
+     * 顺手把项目 Git 打开（那正是这次要根除的回归）。
+     */
+    const REVIEW_KIND = 'review'
+    const REVIEW_SIDEBAR_ID = 'dsh-client-ui-review/review'
 
     /** 「本轮修改」入口在槽位里的注册 id 与顺序。 */
     const TURN_CHIP_ID = 'review-changes'
@@ -832,6 +832,16 @@ window.__ModuleLoader__.load({
       notRepo: '当前工作区（{name}）不是 git 仓库。',
       clean: '本轮没有改动任何文件。',
       projectTitle: 'Git',
+      /**
+       * 官方右侧栏**两个标签**的标题。
+       *
+       * `sidebarReviewTitle` 刻意只有一个词：「本轮修改审查」是输入框上方那个入口的历史文案，
+       * 而标签栏的宽度有限、且标签本身的语义就是"审查"。英文用 `Review`（与 Harness 官方
+       * 的 Review 标签同词），不用 `Turn Changes`。
+       */
+      sidebarGitTitle: 'Git',
+      sidebarReviewTitle: '审查',
+      openTurnReviewFailed: '无法打开右侧栏的审查标签。',
       noWorkspace: '当前没有可用的工作区。',
       repositoryCount: '{count} 个仓库',
       repoSelectorLabel: '切换仓库',
@@ -1340,6 +1350,10 @@ window.__ModuleLoader__.load({
       notRepo: 'The current workspace ({name}) is not a git repository.',
       clean: 'This turn did not change any file.',
       projectTitle: 'Git',
+      /** The right Sidebar's two tab titles (see the Chinese dictionary for why they stay short). */
+      sidebarGitTitle: 'Git',
+      sidebarReviewTitle: 'Review',
+      openTurnReviewFailed: 'Could not open the Review tab in the right sidebar.',
       noWorkspace: 'No workspace is available.',
       repositoryCount: '{count} repositories',
       repoSelectorLabel: 'Switch repository',
@@ -1887,46 +1901,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「本轮修改审查」抽屉的开合状态。
-     *
-     * 与官方侧边栏**完全无关**：抽屉不是侧边栏里的一个标签，它有自己的槽位
-     * （`shell.overlay`）、自己的开关，也不读侧边栏的展开状态。历史上两者共用过一个 `KIND`，
-     * 于是「本轮修改」的入口实际打开了 `git` 标签——这条链路必须保持断开。
-     *
-     * 为什么放在模块级而不是组件 state：入口与抽屉是**两个槽位里的两个组件实例**（入口在
-     * session 作用域的输入框槽位，抽屉在 root 作用域的整帧浮层），它们必须共享同一个开关；
-     * "点入口开抽屉"正是这里唯一要表达的事。
-     *
-     * 为什么不写 localStorage：本轮审查是"看这一轮改了什么"的一次性检视，重启后自动弹出的
-     * 浮层只会挡住对话。（项目级 Git 是常驻工作区，那个偏好由官方侧边栏自己持久化。）
-     */
-    const turnDrawerStore = (() => {
-      const listeners = new Set()
-      let open = false
-      return {
-        get: () => open,
-        set: (value) => {
-          const next = value === true
-          if (open === next) return
-          open = next
-          for (const listener of listeners) listener()
-        },
-        subscribe: (listener) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
-      }
-    })()
-
-    /**
-     * 订阅「本轮修改审查」抽屉的开合状态。
-     * @returns 当前是否展开。
-     */
-    function useTurnDrawerOpen() {
-      return react.useSyncExternalStore(turnDrawerStore.subscribe, turnDrawerStore.get, () => false)
-    }
-
-    /**
      * 一次性意图：「把官方 Git 标签打开，并切到 Log 页签」。
      *
      * 存在的理由：跨插件的「与当前比较」（gitbar 的分支菜单）原先靠
@@ -1958,6 +1932,23 @@ window.__ModuleLoader__.load({
         },
       }
     })()
+
+    /**
+     * 官方右侧栏服务的引用，只在**入口点击那一刻**被读。
+     *
+     * 为什么需要一个模块级引用：`TurnReviewChip` 是按 session 作用域槽位注册的，它的注入面
+     * 里只有 `t`（注入面越窄越好），而"打开审查标签"要用 `ctx.sidebarRight`。两者相隔一层
+     * 槽位，因此由 `apply()` 在装配时把引用记在这里，点击时读它。
+     *
+     * **不做缓存、不做回退猜测**：服务缺席（旧版 Harness / 插件没装）时点击会走
+     * `openReviewSidebar` 的"未打开"分支并把原因写进诊断，而不是静默无反应。
+     */
+    let reviewSidebar
+
+    /** 读当前已知的侧栏服务（可能是 undefined）。 */
+    function reviewSidebarService() {
+      return reviewSidebar
+    }
 
     /**
      * 订阅「打开 Git 标签并切到 Log」的意图。
@@ -4893,35 +4884,62 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 读取**当前会话**的身份：它的 id，以及本轮审查要用的工作区。
+     * 读取**本轮审查的上下文**：当前会话的 id，以及它所属的工作区。
      *
-     * 「本轮修改审查」抽屉挂在 `shell.overlay`（root 作用域），拿不到会话作用域的
-     * `sessionId`；但 `sessions` 是标准注入的服务：`state.current` 就是用户此刻打开的那个
-     * 会话，`byId[current].cwd` 是它所属的项目（新建对话在创建时也会被选中，因此切换对话与
-     * 新建对话都会自动跟随）。
+     * 这是本插件里"当前会话是哪一个"的**唯一**解析点。`TurnReviewChip`（输入框上方的入口，
+     * session 作用域）与 `ReviewSidebarTab`（官方右侧栏的审查标签，session 作用域）都必须
+     * 经由它取上下文——两边各自算一次，就会出现"按钮知道是 4 个文件，侧栏却说没有工作区"。
+     * 那正是这次修复要根除的故障：入口显示「本轮修改 4」，点进去的面板却报
+     * `noWorkspace`，因为两个组件用的不是同一份 session/workspace。
      *
-     * 两个值都从同一个 `state.current` 取：分别取两次就可能出现"用 A 会话的 id 去查 B 项目"
-     * 的错配，而本轮基线本来就是按 sessionId 记录的，错配会直接查错基线。
+     * 解析顺序（两步，都不能少）：
+     *   1. **优先用槽位明确给的 `props.sessionId`**。官方右侧栏的 `sidebar.right.pane.tab`
+     *      是 session 作用域槽位，标准注入面里就带 `sessionId`（见 Harness 的槽位契约
+     *      `standardProps`），它比任何猜测都准；
+     *   2. 没有（或它不是非空字符串）时退回 `useSessions` 的 **`state.current`**——那是
+     *      Harness 此刻真正打开的会话，新建对话在创建时也会被选中，因此切换/新建对话都会
+     *      自动跟随。
+     *
+     * 然后**用同一个 id** 去 `byId[id].cwd` 取工作区（经 `asPath()` 归一）。绝不使用
+     * `process.cwd()` / `DSH_DESKTOP_WORKSPACE` / 最近项目 / 注册表第一项 / 启动目录来
+     * 代替当前会话：那些都会让"本轮修改"指到另一个项目。
      *
      * 返回值是**两个原始值**而不是新对象：`useSyncExternalStore` 的选择器每次渲染都要给出
      * 同一个引用，返回新对象会让 React 警告 "The result of getSnapshot should be cached"
      * 并可能死循环；字符串天然满足。
      *
-     * @param props - 槽注入的属性。
-     * @returns `{ sessionId, workspace }`；没有当前会话时两者都是 undefined。
+     * @param props - 槽注入的属性（`useSessions`，以及侧栏提供的 `sessionId`）。
+     * @returns `{ sessionId, workspace }`；真的没有当前会话时两者都是 undefined。
      */
-    function useCurrentTurn(props) {
+    function useTurnContext(props) {
       // **无条件**取钩子（缺席时用空实现），见 useLatchedHook：条件调用会让 hook 数量可变。
       const useSessions = useLatchedHook(props?.useSessions, absentSessions)
-      const sessionId = useSessions((state) => {
+      const provided = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : undefined
+      /**
+       * 两步解析放在**一个**选择器里：槽位给的 id 优先，否则看 `state.current`。
+       *
+       * 只用一个 hook 槽是刻意的。拆成两个（先 id、再用 id 查 `cwd`）在 React 的
+       * `useSyncExternalStore` 下依赖"两次 getSnapshot 之间仓库不会变"——那是真的，但
+       * 它是一条隐含假设；一个选择器就没有这条假设：id 与 workspace 来自**同一个快照**，
+       * 因此不可能出现"用 A 会话的 id 拿到 B 项目"（本轮基线按 sessionId 记录，错配会查错基线）。
+       *
+       * 返回值仍是两个原始值（字符串）：每次渲染都返回新对象会让 React 警告
+       * "The result of getSnapshot should be cached" 并可能死循环。
+       */
+      const resolved = useSessions((state) => {
         const current = state?.current
-        return current === undefined || current === null || current === '' ? undefined : String(current)
+        const fallback = current === undefined || current === null || current === '' ? undefined : String(current)
+        const activeId = provided ?? fallback
+        if (activeId === undefined) return undefined
+        const workspace = asPath(state?.byId?.[activeId]?.cwd)
+        // 用 `\u0000` 分隔：会话 id 与路径里都不可能出现它，因此不会误拆。
+        return `${activeId}\u0000${workspace ?? ''}`
       })
-      const workspace = useSessions((state) => {
-        const current = state?.current
-        return current === undefined || current === null || current === '' ? undefined : asPath(state?.byId?.[current]?.cwd)
-      })
-      return { sessionId, workspace }
+      if (typeof resolved !== 'string') return { sessionId: undefined, workspace: undefined }
+      const separator = resolved.indexOf('\u0000')
+      const sessionId = resolved.slice(0, separator)
+      const workspace = resolved.slice(separator + 1)
+      return { sessionId: sessionId === '' ? undefined : sessionId, workspace: workspace === '' ? undefined : workspace }
     }
 
     /**
@@ -12251,8 +12269,8 @@ window.__ModuleLoader__.load({
      * **官方右侧栏里「Git」标签的正文**（项目级 Git，workspace scope）。
      *
      * 这是「整个项目相对 HEAD 是什么状态」的唯一入口，由 Harness 官方 Git 图标打开。它与
-     * 「本轮修改审查」是两套界面：这里的 `GitSidebarTab` 只渲染项目 Git 面板，不会去开、
-     * 也不会去关本轮审查抽屉（抽屉由 `TurnReviewChip` → `TurnReviewDrawer` 那条链路负责）。
+     * 侧栏里的「审查」标签是**两个不同的 surface**：`GitSidebarTab` 只渲染项目 Git 面板，
+     * 既不会去开、也不会去关审查标签（那条链路归 `TurnReviewChip` → `openReviewSidebar`）。
      *
      * @param props - 槽注入的属性（含会话标识与本地化函数）。
      */
@@ -12284,17 +12302,187 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 官方右侧栏 Git 标签的标题（图标 + `Git`）。 */
+    /**
+     * 官方右侧栏 Git 标签的标题（图标 + `Git`）。
+     *
+     * 图标取自官方 primitives。**注意名字**：这个包导出的是 `IconBranchOutlineRegular` /
+     * `IconBranchOutlineMedium`，并没有 `IconBranchOutline16` —— 那个名字在运行时是
+     * `undefined`，而"图标为 undefined 时就不渲染"的写法会让它**静默**变成没有图标的标签。
+     */
     function GitSidebarTabTitle(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const Icon = primitives.IconBranchOutline16
+      const Icon = primitives.IconBranchOutlineRegular
       return react.createElement(
         'span',
         { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: uiPx(12), fontFamily: UI_FONT } },
         typeof Icon === 'function' ? react.createElement(Icon, { size: 16 }) : null,
-        'Git',
+        t('sidebarGitTitle'),
       )
     }
+
+    /**
+     * **官方右侧栏「审查」标签的正文**（turn scope）。
+     *
+     * 这是「本轮修改 N」点击之后真正出现的那块界面。它与 `TurnReviewChip` **共用同一个**
+     * `useTurnContext(props)`：因此按钮显示的数字与这里列出的文件必然来自同一个
+     * `sessionId` + 同一个 workspace + 同一条 `/changes`。这一条就是本次修复的核心不变式——
+     * 之前入口挂在 session 作用域的输入框槽位、而抽屉挂在 root 作用域的 `shell.overlay` 上，
+     * 后者拿不到 `useSessions`，workspace 永远是 undefined，于是"入口说 4 个、面板说没有工作区"。
+     *
+     * 关于"当前会话从哪来"（不要凭猜）：Harness 的槽位契约里
+     * `sidebar.right.pane.tab` 的 `standardProps` **明确包含** `sessionId` 与 `useSessions`，
+     * 官方自己的标签（deliverables 的 ReviewTab、sidebar-files 的 FilesBody、
+     * sidebar-browser、schedule…）正是这么解构的：
+     *
+     *     function ReviewTab({ useTabInfo, sessionId, useSessions, ... })
+     *
+     * 因此这里既不读 DOM、也不靠左侧高亮推断工作区。
+     *
+     * @param props - 槽注入的属性（`t` + 标准注入面的 `sessionId` / `useSessions`）。
+     */
+    function ReviewSidebarTab(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { sessionId, workspace } = useTurnContext(props)
+      // 数据读取在面板里（useChanges 自己带 workspace 换代闸门）。这里只把它暴露成诊断快照，
+      // 让真实 Electron 测试能直接断言"点了以后侧栏拿到的是哪个会话/哪个项目"。
+      return react.createElement(
+        ReviewErrorBoundary,
+        { t, workspace },
+        react.createElement(ReviewSidebarTabBody, { t, workspace, sessionId }),
+      )
+    }
+
+    /**
+     * 审查标签正文的**内容半边**（独立成组件，只为让错误边界能包住它）。
+     *
+     * 它读**一次** `/changes`，然后：把文件数写进诊断快照，并把同一份 `turn` 交给面板渲染。
+     * 刻意不各自读一次——虽然工作区闸门的 single-flight 会把并发的两次请求合并，但"同一个
+     * 面板里有两个数据源"正是需要避免的形状（诊断里的数字与界面上的数字必须同源）。
+     *
+     * @param props - `{ t, workspace, sessionId }`。
+     * @returns React 元素。
+     */
+    function ReviewSidebarTabBody(props) {
+      const { t, workspace, sessionId } = props
+      const turn = useChanges(workspace, sessionId)
+      const { files } = summarize(turn.state.result)
+      /**
+       * 真实"没有工作区"的判定（也是这个诊断字段存在的理由）。
+       *
+       * 只有**真的**没有会话（`noContext`）或该会话没有 cwd（`noSession`）时才是这两个值。
+       * 正常会话下——也就是输入框上方那个入口能显示数字的会话——它绝不会是它们，因为两边用的
+       * 是同一个 `useTurnContext`。这条区分让"假错误又回来了"可以被测试直接抓住。
+       */
+      const phase = sessionId === undefined ? 'noContext' : (workspace === undefined ? 'noSession' : turn.state.phase)
+      if (typeof window !== 'undefined') {
+        window.__dshDesktopReviewTab = {
+          sessionId: sessionId ?? null,
+          workspace: workspace ?? null,
+          fileCount: files.length,
+          phase,
+        }
+      }
+      return react.createElement(TurnReviewPanel, { t, workspace, sessionId, turn })
+    }
+
+    /**
+     * 官方右侧栏审查标签的标题（图标 + 本地化的「审查 / Review」）。
+     *
+     * 刻意**短**：标签栏的宽度有限，而"本轮修改审查"这种把入口文案搬过来的写法既长又会被
+     * 截断。语义由图标（清单）与标签本身表达；面板里也不再重复画一遍标题。
+     *
+     * @param props - 槽注入的属性。
+     */
+    function ReviewSidebarTabTitle(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const Icon = primitives.IconChecklistOutlineRegular
+      return react.createElement(
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: uiPx(12), fontFamily: UI_FONT } },
+        typeof Icon === 'function' ? react.createElement(Icon, { size: 16 }) : null,
+        t('sidebarReviewTitle'),
+      )
+    }
+
+    /**
+     * 构造**本轮审查标签**的错误边界。
+     *
+     * 与 `createProjectGitPanelBoundary` 同一个理由（类组件 + 工厂：React 只有
+     * `getDerivedStateFromError` 这一条捕获路径，而测试桩里的 `react` 可能是部分实现）：
+     * 面板炸了只降级面板本体，官方侧栏的标签（以及输入框上方的入口）照常存在。**入口永远不
+     * 消失**这条要求对两个标签都成立。
+     *
+     * @returns 边界组件（类组件，或退化后的透传函数组件）。
+     */
+    function createReviewBoundary() {
+      const Base = typeof react.Component === 'function' ? react.Component : null
+      if (Base === null) {
+        const Passthrough = function ReviewErrorBoundary(props) {
+          return props?.children ?? null
+        }
+        Passthrough.displayName = 'ReviewErrorBoundary'
+        return Passthrough
+      }
+      return class ReviewErrorBoundary extends Base {
+        constructor(props) {
+          super(props)
+          this.state = { error: null, nonce: 0 }
+          this.onRetry = this.onRetry.bind(this)
+        }
+
+        /** 渲染期抛出的异常：记下来，下一次渲染走降级分支。 */
+        static getDerivedStateFromError(error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) }
+        }
+
+        /** 渲染之后 React 把组件栈送过来；记进诊断，便于测试与日志定位。 */
+        componentDidCatch(error, info) {
+          reportPanelError(error, info?.componentStack, this.props?.workspace)
+        }
+
+        /** 「重试」：清掉错误并整棵重挂，数据也会重新取一次。 */
+        onRetry() {
+          this.setState((prev) => ({ error: null, nonce: prev.nonce + 1 }))
+        }
+
+        /**
+         * @returns 正常情况下是包着 children 的容器；出错时是带诊断信息的降级页。
+         */
+        render() {
+          if (this.state.error === null) {
+            return react.createElement(
+              react.Fragment,
+              null,
+              react.createElement(
+                'div',
+                { 'data-review-turn-surface': 'sidebar', style: { display: 'contents' } },
+                this.props?.children ?? null,
+              ),
+            )
+          }
+          const t = typeof this.props?.t === 'function' ? this.props.t : (key) => key
+          const message = String(this.state.error?.message ?? this.state.error)
+          return react.createElement(
+            'div',
+            {
+              'data-review-error-boundary': '',
+              role: 'alert',
+              style: { padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: '10px', fontFamily: UI_FONT, fontSize: uiPx(12) },
+            },
+            react.createElement('span', { style: { color: 'var(--dsw-alias-state-error-primary, #d44747)', fontWeight: 600 } }, t('title')),
+            react.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', wordBreak: 'break-word' } }, message),
+            react.createElement(
+              'button',
+              { type: 'button', 'data-review-error-retry': '', onClick: this.onRetry },
+              t('refresh'),
+            ),
+          )
+        }
+      }
+    }
+
+    /** 审查标签用的边界实例（见 createReviewBoundary）。 */
+    const ReviewErrorBoundary = createReviewBoundary()
 
     // =========================================================================
     // 提交图（项目级 Git 抽屉 → Log 页签的三栏视图）
@@ -16271,32 +16459,96 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 输入框上方的**「本轮修改」入口**：显示本轮 agent 改了几个文件，点击开/关独立的本轮
-     * 修改审查抽屉。
+     * 把官方右侧栏切到**本轮审查**标签（`REVIEW_KIND`）。
      *
-     * 点击只做一件事——切换 `turnDrawerStore`。它**不碰**官方右侧栏：不 `openTab`、不
-     * `openTabIn`、不 `toggleExpanded`。历史上这里调用的是 `sidebarRight.openTab('git')`，
-     * 而 `KIND` 又同时被项目级 Git 用着，于是"本轮修改 5"打开的是整个项目的 Git Changes。
-     * 回归测试 `scripts/test-review-entry-isolation.mjs` 钉住了"这里一次都不许调用它"。
+     * 这是「本轮修改」入口唯一的动作，也是本轮修复的核心：以前入口只切换一个自制抽屉的开关
+     * （`turnDrawerStore`），抽屉挂在 root 作用域的 `shell.overlay` 上、拿不到会话作用域的
+     * `sessionId`/`useSessions`，于是面板里的 workspace 永远是 undefined，界面显示
+     * "当前没有可用的工作区"——而入口自己明明已经算出了"4 个文件"。现在两边走**同一个**
+     * `useTurnContext` + 同一个官方侧栏标签，数字因此必然一致。
      *
-     * 同时负责**记录基线**：观察到会话由"未运行"转为"运行"时记一次，那一轮结束后的
-     * 改动就都能对上；若发现没有基线而当前空闲，也补记一次（见下方注释）。
-     * @param props - 槽注入的属性。
+     * 用法与官方 `ctx.sidebarRight.openTab` 完全一致（Harness 自己的插件也是这么用的）：
+     *   1. `openTab(REVIEW_KIND, { revealIfOpened: true })`——打开或选中审查标签。key 已经
+     *      存在时 `revealIfOpened` 让它变成 active；kind 未注册时官方会抛
+     *      `no tab type is registered as "review"`，那属于装配错误，照实记下来。
+     *   2. 侧栏**收起时**再 `toggleExpanded()`——官方 `openTab` 只提交标签，不负责展开列。
+     *      先开标签再展开，顺序不能反：反了的话第一次点击只会展开列、标签还没选中。
+     *
+     * `openTab` 需要"当前有在屏会话"（官方 `require()` 的语义），而入口本身就在会话里，
+     * 因此正常情况下这条链一定成立；万一不成立（会话正在拆装），退回显式的
+     * `openTabIn(sessionId, …)`，绝不静默失败——那正是"点了没反应"的来源。
+     *
+     * @param sidebar - `ctx.sidebarRight`。
+     * @param sessionId - 当前会话 id（可能 undefined）。
+     * @param t - 本地化函数，只用于把失败原因放进诊断。
+     * @returns 是否成功把侧栏切到审查标签。
+     */
+    let lastReviewOpenError = ''
+    function openReviewSidebar(sidebar, sessionId, t) {
+      let opened = false
+      if (sidebar !== undefined && sidebar !== null) {
+        try {
+          if (typeof sidebar.openTab === 'function') {
+            sidebar.openTab(REVIEW_KIND, { revealIfOpened: true })
+            opened = true
+          }
+        } catch (cause) {
+          lastReviewOpenError = String(cause?.message ?? cause)
+        }
+        if (!opened && sessionId !== undefined && typeof sidebar.openTabIn === 'function') {
+          try {
+            sidebar.openTabIn(sessionId, REVIEW_KIND, { revealIfOpened: true })
+            opened = true
+            lastReviewOpenError = ''
+          } catch (cause) {
+            lastReviewOpenError = String(cause?.message ?? cause)
+          }
+        }
+        // 侧栏收起时把它展开。`isExpanded` 缺席（旧版 Harness）时不猜：宁可不展开，
+        // 也不要每次点击都把用户已经展开的侧栏收起来。
+        if (opened && typeof sidebar.toggleExpanded === 'function' && typeof sidebar.isExpanded === 'function') {
+          try {
+            if (sidebar.isExpanded() !== true) sidebar.toggleExpanded()
+          } catch (cause) {
+            lastReviewOpenError = String(cause?.message ?? cause)
+          }
+        }
+      } else {
+        lastReviewOpenError = 'sidebarRight service is unavailable'
+      }
+      const message = opened ? '' : (lastReviewOpenError === '' ? t('openTurnReviewFailed') : lastReviewOpenError)
+      if (typeof window !== 'undefined') {
+        window.__dshDesktopReviewOpen = { sessionId: sessionId ?? null, kind: REVIEW_KIND, opened, error: message }
+      }
+      return { opened, error: message }
+    }
+
+    /**
+     * 输入框上方的**「本轮修改」入口**：显示本轮 agent 改了几个文件，点击把它所在的会话
+     * 切到官方右侧栏的**审查**标签。
+     *
+     * 三件事，一件都不多做：
+     *   1. 显示本轮改动数量（`/changes` 的元数据，节流轮询）；
+     *   2. 记录本轮基线（会话由"未运行"转为"运行"时记一次，空闲且缺基线时自愈补记）；
+     *   3. 点击 → `openReviewSidebar`（只可能落在 `REVIEW_KIND` 上，绝不碰 `GIT_KIND`）。
+     *
+     * 它**不再**持有任何开合状态：关闭、宽度、全屏、resize 全部归官方右侧栏。
+     *
+     * @param props - 槽注入的属性（`sessionId` + `useSessions`）。
      */
     function TurnReviewChip(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { sessionId } = props ?? {}
+      // **和审查标签用的是同一个解析器**：两边的 sessionId/workspace 因此必然相同，
+      // 不会出现"入口说 4 个、侧栏说没有工作区"。
+      const { sessionId, workspace } = useTurnContext(props)
 
-      // **无条件**取钩子，"有没有 sessionId / 有没有会话源"交给选择器表达
+      // **无条件**取钩子，"有没有会话源"交给选择器表达
       // （见 useLatchedHook：条件调用会让 hook 数量可变 → React #310）。
       const useSessions = useLatchedHook(props?.useSessions, absentSessions)
-      const workspace = useSessions((state) =>
-        sessionId === undefined ? undefined : asPath(state?.byId?.[sessionId]?.cwd),
-      )
       const running = useSessions((state) =>
         sessionId === undefined ? false : state?.byId?.[sessionId]?.isRunning === true,
       )
-      const open = useTurnDrawerOpen()
+      const [open, setOpen] = react.useState(false)
 
       const [count, setCount] = react.useState(null)
       const [trouble, setTrouble] = react.useState('')
@@ -16357,14 +16609,15 @@ window.__ModuleLoader__.load({
           'data-desktop-review': '',
           'data-review-turn-chip': '',
           'aria-label': t('title'),
-          // 展开态：屏幕阅读器与测试都能看出这个按钮控制的是哪个抽屉。
+          // 展开态：屏幕阅读器与测试都能看出这个按钮控制的是侧栏里的审查标签。
           'aria-expanded': open,
-          'aria-controls': TURN_DRAWER_ID,
+          'aria-controls': REVIEW_SIDEBAR_ID,
           title: trouble === '' ? t('openTurnReview') : trouble,
-          // **唯一的动作**：切换本轮审查抽屉。它不接触 `sidebarRight`——项目级 Git 由官方
-          // 侧栏的 Git 图标打开，两者是不同的 surface（见文件头的说明）。
-          onClick: () => turnDrawerStore.set(!turnDrawerStore.get()),
-          style: {
+          // **唯一的动作**：把官方右侧栏切到审查标签。绝不打开 Git（见 openReviewSidebar）。
+          onClick: () => {
+            const outcome = openReviewSidebar(reviewSidebarService(), sessionId, t)
+            setOpen(outcome.opened)
+          },          style: {
             display: 'inline-flex',
             alignItems: 'center',
             flex: '0 1 auto',
@@ -16400,89 +16653,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * **本轮修改审查抽屉**（turn scope）。
-     *
-     * 挂在 `shell.overlay`（官方文档里为"自己的整帧浮层"准备的座位：在所有列之上、在它们的
-     * 滚动容器之外），因此不会被输入框所在的卡片裁掉。开合只由 `turnDrawerStore` 决定：
-     *
-     *   * 入口（`TurnReviewChip`）切换它；
-     *   * 抽屉自己的 × 与 Escape 关掉它；
-     *   * 官方 Git 侧栏的开关**完全不影响它**（反之亦然）。
-     *
-     * 几何是固定的、不依赖侧栏展开与否：右上方一块浮层，宽度 `min(760px, 100vw - 24px)`，
-     * 高度 `min(620px, 100vh - 140px)`，因此两个 surface 可以同时开着。
-     *
-     * @param props - 槽注入的属性（root 作用域：只有 `useSessions`，没有 `sessionId`）。
-     */
-    function TurnReviewDrawer(props) {
-      const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const open = useTurnDrawerOpen()
-      const { sessionId, workspace } = useCurrentTurn(props)
-      const rootRef = react.useRef(null)
-
-      /**
-       * Escape 关闭。
-       *
-       * 只在展开时挂监听：收起状态下按 Escape 不该有任何副作用。用 `document` 上的监听
-       * 而不是抽屉自身的 keydown，是因为焦点可能停在入口按钮或对话输入框上——用户按下
-       * Escape 时并不保证焦点在抽屉里。
-       */
-      react.useEffect(() => {
-        if (!open) return undefined
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') turnDrawerStore.set(false)
-        }
-        document.addEventListener('keydown', onKeyDown)
-        return () => document.removeEventListener('keydown', onKeyDown)
-      }, [open])
-
-      // 所有 hook 都在这个提前返回**之前**（React #310：hook 数量不能随分支变化）。
-      if (!open) return null
-
-      return react.createElement(
-        'aside',
-        {
-          ref: rootRef,
-          id: TURN_DRAWER_ID,
-          // 两个稳定锚点：`data-review-turn-surface` 说明这是哪个 surface（drawer，而不是
-          // 官方侧栏的 panel），`data-review-turn-drawer` 供测试与样式直接命中。
-          'data-review-turn-surface': 'drawer',
-          'data-review-turn-drawer': '',
-          'aria-label': t('title'),
-          style: {
-            position: 'fixed',
-            // 避开窗口顶部的系统按钮（Windows 的 caption 区）与对话页头部的图标。
-            top: 'clamp(12px, 8vh, 72px)',
-            right: 'clamp(12px, 3vw, 40px)',
-            zIndex: 9999,
-            // 视口限制写成 `min()`：窄窗口里抽屉跟着变窄，绝不横向溢出（也就绝不会出现
-            // "关闭按钮在屏幕外、点不到"）。高度留出上下边距。
-            width: 'min(760px, calc(100vw - 24px))',
-            maxHeight: 'min(620px, calc(100vh - 140px))',
-            display: 'flex',
-            flexDirection: 'column',
-            borderRadius: '10px',
-            border: '1px solid var(--dsw-alias-border-l2, #d3d3dc)',
-            background: 'var(--dsw-alias-bg-base, #fff)',
-            color: 'var(--dsw-alias-label-primary)',
-            fontFamily: UI_FONT,
-            boxShadow: '0 16px 48px rgba(0,0,0,.28)',
-            overflow: 'hidden',
-            // 浮层默认点击穿透；这里显式收回指针事件，抽屉本身才能被点。
-            pointerEvents: 'auto',
-          },
-        },
-        react.createElement(TurnReviewPanel, {
-          t,
-          workspace,
-          sessionId,
-          onClose: () => turnDrawerStore.set(false),
-        }),
-      )
-    }
-
-    /**
-     * **本轮修改审查面板**（turn scope）——"这一轮 agent 改了什么"。
+     * **本轮审查面板**（turn scope）——"这一轮 agent 改了什么"。
      *
      * 数据只有一条来源：`/changes`，它的基线是本轮开始时记录的快照（`/baseline`）。这与
      * 项目级 Git 的 `/workspace`（基线是 HEAD）是两件事：用户在 agent 开始之前自己改过的
@@ -16493,12 +16664,19 @@ window.__ModuleLoader__.load({
      * "本轮改了哪些文件 + 每个文件的差异"，差异渲染器与项目级 Git 共用同一套
      * （`FileList` → `LazyFileDiff` / `FileDiff` / 并排与统一视图 / 字符级高亮）。
      *
-     * @param props - `{ t, workspace, sessionId, onClose }`。
+     * **没有自己的标题、也没有自己的关闭按钮**：它现在就住在官方右侧栏的标签里，标签标题
+     * （`ReviewSidebarTabTitle`）与关闭（标签上的 ×）都由 Harness 提供，再画一遍只会重复。
+     *
+     * 它是**纯渲染**：数据由调用方读好传进来（`props.turn`）。刻意不在这里再调一次
+     * `useChanges`——那会造出第二个工作区闸门实例，于是同一个面板里有两个数据源（诊断显示的
+     * 文件数与正文列表可能来自不同的请求）。需要"自己读一次"的调用方请用
+     * {@link TurnReviewPanelConnected}。
+     *
+     * @param props - `{ t, workspace, sessionId, turn }`，`turn` 来自 `useChanges`。
      */
     function TurnReviewPanel(props) {
-      const { t, workspace, sessionId, onClose } = props
-      const turn = useChanges(workspace, sessionId)
-      const { files, added, removed } = summarize(turn.state.result)
+      const { t, workspace, sessionId, turn } = props
+      const { files, added, removed } = summarize(turn?.state?.result)
 
       return react.createElement(
         react.Fragment,
@@ -16516,7 +16694,6 @@ window.__ModuleLoader__.load({
               flexShrink: 0,
             },
           },
-          react.createElement('strong', { style: { fontWeight: 600, fontSize: uiPx(13) } }, t('title')),
           react.createElement(
             'span',
             { 'data-review-turn-count': '', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } },
@@ -16552,28 +16729,6 @@ window.__ModuleLoader__.load({
               }),
             ),
           ),
-          // 独立的关闭入口（×）。它只关这个抽屉，与官方侧栏的关开毫无关系。
-          react.createElement(
-            'button',
-            {
-              type: 'button',
-              'data-review-turn-close': '',
-              'data-review-icon-button': '',
-              onClick: onClose,
-              title: t('close'),
-              'aria-label': t('close'),
-            },
-            react.createElement(
-              'svg',
-              { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
-              react.createElement('path', {
-                d: 'M4 4l8 8M12 4l-8 8',
-                stroke: 'currentColor',
-                strokeWidth: 1.5,
-                strokeLinecap: 'round',
-              }),
-            ),
-          ),
         ),
         // 正文：本轮的文件清单 + 点开的逐行差异。与项目级 Git 共用 `FileList`（因此并排/
         // 统一视图、自动换行、字符级高亮、二进制与大文件处理都是同一套实现），但数据是
@@ -16597,6 +16752,22 @@ window.__ModuleLoader__.load({
           }),
         ),
       )
+    }
+
+    /**
+     * 自带取数的 `TurnReviewPanel`（`useChanges` 的宿主）。
+     *
+     * 存在的理由：`TurnReviewPanel` 刻意是纯渲染（见它的说明），而"自己读一次再渲染"这种
+     * 用法在测试与其它装配点仍然需要。把 `useChanges` 放在这个薄壳里，面板本体就不会有两个
+     * 数据源。
+     *
+     * @param props - `{ t, workspace, sessionId }`。
+     * @returns React 元素。
+     */
+    function TurnReviewPanelConnected(props) {
+      const { t, workspace, sessionId } = props
+      const turn = useChanges(workspace, sessionId)
+      return react.createElement(TurnReviewPanel, { t, workspace, sessionId, turn })
     }
 
     /**
@@ -16679,8 +16850,8 @@ window.__ModuleLoader__.load({
             // 打开官方 Git Sidebar 并落在 Log 页签：不这么做的话，请求会一直挂到用户
             // 自己切到 Log 为止，用户点「与当前比较」之后看起来"什么都没发生"。
             //
-            // 这里是**项目级 Git** 的合法用法：比较视图住在 Git 标签的 Log 页签里。它不
-            // 触碰本轮审查抽屉（`turnDrawerStore`），两者互不影响。
+            // 这里是**项目级 Git** 的合法用法：比较视图住在 Git 标签的 Log 页签里。它用
+            // `GIT_KIND`，因此不会碰到审查标签（那是 `REVIEW_KIND`），两者互不影响。
             panelLogIntent.request()
             const sidebar = ctx.sidebarRight
             if (typeof sidebar?.openTab === 'function') sidebar.openTab(GIT_KIND, {})
@@ -16694,10 +16865,18 @@ window.__ModuleLoader__.load({
 
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'review: dictionaries')
 
-      // 「本轮修改」入口：只显示本轮改动数并切换本轮审查抽屉。
+      /**
+       * 侧栏服务引用（诊断 + 入口点击用）。
+       *
+       * `ctx.sidebarRight` 只在**入口点击那一刻**被读：注册期不持有它，装配期也不缓存——
+       * 服务由官方 sidebar-right 插件提供，缓存会让"服务换了一份"这种情形静默失效。
+       */
+      reviewSidebar = ctx.sidebarRight
+
+      // 「本轮修改」入口：显示本轮改动数，点击切到官方右侧栏的**审查**标签。
       //
-      // **不再注入 `sidebarRight`**：入口与官方侧栏之间没有任何调用关系——那正是这次修复
-      // 的核心。注入得多一点，下一个人就又能顺手 `openTab` 一次。
+      // 入口拿的是**会话作用域**的 `sessionId` + `useSessions`（这个槽位就是 session 作用域），
+      // 因此它可以只带 `t` 注册——session 与 workspace 由 useTurnContext 从槽注入面解析。
       ctx.effect(
         () =>
           ctx.slots.inject(TURN_CHIP_SLOT, () =>
@@ -16715,56 +16894,51 @@ window.__ModuleLoader__.load({
         'dsh-client-ui-review: turn review chip',
       )
 
-      // 「本轮修改审查」抽屉：挂在 `shell.overlay`（整帧浮层，在所有列之上、在滚动容器
-      // 之外），因此不会被输入框所在的卡片裁掉。
+      // ---- 官方右侧栏：两个标签，两组互不相干的注册 ---------------------------------
       //
-      // 它与下面的 Git 标签是**两个互不相关的注册**：不同的槽位、不同的作用域、不同的
-      // 开合状态。这里只有一个 `id`，不注册任何 `sidebarRightTabs` 类型——因此抽屉永远
-      // 不可能出现在官方侧栏的标签列表里，也不可能被 `openTab` 打开。
-      ctx.effect(
-        () =>
-          ctx.slots.inject(TURN_DRAWER_SLOT, () =>
-            ctx.slots.register(
-              {
-                name: TURN_DRAWER_SLOT,
-                id: TURN_DRAWER_ID,
-                // 浮层条目之间按 order 排序；本轮审查要盖在其它提示之上。
-                order: 30,
-                locale: NS,
-                inject: () => ({ t: ctx.locale.bind(NS) }),
-              },
-              TurnReviewDrawer,
-            ),
-          ),
-        'dsh-client-ui-review: turn review drawer',
-      )
-
-      // 把**项目级 Git 标签的类型**注册进侧边栏的类型表。
+      // 每个标签都要三样东西，缺一不可（早先只注册了槽位，于是点击后"没反应"：
+      // `openTab` 拿不到类型而抛 `no tab type is registered as "…"`）：
+      //   1. 类型表（`sidebarRightTabs.register`）——决定 `openTab(kind)` 能否找到它；
+      //   2. 正文槽位（`sidebar.right.pane.tab`，key = sidebar id）——决定由哪个组件渲染；
+      //   3. 标题槽位（`sidebar.right.pane.tab.title`，同一个 key）——决定标签上的图标与文字。
       //
-      // 只有项目级 Git 注册标签类型 ——「本轮修改审查」不在这里，它是 `shell.overlay` 里的
-      // 独立浮层，因此永远不会出现在侧栏的标签列表里，也不可能被 `openTab` 打开。
-      //
-      // 这一步与下面的槽位注册是两件事，缺一不可：
-      //   * 类型表（这里）决定 `openTab(kind)` 能否找到该类型——缺了会抛
-      //     `no tab type is registered as "…"`；
-      //   * 槽位（下面）决定找到类型后由哪个组件渲染正文。
-      // 早先只注册了槽位，于是点击后表现为"没反应"：openTab 拿不到类型。
+      // ⚠️ 两个标签的 `kind` 必须不同（`review` / `git`）。相同的话，`openTabIn` / `openTab`
+      // 根本分不出它们，「本轮修改」又会打开整个项目的 Git。
       ctx.effect(() => {
         const registry = ctx.sidebarRightTabs
         if (registry === undefined) return () => undefined
-        return registry.register({
+        const disposeGit = registry.register({
           id: GIT_SIDEBAR_ID,
           kind: GIT_KIND,
           priority: 'extension',
-          title: () => 'Git',
+          title: () => ctx.locale.bind(NS)('sidebarGitTitle'),
           guide: [{
             order: 20,
-            title: () => 'Git',
+            title: () => ctx.locale.bind(NS)('sidebarGitTitle'),
             description: () => ctx.locale.bind(NS)('projectTitle'),
-            icon: primitives.IconBranchOutline16,
+            icon: primitives.IconBranchOutlineRegular,
           }],
         })
-      }, 'dsh-client-ui-review: git tab type')
+        // 本轮审查：第二个标签类型。kind 与 Git **完全不同**，因此 `openTab(REVIEW_KIND)`
+        // 只可能落在它上面。`title` 是标签在"还没有 live chip"时的兜底文字（官方标题槽位
+        // 挂载前用它），因此这里也必须是「审查」/「Review」，不能是"本轮修改审查"。
+        const disposeReview = registry.register({
+          id: REVIEW_SIDEBAR_ID,
+          kind: REVIEW_KIND,
+          priority: 'extension',
+          title: () => ctx.locale.bind(NS)('sidebarReviewTitle'),
+          guide: [{
+            order: 21,
+            title: () => ctx.locale.bind(NS)('sidebarReviewTitle'),
+            description: () => ctx.locale.bind(NS)('title'),
+            icon: primitives.IconChecklistOutlineRegular,
+          }],
+        })
+        return () => {
+          disposeReview()
+          disposeGit()
+        }
+      }, 'dsh-client-ui-review: sidebar tab types (review + git)')
 
       // 差异正文：keyed 槽位，key 即上面注册的标签类型。
       ctx.effect(
@@ -16797,6 +16971,43 @@ window.__ModuleLoader__.load({
             ),
           ),
         'dsh-client-ui-review: git sidebar tab title',
+      )
+
+      // 本轮审查标签的正文与标题：与 Git 那两处**结构相同、key 不同**。
+      //
+      // 这里**不注入 `sessionId` / `useSessions`**：官方 `sidebar.right.pane.tab` 是
+      // session 作用域槽位，标准注入面里本来就带 `sessionId` 与 `useSessions`
+      // （见 Harness 的槽位契约 `standardProps`），由渲染器在挂载时传进来。注入面只需要 `t`。
+      ctx.effect(
+        () =>
+          ctx.slots.inject(GIT_TAB_SLOT, () =>
+            ctx.slots.register(
+              {
+                name: GIT_TAB_SLOT,
+                key: REVIEW_SIDEBAR_ID,
+                locale: NS,
+                inject: () => ({ t: ctx.locale.bind(NS) }),
+              },
+              ReviewSidebarTab,
+            ),
+          ),
+        'dsh-client-ui-review: review sidebar tab body',
+      )
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject(GIT_TAB_TITLE_SLOT, () =>
+            ctx.slots.register(
+              {
+                name: GIT_TAB_TITLE_SLOT,
+                key: REVIEW_SIDEBAR_ID,
+                locale: NS,
+                inject: () => ({ t: ctx.locale.bind(NS) }),
+              },
+              ReviewSidebarTabTitle,
+            ),
+          ),
+        'dsh-client-ui-review: review sidebar tab title',
       )
 
       // 提交图**不再单独注册成一个面板**。
@@ -16925,22 +17136,32 @@ window.__ModuleLoader__.load({
     // 都在它的 DOM 结构上，隔着官方侧边栏的挂载层断言会让测试被无关的状态耦合住
     // （实测踩到过：换一个 hook key 也拿不到干净状态，因为嵌套组件的 hook 槽按树中位置归属）。
     exports.__projectGitPanelForTest = ProjectGitPanel
-    // 本轮修改审查的两个组件也导出：抽屉的几何/开关与面板的内容都是离线断言的对象，
-    // 而"入口只切换抽屉、绝不碰官方侧栏"这条契约要靠它们直接驱动。
-    exports.__turnReviewDrawerForTest = TurnReviewDrawer
+    // 本轮审查的三个组件都导出给测试：
+    //   * `ReviewSidebarTab` 是官方侧栏里的正文（本轮修复的落点）；
+    //   * `TurnReviewPanel` 是它渲染的面板本体（纯渲染，数据由调用方给）；
+    //   * `TurnReviewChip` 是输入框上方的入口（点击切侧栏标签）。
+    // "入口与侧栏标签共用同一个 context 解析器"这条契约要靠它们直接驱动。
+    exports.__reviewSidebarTabForTest = ReviewSidebarTab
+    exports.__reviewSidebarTabTitleForTest = ReviewSidebarTabTitle
+    exports.__reviewBoundaryForTest = ReviewErrorBoundary
     exports.__turnReviewPanelForTest = TurnReviewPanel
+    exports.__turnReviewPanelConnectedForTest = TurnReviewPanelConnected
     exports.__turnReviewChipForTest = TurnReviewChip
-    // 入口隔离与 scope 语义的断言点：抽屉的开关是模块级 store（不是组件 state），
-    // 因此"点入口 -> 抽屉开"与"点 Git 图标 -> 抽屉不动"都能被直接读出。
-    exports.__turnDrawerStoreForTest = turnDrawerStore
+    /**
+     * 侧栏导航入口导出给测试：它统一了"把侧栏切到审查标签"这一个动作。
+     *
+     * 直接驱动它比隔着组件点更可靠——测试要断言的是"用哪个 kind、失败时怎么报"，而不是
+     * React 的渲染细节。
+     */
+    exports.__openReviewSidebarForTest = openReviewSidebar
+    /** 两个标签的标识：测试据此断言它们**永远不相等**。 */
+    exports.__sidebarIdsForTest = { REVIEW_KIND, REVIEW_SIDEBAR_ID, GIT_KIND, GIT_SIDEBAR_ID }
     // 必需服务：slots 与 locale 是插件机制要求（缺 slots 会导致整个界面白屏）；
-    // sidebarRight 只用于**项目级 Git**（跨插件的「与当前比较」要打开 Git 标签），
-    // sidebarRightTabs 用于把 Git 标签类型注册进它的类型表。
+    // sidebarRight 是**两个入口共用的导航 API**：输入框上方的「本轮修改」用它把侧栏切到
+    // 审查标签，跨插件的「与当前比较」用它打开 Git 标签。
+    // sidebarRightTabs 用于把**两个**标签类型（review / git）注册进它的类型表。
     //
-    // **「本轮修改」入口不注入 sidebarRight**：入口与官方侧栏之间没有任何调用关系，
-    // 注入得多一点下一个人就又能顺手 `openTab` 一次——那正是这次修复的回归点。
-    //
-    // `sessions` 与 `workspaces` 已不再被本插件直接读取（当前工作区改用渲染器注入的
+    // `sessions` 与 `workspaces` 已不再被本插件直接读取（当前会话/工作区改用渲染器注入的
     // 标准钩子 `useSessions`），但仍然声明：官方 `dsh-client-ui-session` /
     // `dsh-client-ui-workspace` 正是用 `slots.provideRoot({ hooks: { sessions/workspaces } })`
     // 把 root source 提供出来的，声明它们可以保证这两个服务先于本项目级入口就位。
