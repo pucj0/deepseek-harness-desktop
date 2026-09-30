@@ -42,7 +42,8 @@
     "test:startup": "npm run sync:plugins && npm run build && node scripts/test-startup.mjs && node scripts/test-startup-window.cjs",
     "benchmark:startup": "npm run build && node scripts/benchmark-startup.mjs",
     "probe:web": "node scripts/probe-web.mjs",
-    "postinstall": "node scripts/link-runtime.mjs"
+    "postinstall": "node scripts/link-runtime.mjs",
+    "bench:startup": "node scripts/benchmark-desktop-startup.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

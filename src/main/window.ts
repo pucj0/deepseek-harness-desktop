@@ -44,6 +44,7 @@ import {
 } from 'electron'
 import type { ShellMenuBarEntry } from './menu'
 import { currentLocale, t } from './i18n'
+import { markStartup } from './startup-timeline'
 import { shellPageHtml } from './shell-page'
 import {
   TITLEBAR_HEIGHT,
@@ -593,6 +594,11 @@ export function createMainWindow(options: MainWindowOptions): {
       appOrigin = new URL(ready.url).origin
       // Stop progress updates before navigation begins, including fast-server races.
       navigated = true
+      // 渲染进程的两个生命周期事件是"界面何时真的出现"的唯一可靠信号：
+      // `dom-ready` = DOM 建好（还没画完），`did-finish-load` = 子资源都到齐。
+      // 用 `once` 是因为切换工作区会重新导航，而时间线只关心**首次**可用。
+      appContents.once('dom-ready', () => markStartup('domReady'))
+      appContents.once('did-finish-load', () => markStartup('didFinishLoad'))
       // 带 token 的 URL 只加载一次，随后服务端会 302 到凭 Cookie 认证的干净根路径。
       await appContents.loadURL(ready.authenticatedUrl)
       appView.setVisible(true)

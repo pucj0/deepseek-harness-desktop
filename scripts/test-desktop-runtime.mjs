@@ -114,6 +114,12 @@ if (!existsSync(APP)) {
   has('没有 LibreOffice 平台负载', asarPaths.some((path) => /libreoffice-kit-(?:win32|darwin|linux|wasm)/u.test(path)) === false)
   has('没有便携 Node 目录', asarPaths.some((path) => path.startsWith('node/')) === false)
 
+  // `electronLanguages` 的效果是可验证的：打包产物里应**只有**中英两套 .pak。
+  // 界面文案本身的双语覆盖由 scripts/check-plugin-i18n.mjs 与 test-i18n.cjs 保证。
+  const localesDir = join(UNPACKED, 'locales')
+  const packs = existsSync(localesDir) ? readdirSync(localesDir).filter((name) => name.endsWith('.pak')).sort() : []
+  check('Electron locale 只有中英两套', packs.join(','), 'en-US.pak,zh-CN.pak')
+
   console.log('')
   console.log('=== 5. 真实启动（Electron Node 模式，与打包后子进程同一条路径）===')
   const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-runtime-'))

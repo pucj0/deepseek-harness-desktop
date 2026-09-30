@@ -28,6 +28,7 @@ import type { RuntimeLocation } from './paths'
 import { resolveBundledPlugins, syncPluginsAtStartup } from './plugin-sync'
 import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
+import { markStartup, reportStartup } from './startup-timeline'
 import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
 import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
@@ -112,7 +113,10 @@ async function main(): Promise<void> {
   //
   // 'system' 让原生外观（菜单栏、原生对话框）与网页外观都跟随系统，两侧因此一致。
   nativeTheme.themeSource = 'system'
+  // 时间线的起点：`markStartup` 的 origin 是模块求值时刻，这里只是明确发出第一行。
+  markStartup('processStart')
   await app.whenReady()
+  markStartup('appReady')
 
   const userDataDir = process.env.DSH_DESKTOP_HOME ?? app.getPath('userData')
   // A dedicated harness home keeps this app's sessions and credentials entirely
@@ -372,11 +376,13 @@ async function main(): Promise<void> {
 
   const credentials = new CredentialStore(userDataDir)
 
-  // 先建窗口（显示加载页），再解包内置运行时。
+  // 先建窗口（显示加载页），再做其余启动工作。
   //
-  // 顺序很重要的原因：内置运行时是压缩携带的（安装包 42.9 MB 而不是散开 197 MB），
-  // 首次启动要把它解到用户目录，实测 9.2 秒。若把解包放在建窗口之前，用户会先对着
-  // 空屏幕等这段时间；现在窗口立刻可见，并在加载页上显示解包进度。
+  // 顺序很重要的原因（历史）：内置运行时曾经是压缩携带的，首次启动要把它解到用户目录，
+  // 实测 9.2 秒；把解包放在建窗口之前，用户会先对着空屏幕等这段时间。那一版把窗口提到
+  // 最前面并在加载页显示解包进度。**这一版不再有解包**（Runtime 直接在 app.asar 里），
+  // 但"窗口先亮、重活在后"的顺序依然保留：它让 `windowCreated` 与
+  // `harnessUsable` 之间成为唯一可优化的区间。
   const iconPath = resolveIconPath(app.isPackaged)
   const mainWindow = createMainWindow({
     userDataDir,
@@ -418,6 +424,7 @@ async function main(): Promise<void> {
   })
   const window = mainWindow.window
   shellWindow = mainWindow
+  markStartup('windowCreated')
 
   /**
    * 处理一次 Harness 上报（在窗口创建之后定义，因为它要读 `window` 之外的注册表状态）。
@@ -451,7 +458,11 @@ async function main(): Promise<void> {
     }
   }
 
-  void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
+  // 标题栏的 git 徽标是**非关键**信息，因此不在这里做。
+  //
+  // 以前它在窗口刚建好（splash 已可见）就发起一次 `git` 子进程：虽然不阻塞窗口显示，
+  // 但它与 Runtime 启动（本版最贵的区间，实测约 3.4 s）抢同一段时间的 CPU 与磁盘。
+  // 移到界面可用之后（见下面 `reportStartup()` 之后），启动区间只剩真正必需的工作。
 
   // Runtime 已经在安装包里（app.asar 的 `runtime/`），**启动时没有任何解包/复制**：
   // 这一版不再交付 `runtime.br`，因此"首次启动解压约 9 秒"这条路径整体消失。
@@ -468,6 +479,7 @@ async function main(): Promise<void> {
     app.exit(1)
     return
   }
+  markStartup('runtimeReady')
 
   // 内置插件的位置。包装形态下是 `resources/plugins`（真实目录，extraResources），开发期
   // 是仓库的 `plugins/`。它有两个用途：**只读**同步（开发期）与交给子进程做 profile 链接。
@@ -492,6 +504,7 @@ async function main(): Promise<void> {
     packaged: app.isPackaged,
   })
   for (const line of pluginSync.messages) process.stderr.write(`${line}\n`)
+  markStartup('pluginSyncFinished')
 
   try {
     runtimeVersion = (JSON.parse(readFileSync(runtime.installAnchor, 'utf8')) as { version?: string }).version ?? runtime.stagedVersion ?? 'unknown'
@@ -707,7 +720,12 @@ async function main(): Promise<void> {
 
   let ready
   try {
+    // `hostSpawned` = 外壳**发起**启动子进程的时刻。它与 `hostReady` 的差值就是
+    // "Runtime 从进程创建到宣布 URL"的净时间——这一版最该被盯住的区间（它包含
+    // Electron 以 Node 模式启动、模块解析、profile 装载与插件链接）。
+    markStartup('hostSpawned')
     ready = await server.start()
+    markStartup('hostReady')
     // 服务端已经启动 = 「移除工作区」的意图已经由它用官方 API 执行完毕，标记是耗材。
     // 放在成功之后而不是构造时：启动失败时标记要留着，让下一次启动再试。
     takePendingForgets(userDataDir)
@@ -722,7 +740,15 @@ async function main(): Promise<void> {
   }
 
   // Hand the already-visible window over to the real UI.
+  markStartup('navigationStarted')
   await mainWindow.navigate(ready)
+  // `domReady` / `didFinishLoad` 由渲染进程的生命周期事件记（见 window.ts）；
+  // navigate 返回时页面已经加载完，因此这里就是"界面可用"。
+  markStartup('harnessUsable')
+  reportStartup()
+
+  // 界面可用之后才做非关键工作：标题栏 git 徽标（一次 git 子进程）与随后的更新检查。
+  void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
 
   // 更新相关的装配放在托盘之前：托盘与菜单都要用到同一个"打开更新窗口"入口，
   // 而它们的回调是在创建时捕获的，所以动作必须先定义好。
