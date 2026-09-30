@@ -18,7 +18,11 @@ const { join, resolve } = require('node:path')
 
 if (!process.versions.electron) {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const result = spawnSync(require('electron'), [__filename], { cwd: resolve(__dirname, '..'), env, stdio: 'inherit', timeout: 60_000, windowsHide: true })
+  // `--no-sandbox --disable-gpu` **不是可选的美化**：在某些宿主（例如受限沙箱里的 Windows）
+  // 加上它们才能起来，否则进程以 Windows 状态 `0x80000003` 直接结束、没有任何 stdout/stderr，
+  // 看起来像"测试被跳过"。本文件另一处（`test-update-window-layout.mjs`）也用同一组参数，
+  // 那里已经实测量出过真实布局。
+  const result = spawnSync(require('electron'), ['--no-sandbox', '--disable-gpu', __filename], { cwd: resolve(__dirname, '..'), env, stdio: 'inherit', timeout: 60_000, windowsHide: true })
   if (result.error !== undefined && result.error !== null && result.stdout === null) {
     console.error(`无法启动 Electron：${String(result.error)}`)
   }
@@ -122,12 +126,14 @@ async function run() {
       .map((node) => ({ id: node.id, right: Math.round(node.getBoundingClientRect().right), left: Math.round(node.getBoundingClientRect().left) }));
     return { width, boxes, scrollWidth: document.documentElement.scrollWidth };
   })()`)
-  assert.equal(geometry.width, 520)
+  // 窗口宽度是 560（见 update-window.ts 的注释：这个尺寸是按"三种状态都不出滚动条"量出来的），
+  // 减去两边的滚动条/边框就是客户端宽度。
+  assert.equal(geometry.width, 544)
   for (const box of geometry.boxes) {
     assert.ok(box.left >= 0 && box.right <= geometry.width, `${box.id} must stay inside the window (${JSON.stringify(geometry)})`)
   }
   // 页面本身也不能出现横向滚动条（那同样意味着有东西溢出）。
-  assert.equal(geometry.scrollWidth, 520, `no horizontal overflow expected (${JSON.stringify(geometry)})`)
+  assert.equal(geometry.scrollWidth, 544, `no horizontal overflow expected (${JSON.stringify(geometry)})`)
 
   // ------------------------------- 4. 不能直装时显示 Release 备用入口 ----
   const releaseOnly = openUpdateWindow(parent, directory, strings, () => {}); releaseOnly.window.hide()
@@ -146,7 +152,7 @@ async function run() {
   state = await read(panel, `({ button: document.getElementById('btn-download').textContent, width: document.getElementById('progress-bar').style.width })`)
   assert.deepEqual(state, { button: 'Downloading 42%…', width: '42%' })
 
-  console.log('PASS dual GitHub update window, Runtime install button/state/progress and 520px layout')
+  console.log('PASS dual GitHub update window, Runtime install button/state/progress and 544px layout')
 }
 run().then(() => finish(0), (error) => { console.error(error); finish(1) })
 function finish(code) {

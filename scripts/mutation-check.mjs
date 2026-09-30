@@ -85,28 +85,58 @@ const FILTER = process.argv[2] ?? ''
  * @param options - `{ file, from, to, script, label, prepare }`；`prepare` 在每次跑测试前执行
  *   （`src/` 下的变异要先用它把源码编译进 `dist/`）。
  */
+/**
+ * 每个被变异过的文件的**原始内容**。
+ *
+ * 为什么必须记下来并在最后核对一次：`mutate()` 的顺序是"读原文件 → 写变异版 → 跑测试 →
+ * 写回原文件"，中间任何一个环节被打断（Ctrl-C、进程被杀、写盘失败），源码就会**留在变异
+ * 状态**——而那是一份会真的被编译、被打包、被发布的源码。实测踩到过：一次中断之后
+ * `paths.ts` 里留着"只看 major.minor.patch"的变异版，而它看起来跟正常代码一模一样。
+ *
+ * @type {Map<string, string>}
+ */
+const originals = new Map()
+
 const mutate = ({ file, from, to, script, label, prepare }) => {
   if (FILTER !== '' && !label.includes(FILTER)) return
   const original = readFileSync(file, 'utf8')
+  originals.set(file, original)
   if (!original.includes(from)) {
     report(label, false, `变异点没找到：${from.slice(0, 60)}`)
     return
   }
-  writeWithRetry(file, original.split(from).join(to))
-  if (prepare !== undefined) prepare()
-  const mutated = run(script)
-  writeWithRetry(file, original)
-  if (prepare !== undefined) prepare()
+  /**
+   * 变异 → 编译 → 跑测试 → **无论成败都还原** → 编译 → 再跑一次。
+   *
+   * `prepare`（TS 编译）必须包在 `try` 里：变异版的 `src/` **可能编译不过**（那正是
+   * "这个变异改变行为"的一种表现），而 `runBuild()` 在编译失败时抛错。没有这层 `try`，
+   * 异常会直接从 `mutate()` 冒出去，**还原那一步就永远不会执行**——源码里于是留下一份
+   * 变异版，而它看起来和真代码一模一样。实测踩到过：`paths.ts` 的版本比较被留成了
+   * "只看 major.minor.patch"。
+   */
+  let mutated
+  try {
+    writeWithRetry(file, original.split(from).join(to))
+    prepare?.()
+    mutated = run(script)
+  } finally {
+    writeWithRetry(file, original)
+  }
+  try {
+    prepare?.()
+  } catch {
+    // 还原后的编译失败必须暴露在下面那次 `run(script)` 的结果里，而不是在这里中断流程。
+  }
   const restored = run(script)
-  const mutatedFailed = mutated.code !== 0
+  const mutatedFailed = mutated === undefined || mutated.code !== 0
   const restoredOk = restored.code === 0
   report(
     label,
     mutatedFailed && restoredOk,
-    `变异后 exit=${mutated.code}（应非 0）/ 还原后 exit=${restored.code}（应为 0）`,
+    `变异后 exit=${mutated === undefined ? 'prepare 抛错' : mutated.code}（应非 0）/ 还原后 exit=${restored.code}（应为 0）`,
   )
   if (restoredOk && !mutatedFailed) {
-    const tail = mutated.out.split('\n').filter((line) => line.includes('FAIL')).slice(0, 2).join(' / ')
+    const tail = (mutated?.out ?? '').split('\n').filter((line) => line.includes('FAIL')).slice(0, 2).join(' / ')
     console.log(`       变异后的测试仍然通过，说明断言没覆盖到：${tail}`)
   }
 }
@@ -745,6 +775,84 @@ mutate({
   to: "    const REVIEW_KIND = 'git'",
   script: 'test-turn-review-sidebar.mjs',
 })
+
+// ===========================================================================
+// 42-44. Runtime 版本比较（1.7.5 的线上故障：installer 拒绝 rc.2）
+//
+// 这三条覆盖的是"三套比较器各自为政"这一整类回归。它们都指向 `src/`，因此每次变异后都要
+// 重新编译（`prepare: runBuild`）。
+// ===========================================================================
+
+const RUNTIME_VERSION = join(ROOT, 'src', 'main', 'runtime-version.ts')
+const RUNTIME_UPDATER = join(ROOT, 'src', 'main', 'runtime-updater.ts')
+const PATHS = join(ROOT, 'src', 'main', 'paths.ts')
+
+mutate({
+  file: RUNTIME_VERSION,
+  label: '42) 版本比较退回"只看 major.minor.patch" → rc.1 → rc.2 的断言变红',
+  // 这就是原 compareCore() 的语义：核心三段相同就返回 0，于是 rc.1 与 rc.2 相等、
+  // installer 抛出"不低于目标版本，无需安装"（线上那条错误信息）。
+  from: '  return comparePrerelease(a.prerelease, b.prerelease)',
+  to: '  void comparePrerelease\n  return 0',
+  prepare: runBuild,
+  script: 'test-runtime-updater.cjs',
+})
+
+mutate({
+  file: RUNTIME_VERSION,
+  label: '43) 预发布 identifier 退回字符串比较 → rc.10 > rc.2 的断言变红',
+  // 字符串序会得出 `"10" < "2"`，也就是 `rc.10 < rc.2`——一个"每发布一个新的 rc 就出错"的坑。
+  from: '      const difference = Number(a) - Number(b)\n      if (difference !== 0) return difference',
+  to: '      if (a !== b) return a < b ? -1 : 1\n      const difference = 0\n      if (difference !== 0) return difference',
+  prepare: runBuild,
+  script: 'test-runtime-version.mjs',
+})
+
+mutate({
+  file: PATHS,
+  label: '44) 启动选择退回"只看核心三段" → 下载版选择断言变红',
+  // 同类的第二处：`paths.ts` 曾经自己有一份 compareVersions()，把 0.2.0-rc.1、0.2.0-rc.2 与
+  // 0.2.0 全看成同一个版本。这里把它换回"只比核心三段"的写法。
+  from: 'compareRuntimeVersions(downloaded.version, bundledVersion) >= 0',
+  to: "downloaded.version.split('-')[0] >= bundledVersion.split('-')[0]",
+  prepare: runBuild,
+  script: 'test-runtime-paths.cjs',
+})
+
+mutate({
+  file: RUNTIME_UPDATER,
+  label: '45) 把"内置不低于目标"改回抛错 → already-current 断言变红',
+  // 旧写法把"目标 == 当前"也当成失败抛出（用户看到红色的「Runtime 更新失败」，正文却是
+  // "无需安装"）。这里在 `already-current` 分支**之前**插一句同样的抛错。
+  //
+  // ⚠️ `from` 必须**唯一**：`mutate()` 用的是 `split(from).join(to)`，字面量出现两次就会
+  // 被替换两次（实测：只写 `status: 'already-current',` 会把下面 `installed` 分支的同一行
+  // 也改掉，插入两条抛错）。因此这里带上紧跟其后的 `version,`／`dir:` 两行一起做锚点。
+  from: "        status: 'already-current',\n        version,\n        dir: installed?.dir ?? this.options.userDataDir,",
+  to: "        status: 'installed',\n        version,\n        dir: installed?.dir ?? this.options.userDataDir,",
+  prepare: runBuild,
+  script: 'test-runtime-updater.cjs',
+})
+
+mutate({
+  file: join(ROOT, 'src', 'main', 'update-window.ts'),
+  label: '46) 更新窗口尺寸退回 520x460 → 真实布局断言变红',
+  // 520x460 实测 main 内容 381 > 358，右侧必然出现滚动条（就是被反馈的那张截图）。
+  from: '    width: 560, height: 560,',
+  to: '    width: 520, height: 460,',
+  prepare: runBuild,
+  script: 'test-update-window-layout.mjs',
+})
+
+// 收尾核对：所有被变异过的文件都必须与开始时**逐字节相同**。不同就说明源码被留在了变异
+// 状态（见 `originals` 的说明），此时必须失败——它比任何一条变异断言都重要。
+for (const [file, before] of originals) {
+  const after = readFileSync(file, 'utf8')
+  if (after !== before) {
+    failures += 1
+    console.error(`源码被留在了变异状态：${file}（请手工还原后再提交）`)
+  }
+}
 
 console.log('')
 console.log(failures === 0 ? '变异验证全部符合预期' : `${failures} 项变异不符合预期`)

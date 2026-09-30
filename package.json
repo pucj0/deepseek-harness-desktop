@@ -29,10 +29,12 @@
     "release": "npm run dist:win && electron-builder --publish always",
     "test:i18n": "node scripts/test-i18n.cjs",
     "test:runtime": "node scripts/test-desktop-runtime.mjs",
+    "test:runtime-version": "node scripts/test-runtime-version.mjs",
     "test:runtime-updater": "node scripts/test-runtime-updater.cjs",
     "test:runtime-paths": "node scripts/test-runtime-paths.cjs",
     "test:npm": "node scripts/test-bundled-npm.mjs",
     "test:packaged-plugin": "node scripts/test-packaged-review-plugin.mjs",
+    "test:update-layout": "npm run build && node scripts/test-update-window-layout.mjs",
     "test:size": "node scripts/report-package-size.mjs",
     "test:locale": "npm run build && node scripts/test-harness-locale.mjs && node scripts/test-shell-locale.mjs && node scripts/test-menu-inventory.mjs && node scripts/test-shell-cold-start.cjs && node scripts/test-titlebar.mjs && node scripts/test-titlebar-ui.cjs",
     "test:settings": "npm run build && node scripts/test-settings-composition.mjs && node scripts/test-typography-settings.mjs",
@@ -43,12 +45,13 @@
     "test:git-sidebar": "node scripts/test-git-sidebar-contract.mjs && node scripts/test-turn-review-sidebar.mjs && node scripts/test-turn-review-scope.mjs && node scripts/test-project-git-panel-style.mjs && node scripts/test-review-project-git.mjs && node scripts/test-auto-save-ui-contract.mjs && node scripts/test-review-workspace-race.mjs",
     "test:turn-review-ui": "node scripts/test-turn-review-sidebar-smoke.mjs",
     "test:ui-typography": "node scripts/test-typography-settings.mjs && node scripts/test-ui-typography.cjs",
-    "test:update-window": "npm run build && node scripts/test-runtime-release.cjs && node scripts/test-update-window-logic.cjs && node scripts/test-update-window.cjs",
+    "test:update-window": "npm run build && node scripts/test-runtime-version.mjs && node scripts/test-runtime-release.cjs && node scripts/test-update-window-logic.cjs && node scripts/test-update-window.cjs && node scripts/test-update-window-layout.mjs",
     "test:startup": "npm run sync:plugins && npm run build && node scripts/test-startup.mjs && node scripts/test-startup-window.cjs",
     "benchmark:startup": "npm run build && node scripts/benchmark-startup.mjs",
     "probe:web": "node scripts/probe-web.mjs",
     "postinstall": "node scripts/link-runtime.mjs",
-    "bench:startup": "node scripts/benchmark-desktop-startup.mjs"
+    "bench:startup": "node scripts/benchmark-desktop-startup.mjs",
+    "test:runtime-real": "node scripts/test-runtime-install-real.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

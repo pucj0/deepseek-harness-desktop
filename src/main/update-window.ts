@@ -159,21 +159,41 @@ export function openUpdateWindow(
   .status.unknown { background:#4a3030;color:#e6b0b0; }
   .note { margin-top:8px;color:#8a8a93;font-size:12px; }
   /* 按钮区：只放 Runtime 直装按钮，右对齐；文字再长也只占自己那一行，
-     两个动作按钮因此永远不会把 520px 的窗口挤到换行。 */
+     两个动作按钮因此永远不会把窗口挤到换行。 */
   .actions { display:flex;flex-direction:column;align-items:flex-end;gap:6px;margin-top:12px; }
   .actions button { max-width:100%;white-space:normal; }
   #progress-wrap { margin:10px 0 16px; }
   .progress { height:6px;border-radius:3px;background:#2a2a30;overflow:hidden; }
   .progress-bar { height:100%;width:0;background:#4d8dff;transition:width .2s ease; }
   .progress-text { margin-top:4px;color:#8a8a93;font-size:12px; }
-  #runtime-install-progress { max-width:100%;text-align:right;word-break:break-all; }
+  /* 进度文本：只显示**最近一条** npm 日志。
+     它必须不能撑高窗口——npm 的 http 日志一行可以很长（完整 URL + 包名），换行几次就会把
+     面板推到出现滚动条。单行 + 省略号 + 明确的 max-height 让它在任何输入下都占同样的一行；
+     完整日志走 stderr / 日志文件，而不是这里。 */
+  #runtime-install-progress {
+    max-width:100%;text-align:right;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    max-height:1.4em;
+  }
   /* 页脚最多同时出现两个按钮（关闭 + 其中一条轨道的动作）：允许收缩并换行，
-     中文长按钮因此不会溢出 520px 宽的窗口。 */
+     中文长按钮因此不会溢出窄窗口。 */
   footer { flex-wrap:wrap; }
   footer button { max-width:100%;white-space:normal; }`
   const panel = openPanel(parent, userDataDir, {
     id: 'update', title: strings.title, rows: [], close: strings.buttonClose,
-    body, footer, script, css, width: 520, height: 460,
+    body, footer, script, css,
+    // **尺寸是量出来的，不是猜的。** 判据不是"文档有没有滚动条"——`panelCss` 把 body 固定成
+    // 100% 高，所以溢出的其实是内部那个 `main`（`overflow-y:auto`），右侧看到的那条滚动条
+    // 来自它。因此真正要成立的是 `main.scrollHeight <= main.clientHeight`。
+    //
+    // 实测（本机 Electron 44，中文最长的内置说明 + 「安装 Runtime 并重启」按钮 + 安装中状态
+    // 三种情况都量过）：
+    //   520x460 → inner 504x421，main 内容 381 > 358 → 出现滚动条（这就是被反馈的那张截图）
+    //   520x540 → inner 504x501，main 内容 438 > 438 的边缘状态，换个语言就溢出
+    //   560x560 → inner 544x521，main 内容 458 <= 458，三种状态**都**没有滚动条
+    // 因此这里取 560x560，并且把内置说明压到两行（它是最长的可变文本）。窗口高度还受
+    // `openPanel` 的 `min(高度, 屏幕可用高 * 0.9)` 限制，小屏上不会超出屏幕。
+    width: 560, height: 560,
   }, onAction)
   let loaded = false
   let latestState: UpdatePanelState | undefined
