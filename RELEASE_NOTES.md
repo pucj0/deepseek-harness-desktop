@@ -1,3 +1,44 @@
+# 1.7.9
+
+修掉顶部 40px 的最后一个视觉问题：**右上角原生窗口按钮那一块的底色，与左边不是同一个颜色**。现在整条 Windows caption strip 是一个连续的整体。
+
+## 问题
+
+顶部那一条有**两个背景来源**，而它们原来取的不是同一个 token：
+
+| 来源 | 谁来画 | 取的 token | 浅色下实测 |
+|---|---|---|---|
+| 左侧 / 中间（Logo、菜单、空白） | Harness 的 `[data-windows-titlebar] .frame::before` | `--dsw-specific-sidebar-fill` | `rgb(249, 250, 251)` |
+| 右上角（最小化 / 最大化 / 关闭） | 原生 `titleBarOverlay.color` | 报的是 **页面 body 的背景** | `rgb(255, 255, 255)` |
+
+两个值只差一点点，于是右上角看起来是一块偏白的矩形。**这不是遮罩问题，是同色问题。**
+
+## 修法（与官方 Desktop 的 `preload-windows.ts` 一致）
+
+- 渲染进程侧用官方的 **probe 取色**：先把 `--dsw-specific-sidebar-fill` 与 `--dsw-alias-label-primary` 解析成真实颜色，再用一个不可见元素让浏览器归一化，最后转成原生 `rgba(...)` 上报给主进程。
+- 主进程侧照旧 `setTitleBarOverlay({ color, symbolColor, height: 40 })`，由页面上报驱动——**没有任何写死的颜色**，主题一换就跟着换。
+- **没有用任何遮罩补丁**：没有新增 div、没有绝对定位的色块、没有给菜单加宽背景、没有自绘窗口按钮。右上角仍然是系统原生按钮（悬停态、Win11 贴靠布局、DPI 缩放全部保留）。
+
+顺带修掉一个初始化顺序问题：preload 可能早于 Harness 的样式表执行，那时还取不到颜色。现在会先给一个合理的兜底值，并在 token 就位后自动再同步一次，因此最终状态一定正确。
+
+## 实测
+
+```
+渲染进程 strip（--dsw-specific-sidebar-fill） = #f9fafb   ← 顶部左侧
+主进程 overlay.color                          = #f9fafb   ← 右上角按钮区
+主进程 overlay.symbolColor                    = #0f1115   ← 与 --dsw-alias-label-primary 一致
+（旧实现用的 body 背景                        = #ffffff）  ← 这就是那块偏白
+```
+
+## 验证
+
+新增"顶部 40px 背景一致性"回归（真实 Electron + 真实打包 Host + 真实 Harness 文档），逐项断言 overlay 的 `color` 等于渲染进程算出的 strip 颜色、`symbolColor` 等于 label primary、**不等于** body 背景、不是纯白，并且最终 Harness 文档加载后仍会同步一次。
+
+其它回归（顶部菜单、侧栏展开/收起布局、Git / Review 侧栏、Runtime 更新、更新窗口）全部通过。
+
+## 已知未完成
+
+启动耗时的冷/热 P50/P95 仍未取到（打包后的可执行文件在开发宿主上无法带开关启动 GUI，测量脚本已就绪）。
 # 1.7.8
 
 修掉 1.7.7 的两个 UI 回归：**顶部菜单整体消失**，以及**左上角仍是浏览器版侧栏布局**。菜单回来了，而且这次真正走官方 Desktop 的 Windows Caption Layout。
