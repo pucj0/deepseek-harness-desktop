@@ -26,6 +26,9 @@ const DROP_FILE_SUFFIX = [
   [/\.d\.[cm]?ts$/iu, 'TypeScript declaration'],
   [/\.tsbuildinfo$/iu, 'TypeScript build cache'],
   [/\.flow$/iu, 'Flow types'],
+  // **刻意不按 `.md` 后缀一刀切**：`@deepseek-ai/dsh-agent-preset/skills/**/SKILL.md`
+  // 是**智能体技能定义**，属于运行时数据而不是文档——按后缀删会把技能功能删掉。
+  // 因此只删明确是文档的那几类（README / CHANGELOG / HISTORY / AUTHORS 与包根 docs/）。
   // 调试符号：node-pty 的 conpty 符号单独就有约 10 MB。
   [/\.pdb$/iu, 'debug symbols'],
   [/\.ilk$/iu, 'incremental linker output'],

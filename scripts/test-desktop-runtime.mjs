@@ -56,6 +56,8 @@ const MUST_DROP = [
   ['some-pkg/lib/types.d.ts', 'TypeScript declaration'],
   ['node-pty/build/Release/pty.pdb', 'debug symbols'],
   ['some-pkg/README.md', 'readme'],
+  ['some-pkg/docs/notes.md', 'docs 或 markdown'],
+  ['some-pkg/lib/CHANGELOG.md', 'changelog'],
   ['some-pkg/LICENSE', 'license text'],
   ['@mixmark-io/domino/test/domino.js', 'tests'],
   ['some-pkg/docs/api.html', 'docs'],
@@ -122,6 +124,9 @@ if (!existsSync(APP)) {
 
   console.log('')
   console.log('=== 5. 真实启动（Electron Node 模式，与打包后子进程同一条路径）===')
+  // `mkdtempSync` 不会创建父目录：某些环境（CI 的自定义 TEMP、被清掉的临时目录）里
+  // `tmpdir()` 本身可能不存在，先补上，免得报一个与测试无关的 ENOENT。
+  mkdirSync(tmpdir(), { recursive: true })
   const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-runtime-'))
   mkdirSync(join(home, 'ws'), { recursive: true })
   /**
