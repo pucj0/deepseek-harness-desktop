@@ -1,3 +1,30 @@
+# 1.7.5
+
+本版有两件事：**Harness Runtime 现在可以在应用内直接安装**，以及**「本轮修改」正式迁入 Harness 官方右侧栏**（并修掉它一直报「当前没有可用的工作区」的根因）。
+
+## Runtime 可以在应用内直接更新
+
+以前 Runtime 有新版时只能"打开 Runtime Release"，安装要等下一个 Desktop Release。现在更新窗口的 Runtime 轨道会给出**「安装 Runtime 并重启」**：
+
+- **版本由官方 GitHub Release 授权。** 目标版本必须等于官方 `deepseek-ai/deepseek-harness` 的 `dsh-v*` Release 里的最新版本；GitHub 的 source archive 永远不会被当成可运行的 Runtime（源码 tag 没有构建好的依赖闭包）。
+- **用应用自带的 npm，你的电脑不需要装 Node.js 或 npm。** 应用里随包携带一份精确锁定版本的 npm CLI，以 Electron 自带的 Node 24（`ELECTRON_RUN_AS_NODE=1`）执行 `npm install @deepseek-ai/dsh@<版本>`。首选 `registry.npmmirror.com`，失败自动回退 `registry.npmjs.org`；依赖按该 Release 的发布时间 `+24h` 解析，避免上游"半波发布"时把还没上架的兄弟包卷进来。
+- **装不干净就绝不切换。** 先装到 `<userData>/runtime/.staging-*`，校验**真实** `package.json` 的版本与目标一致、写好 `runtime.json` 之后才改名为 `<userData>/runtime/<版本>`，最后才把 `current` 指过去。中断或失败只留下一个 staging 目录，**当前正在用的 Runtime 一个字节都不会被动**。
+- **选择规则有明确的优先级。** `current` 只有在版本**不低于**本 Release 内置的 Runtime 时才会被使用，因此升级 Desktop 之后，内置的新 Runtime 不会被一个更旧的下载版本压住；`current` 损坏、断链或版本读不出来时同样回退内置。session、工作区、设置与登录数据一律不删。
+- **起不来会自动回退。** 如果更新装出来的 Runtime 启动失败，应用会先移除 `current`、提示「Runtime 更新已回退」并重启，回到内置 Runtime。
+- 安装完成后会问「立即重启 / 稍后」；立即重启前先停掉当前 Harness server。**Runtime 安装与 Desktop 安装包下载互斥**，不会同时进行。
+- 无法直接安装时（开发模式、包里没有 npm CLI），Runtime 轨道仍然只显示「打开 Runtime Release」，与本版之前一致。
+
+## 「本轮修改」迁入官方右侧栏
+
+右侧栏现在有两个语义完全不同的标签：**审查** 与 **Git**。
+
+- **审查（Review）** 回答"这一轮 agent 改了什么"：基线是本轮开始时记录的快照，只列本轮改动的文件与逐文件差异（并排 / 统一、字符级高亮、按需加载、二进制与大文件处理全部保留）。它**不会**把你在 agent 开始之前自己改过的文件算进本轮。
+- **Git** 回答"整个仓库相对 HEAD 是什么状态"：Changes | Log、提交图、暂存与提交、分支、储藏、Auto-saved Changes、Smart Checkout，一个都没变。
+- 输入框上方的「本轮修改 N」现在**直接打开侧栏的审查标签**，而不是弹一个自制浮层；关闭、宽度、全屏与拖动全部交给官方侧栏。
+- **修掉一个真实故障：**以前入口按钮能显示「本轮修改 4」，点开却写「当前没有可用的工作区 / 0 个文件」。原因是入口在会话作用域里能拿到当前会话，而那个自制浮层挂在整帧浮层的 root 槽位上、拿不到会话作用域的数据，于是它解析出的工作区是空的。现在入口与审查标签共用**同一个**会话上下文解析，按钮上的数字与标签里的文件数必然一致；切换会话时会跟着换，"当前没有可用的工作区"只在真的没有会话时才会出现。
+
+---
+
 # 1.7.4
 
 本版是一次**安装包体积与启动路径的架构重构**：Windows x64 安装包从 **203 MiB 降到 127.63 MiB**（−75.4 MiB / −37%），并且**首次安装后启动不再有约 9 秒的"解压内置运行时"等待**——那条路径被整体删除，不是优化。
