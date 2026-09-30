@@ -5,6 +5,9 @@
 //   node scripts/release.mjs 2.0.0 --force 真正需要跳出序列时才用
 //   node scripts/release.mjs --dry-run    只打印将要发生的事，不改任何东西
 //
+// 需要走 HTTP 代理才能推送的机器，先设置 `DSH_GIT_PROXY`（例如
+// `http://127.0.0.1:7890`）；不设置时直连。
+//
 // 存在的理由：手工发布踩过两次严重的坑。
 //
 //   1. 先 `version.mjs next`（得到 1.0.1），却把标签打成了 `v1.1.0`。结果 CI 构建出
@@ -34,13 +37,29 @@ function git(...argv) {
   return execFileSync('git', argv, { encoding: 'utf8' }).trim()
 }
 
-/** 按项目配置给 git 加上代理（推送需要）。 */
+/**
+ * 推送 master 与标签。
+ *
+ * 代理是**可选**的：默认直连，只有显式设置 `DSH_GIT_PROXY`（例如
+ * `http://127.0.0.1:7890`）时才走它。
+ *
+ * 以前这里把 `http://127.0.0.1:7890` 写死，而那台机器上的代理一关，push 就会以
+ * `Failed to connect to 127.0.0.1 port 7890` 失败——**版本号此时已经写进 package.json
+ * 并提交、标签也已经打好**，于是只能手工收拾。默认直连之后，需要代理的机器显式给环境
+ * 变量即可，不需要代理的机器不会再被一个不存在的代理挡住。
+ *
+ * @param argv - 传给 git 的参数。
+ * @returns git 的 stdout（已 trim）。
+ */
 function gitWithProxy(...argv) {
-  return execFileSync(
-    'git',
-    ['-c', 'http.proxy=http://127.0.0.1:7890', '-c', 'https.proxy=http://127.0.0.1:7890', ...argv],
-    { encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
-  ).trim()
+  const proxy = process.env.DSH_GIT_PROXY
+  const config = typeof proxy === 'string' && proxy !== ''
+    ? ['-c', `http.proxy=${proxy}`, '-c', `https.proxy=${proxy}`]
+    : []
+  return execFileSync('git', [...config, ...argv], {
+    encoding: 'utf8',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  }).trim()
 }
 
 /**
