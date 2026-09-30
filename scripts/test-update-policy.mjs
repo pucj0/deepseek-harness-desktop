@@ -106,8 +106,36 @@ assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*white-space:nowra
 assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*text-overflow:ellipsis/u)
 assert.match(updateWindow, /#runtime-install-progress \{[\s\S]*max-height:1\.4em/u)
 
-// ---------------------------------------------- 4. 两条回退路径必须存在 ----
-// 启动失败 → 回退（摘掉 current）→ 重启并回到内置 Runtime。
+// ================================ 3b. 单 renderer 的顶部菜单（架构级守卫） ======
+//
+// 1.7.7 的回归是"顶部菜单整体消失"，根因有两层，都要在这里钉住：
+//   a. 单 renderer 之后没有任何人画那一行菜单 → 必须由 preload 挂在 Harness 文档里；
+//   b. **沙箱化的 preload 不能 `require` 相对路径的文件**——一旦有人把菜单实现拆成
+//      `require('./caption-menu')`，整个 preload 都会加载失败，`window.dshDesktop` 与菜单
+//      一起消失，而主进程收不到任何错误（Electron 只在渲染进程 console 里留一行）。
+//      因此这里直接扫**编译产物**：任何 `require('./…')` 都会让这条断言变红。
+const appPreload = read('src/preload/app.ts')
+const appPreloadBuilt = read('dist/preload/app.js')
+assert.match(appPreload, /data-dsh-desktop-menu/u, 'the caption menu host must be created by the preload')
+assert.match(appPreload, /attachShadow\(\{ mode: 'open' \}\)/u, 'the menu must live in a Shadow Root')
+assert.match(appPreload, /dsh-desktop:shell-menu-open/u, 'menu clicks must go through the existing IPC')
+assert.match(appPreload, /dsh-desktop:shell-state/u, 'the menu must re-read labels on state pushes (locale / menu revision)')
+assert.match(appPreload, /env\(titlebar-area-width/u, 'the menu must stay clear of the native caption buttons')
+assert.match(appPreload, /-webkit-app-region: no-drag/u, 'the menu area must not be a drag region')
+// 扫**代码**而不是注释：说明文字里正当地写着 `require('./caption-menu')` 这个反例。
+const codeOnly = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')
+const preloadCode = codeOnly(appPreloadBuilt)
+for (const match of preloadCode.matchAll(/require\(['"](\.[^'"]*)['"]\)/gu)) {
+  assert.fail(`沙箱化 preload 不能 require 相对路径：${match[0]}（会让整个 preload 加载失败）`)
+}
+// 菜单必须复用那份唯一的 Application Menu，而不是复制命令表。
+// 接线在 index.ts：`openMenuAt(applicationMenu, index, window, point, onClosed)`——顶层下标来自
+// 渲染进程（不可信输入），`openMenuAt` 自己会校验范围并取回**同一个** MenuItem 的子菜单。
+assert.match(read('src/main/index.ts'), /openMenuAt\(applicationMenu, index, window, point, onClosed\)/u, 'the main process must pop the existing native submenu')
+assert.match(read('src/main/window.ts'), /setMenuBarVisibility\(false\)/u, 'the native menu row stays hidden (one menu row only)')
+assert.match(read('src/main/window.ts'), /before-input-event[\s\S]{0,400}input\.key !== 'Alt'/u, 'bare Alt must be swallowed so no second menu row appears')
+
+// ---------------------------------------------- 4. 两条回退路径必须存在 ----// 启动失败 → 回退（摘掉 current）→ 重启并回到内置 Runtime。
 assert.match(main, /runtimeUpdater\.rollback\(\)/u)
 assert.match(main, /updateRuntimeRollbackTitle/u)
 assert.match(main, /restartIntoBundledRuntime/u)

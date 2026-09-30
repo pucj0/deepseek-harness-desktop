@@ -302,20 +302,29 @@ export function createMainWindow(options: MainWindowOptions): {
   }
 
   const window = new BrowserWindow(constructorOptions)
-  // 原生菜单栏的视觉处理。accelerator 始终由已注册的 application menu 提供，因此**无论**
-  // 哪种结构，快捷键都不会丢；不同的只是"菜单栏以什么方式露出来"。
-  //
-  //   * 两层结构：把自己画的菜单按钮放在自绘标题栏里（那才是这一版的入口），因此把原生
-  //     菜单栏藏起来，并吃掉裸 Alt——否则 Alt 会弹出第二套菜单栏，与自绘的那套并存。
-  //   * 单 renderer：**没有**自绘菜单了（Harness 自己拥有整个标题栏区域，外壳不再往里插
-  //     DOM），因此这里**不拦 Alt**：Windows 上按 Alt 会照常露出原生菜单栏，用户仍然能
-  //     用鼠标走完整的 文件/编辑/视图/更新/帮助。这是"菜单功能一个不丢"在单 renderer 下
-  //     的落地方式，也避免了为了菜单再引入第二个 WebContents。
-  //
-  // 只在自绘标题栏的平台上做：macOS 的菜单本来就该待在系统菜单栏，而 macOS 的 Option 是
-  // 输入修饰键，不能像 Windows 的 Alt 那样被拦掉。
+  /**
+   * 原生菜单栏的视觉处理。
+   *
+   * **要点：藏起来的是"视觉 menu row"，不是 Application Menu 本身。** 后者必须继续用
+   * `Menu.setApplicationMenu()` 装着，因为 accelerator、`role`（undo/copy/paste/zoom…）、
+   * 以及我们要 popup 的那些原生子菜单全靠它。
+   *
+   * 为什么要藏（而不是让 Windows 画原生菜单栏）：那样会得到"Windows 系统菜单栏 + Harness
+   * 页面"两个视觉层级，正是这一版要消掉的东西。所以两套结构都把原生 menu row 藏起来，
+   * 用**文档内**那一行菜单代替：
+   *
+   *   * 单 renderer：那一行由 `src/preload/caption-menu.ts` 挂在 **Harness 自己的文档**里
+   *     （Shadow DOM，用 Harness 的 token 与字体），视觉上就是 Harness 标题栏的一部分；
+   *   * 两层结构：那一行由旧的 `shell-page.ts` 画在自绘标题栏里。
+   *
+   * 两种情况都要**吃掉裸 Alt**：否则 Windows 会把原生 menu row 露出来，与文档内那一行并存。
+   * 只影响裸 Alt——`before-input-event` 早于菜单快捷键处理，Ctrl+O / Ctrl+Shift+U 这些
+   * accelerator 不受影响（有测试断言）。
+   *
+   * 只在自绘标题栏的平台上做：macOS 的菜单本来就该待在系统菜单栏（那里的 `menus` 为 false，
+   * 文档内不画菜单），而 macOS 的 Option 是输入修饰键，不能像 Windows 的 Alt 那样被拦掉。
+   */
   const hidesNativeMenuBar = usesCustomTitleBar() && !keepsNativeMenuBar()
-  const suppressAlt = hidesNativeMenuBar && !SINGLE_RENDERER
   if (hidesNativeMenuBar) window.setMenuBarVisibility(false)
 
   /** 主题状态：Harness 页面上报的令牌优先，未上报时跟随系统。 */
@@ -542,13 +551,10 @@ export function createMainWindow(options: MainWindowOptions): {
   })
   window.on('close', () => persist(window, userDataDir))
 
-  // 菜单栏视觉上隐藏后，Windows 仍会响应单击 Alt 把它露出来——两层结构下那会变成
-  // "原生菜单栏 + 自绘菜单"两套同时存在，因此把裸 Alt 吃掉。`before-input-event` 早于
-  // 菜单快捷键处理，因此只影响 Alt 本身，不会碰到 Ctrl+O 之类的 accelerator。
-  //
-  // **单 renderer 下不做这件事**：那时没有自绘菜单，Alt 露出原生菜单栏正是我们要的入口
-  // （见上面 `suppressAlt` 的说明）。
-  if (suppressAlt) {
+  // 吃掉裸 Alt（见上面 `hidesNativeMenuBar` 的说明）：Windows 上不这么做，Alt 会露出原生
+  // menu row，与文档内那一行菜单并存。`before-input-event` 早于菜单快捷键处理，因此只影响
+  // Alt 本身，Ctrl+O / Ctrl+Shift+U 之类的 accelerator 照常工作。
+  if (hidesNativeMenuBar) {
     const swallowAlt = (contents: WebContents): void => {
       contents.on('before-input-event', (event, input) => {
         if (input.type !== 'keyDown' || input.key !== 'Alt') return
@@ -620,6 +626,27 @@ export function createMainWindow(options: MainWindowOptions): {
   }
   ipcMain.on('dsh-desktop:app-theme', onAppTheme)
   window.on('closed', () => ipcMain.off('dsh-desktop:app-theme', onAppTheme))
+
+  /**
+   * preload 的致命错误。
+   *
+   * preload 在顶层求值时抛错时，`contextBridge.exposeInMainWorld` 不会执行，页面里
+   * `window.dshDesktop` 与顶部菜单会**一起消失**——从主进程看只是"桥没注入"。这条 IPC 把它
+   * 打到 stderr（默认只记录一行；`DSH_DESKTOP_PRELOAD_TRACE=1` 时给出完整堆栈）。
+   */
+  const onPreloadError = (event: Electron.IpcMainEvent, payload: unknown): void => {
+    if (event.sender !== appContents) return
+    const stage = payload !== null && typeof payload === 'object' && typeof (payload as { stage?: unknown }).stage === 'string'
+      ? String((payload as { stage: string }).stage)
+      : 'unknown'
+    const message = payload !== null && typeof payload === 'object' && typeof (payload as { message?: unknown }).message === 'string'
+      ? String((payload as { message: string }).message)
+      : ''
+    const detail = process.env.DSH_DESKTOP_PRELOAD_TRACE === '1' ? `\n${message}` : `: ${message.split('\n')[0] ?? ''}`
+    process.stderr.write(`[shell] preload 失败（${stage}）${detail}\n`)
+  }
+  ipcMain.on('dsh-desktop:preload-error', onPreloadError)
+  window.on('closed', () => ipcMain.off('dsh-desktop:preload-error', onPreloadError))
 
   /**
    * Harness 页面上报"当前工作区"（见 preload.ts 的 `reportActiveWorkspace`）。
