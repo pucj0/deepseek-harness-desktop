@@ -131,6 +131,12 @@ for (const forbidden of ['sidebarCol', '--dsh-caption-menu-start', '--dsh-captio
   )
 }
 assert.match(appPreload, /-webkit-app-region: no-drag/u, 'the menu area must not be a drag region')
+// 顶部 40px 的两个来源必须同色：strip 用 --dsw-specific-sidebar-fill，原生 overlay 也必须用它。
+// 曾经上报的是 body 背景（--dsw-alias-bg-base，浅色下是纯白），于是右上角比左边更白。
+assert.match(appPreload, /--dsw-specific-sidebar-fill/u, 'the overlay colour must come from the strip token')
+assert.match(appPreload, /opaqueNative/u, 'a transparent probe result must not be published as a colour')
+assert.match(appPreload, /function publishTheme/u, 'the theme must be published to the main process')
+assert.match(read('src/main/window.ts'), /setTitleBarOverlay\(/u, 'the main process must apply it to the native overlay')
 // 扫**代码**而不是注释：说明文字里正当地写着 `require('./caption-menu')` 这个反例。
 const codeOnly = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')
 const preloadCode = codeOnly(appPreloadBuilt)

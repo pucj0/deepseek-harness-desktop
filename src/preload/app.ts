@@ -122,12 +122,57 @@ const shell = {
 
 // ------------------------------------------------------------ 阶段二：Harness 页面 ----
 
+/** 顶部 strip 的填充色 token。Harness 的 `AppFrame::before` 与侧栏都用它。 */
+const SIDEBAR_FILL_TOKEN = '--dsw-specific-sidebar-fill'
+
+/** caption 按钮符号色 token。 */
+const LABEL_PRIMARY_TOKEN = '--dsw-alias-label-primary'
+
+/**
+ * 把任意 CSS 颜色转成原生 `rgba(r, g, b, a)` 字符串。
+ *
+ * 为什么要过一遍 canvas：`setTitleBarOverlay` 只接受**不透明**的 `#rrggbb` 或 `#aarrggbb`，
+ * 而 token 解析出来可能是 `oklch(...)`、`color-mix(...)`、带 alpha 的写法或 `rgb()`。浏览器
+ * 自己最清楚这些怎么算成 sRGB，让它画一个 1×1 像素再读回来，比在外壳里重写一套颜色解析可靠。
+ *
+ * 与官方 `preload-windows.ts` 的 `nativeColor()` 同一做法。
+ * @param color - 任意 CSS 颜色文本。
+ * @returns `rgba(...)` 字符串；无法解析时 undefined。
+ */
+function nativeColor(color: string): string | undefined {
+  if (color === '') return undefined
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 1
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (context === null) return undefined
+    context.clearRect(0, 0, 1, 1)
+    context.fillStyle = color
+    context.fillRect(0, 0, 1, 1)
+    const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data
+    return `rgba(${red}, ${green}, ${blue}, ${Number(alpha) / 255})`
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 读取官方 UI 已解析的主题令牌。
  *
- * `--dsw-alias-*` 声明在 `body`（浅色）与 `body[data-ds-dark-theme]`（深色）上，Chromium 在
- * computed-value 时替换 `var()`，因此拿回来的就是可用颜色。页面底色读真实颜色而不是令牌，
- * 这样原生 caption buttons 与**实际被绘制出来的**底色一致。
+ * ## 关键：顶部 strip 的底色必须来自**同一个 token**
+ *
+ * 顶部那一条 40px 有两个来源，必须同色：
+ *   1. **渲染进程**画的 strip —— Harness 的 `[data-windows-titlebar] .frame::before` 用的是
+ *      `background: var(--dsw-specific-sidebar-fill)`；
+ *   2. **原生** caption buttons 那一块 —— 由 `titleBarOverlay.color` 画。
+ *
+ * 以前这里报的是 `body` 的 `background-color`（也就是 `--dsw-alias-bg-base`），而 strip 用的是
+ * `--dsw-specific-sidebar-fill`。这两个 token 在浅色主题下**不是同一个值**，于是右上角原生按钮
+ * 区域比左边更白——正是被反馈的那块矩形。
+ *
+ * 现在与官方一致：用一个不可见的 probe 元素让浏览器把 token 解析成真实颜色，两侧同源。
+ *
  * @returns 主题载荷（解析不出的项省略）。
  */
 function readTheme(): ThemePayload {
@@ -140,9 +185,54 @@ function readTheme(): ThemePayload {
   }
   const darkened =
     body.hasAttribute('data-ds-dark-theme') || window.matchMedia('(prefers-color-scheme: dark)').matches
+
+  /**
+   * 官方那套取色：先在**声明层**把 token 解析成真实颜色，再用 probe 归一化成原生 rgba。
+   *
+   * 两个细节都是踩出来的：
+   *
+   *   1. **`--dsw-specific-sidebar-fill` 不会继承到一个随手 append 到 `body` 的空 `<span>` 上**
+   *      （Harness 在组件自己的样式表里声明它）。直接用 `background-color:var(--token)` 会解析成
+   *      透明色——那正是"右上角又不同色"的复现。因此先按 `:root` → `body` 两层问
+   *      `getComputedStyle(...).getPropertyValue(token)`（这个 API 会把值解析成可用颜色），
+   *      拿到实色后再赋给 probe。
+   *   2. **不能只读 `:root`**：Harness 可能把它声明在更深处，读根元素会拿到空值。
+   */
+  const resolveToken = (token: string): string | undefined => {
+    for (const scope of [document.documentElement, body]) {
+      const value = getComputedStyle(scope).getPropertyValue(token).trim()
+      if (value !== '') return value
+    }
+    return undefined
+  }
+  const fillValue = resolveToken(SIDEBAR_FILL_TOKEN)
+  const labelValue = resolveToken(LABEL_PRIMARY_TOKEN)
+
+  const probe = document.createElement('span')
+  probe.style.cssText =
+    'position:fixed;visibility:hidden;pointer-events:none;left:-9999px;top:-9999px;' +
+    (fillValue === undefined ? '' : `background-color:${fillValue};`) +
+    (labelValue === undefined ? '' : `color:${labelValue}`)
+  body.append(probe)
+  let fill: string | undefined
+  let label: string | undefined
+  try {
+    const probeStyle = getComputedStyle(probe)
+    fill = opaqueNative(probeStyle.backgroundColor)
+    // 符号色不要求不透明（文字色本来就是实色；这里只做解析失败的保护）。
+    label = nativeColor(probeStyle.color)
+  } finally {
+    probe.remove()
+  }
+
   return {
-    bg: style.backgroundColor,
-    fg: token('--dsw-alias-label-primary'),
+    // `bg` 就是顶部 strip 的底色：原生 overlay 与它同源，因此右上角不会再偏白。
+    //
+    // **读不到时省略**（而不是退回 `body` 背景）：退回就等于又回到"右上角偏白"的老 bug。
+    // 省略后由 publishTheme() 重试。
+    ...(fill === undefined ? {} : { bg: fill }),
+    // 符号色优先用 token 解析出来的值（官方同样用 label primary）。
+    ...(label === undefined ? {} : { fg: label }),
     fgDim: token('--dsw-alias-label-tertiary') ?? token('--dsw-alias-label-secondary'),
     hover: token('--dsw-alias-interactive-bg-hover'),
     active: token('--dsw-alias-interactive-bg-active') ?? token('--dsw-alias-interactive-bg-hover'),
@@ -151,13 +241,99 @@ function readTheme(): ThemePayload {
   }
 }
 
-/** 上报主题；绝不向宿主页面抛错。 */
+/**
+ * 判断一个原生颜色是不是**不透明**（因此可以拿去画标题栏）。
+ *
+ * `setTitleBarOverlay` 要的是实色；透明结果（`rgba(0, 0, 0, 0)`，也就是"probe 没取到色"）
+ * 必须被识别出来，否则会被当成黑色报上去，右上角又是错的。
+ *
+ * Chromium 对**不透明**颜色会算成 `rgb(r, g, b)`（没有 alpha 段），对半透明才算
+ * `rgba(r, g, b, a)`——两种形状都要认，否则会把实色误判为"没取到"。
+ *
+ * @param color - {@link nativeColor} 的返回值。
+ * @returns 不透明时返回原值，否则 undefined。
+ */
+function opaqueNative(color: string | undefined): string | undefined {
+  if (color === undefined) return undefined
+  const match = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/u.exec(color)
+  if (match === null) return undefined
+  const alpha = match[4]
+  return alpha === undefined || Number(alpha) > 0 ? color : undefined
+}
+
+/** 主题上报的补发间隔（毫秒）。 */
+const THEME_RETRY_INTERVAL_MS = 400
+
+/** 补发上限（约 48 秒；Harness 的首帧远早于此）。 */
+const THEME_RETRY_LIMIT = 120
+
+/** 是否已经上报过一次"真正读到 token"的主题。 */
+let themeSettled = false
+/** 重试计时器。 */
+let themeRetry: ReturnType<typeof setTimeout> | undefined
+
+/**
+ * 上报主题；绝不向宿主页面抛错。
+ *
+ * ## 为什么要重试（初始化顺序）
+ *
+ * preload 可能早于 Harness 的样式表执行（单 renderer 下它先跑在**启动底板**上，导航之后才跑在
+ * Harness 文档里），此时 `--dsw-specific-sidebar-fill` 还没被声明，probe 的 computed 背景色是
+ * **透明**的（实测 `rgba(0, 0, 0, 0)`）。旧实现会把透明当成结果报上去，主进程只能用自己的兜底
+ * 色，于是右上角又和左边不同色。
+ *
+ * 现在：读到实色才算成功；读不到就以指数退避重试，**不设次数上限**——因为"什么时候 token 才
+ * 生效"取决于 Harness 的首帧，而那正是我们在等的东西。导航会把整个文档连同计时器一起换掉，
+ * 新文档里的 preload 会重新开始，因此这个循环不会无限堆积。
+ */
 function publishTheme(): void {
+  let theme: ThemePayload
   try {
-    ipcRenderer.send('dsh-desktop:app-theme', readTheme())
+    theme = readTheme()
   } catch {
-    // 主题上报是尽力而为：读不到时主进程退回系统深浅色。
+    theme = {}
   }
+  // **先发**：`fill` 拿不到时会退回一个干净的载荷（主进程那边按系统深浅色兜底），因此无论
+  // 如何这一次上报都是安全的——而绝对不发会让右上角一直停在窗口创建时的初值上。
+  try {
+    tracePreload(`publishTheme bg=${String(theme.bg)} fg=${String(theme.fg)} attempts=${String(themeAttempts)}`)
+    ipcRenderer.send('dsh-desktop:app-theme', theme)
+  } catch {
+    // 主题上报是尽力而为。
+  }
+
+  // 拿到实色就算稳定；否则继续按固定间隔补发，直到 Harness 的 token 就位。
+  themeAttempts += 1
+  if (theme.bg !== undefined) {
+    themeSettled = true
+    if (themeRetry !== undefined) {
+      clearTimeout(themeRetry)
+      themeRetry = undefined
+    }
+    return
+  }
+  if (!themeSettled && themeRetry === undefined && themeAttempts < THEME_RETRY_LIMIT) {
+    themeRetry = setTimeout(() => {
+      themeRetry = undefined
+      publishTheme()
+    }, THEME_RETRY_INTERVAL_MS)
+  }
+}
+
+/** 已经尝试过多少次上报（用于给补发设一个上限，避免永久定时器）。 */
+let themeAttempts = 0
+
+/**
+ * 把当前主题再上报一次。
+ *
+ * 存在的理由：这条链路跨两个进程、四段（probe 取色 → canvas 转 native → IPC →
+ * `setTitleBarOverlay`），把它暴露成一个显式方法，排查时就能在页面里直接驱动它，而不必去猜
+ * "是这一侧没发，还是主进程没收到"。
+ *
+ * 它不做任何额外的事——只是 `publishTheme()` 的别名，因此不存在"测试专用路径"。
+ */
+function flushTheme(): void {
+  publishTheme()
 }
 
 /**
@@ -293,6 +469,28 @@ function enableWindowsTitlebar(): void {
 }
 
 enableWindowsTitlebar()
+
+/**
+ * 诊断写盘：`DSH_DESKTOP_PRELOAD_TRACE=1` 时把一行记录追加到 harness home 下的
+ * `preload-trace.log`。
+ *
+ * 用**同步写文件**而不是 stderr / console：preload 里那两种输出要么被沙箱吞掉、要么只在渲染
+ * 进程的 DevTools 里可见，而排障时最需要知道的是"它到底跑到哪一步了"。
+ * @param message - 记录内容。
+ */
+function tracePreload(message: string): void {
+  if (process.env.DSH_DESKTOP_PRELOAD_TRACE !== '1') return
+  try {
+    require('node:fs').appendFileSync(
+      require('node:path').join(process.env.DSH_DESKTOP_HOME ?? process.cwd(), 'preload-trace.log'),
+      `[preload] ${message}\n`,
+    )
+  } catch {
+    // 诊断写不进去不影响任何功能。
+  }
+}
+
+tracePreload(`evaluated singleRenderer=${String(process.env.DSH_DESKTOP_SINGLE_RENDERER)} readyState=${document.readyState}`)
 
 /** 字体栈的最后兜底（Harness 一定会提供 `--dsw-font-family`，这里只防它还没生效）。 */
 const FALLBACK_FONT = 'system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
@@ -541,6 +739,13 @@ if (document.readyState === 'loading') {
 const api = {
   /** 启动底板阶段的那组能力（`window.dshTitlebar`）。 */
   shell,
+  /**
+   * 把当前主题再上报一次（诊断 / 测试用）。
+   *
+   * 见 {@link flushTheme}：它是 `publishTheme()` 的别名，不改变任何行为——只是让"读 token →
+   * 转原生颜色 → 发 IPC → setTitleBarOverlay"这条跨进程链路可以被逐步断言。
+   */
+  flushTheme,
   /** Version of the Electron shell. */
   shellVersion: process.env.DSH_DESKTOP_SHELL_VERSION ?? '0.0.0',
   /** Version of the bundled dsh runtime serving this window. */

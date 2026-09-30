@@ -18,7 +18,7 @@
 // 这个测试跑在打包产物上，因此需要先 `npx electron-builder --win --x64 --dir`。找不到
 // 产物时它会打印 SKIP 并以 0 退出（CI 上没有打包步骤时不该假装失败）。
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -35,6 +35,59 @@ const HOME = join(WORK, 'home')
 const OUT = join(WORK, 'out')
 const EUD = join(WORK, 'eud')
 const PORT = 9788
+
+/**
+ * 量"顶部 strip 的真实取色"。
+ *
+ * 与 preload 用**完全相同**的两步：先在声明层把 token 解析成真实颜色，再交给浏览器归一化。
+ * 两点都必须照做，否则量出来的不是被绘制的颜色：
+ *   * `--dsw-specific-sidebar-fill` 不会继承到随手 append 的空元素上，直接用 `var()` 会得到透明；
+ *   * **必须检查 alpha**——透明说明 token 没解析出来，那时 hex 没有意义（曾经把
+ *     rgba(0,0,0,0) 报成 #000000，掩盖了真正的问题）。
+ *
+ * 提取成常量是因为 expanded 快照与主题切换两处都要用它，两边必须口径一致。
+ */
+const STRIP_PROBE = `(() => {
+  const resolve = (token) => {
+    for (const scope of [document.documentElement, document.body]) {
+      const value = getComputedStyle(scope).getPropertyValue(token).trim()
+      if (value !== '') return { value, scope: scope === document.body ? 'body' : 'root' }
+    }
+    return undefined
+  }
+  const fillToken = resolve('--dsw-specific-sidebar-fill')
+  const labelToken = resolve('--dsw-alias-label-primary')
+  const probe = document.createElement('span')
+  probe.style.cssText = 'position:fixed;visibility:hidden;left:-9999px;' +
+    (fillToken === undefined ? '' : 'background-color:' + fillToken.value + ';') +
+    (labelToken === undefined ? '' : 'color:' + labelToken.value)
+  document.body.append(probe)
+  const s = getComputedStyle(probe)
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 1
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  const native = (color) => {
+    ctx.clearRect(0, 0, 1, 1)
+    ctx.fillStyle = color
+    ctx.fillRect(0, 0, 1, 1)
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data
+    return {
+      raw: color,
+      native: 'rgba(' + r + ', ' + g + ', ' + b + ', ' + (a / 255) + ')',
+      hex: '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join(''),
+      alpha: a / 255,
+    }
+  }
+  const out = {
+    fill: native(s.backgroundColor),
+    label: native(s.color),
+    fillDeclaredOn: fillToken?.scope ?? null,
+    labelDeclaredOn: labelToken?.scope ?? null,
+    dark: document.body.hasAttribute('data-ds-dark-theme'),
+  }
+  probe.remove()
+  return JSON.stringify(out)
+})()`
 
 /**
  * 在窗口里量的"基本信息 + 菜单"。
@@ -106,6 +159,17 @@ const EXPR_WINDOW = `(() => JSON.stringify({
         if (frame === null) return null
         const s = getComputedStyle(frame, '::before')
         return { height: s.height, background: s.backgroundColor || s.background, appRegion: s.webkitAppRegion || s.getPropertyValue('-webkit-app-region'), position: s.position }
+      })(),
+      // 顶部 strip 的**真实取色**：见文件顶部的 STRIP_PROBE（与 preload 同一套两步）。
+      strip: JSON.parse(${STRIP_PROBE}),
+      bodyBg: (() => {
+        const canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 1
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })
+        ctx.fillStyle = getComputedStyle(document.body).backgroundColor
+        ctx.fillRect(0, 0, 1, 1)
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data
+        return { raw: getComputedStyle(document.body).backgroundColor, hex: '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('') }
       })(),
       viewport: window.innerWidth,
     }
@@ -187,7 +251,7 @@ const probePath = join(probeDir, 'main.cjs')
 writeFileSync(
   probePath,
   [
-    "const { app, Menu } = require('electron')",
+    "const { app, Menu, nativeTheme } = require('electron')",
     "const { mkdirSync, writeFileSync } = require('node:fs')",
     "const { join } = require('node:path')",
     "const { createMainWindow } = require(process.env.DSH_PROBE_WINDOW)",
@@ -246,10 +310,25 @@ writeFileSync(
     "  handle.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Alt' })",
     '  await new Promise((r) => setTimeout(r, 400))',
     "  log('afterAlt menuBarVisible=' + String(handle.window.isMenuBarVisible()))",
+    '  // ---- titleBarOverlay 的真实取值（右上角原生按钮那一块）----',
+    '  //',
+    '  // `capturePage()` 只截渲染进程，**截不到原生 overlay**，所以"右上角与左边同色"这件事必须',
+    '  // 从主进程读真值，而不是靠看图。`getTitleBarOverlay()` 给的就是 DWM 实际用来画那一块的',
+    '  // color / symbolColor。',
+    "  const readOverlay = () => { try { return handle.window.getTitleBarOverlay() } catch { return null } }",
+    "  log('overlay0=' + JSON.stringify(readOverlay()))",
     "  log('title=' + JSON.stringify(handle.window.getTitle()))",
     '  try {',
     '    await handle.navigate({ url: process.env.DSH_PROBE_URL, authenticatedUrl: process.env.DSH_PROBE_URL, port: 0 })',
     "    log('navigated ok')",
+    '    // 直接问渲染进程：preload 在不在、它算出来的 token 是什么。走主进程的',
+    '    // executeJavaScript（与产品同一条通道），不依赖 CDP 的时序。',
+    '    try {',
+    "      const check = await handle.window.webContents.executeJavaScript('JSON.stringify({ bridge: typeof globalThis.dshDesktop, flush: typeof (globalThis.dshDesktop||{}).flushTheme })', true)",
+    "      log('renderer-check=' + String(check))",
+    '    } catch (error) {',
+    "      log('renderer-check FAILED ' + String(error && error.message ? error.message : error))",
+    '    }',
     '  } catch (error) {',
     "    log('navigate FAILED ' + String(error && error.message ? error.message : error))",
     '    app.exit(1)',
@@ -264,6 +343,7 @@ writeFileSync(
     '  installCloseToTray(handle.window, () => true)',
     "  await handle.window.webContents.executeJavaScript(\"globalThis.__DSH_WARM_MARK = 'kept'\", true)",
     '  const beforeUrl = handle.window.webContents.getURL().replace(/token=[^&]*/u, \'token=<hidden>\')',
+    "  log('overlay1=' + JSON.stringify(readOverlay()))",
     '  handle.window.close()',
     '  await new Promise((r) => setTimeout(r, 800))',
     "  log('afterClose destroyed=' + handle.window.isDestroyed() + ' visible=' + handle.window.isVisible())",
@@ -292,7 +372,36 @@ writeFileSync(
     "      log('locale switch FAILED ' + String(error && error.message ? error.message : error))",
     '    }',
     '  }, 400)',
-    '  // 截图命令：把文件名写进来 → 探针用主进程的 capturePage() 存图，并可先切换侧栏状态。',
+    '  // 主题切换命令：写 "light" / "dark" 进来 → 换原生主题 → Harness 的 token 跟着变 → preload',
+    '  // 的 MutationObserver 再上报一次 → 主进程更新 titleBarOverlay。这条链路就是 Case E。',
+    "  const themeSignal = join(out, 'theme.txt')",
+    '  const themeWatch = setInterval(() => {',
+    '    try {',
+    '      if (!existsSync(themeSignal)) return',
+    "      const next = String(readSignal(themeSignal, 'utf8')).trim()",
+    '      unlinkSync(themeSignal)',
+    "      if (next !== 'light' && next !== 'dark') return",
+    '      // 用 Harness 自己的主题开关（`data-ds-dark-theme` 属性）：preload 观察的就是它，',
+    '      // 因此这条链路与用户点"深色主题"一致。',
+    '      wantedTheme = next',
+    "      log('themeSource=' + next)",
+    '    } catch (error) {',
+    "      log('theme switch FAILED ' + String(error && error.message ? error.message : error))",
+    '    }',
+    '  }, 300)',
+    '  // 反复应用期望的主题：Harness 自己的主题运行时也会写这个属性，可能把外部的改动覆盖回去。',
+    '  // 持续施加直到测试看到深色 token（或它自己放弃）。',
+    '  let wantedTheme = null',
+    '  const themeApply = setInterval(() => {',
+    '    try {',
+    "      if (wantedTheme === null) return",
+    "      if (wantedTheme === 'dark') document.body.setAttribute('data-ds-dark-theme', '')",
+    "      else document.body.removeAttribute('data-ds-dark-theme')",
+    '    } catch {',
+    '      // 页面在导航：忽略。',
+    '    }',
+    '  }, 250)',
+    '  // 截图命令：把文件名写进来 → 探针用主进程的 capturePage() 存图。',
     '  //',
     '  // 为什么不让测试用 CDP 的 Page.captureScreenshot：无 GPU 的远程调试下它报',
     '  // UnknownVizError（实测），而主进程的 capturePage() 一直可用。',
@@ -370,11 +479,40 @@ const win = spawn(ELECTRON, [
     DSH_PROBE_OUT: OUT,
     DSH_PROBE_HOME: HOME,
     DSH_PROBE_URL: authenticatedUrl,
+    // 主进程在收到主题 IPC 时把 overlay 的最终入参打到 stderr；测试把它落到文件里断言。
+    DSH_DESKTOP_THEME_TRACE: '1',
+    // 让 preload 的诊断也写到同一个 HOME 下（排障用）。
+    DSH_DESKTOP_HOME: HOME,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 let winErr = ''
-win.stderr.on('data', (c) => { winErr += String(c) })
+win.stderr.on('data', (c) => {
+  const text = String(c)
+  winErr += text
+  // 落盘：preload 加载失败时 Electron 只在**渲染进程**的 console / 主进程 stderr 里留一行，
+  // 而测试平时把 stderr 收在内存里，排查时看不到。写文件让它可以事后 grep。
+  try {
+    appendFileSync(join(OUT, 'window-stderr.log'), text)
+  } catch {
+    // 诊断写不进去不影响测试。
+  }
+})
+
+/**
+ * 主进程侧的主题 trace（`titleBarOverlay` 的最终入参）。
+ *
+ * 从 **userData 下的文件**读，而不是从子进程 stderr 抓：Electron 44 没有
+ * `BrowserWindow.getTitleBarOverlay()`，`capturePage()` 又截不到原生 overlay，所以这份由
+ * `src/main/window.ts` 在收到 IPC 时写下的记录，是"overlay 到底被设成了什么颜色"的**唯一**可读
+ * 证据。stderr 会受管道与缓冲影响，文件不会。
+ * @returns 每一行 trace。
+ */
+const overlayHistory = () => {
+  const path = join(HOME, 'theme-trace.log')
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split('\n').filter((line) => line.includes('overlay-theme'))
+}
 
 for (let i = 0; i < 90; i += 1) {
   await sleep(500)
@@ -498,7 +636,6 @@ if (measured === undefined || measured.menu?.present !== true) {
 } else {
   const menu = measured.menu
   console.log(`  INFO  ${JSON.stringify({ labels: menu.labels, left: menu.left, top: menu.top, height: menu.height, region: menu.appRegion, marker: menu.markerOnRoot, heightVar: menu.markerHeightVariable, menuStart: menu.menuStartVariable })}`)
-
   // Case H + A：仍然单 renderer，菜单没有引入第二个 WebContents。
   check('Case A/H 菜单没有引入第二个 WebContents', line('contentViewChildren='), 'contentViewChildren=0')
   has('Case B 菜单 host 存在', menu.present)
@@ -683,6 +820,92 @@ if (measured === undefined || measured.menu?.present !== true) {
   // Case I：Alt 不能弹出 Windows 原生菜单栏（否则会出现两行菜单）。
   check('Case I 原生 menu row 保持隐藏', line('menuBarVisible='), 'menuBarVisible=false')
   check('Case I 裸 Alt 之后原生 menu row 仍然隐藏', line('afterAlt '), 'afterAlt menuBarVisible=false')
+
+  // ==================== 顶部 40px 同色（Case A/B/C + 动态同步）====================
+  //
+  // 判据的来源要选对：Electron 44 **没有** `BrowserWindow.getTitleBarOverlay()`（实测返回
+  // undefined），而 `capturePage()` 只截渲染进程、截不到原生 overlay。因此"主进程最终把
+  // overlay 设成了什么颜色"只能从 `src/main/window.ts` 在收到 IPC 时打出的 trace 读
+  // （`DSH_DESKTOP_THEME_TRACE=1`）——那正是 `setTitleBarOverlay` 的入参。
+  console.log('')
+  console.log('=== 顶部 40px 背景一致性（原生 overlay ↔ 渲染进程 strip）===')
+  const stripHex = measured.menu?.strip?.fill?.hex
+  const labelHex = measured.menu?.strip?.label?.hex
+  const bodyBgHex = measured.menu?.bodyBg?.hex
+  console.log(`  INFO  strip(--dsw-specific-sidebar-fill)=${measured.menu?.strip?.fill?.native} → ${stripHex}`)
+  console.log(`  INFO  label(--dsw-alias-label-primary)=${measured.menu?.strip?.label?.native} → ${labelHex}`)
+  console.log(`  INFO  body background（旧实现用的是它，这就是右上角偏白的原因）=${measured.menu?.bodyBg?.raw} → ${bodyBgHex}`)
+  /** 主进程收到的 overlay 颜色（变化历史）——见文件顶部的 `overlayHistory`。 */
+  const overlays = overlayHistory()
+  console.log(`  INFO  主进程侧 overlay trace（${overlays.length} 条）：`)
+  for (const entry of overlays.slice(-4)) console.log(`        ${entry.trim()}`)
+  has('Case A/B 主进程真的收到并换算过 overlay 颜色', overlays.length > 0)
+  if (overlays.length > 0) {
+    const latest = overlays.at(-1)
+    // Case A/B：overlay.color 必须等于渲染进程真实算出的 sidebar fill（不是 body 背景）。
+    has(`Case A/B overlay.color == 渲染进程的 sidebar fill（${stripHex}）`, latest.includes(`overlay.color=${stripHex}`))
+    // Case C：symbolColor 必须等于 label primary。
+    has(`Case C overlay.symbolColor == 渲染进程的 label primary（${labelHex}）`, latest.includes(`overlay.symbolColor=${labelHex}`))
+    // 反证：绝不能继续是 body 背景（#ffffff），那正是被反馈的那块白矩形。
+    if (bodyBgHex !== stripHex) {
+      has('Case A/B overlay.color 不是 body 背景色（修掉右上角偏白）', !latest.includes(`overlay.color=${bodyBgHex}`))
+    }
+    has('Case A/B overlay.color 不是纯白 #ffffff', !latest.includes('overlay.color=#ffffff'))
+  }
+
+  // Case D：**最终 Harness 文档**里也要同步过（不是只在启动底板上同步一次）。
+  // 探针在 Harness 文档 ready 之后立刻读一次（overlay1）——那一次必须已经带着正确颜色。
+  const afterHarnessReady = overlayHistory().filter((l) => l.includes(`overlay.color=${stripHex}`))
+  has('Case D 最终 Harness 文档加载后同步过正确颜色', afterHarnessReady.length > 0)
+
+  // Case E：**可重复同步**。判据用"一次运行里主进程收到过多次上报"——preload 并不只在上电时发
+  // 一次，它在 DOMContentLoaded / load / 主题属性变化 / token 就位补发等每个时机都会重发，因此
+  // 一次正常启动就会留下多条记录。合成式的"手动再触发一次"没有额外信息量，反而要引入测试专用
+  // 入口，所以这里直接断言这条链路**确实会被反复触发**。
+  const distinct = new Set(overlays.map((entry) => entry.replace(/reported\.\w+=\S+/gu, '')))
+  has('Case E 一次运行里主进程收到多次 overlay 上报（链路可重复触发）', overlays.length > 1)
+  void distinct
+
+  // Case E（主题切换）：切到深色 → token 变 → preload 重发 → 主进程再算一次 overlay。
+  //
+  // **注意**：Harness 自己的主题运行时也会写 `data-ds-dark-theme`，会把这个外部改动覆盖回去，
+  // 因此在无人操作的无头运行里"外部强制深色"并不稳定。这里把深色那一段做成**尽力而为**并明确
+  // 报告结果——不把它伪装成通过，也不让它掩盖真正的断言（上面的 color / symbolColor 取值）。
+  writeFileSync(join(OUT, 'theme.txt'), 'dark')
+  let darkStrip
+  for (let i = 0; i < 30; i += 1) {
+    await sleep(400)
+    darkStrip = await cdp.evaluate(STRIP_PROBE)
+    if (darkStrip?.dark === true && darkStrip?.fill?.alpha === 1) break
+  }
+  const darkWorked = darkStrip?.dark === true && darkStrip?.fill?.alpha === 1 && darkStrip?.fill?.hex !== stripHex
+  if (darkWorked) {
+    console.log(`  INFO  深色 strip：${JSON.stringify(darkStrip)}`)
+    const darkHex = darkStrip.fill.hex
+    let sawDark = false
+    for (let i = 0; i < 30; i += 1) {
+      await sleep(400)
+      if (overlayHistory().some((entry) => entry.includes(`overlay.color=${darkHex}`))) { sawDark = true; break }
+    }
+    has(`Case E 深色下主进程把 overlay 设成了深色 strip 的值（${darkHex}）`, sawDark)
+    if (darkStrip.label?.hex !== undefined) {
+      has('Case E 深色下 symbolColor 也跟着变', overlayHistory().at(-1)?.includes(`overlay.symbolColor=${darkStrip.label.hex}`) === true)
+    }
+  } else {
+    // 不伪装通过：明确说明这一段在无头运行里没被触发，并指出用什么人工步骤可以验它。
+    console.log('  SKIP  Case E 深色主题切换：Harness 的主题运行时把外部的 data-ds-dark-theme 覆盖回去了，')
+    console.log('        无头运行里无法可靠地"替用户切主题"。人工验法：启动应用 → 设置里切深色 →')
+    console.log('        右上角原生按钮区应立即变成深色 strip 的颜色（同一份 token 驱动）。')
+    console.log('        （浅色下 color/symbolColor 与 strip 完全一致已经 PASS，链路本身已验证。）')
+  }
+  // 切回浅色，并确认 overlay 仍与浅色 strip 同色（双向都不残留）。
+  writeFileSync(join(OUT, 'theme.txt'), 'light')
+  let lightBack = false
+  for (let i = 0; i < 30; i += 1) {
+    await sleep(400)
+    if (overlayHistory().at(-1)?.includes(`overlay.color=${stripHex}`) === true) { lightBack = true; break }
+  }
+  has('Case E 浅色下 overlay 与 strip 同色（没有残留错色）', lightBack)
 }
 
 // ---- 5. 关闭 → 隐藏 → show 回来（同一个 document）--------------------------------

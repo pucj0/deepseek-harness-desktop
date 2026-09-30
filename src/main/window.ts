@@ -31,7 +31,7 @@
  *   `GET /` 上接受该 token，用它写入绑定 authority 的 HttpOnly Cookie，然后 302 到
  *   干净的 `/`。因此 Harness 视图只加载一次带 token 的 URL。
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   BrowserWindow,
@@ -625,7 +625,7 @@ export function createMainWindow(options: MainWindowOptions): {
     if (payload === null || typeof payload !== 'object') return
     const raw = payload as ShellTheme
     themeFromApp = true
-    applyTheme({
+    const theme: ShellTheme = {
       ...(typeof raw.bg === 'string' ? { bg: raw.bg } : {}),
       ...(typeof raw.fg === 'string' ? { fg: raw.fg } : {}),
       ...(typeof raw.fgDim === 'string' ? { fgDim: raw.fgDim } : {}),
@@ -633,7 +633,30 @@ export function createMainWindow(options: MainWindowOptions): {
       ...(typeof raw.active === 'string' ? { active: raw.active } : {}),
       ...(typeof raw.border === 'string' ? { border: raw.border } : {}),
       dark: raw.dark === true,
-    })
+    }
+    /**
+     * 诊断：把**渲染进程送来的原始值**与**换算出来的 overlay 颜色**打出来。
+     *
+     * 为什么需要它：Electron 44 没有 `BrowserWindow.getTitleBarOverlay()`，所以"右上角原生按钮
+     * 那一块到底被设成了什么颜色"从外部**读不到**；而 `capturePage()` 只截渲染进程，也截不到
+     * 原生 overlay。没有这行 trace，"overlay 与顶部 strip 同色"就只剩肉眼截图可验。
+     * 打开 `DSH_DESKTOP_THEME_TRACE=1` 时它给出这两组值，测试据此断言。
+     */
+    if (process.env.DSH_DESKTOP_THEME_TRACE === '1') {
+      const colors = overlayColors(theme)
+      // 写**文件**而不是 stderr：stderr 会被管道/缓冲影响，而且测试里还要跨进程抓；文件是
+      // 确定的。路径落在 userData 下，与 shell.html 同级。
+      try {
+        appendFileSync(
+          join(userDataDir, 'theme-trace.log'),
+          `[overlay-theme] reported.bg=${String(raw.bg)} reported.fg=${String(raw.fg)} ` +
+            `overlay.color=${colors.color} overlay.symbolColor=${colors.symbolColor} dark=${String(raw.dark)}\n`,
+        )
+      } catch {
+        // 诊断写不进去不影响功能。
+      }
+    }
+    applyTheme(theme)
   }
   ipcMain.on('dsh-desktop:app-theme', onAppTheme)
   window.on('closed', () => ipcMain.off('dsh-desktop:app-theme', onAppTheme))
