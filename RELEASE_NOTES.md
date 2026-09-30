@@ -1,3 +1,20 @@
+# 1.7.4
+
+本版是一次**安装包体积与启动路径的架构重构**：Windows x64 安装包从 **203 MiB 降到 127.63 MiB**（−75.4 MiB / −37%），并且**首次安装后启动不再有约 9 秒的"解压内置运行时"等待**——那条路径被整体删除，不是优化。
+
+- **升级到 Electron 44，删掉第二份 Node。** 内置 Runtime 要求 Node `^22.19.0 || >=24`，而 Electron 33 只带 Node 20，于是历史上额外 stage 了一份 88 MiB 的便携 Node（占解压后 Runtime 的 46%）。现在子进程直接用 `process.execPath` + `ELECTRON_RUN_AS_NODE=1` 以 Node 模式运行（Node 24.18.1）。Electron 精确钉在 **44.0.0**：Runtime 的 native 加载器按 V8 指纹白名单校验（43.0.0 / 44.0.0 / 45.0.0-alpha.6），`^44.0.0` 会解析到 44.4.5 并直接启动失败。`stage` 不再包含 `stage:node`。
+- **不再携带生产 npm。** 用户侧 runtime updater 早已移除，`npm` 因此不再是生产依赖；安装包里不再有 `node_modules/npm`（原本 10.2 MiB）。
+- **取消 `runtime.br` 交付模式。** 以前安装包携带一个 40.55 MiB 的 brotli 归档，首次启动要把它解压成 189.7 MiB 到用户目录（实测约 9 秒）。现在 Runtime 的 JS / JSON 直接进 `app.asar`，只有必须真实落盘的 native（`.node/.dll/.exe/.so/.dylib`）走 `asarUnpack`，由 NSIS 统一压缩一次。正常启动不再解压、不再复制、不再递归 materialize `node_modules`。
+- **构建 Desktop 专用 Runtime。** 新增 `scripts/runtime-file-policy.mjs` 与 `scripts/prepare-desktop-runtime.mjs`：按策略把 `runtime/` 裁剪成 `build/runtime-desktop/` 再打包，实测 **557.6 MiB → 127.3 MiB**（剔除 430.2 MiB：LibreOffice 平台负载 182.0、便携 Node 100.1、source map 44.1、`.d.ts` 39.6、异平台预编译 23.2、sherpa-onnx 22.4、tests/readme/docs 等）。裁剪报告会打印"每条理由各占多少字节"。
+- **内置插件的链接契约跟着改。** `symlinkSync` 的目标必须是真实路径，而 Runtime 在 `app.asar` 里只存在于归档内部，四个内置插件会全部消失；现在插件只从真实的 `resources/plugins` 链进 profile，并且打包形态下运行时侧的插件同步**整段删除**（应用与其插件同属一个不可变 Release），启动关键路径上不再有递归指纹校验。
+- **Electron locale 只留中英。** 55 种语言包 40.3 MiB → `en-US` + `zh-CN` 共 1.1 MiB；系统语言 fallback 不变（找不到对应 `.pak` 时由 Chromium 回落到 en-US）。
+- **体积门禁进 CI。** 新增 `scripts/report-package-size.mjs`，Windows 构建后强制执行：同时检查第二份 Node、生产 npm CLI、重复的 `@deepseek-ai` Runtime、`runtime.br` 与解压 Runtime 的双交付，越界即失败。
+- **⚠️ 第一阶段目标未达标。** 目标是 NSIS ≤ 120 MiB，本版实测 **127.63 MiB**（133,832,858 字节），门禁暂锁在 131 MiB 以容忍 CI 重新解析依赖闭包的抖动。差距主要来自 Electron 44 自身（主程序 233.1 MiB + `dxcompiler.dll` 24.6 MiB）与 51.3 MiB 的 native 负载；下一版的硬要求是收到 120，再到 100。
+- **压缩等级不是手段。** 实测 `compression: maximum` 与 `normal` 的安装包只差 **1 个字节**，因此保持 `normal`。
+- **启动数据。** 首次启动解压约 9 秒 → **0**；打包产物以 Node 模式跑到 `dsh web:` 就绪实测 **3.27 / 3.32 秒**（含 Electron 冷启动与四个插件装载）。完整 UI 的 cold/warm P50 尚未埋点采集（需要能运行 Electron 图形界面的环境）。
+
+---
+
 # 1.7.3
 
 本版修掉一处界面回归，并把 Git 面板的两个视图按"统一视图"重做：**「本轮修改」不再打开项目级 Git**，Changes 变成一张连续的列表，Log 不再有左侧分支栏。
