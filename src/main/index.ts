@@ -35,7 +35,7 @@ import { ShellUpdater } from './shell-updater'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
-import { createMainWindow } from './window'
+import { createMainWindow, TWO_LAYER_ARCHITECTURE } from './window'
 import type { ActiveWorkspaceReportPayload } from './window'
 import { createWorkspaceActions } from './workspace-actions'
 import type { WorkspaceActionEffects, WorkspaceActions } from './workspace-actions'
@@ -50,6 +50,20 @@ import {
   takePendingForgets,
   workspaceIdentity,
 } from './workspace'
+
+/**
+ * Host 尚未就绪时的占位 origin。
+ *
+ * 渲染进程需要在 Host 宣布 URL **之前**就开始加载（这是"感知性能"的关键：
+ * 窗口与 Harness 的那一层同时出现，而不是先看一层外壳的加载页）。这一次导航的地址没有
+ * 意义——它只是让 `window.ts` 里那条 `new URL(ready.url).origin` 拿到一个合法的 origin，
+ * 从而"哪些链接属于应用内、哪些交给系统浏览器"这条判断在 Host 就绪前保持保守。
+ *
+ * 为什么不用 `http://127.0.0.1:1/`：那会真的发一次注定失败的请求。这里用一个**不可路由**
+ * 的自定义 scheme，Chromium 会立刻以 `ERR_UNKNOWN_URL_SCHEME` 失败，渲染进程留在启动底板
+ * 上——这正是我们要的中间态。
+ */
+const PENDING_URL = 'dsh-pending://boot/'
 
 const SHELL_VERSION: string = (() => {
   try {
@@ -81,6 +95,25 @@ let session: Session | undefined
  * after `main()` has assigned it.
  */
 let activeRuntime: RuntimeLocation | undefined
+
+/**
+ * 让启动基准可以在**不传任何 Chromium 开关**的前提下控制 user-data-dir。
+ *
+ * 为什么需要：本机（Windows + 受限宿主）对打包后的 exe 有两个互相叠加的限制——
+ *   * 默认的 `%APPDATA%\<name>` 让主进程在 `app.whenReady()` 之后立刻以 0xC0000005 退出；
+ *   * 而把 `--user-data-dir=…` 当命令行参数传进去又会被它自己的参数解析拒掉。
+ * 于是"用打包 exe 量一次 GUI 冷启动"在这个宿主上做不到。`app.setPath('userData', …)`
+ * 与 `--user-data-dir` 等价、且不需要命令行参数，因此基准脚本改用这个环境变量。
+ *
+ * 它**只在显式设置时**生效（生产启动不设置），因此不改变发布版行为。
+ */
+if (typeof process.env.DSH_DESKTOP_USER_DATA_DIR === 'string' && process.env.DSH_DESKTOP_USER_DATA_DIR !== '') {
+  try {
+    app.setPath('userData', process.env.DSH_DESKTOP_USER_DATA_DIR)
+  } catch {
+    // 路径不可用时保持 Electron 默认值：这只是诊断/基准用的开关。
+  }
+}
 
 // A second launch focuses the existing window instead of starting a second
 // server (which would bind another port and duplicate the harness home).
@@ -761,14 +794,64 @@ async function main(): Promise<void> {
     return
   }
 
-  let ready
+  // ------------------------------------------------------------------ 启动编排 ----
+  //
+  // **窗口与渲染进程先起来，Host 在后台并行启动。** 这是与官方 Desktop 一致、
+  // 也是与"感觉慢"直接相关的一条。
+  //
+  // 旧顺序是 `markStartup('hostSpawned') → await server.start() → markStartup('hostReady')
+  // → markStartup('navigationStarted') → await mainWindow.navigate(ready)`：真正属于
+  // Harness 的渲染进程被 `server.start()` **整段挡在后面**，用户先对着外壳的加载页等
+  // 十几秒，然后整页界面"突然"出现。感知性能的差异主要来自这里，而不是 Runtime 本身慢。
+  //
+  // 新顺序把三件事拆开：
+  //   1. `createMainWindow()` 已经在上面完成——窗口与**启动底板**（同一个 webContents，
+  //      见 window.ts 的 SINGLE_RENDERER）立刻可见，用户几百毫秒内就看到窗口；
+  //   2. 本处**同步**发起 `server.start()` 并发起导航（渲染进程与 Host 同时在跑）；
+  //   3. `await server.start()` 仍然照旧，因为后面的托盘/菜单/更新装配都依赖"Host 已就绪"，
+  //      而且 `ready.url` 就是渲染进程要去的地址——只是它不再挡在"窗口出现"之前。
+  //
+  // 这里刻意写成"promise 边界而不是回调重排"：`shellReady` 是一个在 `server.start()` 的
+  // then/catch 里被 resolve/reject 的 promise，主流程 `await` 它。于是窗口/渲染进程的创建
+  // 不再需要改动后面任何一行代码，而 Host 的启动**从"被 await 挡住"变成"已在进行中"**。
+  let settleShellReady: (ready: ServerReady) => void = () => {}
+  let failShellReady: (error: unknown) => void = () => {}
+  const shellReady = new Promise<ServerReady>((resolve, reject) => {
+    settleShellReady = resolve
+    failShellReady = reject
+  })
+  // 先挂上 catch：`server.start()` 失败时这个 promise 会被 reject，而它可能早于下面的
+  // `await`（Host 秒失败时）。没有这个 no-op handler，Node 会报 unhandled rejection。
+  shellReady.catch(() => {})
+
+  // `hostSpawned` = 外壳**发起**启动子进程的时刻。它与 `hostReady` 的差值就是
+  // "Runtime 从进程创建到宣布 URL"的净时间——这一版最该被盯住的区间（它包含
+  // Electron 以 Node 模式启动、模块解析、profile 装载与插件链接）。
+  markStartup('hostSpawned')
+  const startup = server.start()
+  startup.then(
+    (value) => {
+      markStartup('hostReady')
+      settleShellReady(value)
+    },
+    (error: unknown) => failShellReady(error),
+  )
+
+  // 渲染进程立刻出发。**这一步就是"窗口与 Harness 的那一层同时出现"**：
+  //
+  //   * 单 renderer 下渲染进程此刻已经在显示启动底板（`window.ts` 用 `loadFile` 装的），
+  //     因此这里只需记下"渲染进程已开始"，不必再导航一次——导航到任何地方都只会把这个
+  //     已经画好的底板换掉，然后再被 Host 就绪后的第二次导航换回来（白闪一次）。
+  //   * 两层结构下渲染进程是一个独立子视图，它需要**先装一次文档**才能参与后续流程，
+  //     所以这里仍然按老样子先导航到那个页面。
+  markStartup('navigationStarted')
+  const navigation = TWO_LAYER_ARCHITECTURE
+    ? mainWindow.navigate({ url: PENDING_URL, authenticatedUrl: PENDING_URL, port: 0 })
+    : Promise.resolve()
+
+  let ready: ServerReady
   try {
-    // `hostSpawned` = 外壳**发起**启动子进程的时刻。它与 `hostReady` 的差值就是
-    // "Runtime 从进程创建到宣布 URL"的净时间——这一版最该被盯住的区间（它包含
-    // Electron 以 Node 模式启动、模块解析、profile 装载与插件链接）。
-    markStartup('hostSpawned')
-    ready = await server.start()
-    markStartup('hostReady')
+    ready = await shellReady
     // 服务端已经启动 = 「移除工作区」的意图已经由它用官方 API 执行完毕，标记是耗材。
     // 放在成功之后而不是构造时：启动失败时标记要留着，让下一次启动再试。
     takePendingForgets(userDataDir)
@@ -797,15 +880,20 @@ async function main(): Promise<void> {
     return
   }
 
-  // Hand the already-visible window over to the real UI.
-  markStartup('navigationStarted')
+  // Host 已经宣布 URL：把**已经跑起来的**渲染进程导航到真正的 Harness 界面。
+  // 第二步导航是"启动底板 → 官方 UI"的替换（单 renderer 下就是同一个文档换掉内容）。
   await mainWindow.navigate(ready)
+  // 上面的 `navigation`（Host 未就绪时的那次尝试）已经结束或已被第二次导航取代；
+  // 等它 settle，避免它在一个已经导航走的文档上抛错。
+  await navigation.catch(() => {})
   // `domReady` / `didFinishLoad` 由渲染进程的生命周期事件记（见 window.ts）；
   // navigate 返回时页面已经加载完，因此这里就是"界面可用"。
   markStartup('harnessUsable')
   reportStartup()
 
-  // 界面可用之后才做非关键工作：标题栏 git 徽标（一次 git 子进程）与随后的更新检查。
+  // 界面可用之后才做非关键工作：git 徽标（一次 git 子进程）。注意单 renderer 下
+  // **不再有"外壳标题栏"要更新**——窗口标题与徽标都交给 Harness 自己的页面标题，
+  // 因此这里只在两层结构下生效（见 window.ts 的 setGitBadge）。
   void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
 
   // 更新相关的装配放在托盘之前：托盘与菜单都要用到同一个"打开更新窗口"入口，

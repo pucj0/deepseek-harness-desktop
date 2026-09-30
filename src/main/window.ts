@@ -46,6 +46,7 @@ import type { ShellMenuBarEntry } from './menu'
 import { currentLocale, t } from './i18n'
 import { markStartup } from './startup-timeline'
 import { shellPageHtml } from './shell-page'
+import { splashPageHtml } from './splash-page'
 import {
   TITLEBAR_HEIGHT,
   drawsMenusInTitleBar,
@@ -191,13 +192,45 @@ export interface ActiveWorkspaceReportPayload {
 }
 
 /**
+ * 是否使用**单 renderer**架构（窗口自身的 `webContents` 就是 Harness 页面）。
+ *
+ * 默认开启，`DSH_DESKTOP_TWO_LAYER=1` 可以退回旧的"外壳页面 + Harness 子视图"两层结构
+ * （保留它是为了能在同一台机器上 A/B 对比，以及万一新架构在某平台出问题时有个开关）。
+ *
+ * ## 两种结构到底差在哪
+ *
+ * ```text
+ * 两层（旧）                              单 renderer（新）
+ * ┌──────────── BrowserWindow ────────┐   ┌──────────── BrowserWindow ────────┐
+ * │ [自绘 40px 标题栏]  ← 窗口文档      │   │                                   │
+ * │   Logo / 菜单 / 窗口状态            │   │   Harness Renderer 铺满整个客户区   │
+ * ├───────────────────────────────────┤   │   （它的侧栏、Logo、折叠按钮、       │
+ * │ [Harness 官方界面] ← WebContentsView│   │     顶部间距全是它自己的）          │
+ * └───────────────────────────────────┘   └───────────────────────────────────┘
+ * ```
+ *
+ * 两层结构里，窗口文档与 Harness 是**两个 DOM、两个布局上下文、两套设计系统**：外壳画一遍
+ * Logo / 顶栏 / 悬停态，Harness 又画一遍，于是"Logo 位置对不齐、顶栏高度差一点、侧栏与
+ * 标题栏之间那条分割线断开、折叠图标不一样"全都修不掉——只能靠 margin/padding 逼近，
+ * 而那正是"看得出是两层"的根因。单 renderer 之后只剩官方那一套 UI，标题栏区域由
+ * Harness 自己铺，原生 caption buttons 由 `titleBarOverlay` 画在最上层。
+ */
+const TWO_LAYER = process.env.DSH_DESKTOP_TWO_LAYER === '1'
+
+/** 当前是否单 renderer 架构（见 {@link TWO_LAYER}）。 */
+export const SINGLE_RENDERER = !TWO_LAYER
+
+/** 当前是否两层结构（`index.ts` 用它决定"Host 就绪前要不要先导航一次"）。 */
+export const TWO_LAYER_ARCHITECTURE = TWO_LAYER
+
+/**
  * 创建主窗口并返回控制句柄。
  * @param options - 窗口、标题栏与加载页配置。
- * @returns 窗口、Harness 视图的 webContents，以及导航/加载页/标题控制方法。
+ * @returns 窗口、Harness 界面的 webContents，以及导航/加载页/标题控制方法。
  */
 export function createMainWindow(options: MainWindowOptions): {
   window: BrowserWindow
-  /** Harness 官方界面所在的 webContents（标题栏下方的子视图）。 */
+  /** Harness 官方界面所在的 webContents（单 renderer 下就是窗口自身的）。 */
   appContents: WebContents
   navigate: (ready: ServerReady) => Promise<void>
   /** 更新加载页的提示文案（例如解包进度）。 */
@@ -249,20 +282,40 @@ export function createMainWindow(options: MainWindowOptions): {
         }
       : {}),
     webPreferences: {
-      // 标题栏页面也是渲染进程：保持完全沙箱化，只通过最小桥与主进程通信。
+      // 标题栏 / 启动底板也是渲染进程：保持完全沙箱化，只通过最小桥与主进程通信。
+      //
+      // 单 renderer 下这个 `webContents` **随后会承载 Harness 页面**，因此它必须带上
+      // Harness 需要的那几条桥（主题令牌、当前工作区、语言）——那就是 `preload/app.js`
+      // 把两份桥合并成一份的原因。两层结构下它只承载标题栏页面，用 `preload/titlebar.js`
+      // 即可（`app.js` 也兼容，但保持原样以便 A/B 对比时行为不串）。
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      preload: join(__dirname, '..', 'preload', 'titlebar.js'),
+      preload: join(
+        __dirname,
+        '..',
+        'preload',
+        SINGLE_RENDERER ? 'app.js' : 'titlebar.js',
+      ),
     },
   }
 
   const window = new BrowserWindow(constructorOptions)
-  // 原生菜单栏隐藏：accelerator 仍由已注册的 application menu 提供。
+  // 原生菜单栏的视觉处理。accelerator 始终由已注册的 application menu 提供，因此**无论**
+  // 哪种结构，快捷键都不会丢；不同的只是"菜单栏以什么方式露出来"。
+  //
+  //   * 两层结构：把自己画的菜单按钮放在自绘标题栏里（那才是这一版的入口），因此把原生
+  //     菜单栏藏起来，并吃掉裸 Alt——否则 Alt 会弹出第二套菜单栏，与自绘的那套并存。
+  //   * 单 renderer：**没有**自绘菜单了（Harness 自己拥有整个标题栏区域，外壳不再往里插
+  //     DOM），因此这里**不拦 Alt**：Windows 上按 Alt 会照常露出原生菜单栏，用户仍然能
+  //     用鼠标走完整的 文件/编辑/视图/更新/帮助。这是"菜单功能一个不丢"在单 renderer 下
+  //     的落地方式，也避免了为了菜单再引入第二个 WebContents。
+  //
   // 只在自绘标题栏的平台上做：macOS 的菜单本来就该待在系统菜单栏，而 macOS 的 Option 是
-  // 输入修饰键，不能像 Windows 的 Alt 那样被拦掉（见下面的 suppressAlt）。
+  // 输入修饰键，不能像 Windows 的 Alt 那样被拦掉。
   const hidesNativeMenuBar = usesCustomTitleBar() && !keepsNativeMenuBar()
+  const suppressAlt = hidesNativeMenuBar && !SINGLE_RENDERER
   if (hidesNativeMenuBar) window.setMenuBarVisibility(false)
 
   /** 主题状态：Harness 页面上报的令牌优先，未上报时跟随系统。 */
@@ -280,21 +333,38 @@ export function createMainWindow(options: MainWindowOptions): {
 
   const shellPath = join(userDataDir, 'shell.html')
 
-  /** 写标题栏页面。加载页文案内联在 HTML 里，因此不存在"进度到达前先闪空"。 */
+  /**
+   * 标题栏阶段的文档。
+   *
+   * 单 renderer：写**启动底板**（`splash-page.ts`）——只有底色 + 一行提示 + 顶部留白，
+   * 不画任何属于 Harness 的 UI；Harness 就绪后整页被替换，此后窗口里只剩官方那一层。
+   *
+   * 两层：沿用旧的 `shell-page.ts`（自绘标题栏 + 加载页）。
+   */
   const writeShell = (hint: string): void => {
     try {
       writeFileSync(
         shellPath,
-        shellPageHtml({
-          platform: process.platform,
-          height: titlebarHeight,
-          custom,
-          menus: drawsMenusInTitleBar(),
-          splashTitle,
-          splashHint: hint,
-          locale: currentLocale(),
-          dark: theme.dark === true,
-        }),
+        SINGLE_RENDERER
+          ? splashPageHtml({
+              title: splashTitle,
+              hint,
+              titlebarHeight,
+              locale: currentLocale(),
+              background: theme.bg ?? '#1b1b1f',
+              foreground: theme.fg ?? '#e8e8ea',
+              dark: theme.dark === true,
+            })
+          : shellPageHtml({
+              platform: process.platform,
+              height: titlebarHeight,
+              custom,
+              menus: drawsMenusInTitleBar(),
+              splashTitle,
+              splashHint: hint,
+              locale: currentLocale(),
+              dark: theme.dark === true,
+            }),
         'utf8',
       )
     } catch {
@@ -303,28 +373,42 @@ export function createMainWindow(options: MainWindowOptions): {
   }
   writeShell(splashHint)
 
-  // Harness 官方界面所在的子视图：位于标题栏下方，视口因此不含标题栏。
-  const appView = new WebContentsView({
-    webPreferences: {
-      // 官方 UI 不需要 Node 能力，因此渲染进程保持完全沙箱化。
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      preload: join(__dirname, '..', 'preload', 'preload.js'),
-    },
-  })
-  const appContents = appView.webContents
-  window.contentView.addChildView(appView)
-  appView.setVisible(false)
+  /**
+   * Harness 官方界面所在的 webContents。
+   *
+   * 单 renderer：**窗口自身的** `webContents`。这是整个重构的核心一行——不再有第二个
+   * `WebContentsView`，因此"外壳 + 内嵌 Harness"那两层结构从根上消失。
+   * 两层：新建一个位于标题栏下方的 `WebContentsView`。
+   */
+  const appView = SINGLE_RENDERER
+    ? undefined
+    : new WebContentsView({
+        webPreferences: {
+          // 官方 UI 不需要 Node 能力，因此渲染进程保持完全沙箱化。
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          webSecurity: true,
+          preload: join(__dirname, '..', 'preload', 'preload.js'),
+        },
+      })
+  const appContents = appView === undefined ? window.webContents : appView.webContents
+  if (appView !== undefined) {
+    window.contentView.addChildView(appView)
+    appView.setVisible(false)
+  }
 
   /**
-   * 把子视图铺在标题栏下方（全屏时铺满，交给系统全屏语义）。
+   * 把 Harness 子视图铺在标题栏下方（全屏时铺满，交给系统全屏语义）。
    *
    * "避开右上角原生按钮"由网页侧的 `env(titlebar-area-*)` 负责；这里只管高度换算，
    * 因此 resize / 最大化 / 还原 / 全屏切换时都要重算，否则会露白边或错位。
+   *
+   * 单 renderer 下**没有子视图可排**：Harness 页面就是窗口文档，它自己铺满整个客户区
+   * （这正是"顶栏与侧栏自然连续"的来源）。因此这里直接返回。
    */
   const layout = (): void => {
+    if (appView === undefined) return
     if (window.isDestroyed()) return
     const { width, height } = window.getContentBounds()
     const top = window.isFullScreen() ? 0 : titlebarHeight
@@ -458,20 +542,22 @@ export function createMainWindow(options: MainWindowOptions): {
   })
   window.on('close', () => persist(window, userDataDir))
 
-  // 菜单栏视觉上隐藏后，Windows 仍会响应单击 Alt 把它露出来——那会变成"原生菜单栏 +
-  // 自绘菜单"两套同时存在。这里把裸 Alt 吃掉；`before-input-event` 早于菜单快捷键处理，
-  // 因此只影响 Alt 本身，不会碰到 Ctrl+O 之类的 accelerator。
-  // 只在 Windows 上做：macOS 的 Option 是输入修饰键（且它的菜单在系统菜单栏，本来就该在）。
-  if (hidesNativeMenuBar) {
-    const suppressAlt = (contents: WebContents): void => {
+  // 菜单栏视觉上隐藏后，Windows 仍会响应单击 Alt 把它露出来——两层结构下那会变成
+  // "原生菜单栏 + 自绘菜单"两套同时存在，因此把裸 Alt 吃掉。`before-input-event` 早于
+  // 菜单快捷键处理，因此只影响 Alt 本身，不会碰到 Ctrl+O 之类的 accelerator。
+  //
+  // **单 renderer 下不做这件事**：那时没有自绘菜单，Alt 露出原生菜单栏正是我们要的入口
+  // （见上面 `suppressAlt` 的说明）。
+  if (suppressAlt) {
+    const swallowAlt = (contents: WebContents): void => {
       contents.on('before-input-event', (event, input) => {
         if (input.type !== 'keyDown' || input.key !== 'Alt') return
         event.preventDefault()
         if (!window.isDestroyed()) window.setMenuBarVisibility(false)
       })
     }
-    suppressAlt(window.webContents)
-    suppressAlt(appContents)
+    swallowAlt(window.webContents)
+    if (appView !== undefined) swallowAlt(appContents)
   }
 
   // 系统外观变化：Harness 页面还没上报令牌时也能跟上深浅色。
@@ -515,6 +601,8 @@ export function createMainWindow(options: MainWindowOptions): {
     if (!appContents.isDestroyed()) appContents.focus()
   })
   // Harness 页面上报主题令牌：标题栏与原生按钮颜色随之匹配（含应用内切换主题）。
+  // 单 renderer 下 `appContents === window.webContents`，这条桥仍然必要——它驱动
+  // `setTitleBarOverlay`，也就是原生 caption buttons 的底色与符号色。
   const onAppTheme = (event: Electron.IpcMainEvent, payload: unknown): void => {
     if (event.sender !== appContents) return
     if (payload === null || typeof payload !== 'object') return
@@ -600,8 +688,11 @@ export function createMainWindow(options: MainWindowOptions): {
       appContents.once('dom-ready', () => markStartup('domReady'))
       appContents.once('did-finish-load', () => markStartup('didFinishLoad'))
       // 带 token 的 URL 只加载一次，随后服务端会 302 到凭 Cookie 认证的干净根路径。
+      //
+      // 单 renderer：这一步同时**替换掉启动底板**——窗口文档从"底板"变成"Harness 自己"，
+      // 中间不存在第三个文档，也没有子视图要显示。此后整窗就是官方 UI。
       await appContents.loadURL(ready.authenticatedUrl)
-      appView.setVisible(true)
+      appView?.setVisible(true)
       appVisible = true
       layout()
       publishState()

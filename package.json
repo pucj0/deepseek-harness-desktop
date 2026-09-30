@@ -46,6 +46,7 @@
     "test:turn-review-ui": "node scripts/test-turn-review-sidebar-smoke.mjs",
     "test:ui-typography": "node scripts/test-typography-settings.mjs && node scripts/test-ui-typography.cjs",
     "test:update-window": "npm run build && node scripts/test-runtime-version.mjs && node scripts/test-runtime-release.cjs && node scripts/test-update-window-logic.cjs && node scripts/test-update-window.cjs && node scripts/test-update-window-layout.mjs",
+    "test:shell": "npm run build && node scripts/test-single-renderer-window.mjs",
     "test:startup": "npm run sync:plugins && npm run build && node scripts/test-startup.mjs && node scripts/test-startup-window.cjs",
     "benchmark:startup": "npm run build && node scripts/benchmark-startup.mjs",
     "probe:web": "node scripts/probe-web.mjs",
