@@ -1,3 +1,114 @@
+# 1.7.10
+
+针对 1.7.9 的"白屏"报告：**这一版的重点不是继续调 UI，而是让白屏再也不可能悄悄发生**——补上完整的启动诊断、给 Harness mount 加看门狗、把主题同步从启动关键路径上移开，并把"无白屏"变成真正的 E2E 断言。
+
+## 背景：1.7.9 可能白屏，而所有测试都是 PASS
+
+1.7.9 的截图症状是：顶部菜单（文件/编辑/视图/更新/帮助）与右上角原生按钮都在，但 Harness 的侧栏、工作区、会话区、Composer 全都没有。
+
+关键在于：**菜单是 preload 挂的，跟 Harness 有没有渲染出来无关**。而当时的回归断言用的是弱条件——"body 里有文字""侧栏元素存在""菜单 host 在"——一个**只有菜单 host 的纯白页全都能满足**。所以测试全绿、应用却白屏，不是测试漏跑，而是判据选错了。
+
+## 本版做了什么
+
+### 1. 启动诊断：白屏时主进程能说话了
+
+`src/main/window.ts` 新增一组渲染进程诊断（`DSH_DESKTOP_RENDERER_TRACE=1` 时输出）：
+
+- 生命周期：`did-start-loading` / `did-start-navigation` / `dom-ready` / `did-finish-load` / `did-stop-loading`
+- **失败与崩溃**：`did-fail-load`（带 code / description / url / 是否主框架）、`render-process-gone`、`unresponsive` / `responsive`
+- **页面自己的 console**（含未捕获异常），Electron 44 的签名是单个事件对象，代码同时兼容旧签名
+- 所有 URL 都**脱敏**（`token=<hidden>`），凭据绝不进日志
+
+以前白屏时主进程对"导航失败 / 渲染进程崩溃 / 页面抛错"一无所知——用户又点不开 DevTools。这几行就是那条路。
+
+### 2. Harness mount 看门狗
+
+`did-finish-load` 只说明**文档**加载完，不代表 React 挂上去了。现在导航后启动一个最多 10 秒的看门狗，每秒在页面里跑一段只读探测，用**官方稳定标记**判断：
+
+- `[data-shell-overlay]`（Harness 自己的 shell overlay 座，官方 preload-menu 也用它判断"应用已渲染"）
+- AppFrame / 侧栏列 / Composer 的类名前缀
+
+三种结局都有明确结论：探到就记 `harnessMounted`；探不到但菜单在，就打 **`harness document loaded but application did not mount`**；根本没有应用标记则另报一条。**绝不静默。**
+
+### 3. 页面错误记录（preload）
+
+`process.on('uncaughtException')` 抓不到**页面世界**的异常——Harness 的 Web 代码跑在 main world。现在 preload 里补上 `window.addEventListener('error')`（含资源加载失败）与 `unhandledrejection`，**只记录不改行为**（不 `preventDefault`、不返回 true），通过 IPC 交给主进程。
+
+### 4. 主题同步移出启动关键路径
+
+1.7.9 的实现会在每次上报时挂 DOM probe、创建 canvas，并用补发循环反复做几十秒。颜色本身是对的，但形态太重，而且当时无法排除它对启动的干扰——**白屏是 P0，标题栏颜色晚 100–300ms 没有任何影响**。
+
+现在：
+
+- **不再挂 DOM probe**：优先读 AppFrame **已经画出来的** `getComputedStyle(frame, '::before').backgroundColor`——那就是浏览器真正绘制的顶部 strip，不需要猜 token 声明在哪一层；AppFrame 还没出现时退回读 `body` 上的 token 值。
+- **补发有限**：500ms 间隔、最多 12 次（约 6 秒），不再是数十秒的循环。
+- **读不到就跳过**：保留窗口创建时的系统深浅色兜底，绝不把透明色当黑色报上去。
+- **fire-and-forget**：没有任何 `await theme…` 出现在 Harness boot / 窗口显示 / Host ready 路径上（有架构断言守着）。
+
+### 5. 安全模式（只用于诊断）
+
+`DSH_DESKTOP_SAFE_RENDERER=1` 时只关掉桌面扩展（顶部菜单挂载 + 主题同步），Harness、Host、single renderer 结构全部不动。用途是把白屏一次性分成两类：
+
+```
+安全模式能显示  → 问题在桌面扩展（菜单 / 主题同步）
+安全模式仍白屏  → 问题在 Harness / Host / Runtime
+```
+
+## 验证：这次是**真的在验"用户看得到 UI"**
+
+`npm run test:shell` 新增"无白屏"一节，判据换成官方稳定标记，并要求截图能看出真正的界面：
+
+```
+PASS  Harness shell overlay 存在（[data-shell-overlay]）
+PASS  Harness AppFrame 存在
+PASS  Harness 侧栏列存在
+PASS  Harness「新会话」在页面上
+PASS  Harness「工作区」区在页面上
+PASS  Harness Composer 存在
+PASS  页面有真正的 UI 文本（不是白屏）
+PASS  菜单存在（preload 挂上了）
+PASS  AppFrame 存在（Harness 自己挂上了）
+PASS  没有发生 did-fail-load（导航失败）
+PASS  没有发生 render-process-gone（渲染进程消失）
+PASS  没有 unresponsive / 页面未捕获错误
+PASS  主进程确认 Harness 真的 mount 了（看门狗）
+PASS  没有出现「文档加载了但应用没 mount」
+PASS  最终 URL 是 Host 的 loopback 根路径
+```
+
+### 并且证明了这组断言真的会红
+
+新增 `DSH_WHITE_SCREEN_SELFTEST=1` 自检：故意把 Harness 的 React 树从 DOM 上摘掉、只留菜单 host，复现 1.7.9 那个形状：
+
+```
+PASS  自检：菜单仍然在（说明它不是判据）
+PASS  自检：AppFrame 已不在（白屏形状成立）
+PASS  自检：shell overlay 已不在
+PASS  自检：只剩菜单时文本极短（弱条件会误判为通过）
+```
+
+`DSH_WHITE_SCREEN_SELFTEST=1` 的运行里，新增的 AppFrame / shell overlay / 新会话 / 工作区 断言全部 FAIL——**白屏不再漏网**。
+
+### 还验证了主题同步坏掉不影响 Harness
+
+把 token 与 frame 选择器都改成不可解析的名字（模拟"AppFrame 不存在 / 颜色读不到"）后重跑：`Harness AppFrame 存在` 仍然 PASS，主进程保留兜底色。即**主题同步失败与 Harness 能否显示完全解耦**。
+
+### 安全模式验证
+
+`DSH_DESKTOP_SAFE_RENDERER=1` 下 Harness 正常显示（AppFrame / 新会话 / Composer 全部 PASS），而菜单与主题上报关闭（对应断言 FAIL，符合预期）。
+
+## 关于"我在这台机器上没能复现白屏"
+
+必须说清楚，不粉饰：
+
+- 用真实打包 Host + 真实 Electron + 走 `createMainWindow()` 的复现器跑了多次（含全新 profile、带 git 工作区、带仓库自带的 4 个插件），**AppFrame 全部正常 mount，白屏 0 次**。
+- **打包后的 `dsh-desktop.exe` 在本机无法启动**（`0xC0000005`，任何 stdout/stderr 都没有），因此"用户双击 exe 那条路径"我在这里复现不了。这也是过去几版一直标注"packaged GUI 无法在本宿主测量"的同一个限制。
+- 因此这一版的价值是：**即使我复现不了，白屏也不会再无声发生**——诊断会给出最终 URL、失败码、渲染进程崩溃原因、页面第一条错误、以及"文档加载了但应用没 mount"这个明确结论。请把 `DSH_DESKTOP_RENDERER_TRACE=1` 下的 stderr 发我，我可以据此定位根因。
+- 同时主题同步已经不可能再是原因（它被移出关键路径、失败即跳过，并且有实测证明它坏掉时 Harness 照常显示）。
+
+## 未回滚
+
+single renderer、Harness 铺满窗口、官方侧栏与折叠控件、无 WebContentsView、Host 并行启动、关闭到托盘、Git / Review / Typography、Runtime 应用内更新——全部保持不变。
 # 1.7.9
 
 修掉顶部 40px 的最后一个视觉问题：**右上角原生窗口按钮那一块的底色，与左边不是同一个颜色**。现在整条 Windows caption strip 是一个连续的整体。
