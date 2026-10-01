@@ -56,6 +56,73 @@ function reportPreloadFailure(stage: string, error: unknown): void {
 process.on('uncaughtException', (error) => reportPreloadFailure('uncaughtException', error))
 process.on('unhandledRejection', (reason) => reportPreloadFailure('unhandledRejection', reason))
 
+/**
+ * 记录**页面自己**的未捕获错误与未处理的 promise 拒绝。
+ *
+ * 为什么 preload 的 `process.on('uncaughtException')` 不够：Harness 的 Web 代码跑在页面世界
+ * （main world），它抛出的异常**不会**进 preload 的进程级 handler；而白屏最常见的原因就是
+ * "React 在 mount 时抛了一个没人接的异常"。这里补上那一半。
+ *
+ * 只记录、不改行为：不 `preventDefault()`、不返回 `true`、不动 `event.error`，因此不会改变
+ * 页面的错误传播语义。1.7.9 白屏时主进程一无所知，就是缺这一段。
+ */
+function watchPageErrors(): void {
+  window.addEventListener(
+    'error',
+    (event) => {
+      try {
+        const target = event.target
+        // 资源加载失败（<script>/<link>）走的是同一条事件，但 detail 不同。
+        if (target !== null && target !== window && target instanceof HTMLElement) {
+          const source = target.getAttribute('src') ?? target.getAttribute('href') ?? ''
+          reportPreloadFailure('resource-error', `${target.tagName} ${source.slice(0, 200)}`)
+          return
+        }
+        reportPreloadFailure(
+          'page-error',
+          `${event.message} @ ${event.filename}:${String(event.lineno)}:${String(event.colno)}` +
+            (event.error instanceof Error ? `\n${event.error.stack ?? ''}` : ''),
+        )
+      } catch {
+        // 记录失败不能引发新的异常。
+      }
+    },
+    true,
+  )
+  window.addEventListener('unhandledrejection', (event) => {
+    try {
+      const reason = event.reason
+      reportPreloadFailure(
+        'unhandledrejection',
+        reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason).slice(0, 500),
+      )
+    } catch {
+      // 同上。
+    }
+  })
+}
+
+/**
+ * 安全模式：**只用于诊断**，不是产品逻辑。
+ *
+ * `DSH_DESKTOP_SAFE_RENDERER=1` 时关掉外壳加在渲染进程上的一切附加行为（主题同步、顶部菜单
+ * 挂载），只保留 Harness 自己。目的在于把"白屏到底来自 Harness 还是来自桌面扩展"一次性分开：
+ *
+ * ```text
+ * 安全模式能显示  → 问题在桌面扩展（菜单挂载 / 主题同步）
+ * 安全模式仍白屏  → 问题在 Harness / Host / Runtime
+ * ```
+ *
+ * 它不影响关键路径、Host 与 single renderer 结构，因此不会掩盖真正的问题。
+ * @returns 是否处于安全模式。
+ */
+function safeMode(): boolean {
+  return process.env.DSH_DESKTOP_SAFE_RENDERER === '1'
+}
+
+// 页面错误记录在安全模式下也保留：它只读不写，而且正是白屏时最需要的信息。
+watchPageErrors()
+
 // 顶层冒烟标记：preload 到底有没有被求值。
 //
 // 存在的理由很具体：曾出现过"页面里 `window.dshDesktop` 与顶部菜单一起消失、而主进程什么
@@ -139,6 +206,21 @@ const LABEL_PRIMARY_TOKEN = '--dsw-alias-label-primary'
  * @param color - 任意 CSS 颜色文本。
  * @returns `rgba(...)` 字符串；无法解析时 undefined。
  */
+/**
+ * 把任意 CSS 颜色转成原生 `rgba(r, g, b, a)` 字符串。
+ *
+ * 为什么要过一遍 canvas：`setTitleBarOverlay` 只接受**不透明**的 `#rrggbb`（或 `#aarrggbb`），
+ * 而主题里的颜色可能是 `oklch(...)`、`color-mix(...)`、`color(srgb …)`、`rgb()` 或带 alpha 的
+ * 写法。浏览器自己最清楚这些怎么算成 sRGB：让它画一个 1×1 像素再读回来，比在外壳里重写一套
+ * 颜色解析可靠。与官方 `preload-windows.ts` 的 `nativeColor()` 同一做法。
+ *
+ * **注意它在当前实现里的调用频率**：只有 {@link readTheme} 在上报主题时调用，而主题上报是
+ * 事件驱动 + 有限补发的（见 {@link publishTheme}），不是循环探测。因此这里每帧最多创建一个
+ * 1×1 的临时 canvas，用完即弃，不会在 Harness 启动期间反复做重活。
+ *
+ * @param color - 任意 CSS 颜色文本。
+ * @returns `rgba(...)` 字符串；无法解析时 undefined。
+ */
 function nativeColor(color: string): string | undefined {
   if (color === '') return undefined
   try {
@@ -175,63 +257,68 @@ function nativeColor(color: string): string | undefined {
  *
  * @returns 主题载荷（解析不出的项省略）。
  */
+/**
+ * 读取官方 UI 已解析的主题令牌。
+ *
+ * ## 关键：顶部 strip 的底色必须来自**同一个 token**
+ *
+ * 顶部那一条 40px 有两个来源，必须同色：
+ *   1. **渲染进程**画的 strip —— Harness 的 `[data-windows-titlebar] .frame::before` 用的是
+ *      `background: var(--dsw-specific-sidebar-fill)`；
+ *   2. **原生** caption buttons 那一块 —— 由 `titleBarOverlay.color` 画。
+ *
+ * 以前这里报的是 `body` 的 `background-color`（`--dsw-alias-bg-base`），而 strip 用的是
+ * `--dsw-specific-sidebar-fill`。浅色下两者是 `rgb(249,250,251)` 与 `rgb(255,255,255)`，于是
+ * 右上角偏白。现在读的就是 strip 用的那一个 token。
+ *
+ * ## 为什么不再挂 DOM probe
+ *
+ * 1.7.9 的实现会在每次上报时 `append` 一个 `<span>`、读 computed style、再 `remove`，并用
+ * retry 循环反复做。它**读到的颜色是对的**，但形态太重，而且当时无法排除它对启动的干扰——
+ * 白屏是 P0，而标题栏颜色晚 100–300ms 没有任何影响。
+ *
+ * 现在分两路，都是**只读、轻量、同步**：
+ *   * 优先读 **AppFrame 实际画出来的** `::before` 背景色——那正是浏览器已经绘制的顶部 strip，
+ *     不需要猜 token 声明在哪一层；
+ *   * AppFrame 还没出现时退回读 token 值本身（实测声明在 `body` 上）。
+ *
+ * @returns 主题载荷（读不到实色时省略 `bg`，由 {@link publishTheme} 决定要不要补发）。
+ */
 function readTheme(): ThemePayload {
   const body = document.body
   if (body === null) return {}
-  const style = getComputedStyle(body)
+  const bodyStyle = getComputedStyle(body)
   const token = (name: string): string | undefined => {
-    const value = style.getPropertyValue(name).trim()
+    const value = bodyStyle.getPropertyValue(name).trim()
     return value === '' ? undefined : value
   }
   const darkened =
     body.hasAttribute('data-ds-dark-theme') || window.matchMedia('(prefers-color-scheme: dark)').matches
 
   /**
-   * 官方那套取色：先在**声明层**把 token 解析成真实颜色，再用 probe 归一化成原生 rgba。
+   * 顶部 strip 的真实底色。
    *
-   * 两个细节都是踩出来的：
-   *
-   *   1. **`--dsw-specific-sidebar-fill` 不会继承到一个随手 append 到 `body` 的空 `<span>` 上**
-   *      （Harness 在组件自己的样式表里声明它）。直接用 `background-color:var(--token)` 会解析成
-   *      透明色——那正是"右上角又不同色"的复现。因此先按 `:root` → `body` 两层问
-   *      `getComputedStyle(...).getPropertyValue(token)`（这个 API 会把值解析成可用颜色），
-   *      拿到实色后再赋给 probe。
-   *   2. **不能只读 `:root`**：Harness 可能把它声明在更深处，读根元素会拿到空值。
+   * `getComputedStyle(frame, '::before')` 给出的是**已经画出来的**那一条的颜色，因此不需要关心
+   * `--dsw-specific-sidebar-fill` 究竟声明在 `:root` / `body` / 组件里。
    */
-  const resolveToken = (token: string): string | undefined => {
-    for (const scope of [document.documentElement, body]) {
-      const value = getComputedStyle(scope).getPropertyValue(token).trim()
-      if (value !== '') return value
+  const paintedStrip = (): string | undefined => {
+    try {
+      const frame = document.querySelector('[class*=frame]')
+      if (frame === null) return undefined
+      const pseudo = getComputedStyle(frame, '::before')
+      return opaqueNative(nativeColor(pseudo.backgroundColor))
+    } catch {
+      return undefined
     }
-    return undefined
   }
-  const fillValue = resolveToken(SIDEBAR_FILL_TOKEN)
-  const labelValue = resolveToken(LABEL_PRIMARY_TOKEN)
-
-  const probe = document.createElement('span')
-  probe.style.cssText =
-    'position:fixed;visibility:hidden;pointer-events:none;left:-9999px;top:-9999px;' +
-    (fillValue === undefined ? '' : `background-color:${fillValue};`) +
-    (labelValue === undefined ? '' : `color:${labelValue}`)
-  body.append(probe)
-  let fill: string | undefined
-  let label: string | undefined
-  try {
-    const probeStyle = getComputedStyle(probe)
-    fill = opaqueNative(probeStyle.backgroundColor)
-    // 符号色不要求不透明（文字色本来就是实色；这里只做解析失败的保护）。
-    label = nativeColor(probeStyle.color)
-  } finally {
-    probe.remove()
-  }
+  const fill = paintedStrip() ?? opaqueNative(nativeColor(token(SIDEBAR_FILL_TOKEN) ?? ''))
+  const label = nativeColor(token(LABEL_PRIMARY_TOKEN) ?? '')
 
   return {
     // `bg` 就是顶部 strip 的底色：原生 overlay 与它同源，因此右上角不会再偏白。
     //
     // **读不到时省略**（而不是退回 `body` 背景）：退回就等于又回到"右上角偏白"的老 bug。
-    // 省略后由 publishTheme() 重试。
     ...(fill === undefined ? {} : { bg: fill }),
-    // 符号色优先用 token 解析出来的值（官方同样用 label primary）。
     ...(label === undefined ? {} : { fg: label }),
     fgDim: token('--dsw-alias-label-tertiary') ?? token('--dsw-alias-label-secondary'),
     hover: token('--dsw-alias-interactive-bg-hover'),
@@ -262,29 +349,38 @@ function opaqueNative(color: string | undefined): string | undefined {
 }
 
 /** 主题上报的补发间隔（毫秒）。 */
-const THEME_RETRY_INTERVAL_MS = 400
+const THEME_RETRY_INTERVAL_MS = 500
 
-/** 补发上限（约 48 秒；Harness 的首帧远早于此）。 */
-const THEME_RETRY_LIMIT = 120
+/**
+ * 补发次数上限。
+ *
+ * **刻意很小**：补发只用来覆盖"窗口刚起来、Harness 还没画第一帧"这一小段。它不再是一个能跑
+ * 几十秒的循环——那是 1.7.9 的形态，而白屏是 P0、标题栏颜色晚几百毫秒无所谓。AppFrame 一出现，
+ * `readTheme()` 就优先读它**已经画出来的** `::before`，因此正常情况下第一次或第二次就成功。
+ */
+const THEME_RETRY_LIMIT = 12
 
-/** 是否已经上报过一次"真正读到 token"的主题。 */
+/** 是否已经上报过一次"真正读到实色"的主题。 */
 let themeSettled = false
-/** 重试计时器。 */
+/** 补发计时器。 */
 let themeRetry: ReturnType<typeof setTimeout> | undefined
+/** 已经尝试过多少次上报。 */
+let themeAttempts = 0
 
 /**
  * 上报主题；绝不向宿主页面抛错。
  *
- * ## 为什么要重试（初始化顺序）
+ * ## 关键路径原则
  *
- * preload 可能早于 Harness 的样式表执行（单 renderer 下它先跑在**启动底板**上，导航之后才跑在
- * Harness 文档里），此时 `--dsw-specific-sidebar-fill` 还没被声明，probe 的 computed 背景色是
- * **透明**的（实测 `rgba(0, 0, 0, 0)`）。旧实现会把透明当成结果报上去，主进程只能用自己的兜底
- * 色，于是右上角又和左边不同色。
+ * 颜色同步**只能 fire-and-forget**：它不出现在 Harness boot、窗口显示、Host ready 这些关键路径
+ * 上，也没有任何 `await theme…`。整个函数同步执行、全部 try/catch，最坏情况就是这一帧的颜色没
+ * 上报成功，等下一次触发。
  *
- * 现在：读到实色才算成功；读不到就以指数退避重试，**不设次数上限**——因为"什么时候 token 才
- * 生效"取决于 Harness 的首帧，而那正是我们在等的东西。导航会把整个文档连同计时器一起换掉，
- * 新文档里的 preload 会重新开始，因此这个循环不会无限堆积。
+ * ## 读不到实色时怎么办
+ *
+ * 直接 `return`，保留窗口创建时的系统深浅色兜底（见 `src/main/titlebar.ts`）。**绝不**为了"凑出
+ * 一个颜色"去做重活，也绝不把透明色当成黑色报上去。AppFrame mount 之后（或主题变化时）自然会
+ * 再补一次。
  */
 function publishTheme(): void {
   let theme: ThemePayload
@@ -293,35 +389,31 @@ function publishTheme(): void {
   } catch {
     theme = {}
   }
-  // **先发**：`fill` 拿不到时会退回一个干净的载荷（主进程那边按系统深浅色兜底），因此无论
-  // 如何这一次上报都是安全的——而绝对不发会让右上角一直停在窗口创建时的初值上。
+  themeAttempts += 1
+
+  if (theme.bg === undefined) {
+    // 还没读到实色：不覆盖当前 overlay，有限次数补发后放弃（等下一次事件触发）。
+    if (!themeSettled && themeRetry === undefined && themeAttempts < THEME_RETRY_LIMIT) {
+      themeRetry = setTimeout(() => {
+        themeRetry = undefined
+        publishTheme()
+      }, THEME_RETRY_INTERVAL_MS)
+    }
+    return
+  }
+
+  themeSettled = true
+  if (themeRetry !== undefined) {
+    clearTimeout(themeRetry)
+    themeRetry = undefined
+  }
   try {
     tracePreload(`publishTheme bg=${String(theme.bg)} fg=${String(theme.fg)} attempts=${String(themeAttempts)}`)
     ipcRenderer.send('dsh-desktop:app-theme', theme)
   } catch {
     // 主题上报是尽力而为。
   }
-
-  // 拿到实色就算稳定；否则继续按固定间隔补发，直到 Harness 的 token 就位。
-  themeAttempts += 1
-  if (theme.bg !== undefined) {
-    themeSettled = true
-    if (themeRetry !== undefined) {
-      clearTimeout(themeRetry)
-      themeRetry = undefined
-    }
-    return
-  }
-  if (!themeSettled && themeRetry === undefined && themeAttempts < THEME_RETRY_LIMIT) {
-    themeRetry = setTimeout(() => {
-      themeRetry = undefined
-      publishTheme()
-    }, THEME_RETRY_INTERVAL_MS)
-  }
 }
-
-/** 已经尝试过多少次上报（用于给补发设一个上限，避免永久定时器）。 */
-let themeAttempts = 0
 
 /**
  * 把当前主题再上报一次。
@@ -341,6 +433,17 @@ function flushTheme(): void {
  *
  * 两个触发源都必要：应用可以在系统外观不变的情况下切换主题（设置里），系统外观也可以在
  * 页面的属性不变的情况下变化（跟随系统）。
+ *
+ * ## 关键路径原则（1.7.9 白屏回归的教训）
+ *
+ * 颜色同步**只能 fire-and-forget**：它不得出现在 Harness boot、窗口显示、Host ready 这些
+ * 关键路径上，也不得为了"还没拿到正确 caption 色"而反复做重活。标题栏颜色晚 100–300ms 对用户
+ * 没有影响，而 Harness 白屏是 P0。
+ *
+ * 因此这里的策略是：
+ *   * 每个触发点都调 `publishTheme()`，但它**从不抛错、从不阻塞**（内部全 try/catch）；
+ *   * 补发只在"还没读到实色"时进行，且用的是 `setTimeout` 而不是忙等；
+ *   * 拖拽/主题变化等高频触发由 observ**er 合并**（同一个 tick 内多次变化只发一次）。
  */
 function watchTheme(): void {
   publishTheme()
@@ -348,11 +451,13 @@ function watchTheme(): void {
   document.addEventListener('DOMContentLoaded', send, { once: true })
   window.addEventListener('load', send, { once: true })
   try {
-    new MutationObserver(send).observe(document.documentElement, {
+    // 观察器只报告"属性变了"，不做重活；`publishTheme` 自己会判断该不该继续补发。
+    const observer = new MutationObserver(() => send())
+    observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['data-ds-dark-theme', 'class', 'style'],
     })
-    new MutationObserver(send).observe(document.body ?? document.documentElement, {
+    observer.observe(document.body ?? document.documentElement, {
       attributes: true,
       attributeFilter: ['data-ds-dark-theme', 'class', 'style'],
     })
@@ -362,10 +467,13 @@ function watchTheme(): void {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', send)
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', watchTheme, { once: true })
-} else {
-  watchTheme()
+// 主题同步是**附加行为**：安全模式下完全不启动它（见 safeMode 的说明）。
+if (!safeMode()) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', watchTheme, { once: true })
+  } else {
+    watchTheme()
+  }
 }
 
 // =====================================================================================
@@ -723,6 +831,7 @@ function mountCaptionMenu(): () => void {
 
 /** 挂菜单；失败只记录，绝不影响 Harness（快捷键在主进程侧，仍然可用）。 */
 function startCaptionMenu(): void {
+  if (safeMode()) return
   try {
     mountCaptionMenu()
   } catch (error) {

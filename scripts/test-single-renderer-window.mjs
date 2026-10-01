@@ -103,6 +103,25 @@ const EXPR_WINDOW = `(() => JSON.stringify({
   hasComposer: document.querySelector('textarea, [contenteditable=true]') !== null,
   hasDesktopBridge: typeof globalThis.dshDesktop === 'object',
   bodyText: (document.body === null ? '' : document.body.innerText).replace(/\\s+/gu, ' ').slice(0, 160),
+  // ---- 「无白屏」判据（见文件头：菜单在 ≠ 应用在）----
+  //
+  // 1.7.9 报过一次"菜单在、Harness 全白"：文档加载成功、React 没 mount，而当时的测试只看了
+  // "body 有文字 / 菜单 host 在"，**恰好都能通过**。这里改成官方稳定标记。
+  harness: (() => {
+    const q = (selector) => document.querySelector(selector)
+    const body = document.body
+    const text = body === null ? '' : body.innerText.replace(/\\s+/gu, ' ').trim()
+    return {
+      hasShellOverlay: q('[data-shell-overlay]') !== null,
+      hasAppFrame: q('[class*=frame]') !== null,
+      hasSidebarColumn: q('[class*=sidebarCol], [class*=sidebarRoot], aside') !== null,
+      hasNewSession: /新会话|New session|New Session/u.test(text),
+      hasWorkspaceSection: /工作区|Workspace/u.test(text),
+      hasComposer: q('textarea, [contenteditable=true]') !== null,
+      textLength: text.length,
+      textSample: text.slice(0, 80),
+    }
+  })(),
   menu: (() => {
     const host = document.querySelector('[data-dsh-desktop-menu]')
     if (host === null) return { present: false }
@@ -481,6 +500,8 @@ const win = spawn(ELECTRON, [
     DSH_PROBE_URL: authenticatedUrl,
     // 主进程在收到主题 IPC 时把 overlay 的最终入参打到 stderr；测试把它落到文件里断言。
     DSH_DESKTOP_THEME_TRACE: '1',
+    // 渲染进程诊断（导航失败 / 进程消失 / 页面 console）：白屏时唯一能看到真相的地方。
+    DSH_DESKTOP_RENDERER_TRACE: '1',
     // 让 preload 的诊断也写到同一个 HOME 下（排障用）。
     DSH_DESKTOP_HOME: HOME,
   },
@@ -613,13 +634,100 @@ if (measured === undefined) {
   has('Harness 侧栏渲染在这个窗口里', measured.hasSidebar)
   has('Harness 输入区渲染在这个窗口里', measured.hasComposer)
   has('theme/workspace/locale 桥注入在同一个渲染进程里', measured.hasDesktopBridge)
-  has('页面有实际内容（不是启动底板）', measured.bodyText.length > 20)
+
+  // ================= 「无白屏」：Harness 应用真的挂上去了吗 =================
+  //
+  // 这一节是 1.7.9 白屏回归的直接产物。原来的断言只看"body 有文字 + 侧栏元素存在"，而
+  // **只有菜单 host** 的纯白页也能让它们通过——菜单是 preload 挂的，跟 Harness 是否 mount 无关。
+  // 因此这里改用官方稳定标记，并且要求截图能看出真正的 UI。
+  console.log('')
+  console.log('=== 无白屏（Harness 应用真的 mount）===')
+  const harness = measured.harness
+  console.log(`  INFO  ${JSON.stringify(harness)}`)
+  has('Harness shell overlay 存在（[data-shell-overlay]）', harness?.hasShellOverlay)
+  has('Harness AppFrame 存在', harness?.hasAppFrame)
+  has('Harness 侧栏列存在', harness?.hasSidebarColumn)
+  has('Harness「新会话」在页面上', harness?.hasNewSession)
+  has('Harness「工作区」区在页面上', harness?.hasWorkspaceSection)
+  has('Harness Composer 存在', harness?.hasComposer)
+  has('页面有真正的 UI 文本（不是白屏）', (harness?.textLength ?? 0) > 40)
+  // 反证：菜单在 **不能** 当成"应用已经渲染"。这是 1.7.9 白屏骗过测试的那一步。
+  has('菜单存在（preload 挂上了）', measured.menu?.present === true)
+  has('AppFrame 存在（Harness 自己挂上了）', harness?.hasAppFrame === true)
+
+  // ---- 测试自身的有效性：故意制造白屏，证明这组断言真的会变红 ----
+  //
+  // 这一轮的核心教训是"所有测试 PASS + 实际应用白屏"。根因是当时的断言用弱条件（body 有文字 /
+  // 菜单 host 在），而**只有菜单 host 的纯白页也能让它们通过**。这里把 Harness 的 React 树从
+  // DOM 上摘掉（只留菜单 host），复现那个形状，确认新断言会抓住它。
+  if (cdp !== undefined && process.env.DSH_WHITE_SCREEN_SELFTEST === '1') {
+    const stripped = await cdp.evaluate(`(() => {
+      for (const node of [...document.body.children]) {
+        if (!node.hasAttribute('data-dsh-desktop-menu')) node.remove()
+      }
+      return JSON.stringify({ bodyChildren: document.body.children.length })
+    })()`)
+    const afterStrip = await cdp.evaluate(`(() => {
+      const q = (s) => document.querySelector(s)
+      const body = document.body
+      const text = body === null ? '' : body.innerText.replace(/\\s+/gu, ' ').trim()
+      return JSON.stringify({
+        hasShellOverlay: q('[data-shell-overlay]') !== null,
+        hasAppFrame: q('[class*=frame]') !== null,
+        hasMenu: q('[data-dsh-desktop-menu]') !== null,
+        textLength: text.length,
+      })
+    })()`)
+    console.log('')
+    console.log('=== 白屏自检（故意摘掉 React 树）===')
+    console.log(`  INFO  摘除后：${JSON.stringify(afterStrip)}（bodyChildren=${stripped?.bodyChildren}）`)
+    has('自检：菜单仍然在（说明它不是判据）', afterStrip?.hasMenu === true)
+    has('自检：AppFrame 已不在（白屏形状成立）', afterStrip?.hasAppFrame === false)
+    has('自检：shell overlay 已不在', afterStrip?.hasShellOverlay === false)
+    has('自检：只剩菜单时文本极短（弱条件会误判为通过）', (afterStrip?.textLength ?? 0) < 40)
+    console.log('  ↑ 这三条说明：只有菜单 host 时，"body 有文字 / 菜单在"都会 PASS，')
+    console.log('    而新增的 AppFrame / shell overlay / 新会话 / 工作区 断言会 FAIL——白屏不再漏网。')
+  }
 }
 
 // ---- 4. 结构断言：单 renderer、没有子视图、没有外壳文档 --------------------------
 console.log('')
 console.log('=== 结构（探针从主进程读的真实值）===')
 const line = (name) => probeLog.split('\n').find((l) => l.startsWith(name)) ?? ''
+
+/**
+ * 主进程侧的渲染进程诊断行（`DSH_DESKTOP_RENDERER_TRACE=1`）。
+ *
+ * 这是白屏时唯一能看到真相的地方：`did-fail-load` / `render-process-gone` 是渲染进程自己报不
+ * 出来的事件，而用户点不开 DevTools。这里把它读出来，一方面当作回归断言（不允许出现失败导航或
+ * 进程消失），另一方面在报告里直接给出"最终 URL 是什么"。
+ */
+const rendererLines = () =>
+  (existsSync(join(OUT, 'window-stderr.log')) ? readFileSync(join(OUT, 'window-stderr.log'), 'utf8') : '')
+    .split('\n')
+    .filter((l) => l.includes('[renderer]'))
+    .map((l) => l.slice(l.indexOf('[renderer]')))
+console.log('  渲染进程诊断：')
+for (const entry of rendererLines().slice(-10)) console.log(`    ${entry}`)
+has(
+  '没有发生 did-fail-load（导航失败）',
+  rendererLines().filter((l) => l.includes('did-fail-load')).length === 0,
+)
+has(
+  '没有发生 render-process-gone（渲染进程消失）',
+  rendererLines().filter((l) => l.includes('render-process-gone')).length === 0,
+)
+has(
+  '没有 unresponsive / 页面未捕获错误',
+  rendererLines().filter((l) => l.includes('unresponsive') || l.includes('page-error')).length === 0,
+)
+has('主进程确认 Harness 真的 mount 了（看门狗）', rendererLines().some((l) => l.includes('harnessMounted')))
+has(
+  '没有出现「文档加载了但应用没 mount」',
+  rendererLines().filter((l) => l.includes('did not mount')).length === 0,
+)
+// 最终 URL 必须是 Host 的 loopback 根路径，而不是停在 file:// 或 dsh-pending://。
+has('最终 URL 是 Host 的 loopback 根路径', /did-finish-load url=http:\/\/127\.0\.0\.1:\d+\//u.test(rendererLines().join('\n')))
 check('appContents === window.webContents（单 renderer）', line('created '), 'created single-renderer=true')
 check('窗口没有任何子 WebContentsView', line('contentViewChildren='), 'contentViewChildren=0')
 has('探针确认 navigate 成功', probeLog.includes('navigated ok'))

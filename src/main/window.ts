@@ -585,6 +585,152 @@ export function createMainWindow(options: MainWindowOptions): {
   nativeTheme.on('updated', onNativeTheme)
   window.on('closed', () => nativeTheme.off('updated', onNativeTheme))
 
+  // ===================================================================================
+  // 渲染进程诊断
+  //
+  // 1.7.9 报过一次"菜单在、Harness 界面全白"的回归。当时**没有任何运行期可见性**：导航失败、
+  // 渲染进程崩溃、页面里的 JS 抛错，主进程一概不知道，只能靠猜。这一段把那条路打通——只在
+  // `DSH_DESKTOP_RENDERER_TRACE=1` 时输出，平时零成本。
+  //
+  // 为什么必须打在主进程：白屏时用户点不开 DevTools，而 `did-fail-load` /
+  // `render-process-gone` 是**渲染进程自己报不出来**的事件（进程都没了）。
+  // ===================================================================================
+  const rendererTrace = (message: string): void => {
+    if (process.env.DSH_DESKTOP_RENDERER_TRACE !== '1') return
+    process.stderr.write(`[renderer] ${message}\n`)
+  }
+
+  /** 脱敏：URL 里的 `token=` 是认证凭据，绝不能进日志。 */
+  const safeUrl = (raw: string): string => raw.replace(/token=[^&]*/gu, 'token=<hidden>')
+
+  appContents.on('did-start-loading', () => rendererTrace('did-start-loading'))
+  appContents.on('did-stop-loading', () => rendererTrace(`did-stop-loading url=${safeUrl(appContents.getURL())}`))
+  appContents.on('did-start-navigation', (details) => {
+    rendererTrace(`did-start-navigation url=${safeUrl(details.url)} mainFrame=${String(details.isMainFrame)}`)
+  })
+  appContents.on('dom-ready', () => rendererTrace('dom-ready'))
+  appContents.on('did-finish-load', () => rendererTrace(`did-finish-load url=${safeUrl(appContents.getURL())}`))
+  /**
+   * 主框架加载失败。
+   *
+   * **这是白屏最直接的答案**：`did-fail-load` 给出 code / description / url，而白屏时最需要的
+   * 就是"Harness 页面到底有没有从 file:// 变成 http://127.0.0.1:xxxx/"以及失败码。
+   */
+  appContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    rendererTrace(
+      `did-fail-load code=${String(errorCode)} description=${String(errorDescription)} ` +
+        `url=${safeUrl(String(validatedURL))} mainFrame=${String(isMainFrame)}`,
+    )
+  })
+  appContents.on('render-process-gone', (_event, details) => {
+    rendererTrace(`render-process-gone reason=${String(details.reason)} exitCode=${String(details.exitCode)}`)
+  })
+  appContents.on('unresponsive', () => rendererTrace('unresponsive'))
+  appContents.on('responsive', () => rendererTrace('responsive'))
+  /**
+   * 页面自己的 console 输出（含未捕获异常）。
+   *
+   * Electron 44 的回调签名是**一个事件对象**（旧版是 `(event, level, message, line, sourceId)`
+   * 五个参数）。这里按当前版本实现，同时兼容旧签名，避免版本变化时静默失效。
+   */
+  appContents.on('console-message', (...args: unknown[]) => {
+    const first = args[0] as { level?: unknown; message?: unknown; lineNumber?: unknown; sourceId?: unknown } | undefined
+    const legacy = args.length > 2 ? { level: args[1], message: args[2], lineNumber: args[3], sourceId: args[4] } : undefined
+    const detail = first !== undefined && typeof first === 'object' && 'message' in first ? first : legacy
+    if (detail === undefined) return
+    rendererTrace(
+      `console level=${String(detail.level)} message=${String(detail.message).slice(0, 400)} ` +
+        `source=${safeUrl(String(detail.sourceId))}:${String(detail.lineNumber)}`,
+    )
+  })
+
+  /**
+   * 判断 Harness **应用**有没有真的挂上去（而不只是文档加载完）。
+   *
+   * 在页面里跑一段只读的探测：不注入业务逻辑、不改页面状态，只报告事实。
+   *
+   * 判据用官方稳定标记，而不是"body 有没有文字"——菜单 host 会让 `innerText` 非空，那正是
+   * 1.7.9 白屏时骗过一次的弱条件：
+   *   * `[data-shell-overlay]`：Harness 自己的 shell overlay 座（官方 preload-menu 也用它判断
+   *     "应用已经渲染"）；
+   *   * AppFrame / 侧栏 / Composer 的类名前缀（本 Runtime 实测为 `pI_x6G_frame` / `hHd-Xa_root`）。
+   * @returns 页面自述的状态。
+   */
+  const probeHarnessMount = async (): Promise<Record<string, unknown> | undefined> => {
+    if (appContents.isDestroyed()) return undefined
+    const expression = `(() => {
+      const q = (selector) => document.querySelector(selector)
+      const body = document.body
+      const text = body === null ? '' : body.innerText.replace(/\\s+/gu, ' ').trim()
+      return JSON.stringify({
+        url: location.href.replace(/token=[^&]*/u, 'token=<hidden>'),
+        readyState: document.readyState,
+        bodyChildren: body === null ? 0 : body.children.length,
+        bodyTextLength: text.length,
+        hasShellOverlay: q('[data-shell-overlay]') !== null,
+        hasAppFrame: q('[class*=frame]') !== null,
+        hasSidebar: q('aside, [class*=sidebarCol], [class*=sidebarRoot]') !== null,
+        hasComposer: q('textarea, [contenteditable=true]') !== null,
+        hasMenu: q('[data-dsh-desktop-menu]') !== null,
+        hasDesktopBridge: typeof globalThis.dshDesktop === 'object',
+        hasBootReady: typeof globalThis.__DSH_BOOT_READY__ === 'object',
+        scripts: document.scripts.length,
+        styleSheets: document.styleSheets.length,
+      })
+    })()`
+    try {
+      const raw = (await appContents.executeJavaScript(expression, true)) as string
+      return typeof raw === 'string' && raw !== '' ? (JSON.parse(raw) as Record<string, unknown>) : undefined
+    } catch (error) {
+      rendererTrace(`mount-probe FAILED ${String(error instanceof Error ? error.message : error)}`)
+      return undefined
+    }
+  }
+
+  /** 看门狗是否已经在跑（导航会发生多次：启动 + 切换工作区）。 */
+  let mountWatchdogRunning = false
+  /** 最近一次探测到的 Harness 状态；诊断与测试都读它。 */
+  let lastMountState: Record<string, unknown> | undefined
+
+  /**
+   * Harness mount 看门狗。
+   *
+   * 最多等 10 秒，每秒探一次页面的真实 DOM。三种结局都要有明确结论，绝不静默：
+   *   * 探到 AppFrame → 记 `harnessMounted` 并完成；
+   *   * 一直探不到、但**菜单 host 在** → 这正是 1.7.9 的白屏：文档加载了、应用没 mount。
+   *     打一行 `harness document loaded but application did not mount` 并带上完整状态；
+   *   * 根本没探到（没有 body / 探测报错）→ 也明确报出来。
+   *
+   * 它只读不写：不改页面、不阻塞导航（`navigate()` 不 await 它）。
+   */
+  const watchHarnessMount = async (): Promise<void> => {
+    if (mountWatchdogRunning) return
+    mountWatchdogRunning = true
+    try {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        if (window.isDestroyed() || appContents.isDestroyed()) return
+        const state = await probeHarnessMount()
+        if (state === undefined) continue
+        lastMountState = state
+        if (state.hasAppFrame === true) {
+          rendererTrace(`harnessMounted ${JSON.stringify(state)}`)
+          return
+        }
+        if (attempt === 9) {
+          const message =
+            state.hasMenu === true
+              ? 'harness document loaded but application did not mount'
+              : 'harness document did not present any application markup'
+          rendererTrace(`${message} ${JSON.stringify(state)}`)
+          process.stderr.write(`[shell] ${message}\n  ${JSON.stringify(state)}\n`)
+        }
+      }
+    } finally {
+      mountWatchdogRunning = false
+    }
+  }
+
   // ---- 标题栏 IPC：只暴露标题栏真正需要的几件事 ---------------------------
   //
   // 用 removeHandler 先清一遍：`ipcMain.handle` 对同一 channel 重复注册会抛错，
@@ -758,6 +904,10 @@ export function createMainWindow(options: MainWindowOptions): {
       layout()
       publishState()
       show()
+      // `did-finish-load` 只说明**文档**加载完了，不代表 Harness 的 React 真的挂上去了。
+      // 1.7.9 的"菜单在、界面全白"正是这种情况：文档加载成功、mount 失败，而主进程完全不知道。
+      // 这里在导航之后启动一个看门狗，用**官方稳定标记**判断有没有真的渲染出来。
+      void watchHarnessMount()
     },
     setSplashHint: (hint: string): void => {
       if (window.isDestroyed() || navigated) return

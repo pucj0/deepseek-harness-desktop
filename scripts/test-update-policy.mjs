@@ -137,8 +137,24 @@ assert.match(appPreload, /--dsw-specific-sidebar-fill/u, 'the overlay colour mus
 assert.match(appPreload, /opaqueNative/u, 'a transparent probe result must not be published as a colour')
 assert.match(appPreload, /function publishTheme/u, 'the theme must be published to the main process')
 assert.match(read('src/main/window.ts'), /setTitleBarOverlay\(/u, 'the main process must apply it to the native overlay')
-// 扫**代码**而不是注释：说明文字里正当地写着 `require('./caption-menu')` 这个反例。
+// ---- 白屏回归的守卫（1.7.9 的 P0）--------------------------------------------------
+//
+// 三件事必须一直成立，否则"菜单在、Harness 白屏"会再次发生且无人察觉：
+const mainWindow = read('src/main/window.ts')
+/** 去掉注释：架构断言要扫**代码**，而注释里正当地举着反例（例如 `await themeReady`）。 */
 const codeOnly = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^[ \t]*\/\/.*$/gmu, '')
+assert.match(mainWindow, /did not mount/u, 'the main process must be able to report a failed Harness mount')
+assert.match(mainWindow, /watchHarnessMount/u, 'the main process must watch for the Harness mount')
+assert.match(mainWindow, /did-fail-load/u, 'navigation failures must be logged, never swallowed')
+assert.match(mainWindow, /render-process-gone/u, 'renderer crashes must be logged')
+// 主题同步必须能整体关掉（安全模式），并且不得出现在关键路径上。
+assert.match(appPreload, /DSH_DESKTOP_SAFE_RENDERER/u, 'safe mode must exist for white-screen triage')
+// 扫**代码**而不是注释：源码注释里正当地举着 `await themeReady` 这个反例。
+assert.ok(
+  !/await\s+(?:theme|stripColor|token|canvas)/u.test(codeOnly(appPreload)),
+  '主题同步不得在关键路径上 await（颜色必须 fire-and-forget）',
+)
+// 扫**代码**而不是注释（`codeOnly` 见上）：说明文字里正当地写着 `require('./caption-menu')` 这个反例。
 const preloadCode = codeOnly(appPreloadBuilt)
 for (const match of preloadCode.matchAll(/require\(['"](\.[^'"]*)['"]\)/gu)) {
   assert.fail(`沙箱化 preload 不能 require 相对路径：${match[0]}（会让整个 preload 加载失败）`)
