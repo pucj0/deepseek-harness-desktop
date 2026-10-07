@@ -120,6 +120,8 @@ jobs:
 
       - name: 准备内置运行时
         run: npm run stage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # stage = stage:runtime + link:runtime。
         #
         # 这一版**不再** stage:node（第二份便携 Node）：Electron 自带 Node 24，子进程直接

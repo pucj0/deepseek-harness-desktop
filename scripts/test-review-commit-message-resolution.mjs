@@ -3,11 +3,14 @@
 import assert from 'node:assert/strict'
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const root = resolve(import.meta.dirname, '..')
-const tempRoot = join(root, '.tmp')
+// Stage links Runtime packages into the checkout's node_modules on CI. Keep
+// this fixture outside the checkout so those development links cannot hide the bug.
+const tempRoot = resolve(tmpdir())
 mkdirSync(tempRoot, { recursive: true })
 const scratch = mkdtempSync(join(tempRoot, 'ai-resolution-'))
 const runtime = resolve(process.env.DSH_AI_TEST_RUNTIME ?? join(root, 'runtime'))
