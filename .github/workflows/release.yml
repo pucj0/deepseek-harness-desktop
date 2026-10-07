@@ -22,8 +22,8 @@ permissions:
   contents: write
 
 env:
-  # 上游 Node 与 electron-builder 工具的镜像。
-  ELECTRON_MIRROR: https://registry.npmmirror.com/-/binary/electron/
+  # Electron 使用官方 GitHub 发布地址；electron-builder 工具保留镜像。
+  ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
   ELECTRON_BUILDER_BINARIES_MIRROR: https://registry.npmmirror.com/-/binary/electron-builder-binaries/
   # 不再需要 DSH_NODE_VERSION：这一版不再 stage 第二份便携 Node。
   # 打印 electron-builder 的详细决策过程。CI 上一次失败只给一行结论，
@@ -80,10 +80,6 @@ jobs:
 
       - name: 编译 TypeScript
         run: npm run build
-
-      - name: 验证白屏修复（HTTP 请求头上限）
-        if: matrix.target == 'win'
-        run: node scripts/test-server-request-headers.cjs
 
       # 与"编译 TypeScript"有重叠，但保留：一旦 checkout 出的内容有问题，这一步的
       # 报错更直白（明确列出哪个相对 import 找不到目标文件），而 tsc 的报错容易被
@@ -177,6 +173,15 @@ jobs:
         run: npx electron-builder --win --x64 --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 验证白屏修复（实际打包程序的 HTTP 请求头上限）
+        if: matrix.target == 'win'
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $env:DSH_HEADER_TEST_ELECTRON = (Resolve-Path "release/$version/win-unpacked/dsh-desktop.exe").Path
+          node scripts/test-server-request-headers.cjs
 
       # Size Gate：体积是这一版的**交付指标**，不是"感觉快了"。
       #
