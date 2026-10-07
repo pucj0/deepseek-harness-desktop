@@ -29,6 +29,22 @@
 // 窗口而失败，以及（更糟的）在"看起来能用"的情况下产生巨额 token 账单。因此这里对
 // 文件数、单文件字符数、总字符数三层设限，超出时**降级**为"状态 + 增删行数"，而不是报错。
 
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+
+/**
+ * 桌面插件位于 resources/plugins，Runtime 位于 app.asar 或用户更新目录。
+ * 从插件文件做裸 import 无法找到 Runtime 依赖；使用宿主提供的安装锚点，
+ * 再将解析出的入口转成 URL 导入，复用当前 Runtime 的包及其 exports。
+ * 普通非桌面宿主没有该锚点时，保留原有的 Node 模块解析方式。
+ */
+function loadHostModule(ctx, specifier) {
+  const anchor = ctx?.get?.('profileContext')?.installAnchor
+  return typeof anchor === 'string' && anchor !== ''
+    ? import(pathToFileURL(createRequire(anchor).resolve(specifier)).href)
+    : import(specifier)
+}
+
 /** 一次"AI 补充"的输入/输出上限。数字本身是策略，因此集中在这里并对外导出以便测试。 */
 export const COMMIT_MESSAGE_LIMITS = Object.freeze({
   /** 最多把多少个文件的差异放进上下文（按用户勾选的顺序取前 N 个）。 */
@@ -333,9 +349,9 @@ export function commitMessageFromAssembler(assembler) {
  */
 export function createCommitMessageGenerator(ctx, options = {}) {
   const loadLlm =
-    typeof options.loadLlm === 'function' ? options.loadLlm : () => import('@deepseek-ai/dsh-llm')
+    typeof options.loadLlm === 'function' ? options.loadLlm : () => loadHostModule(ctx, '@deepseek-ai/dsh-llm')
   const loadTimeout =
-    typeof options.loadTimeout === 'function' ? options.loadTimeout : () => import('@deepseek-ai/dsh-timeout')
+    typeof options.loadTimeout === 'function' ? options.loadTimeout : () => loadHostModule(ctx, '@deepseek-ai/dsh-timeout')
 
   /**
    * 报告宿主此刻是否具备这个能力，以及缺什么。

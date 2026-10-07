@@ -81,6 +81,10 @@ jobs:
       - name: 编译 TypeScript
         run: npm run build
 
+      - name: 验证白屏修复（HTTP 请求头上限）
+        if: matrix.target == 'win'
+        run: node scripts/test-server-request-headers.cjs
+
       # 与"编译 TypeScript"有重叠，但保留：一旦 checkout 出的内容有问题，这一步的
       # 报错更直白（明确列出哪个相对 import 找不到目标文件），而 tsc 的报错容易被
       # 误读成环境问题。历史上两次 CI 失败都源于改了文件却没提交。
@@ -141,6 +145,10 @@ jobs:
           # 被 shell 拆坏，这是很容易忽略的写法错误。
           staged=$(node -p 'require("./runtime/node_modules/@deepseek-ai/dsh/package.json").version')
           echo "dsh staged: $staged"
+
+      - name: 验证 AI 提交信息的 Runtime 依赖解析
+        if: matrix.target == 'win'
+        run: npm run test:commit-message
 
       # 裁剪成 **Desktop Production Runtime**（策略见 scripts/runtime-file-policy.mjs）。
       # 每个平台按自己的 target 裁一次：非目标平台的 native 包必须在那一步就被去掉，

@@ -72,7 +72,7 @@ console.log('=== 2. 打包副本与开发目录那一份一致 ===')
   const devClient = readFileSync(join(DEV_PLUGIN, 'lib', 'client.js'), 'utf8')
   has('lib/client.js 逐字节相同', devClient === packagedClient)
   // 其它文件也一起比：只比 client.js 会漏掉"改了 host 半边却忘了重新打包"。
-  for (const name of ['package.json', 'cordis.patch.yml', join('lib', 'index.js'), join('lib', 'repo-context.js')]) {
+  for (const name of ['package.json', 'cordis.patch.yml', join('lib', 'index.js'), join('lib', 'repo-context.js'), join('lib', 'commit-message.js')]) {
     const dev = existsSync(join(DEV_PLUGIN, name)) ? readFileSync(join(DEV_PLUGIN, name), 'utf8') : null
     const shipped = existsSync(join(PACKAGED_PLUGIN, name)) ? readFileSync(join(PACKAGED_PLUGIN, name), 'utf8') : null
     has(`${name} 相同（两边都在）`, dev !== null && shipped !== null && dev === shipped)
