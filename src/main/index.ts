@@ -32,6 +32,7 @@ import { markStartup, reportStartup } from './startup-timeline'
 import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
 import { RuntimeUpdater } from './runtime-updater'
 import { ShellUpdater } from './shell-updater'
+import { checkStartupUpdates, createUpdateChecker, type UpdateCheckResults } from './update-check'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
@@ -903,14 +904,29 @@ async function main(): Promise<void> {
   // 踩过一次：这里原本传的是 runtimeVersion，于是更新窗口的
   // 「应用外壳 / 已安装版本」显示成了 dsh 的版本号（0.1.5-rc.1），而应用自己是 1.0.0。
   const shellUpdater = new ShellUpdater(app.getVersion(), strings.updateShellUnavailable)
-  const openUpdates = (): void => {
-    openUpdatesFor({
-      window,
-      shellUpdater,
-      runtimeUpdater,
-      userDataDir,
-      strings,
+  const updateChecker = createUpdateChecker({
+    desktopVersion: app.getVersion(),
+    runtimeVersion,
+    checkDesktop: () => shellUpdater.check(app.isPackaged),
+    checkRuntime: () => checkRuntimeRelease(runtimeVersion),
+  })
+  let updatesOpened = false
+  let updatePanel: BrowserWindow | undefined
+  const showUpdates = (results?: UpdateCheckResults): void => {
+    if (updatePanel !== undefined && !updatePanel.isDestroyed()) {
+      updatePanel.show()
+      updatePanel.focus()
+      return
+    }
+    updatePanel = openUpdatesFor({
+      window, shellUpdater, runtimeUpdater, userDataDir, strings,
+      check: updateChecker.check,
+      results,
     })
+  }
+  const openUpdates = (): void => {
+    updatesOpened = true
+    showUpdates()
   }
 
   trayActions = {
@@ -948,14 +964,15 @@ async function main(): Promise<void> {
   // `watchLocalePreference` 的调用），并且以那个值为基准。放到这里再装一次的话，
   // "读偏好"与"起服务端"之间那十几秒里的修改就永远等不到事件了。
 
-  // 启动时**不再**静默检查完整应用更新。
-  //
-  // 此前 `if (app.isPackaged) void checkShellUpdate()` 会在启动后偷偷检查并弹一个
-  // 对话框，用户既没触发也不知道它是谁在什么时候检查的，观感很怪（这正是要改掉的
-  // 一点）。现在两条轨道都只在用户主动打开「更新」时检查。
-  //
-  // 保留的自动化只有 `autoInstallOnAppQuit`：已经下载完成的更新在退出时安装，
-  // 避免用户点了下载却因为忘记重启而一直用旧版本。
+  // 界面可用后后台检查。仅确认有新版时打开可关闭的更新窗口；离线、超时和最新版不弹窗。
+  // 手动打开过更新窗口后不再自动提示，也不重新查询已经检查出来的版本。
+  if (app.isPackaged) {
+    void checkStartupUpdates({
+      check: updateChecker.check,
+      canNotify: () => !updatesOpened && !window.isDestroyed() && window.isVisible() && session?.quitting !== true,
+      notify: (results) => showUpdates(results),
+    }).catch((error: unknown) => console.warn(`[updater] ${String(error)}`))
+  }
 
   app.on('before-quit', () => {
     if (session !== undefined) session.quitting = true
@@ -1070,7 +1087,9 @@ function openUpdatesFor(deps: {
   runtimeUpdater: RuntimeUpdater
   userDataDir: string
   strings: ReturnType<typeof t>
-}): void {
+  check: () => Promise<UpdateCheckResults>
+  results?: UpdateCheckResults
+}): BrowserWindow {
   const { window, shellUpdater, runtimeUpdater, userDataDir, strings: s } = deps
 
   const shellVersion = app.getVersion()
@@ -1251,39 +1270,25 @@ function openUpdatesFor(deps: {
   let releaseInfo: Awaited<ReturnType<typeof checkRuntimeRelease>> | undefined
 
   void (async () => {
-    const [shellResult, runtimeResult] = await Promise.allSettled([
-      shellUpdater.check(app.isPackaged),
-      checkRuntimeRelease(runtimeVersion),
-    ])
-    const desktop = shellResult.status === 'fulfilled'
-      ? {
-          installed: shellResult.value.current,
-          ...(shellResult.value.latest === undefined ? {} : { latest: shellResult.value.latest }),
-          state: shellResult.value.available ? 'available' as const : shellResult.value.reason === undefined ? 'latest' as const : 'unknown' as const,
-          ...(shellResult.value.reason === undefined ? {} : { reason: shellResult.value.reason }),
-        }
-      : {
-          installed: shellVersion,
-          state: 'unknown' as const,
-          reason: shellResult.reason instanceof Error ? shellResult.reason.message : String(shellResult.reason),
-        }
-    const runtime = runtimeResult.status === 'fulfilled'
-      ? {
-          installed: runtimeResult.value.current,
-          ...(runtimeResult.value.latest === undefined ? {} : { latest: runtimeResult.value.latest }),
-          state: runtimeResult.value.available ? 'available' as const : runtimeResult.value.reason === undefined ? 'latest' as const : 'unknown' as const,
-          ...(runtimeResult.value.reason === undefined ? {} : { reason: runtimeResult.value.reason }),
-          ...(runtimeResult.value.releaseUrl === undefined ? {} : { releaseUrl: runtimeResult.value.releaseUrl }),
-          // 正在使用的是"应用内更新装出来的那份"时明确说明来源：否则用户只会看到
-          // 一个与内置版本不同的号，不知道它是哪来的。
-          ...(runtimeVersion === bundledRuntimeVersion ? {} : { reason: s.updateRuntimeDownloadedNote }),
-        }
-      : {
-          installed: runtimeVersion,
-          state: 'unknown' as const,
-          reason: runtimeResult.reason instanceof Error ? runtimeResult.reason.message : String(runtimeResult.reason),
-        }
-    if (runtimeResult.status === 'fulfilled') releaseInfo = runtimeResult.value
+    const results = deps.results ?? await deps.check()
+    const { desktop: shellResult, runtime: runtimeResult } = results
+    const checkReason = (reason: string | undefined): string | undefined =>
+      reason === undefined ? undefined : `${s.updateCheckFailedDetail}\n\n${reason}`
+    const desktop = {
+      installed: shellResult.current,
+      latest: shellResult.latest,
+      state: shellResult.available ? 'available' as const : shellResult.reason === undefined ? 'latest' as const : 'unknown' as const,
+      reason: shellResult.reason === s.updateShellUnavailable ? shellResult.reason : checkReason(shellResult.reason),
+    }
+    const runtime = {
+      installed: runtimeResult.current,
+      latest: runtimeResult.latest,
+      state: runtimeResult.available ? 'available' as const : runtimeResult.reason === undefined ? 'latest' as const : 'unknown' as const,
+      reason: runtimeResult.reason !== undefined ? checkReason(runtimeResult.reason)
+        : runtimeVersion === bundledRuntimeVersion ? undefined : s.updateRuntimeDownloadedNote,
+      releaseUrl: runtimeResult.releaseUrl,
+    }
+    releaseInfo = runtimeResult
     currentState = {
       desktop,
       runtime,
@@ -1293,6 +1298,7 @@ function openUpdatesFor(deps: {
     }
     panel.update(currentState)
   })()
+  return panel.window
 }
 
 /** Register the preload bridge's IPC handlers. */

@@ -15,6 +15,7 @@
  * 因此本应用可以直接自更新。若将来配置了证书，两者仍兼容。
  */
 import type { BrowserWindow } from 'electron'
+import { isRuntimeVersionNewer } from './runtime-version'
 
 /** 完整应用更新检查的结果。 */
 export interface ShellCheck {
@@ -91,9 +92,11 @@ export class ShellUpdater {
       if (info === undefined) {
         return { available: false, current: this.currentVersion, reason: '没有返回更新信息' }
       }
-      return info.version === this.currentVersion
-        ? { available: false, current: this.currentVersion, latest: info.version }
-        : { available: true, current: this.currentVersion, latest: info.version }
+      return {
+        available: isRuntimeVersionNewer(info.version, this.currentVersion),
+        current: this.currentVersion,
+        latest: info.version,
+      }
     } catch (error) {
       return {
         available: false,

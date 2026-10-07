@@ -45,6 +45,7 @@ dsh web
 
 - **Git 工具条与 Smart Checkout：**显示当前分支、未提交状态及相对上游的领先/落后；切换分支时先让 Git 正常携带兼容修改。只有 Git 明确拒绝覆盖本地修改时，宿主才用带唯一标记与稳定 OID 的安全储藏执行“储藏 → 切换 → `apply --index` → 验证 → 精确删除”。已暂存、未暂存和未跟踪文件都会保护；恢复冲突时留在目标分支并进入现有冲突编辑器，安全储藏绝不删除。
 - **官方右侧 Sidebar 有两个标签：**「审查」与「Git」，语义完全不同。
+  - 会话右上角提供项目 Git 图标，新会话页面也可用；点击直接打开并展开当前项目的 Git 标签，旁边保留侧栏开关。
   - **审查（Review）** 回答"这一轮 agent 改了什么"：turn scope，基线是本轮开始时记录的快照，数据来自 `/changes`。输入框上方的「本轮修改 N」点击后直接打开这个标签（`sidebarRight.openTab('review')`），关掉/宽度/全屏/拖动全部交给官方侧栏；入口与标签**共用同一个会话上下文解析器**，因此按钮上的数字与面板里的文件数必然一致。
   - **Git** 回答"整个仓库相对 HEAD 是什么状态"：workspace scope，数据来自 `/workspace`。它以当前 Harness 会话的 `cwd` 为唯一 active workspace，项目切换会清空旧选择并由 generation guard 丢弃迟到响应；多仓库选择按 workspace 保存。Changes 包含 Conflicts / Staged / Changes / Unversioned / Auto-saved Changes / Stashes，Log 保留提交图、分支筛选、详情、比较、重置、摘取与标签。
   - 两个标签各有独立的 `kind`（`review` / `git`）、sidebar id、数据 API 与正文组件，互不触发；不再有右上角 fixed Drawer 这类自制浮层。
@@ -132,6 +133,7 @@ Electron Desktop Shell
 ## 更新机制
 
 - **两条 GitHub 检查轨道：** **更新 → 检查更新** 同时检查本项目 `pucj0/deepseek-harness-desktop` Releases（Desktop 应用）与官方 `deepseek-ai/deepseek-harness` Releases（Harness Runtime），分别显示已安装版本、最新版本与状态。
+- **启动检查更新：** 安装版在界面就绪后自动检查两条轨道，有新版时打开可关闭的更新窗口；下载或安装仍由按钮触发。检查最长等待 15 秒，GitHub 无法访问、超时或没有新版时不弹窗，不阻塞启动；手动检查会显示网络失败原因，可稍后重试。
 - **完整产品安装：**Desktop 应用继续通过 `electron-updater` 下载本项目 GitHub Release。一个 Release 同时携带桌面外壳、经过兼容验证的官方 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`。
 - **Runtime 可在应用内直接安装：** Runtime 有新版时，更新窗口的 Runtime 轨道出现 **「安装 Runtime 并重启」**（`data-action=runtime-install`）。实现在 `src/main/runtime-updater.ts`：
   - **版本由官方 GitHub Release 授权。** 目标版本必须等于官方 `dsh-v*` Release 的最新版本；GitHub 的 source archive 永远不会被当作可运行 Runtime（源码 tag 没有构建好的依赖闭包）。同时用该 Release 的 `published_at` 算出 npm `--before = published_at + 24h`，让依赖按"该版本发布当时的仓库状态"解析——上游半波发布时 `^` 范围会把还没上架的兄弟包卷进来，24 小时窗口能等到同一次发布的兄弟包、又不会跨进下一波。与 `npm run stage` 同一条规则。

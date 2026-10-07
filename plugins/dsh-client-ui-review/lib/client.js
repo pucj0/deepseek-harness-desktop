@@ -7,7 +7,7 @@
 //      数据：`/changes`，基线 = 本轮开始时记录的快照（baseline vs 当前工作区）
 //
 //   2. 项目级 Git（workspace scope）——"整个仓库相对 HEAD 是什么状态"
-//      入口：Harness 官方右侧栏的 **Git 标签**
+//      入口：会话右上角的 Git 图标与 Harness 官方右侧栏的 **Git 标签**
 //      正文：`GitSidebarTab` → `ProjectGitPanel`（Changes | Log）
 //      数据：`/workspace`（HEAD 基线），提交图等另走各自路由
 //
@@ -522,11 +522,12 @@ window.__ModuleLoader__.load({
     /** 官方右侧栏：标签正文与标签标题的两个 keyed 槽位（两个标签各占一个 key）。 */
     const GIT_TAB_SLOT = 'sidebar.right.pane.tab'
     const GIT_TAB_TITLE_SLOT = 'sidebar.right.pane.tab.title'
+    const GIT_HEADER_SLOT = 'conversation.session.header.corner'
 
     /**
      * 项目级 Git 的页签（IDEA 的 Git 工具窗就是这两个）。
      *
-     * `'changes' | 'log'`。项目级 Git 的**唯一**入口是官方右侧栏的 Git 图标：早先还有一个
+     * `'changes' | 'log'`。项目级 Git 在右上角与官方侧栏都有入口：早先还有一个
      * 独立的「提交图」侧栏入口（`sidebar.panellist` + `main` 两处注册）画同一个
      * `CommitGraphView`，与 Log 页签完全重复——用户在主界面左侧看到两个入口，点哪一个都是
      * "提交图"。那个入口已经删除，提交图只留在 Git 标签的 Log 页签里。
@@ -842,6 +843,9 @@ window.__ModuleLoader__.load({
       sidebarGitTitle: 'Git',
       sidebarReviewTitle: '审查',
       openTurnReviewFailed: '无法打开右侧栏的审查标签。',
+      openProjectGit: '打开项目 Git',
+      openProjectGitFailed: '无法打开项目 Git，请重试。',
+      toggleProjectSidebar: '展开或收起侧栏',
       noWorkspace: '当前没有可用的工作区。',
       repositoryCount: '{count} 个仓库',
       repoSelectorLabel: '切换仓库',
@@ -1354,6 +1358,9 @@ window.__ModuleLoader__.load({
       sidebarGitTitle: 'Git',
       sidebarReviewTitle: 'Review',
       openTurnReviewFailed: 'Could not open the Review tab in the right sidebar.',
+      openProjectGit: 'Open project Git',
+      openProjectGitFailed: 'Could not open project Git. Please try again.',
+      toggleProjectSidebar: 'Expand or collapse sidebar',
       noWorkspace: 'No workspace is available.',
       repositoryCount: '{count} repositories',
       repoSelectorLabel: 'Switch repository',
@@ -16483,6 +16490,54 @@ window.__ModuleLoader__.load({
      * @param t - 本地化函数，只用于把失败原因放进诊断。
      * @returns 是否成功把侧栏切到审查标签。
      */
+    /** Open the project tab and reveal it even on older Harness versions. */
+    function openGitSidebar(sidebar, sessionId) {
+      try {
+        if (sidebar === undefined || sidebar === null) throw new Error('sidebarRight service is unavailable')
+        try {
+          sidebar.openTab(GIT_KIND, { revealIfOpened: true })
+        } catch (cause) {
+          if (sessionId === undefined || typeof sidebar.openTabIn !== 'function') throw cause
+          sidebar.openTabIn(sessionId, GIT_KIND, { revealIfOpened: true })
+        }
+        if (typeof sidebar.isExpanded === 'function' && sidebar.isExpanded() !== true) sidebar.toggleExpanded()
+        return { opened: true, error: '' }
+      } catch (cause) {
+        return { opened: false, error: String(cause?.message ?? cause) }
+      }
+    }
+
+    /** The corner stays visible in blank sessions, unlike the header utilities slot. */
+    function ProjectGitHeader(props) {
+      const { t, getSidebar, sessionId } = props
+      const [error, setError] = react.useState('')
+      const iconStyle = { width: 15, height: 15 }
+      const buttonStyle = { width: 28, padding: 0, color: 'var(--dsw-alias-label-secondary)', WebkitAppRegion: 'no-drag' }
+      const button = (label, attributes, icon) => react.createElement(primitives.Tooltip, {
+        label, side: 'bottom', delayMs: 500,
+      }, react.createElement(primitives.Button, {
+        type: 'button', size: 'sm', style: buttonStyle, 'aria-label': label, ...attributes,
+      }, icon))
+      return react.createElement('div', {
+        'data-project-git-header': '',
+        style: { display: 'flex', alignItems: 'center', gap: 4, WebkitAppRegion: 'no-drag' },
+      },
+        button(t('openProjectGit'), {
+          'data-project-git-open': '',
+          title: error === '' ? t('openProjectGit') : `${t('openProjectGitFailed')} ${error}`,
+          onClick: () => {
+            const result = openGitSidebar(getSidebar(), sessionId)
+            setError(result.error)
+            if (typeof window !== 'undefined') window.__dshDesktopGitOpen = { sessionId, kind: GIT_KIND, ...result }
+          },
+        }, react.createElement(primitives.IconBranchOutlineRegular, { style: iconStyle })),
+        button(t('toggleProjectSidebar'), {
+          'data-project-sidebar-toggle': '',
+          onClick: () => getSidebar()?.toggleExpanded?.(),
+        }, react.createElement(primitives.IconPanelLeftOutlineRegular, { style: { ...iconStyle, transform: 'scaleX(-1)' } })),
+      )
+    }
+
     let lastReviewOpenError = ''
     function openReviewSidebar(sidebar, sessionId, t) {
       let opened = false
@@ -16872,6 +16927,18 @@ window.__ModuleLoader__.load({
        * 服务由官方 sidebar-right 插件提供，缓存会让"服务换了一份"这种情形静默失效。
        */
       reviewSidebar = ctx.sidebarRight
+
+      // This single corner slot also owns the generic sidebar control. A lower rank
+      // replaces its stock occupant; keep that control alongside the project Git shortcut.
+      ctx.effect(
+        () => ctx.slots.inject(GIT_HEADER_SLOT, () => ctx.slots.register({
+          name: GIT_HEADER_SLOT,
+          priority: -10,
+          locale: NS,
+          inject: () => ({ t: ctx.locale.bind(NS), getSidebar: () => ctx.sidebarRight }),
+        }, ProjectGitHeader)),
+        'dsh-client-ui-review: project Git header shortcut',
+      )
 
       // 「本轮修改」入口：显示本轮改动数，点击切到官方右侧栏的**审查**标签。
       //

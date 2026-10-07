@@ -81,6 +81,11 @@ jobs:
       - name: 编译 TypeScript
         run: npm run build
 
+      - name: 验证 Git 快捷入口与启动更新检查
+        run: |
+          node scripts/test-project-git-header.mjs
+          node scripts/test-update-check.cjs
+
       # 与"编译 TypeScript"有重叠，但保留：一旦 checkout 出的内容有问题，这一步的
       # 报错更直白（明确列出哪个相对 import 找不到目标文件），而 tsc 的报错容易被
       # 误读成环境问题。历史上两次 CI 失败都源于改了文件却没提交。
