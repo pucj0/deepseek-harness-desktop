@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import { resolve } from 'node:path'
 import type { RuntimeLocation } from './paths'
+import { bundledPackageManagerEnvironment } from './package-manager'
 
 /** One parsed readiness announcement from the server child. */
 export interface ServerReady {
@@ -96,7 +97,7 @@ function resolveServerEntry(runtime: RuntimeLocation): string {
   if (resolve(runtime.serverEntry) === resolve(target)) return target
 
   try {
-    for (const name of ['client-module-cache.mjs', path.basename(runtime.serverEntry)]) {
+    for (const name of ['client-module-cache.mjs', 'package-manager.mjs', path.basename(runtime.serverEntry)]) {
       const source = readFileSync(path.join(path.dirname(runtime.serverEntry), name))
       const destination = name === path.basename(runtime.serverEntry) ? target : path.join(runtime.dir, name)
       let current: Buffer | undefined
@@ -113,7 +114,7 @@ function resolveServerEntry(runtime: RuntimeLocation): string {
     return target
   } catch {
     // 目标不可写时（Runtime 打包在 app.asar 里）**不需要**写：`npm run stage` 已经把
-    // 这两个脚本放进 `runtime/`，因此 target 本来就在、内容也对。只有"目标不存在"
+    // 启动脚本及其依赖已放进 `runtime/`，因此 target 本来就在、内容也对。只有"目标不存在"
     // 才是真的没救——那时退回安装包里那份，让模块解析错误自己说话（比我们这里的记账
     // 失败更有信息量）。
     if (existsSync(target)) return target
@@ -218,6 +219,7 @@ export class DshServer extends EventEmitter {
         env: {
           ...process.env,
           ...env,
+          ...bundledPackageManagerEnvironment(runtime.serverEntry, runtime.packaged),
           ...(useBundledNode ? { PATH: childPath } : { ELECTRON_RUN_AS_NODE: '1' }),
           DSH_HOME: dshHome,
           DSH_DESKTOP: '1',

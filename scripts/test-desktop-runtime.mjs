@@ -130,6 +130,9 @@ if (!existsSync(APP)) {
   // 这句话的物理载体。缺失即失败（scripts/report-package-size.mjs 同样判它失败）。
   const npmCliOnDisk = join(UNPACKED, 'resources', 'app.asar.unpacked', 'node_modules', 'npm', 'bin', 'npm-cli.js')
   has('解包后的 npm CLI 真实存在', existsSync(npmCliOnDisk))
+  has('pnpm CLI 以 unpacked 条目出现', asarUnpacked.has('node_modules/pnpm/bin/pnpm.mjs'))
+  has('解包后的 pnpm CLI 真实存在', existsSync(join(UNPACKED, 'resources', 'app.asar.unpacked', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')))
+  has('包管理器的 profile 桥接脚本存在', asarPaths.includes('runtime/package-manager.mjs'))
   // 注意断言的是**平台负载**而不是包名：`@deepseek-ai/libreoffice-kit` 这个 JS 包装层是
   // dsh-web-app / dsh-skill-office 的必需依赖，必须保留；不该携带的是它那 170 MiB 的
   // 平台二进制（`libreoffice-kit-win32-x64` 等）。
@@ -163,8 +166,8 @@ if (!existsSync(APP)) {
       const child = spawn(
         EXE,
         [
-          join(APP, 'runtime', 'server.mjs'),
           '--max-http-header-size=1048576',
+          join(APP, 'runtime', 'server.mjs'),
           '--dsh-home',
           home,
           '--install-anchor',
@@ -174,7 +177,11 @@ if (!existsSync(APP)) {
           '--workspace',
           join(home, 'ws'),
         ],
-        { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_HOME: home } },
+        { env: {
+          ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_HOME: home,
+          DSH_DESKTOP_PNPM_CLI: join(UNPACKED, 'resources', 'app.asar.unpacked', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+          DSH_DESKTOP_NODE_BIN: join(UNPACKED, 'resources', 'tooling'),
+        } },
       )
       let stdout = ''
       let stderr = ''

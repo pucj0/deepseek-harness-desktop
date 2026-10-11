@@ -437,6 +437,9 @@ if (asarRuntimeNodeExe.length > 0) problems.push(`app.asar 的 runtime/ 里仍�
 if (unpackedNpmCli.length === 0) {
   problems.push('app.asar.unpacked 里缺少 node_modules/npm/bin/npm-cli.js（应用内更新 Runtime 依赖它）')
 }
+if (!existsSync(join(UNPACKED, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'))) {
+  problems.push('app.asar.unpacked 里缺少内置 pnpm CLI（插件管理器依赖它）')
+}
 // 同一份 npm 出现在三处中的多处 = 体积回归（它不是被 require 的库，只需要解包那一份）。
 if (asarNpmCli.length > 0) problems.push('app.asar 里仍带一份 npm CLI（应只保留解包后的那一份）')
 if (archiveNpmCli.length > 0) problems.push('裁剪后的 Runtime 里仍带一份 npm CLI（应由应用自己携带）')

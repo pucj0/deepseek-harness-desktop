@@ -60,6 +60,9 @@ extraResources:
     filter:
       - 'server.mjs'
       - 'client-module-cache.mjs'
+      - 'package-manager.mjs'
+  - from: src/tooling
+    to: tooling
   - from: build/icon.png
     to: icon.png
 
@@ -99,7 +102,7 @@ files:
 
 # 只有加载器必须按真实路径打开的 native 二进制才 unpack，其余一律留在 app.asar 里。
 #
-# `node_modules/npm/**` 是唯一的例外，理由值得写清楚：npm 不是被 `require` 进来的库，
+# npm 与 pnpm 是例外：它们不是被 `require` 进来的库，
 # 而是被 `spawn(process.execPath, [npm-cli.js, …])` 以**真实路径**执行的 CLI。Electron
 # 的 Node 模式读不了 asar 内部路径，npm 自己也要在 `node_modules/npm` 下解析它自带的
 # 依赖树，因此它必须完整解到 `resources/app.asar.unpacked/node_modules/npm/**`——
@@ -117,6 +120,8 @@ asarUnpack:
   - 'runtime/**/*.so'
   - 'runtime/**/*.dylib'
   - 'node_modules/npm/**'
+  # 插件管理器显式执行内置 pnpm；与 npm 一样必须从真实路径运行。
+  - 'node_modules/pnpm/**'
 
 # **必须**打开：electron-builder 默认会跳过**任何**层级的 `node_modules` 目录
 # （`AppFileWalker.createAppFilter` 里只要 `file.endsWith('/node_modules')` 就返回

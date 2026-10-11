@@ -253,7 +253,7 @@ async function main() {
    * `app.asar`，而 asar 在启动时不可写，因此必须在打包前就放好。`DshServer` 仍会比对
    * 内容，一致时什么都不做（见 `resolveServerEntry`）。
    */
-  for (const name of ['server.mjs', 'client-module-cache.mjs']) {
+  for (const name of ['server.mjs', 'client-module-cache.mjs', 'package-manager.mjs']) {
     const source = join(ROOT, 'src', 'server', name)
     if (!existsSync(source)) continue
     const destination = join(RUNTIME, name)

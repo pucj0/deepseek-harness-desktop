@@ -139,7 +139,7 @@ jobs:
             echo "::error::staged 运行时缺失"; exit 1; }
           # 子进程要跑的脚本必须**已经在 runtime/ 里**：打包进 app.asar 之后启动时写不进去，
           # 缺了它只会在用户机器上以 ERR_MODULE_NOT_FOUND 出现。
-          for f in server.mjs client-module-cache.mjs; do
+          for f in server.mjs client-module-cache.mjs package-manager.mjs; do
             test -f "runtime/$f" || { echo "::error::runtime/$f 缺失（stage:runtime 没同步）"; exit 1; }
           done
           # 第二份 Node 绝不能再出现：它曾占解压后 Runtime 的 46%（88 MiB）。
@@ -153,6 +153,10 @@ jobs:
       - name: 验证 AI 提交信息的 Runtime 依赖解析
         if: matrix.target == 'win'
         run: npm run test:commit-message
+
+      - name: 验证插件查询、安装和卸载（无系统 Node/pnpm）
+        run: node scripts/test-plugin-package-manager.mjs
+        timeout-minutes: 3
 
       # 裁剪成 **Desktop Production Runtime**（策略见 scripts/runtime-file-policy.mjs）。
       # 每个平台按自己的 target 裁一次：非目标平台的 native 包必须在那一步就被去掉，
@@ -285,6 +289,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # ------------------------------------------------------------------ 诊断
+      - name: 验证打包后的内置 pnpm 和 Node 启动器
+        run: npm run test:pnpm
+
       - name: 列出产物目录
         if: always()
         shell: bash

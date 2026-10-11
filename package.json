@@ -33,6 +33,8 @@
     "test:runtime-updater": "node scripts/test-runtime-updater.cjs",
     "test:runtime-paths": "node scripts/test-runtime-paths.cjs",
     "test:npm": "node scripts/test-bundled-npm.mjs",
+    "test:plugin-manager": "npm run build && node scripts/test-plugin-package-manager.mjs",
+    "test:pnpm": "node scripts/test-bundled-pnpm.mjs",
     "test:packaged-plugin": "node scripts/test-packaged-review-plugin.mjs",
     "test:update-layout": "npm run build && node scripts/test-update-window-layout.mjs",
     "test:size": "node scripts/report-package-size.mjs",
@@ -67,6 +69,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
-    "npm": "11.20.0"
+    "npm": "11.20.0",
+    "pnpm": "11.28.5"
   }
 }

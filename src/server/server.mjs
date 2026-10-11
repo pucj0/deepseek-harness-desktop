@@ -53,6 +53,7 @@ import {
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { installClientModuleCache } from './client-module-cache.mjs'
+import { desktopPackageManager } from './package-manager.mjs'
 
 installClientModuleCache()
 
@@ -651,6 +652,7 @@ function createProfileContext(profile, installAnchor, home) {
     home,
     overlays: [],
     telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+    packageManager: desktopPackageManager(),
   }
 }
 
