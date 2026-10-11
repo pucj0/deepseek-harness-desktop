@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { createUpdateChecker, checkStartupUpdates } = require('../dist/main/update-check')
+const { createUpdateChecker, checkStartupUpdates, scheduleStartupUpdates, UPDATE_CHECK_TIMEOUT_MS } = require('../dist/main/update-check')
 const { ShellUpdater } = require('../dist/main/shell-updater')
 
 const desktop = (available = false) => ({ current: '1.8.1', latest: available ? '1.8.2' : '1.8.1', available })
@@ -9,6 +9,44 @@ const create = (checkDesktop, checkRuntime, timeoutMs = 50) => createUpdateCheck
 })
 
 async function run() {
+  assert.equal(UPDATE_CHECK_TIMEOUT_MS, 5000)
+  let paint
+  let network
+  let started = 0
+  let notified = 0
+  const cancel = scheduleStartupUpdates({
+    whenUsable: new Promise(resolve => { paint = resolve }),
+    check: () => { started++; return new Promise(resolve => { network = resolve }) },
+    canNotify: () => true,
+    notify: () => { notified++ },
+    onError: error => { throw error },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(started, 0, 'no updater initialization before the app paints and becomes idle')
+  paint(true)
+  await Promise.resolve()
+  assert.equal(started, 0, 'readiness yields to a separate main-process task')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(started, 1)
+  // A stalled network request leaves the event loop available to navigation/input.
+  let responsive = false
+  await new Promise(resolve => setImmediate(() => { responsive = true; resolve() }))
+  assert.equal(responsive, true)
+  cancel()
+  network({ desktop: desktop(true), runtime: runtime(true) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(notified, 0, 'shutdown suppresses late completion')
+  for (const [usable, allowed, cancelled] of [[false, true, false], [true, false, false], [true, true, true]]) {
+    const stop = scheduleStartupUpdates({
+      whenUsable: Promise.resolve(usable), check: () => { throw new Error('unexpected request') },
+      canNotify: () => allowed, notify: () => { throw new Error('unexpected prompt') },
+      onError: error => { throw error },
+    })
+    if (cancelled) stop()
+    await new Promise(resolve => setImmediate(resolve))
+    stop()
+  }
+  console.log('PASS startup returns immediately, defers requests until paint/idle, and cancels pending checks')
   const updater = new ShellUpdater('1.8.1')
   for (const [version, available] of [['1.8.1', false], ['1.8.0', false], ['1.8.2', true], ['1.8.2-rc.1', true]]) {
     updater.updater = { checkForUpdates: async () => ({ updateInfo: { version } }) }

@@ -28,11 +28,11 @@ import type { RuntimeLocation } from './paths'
 import { resolveBundledPlugins, syncPluginsAtStartup } from './plugin-sync'
 import { showProjectInfo } from './project-info'
 import { readSettings, switchWorkspace } from './settings'
-import { markStartup, reportStartup } from './startup-timeline'
+import { markStartup } from './startup-timeline'
 import { checkRuntimeRelease, RUNTIME_RELEASES_URL } from './runtime-release'
 import { RuntimeUpdater } from './runtime-updater'
 import { ShellUpdater } from './shell-updater'
-import { checkStartupUpdates, createUpdateChecker, type UpdateCheckResults } from './update-check'
+import { scheduleStartupUpdates, createUpdateChecker, type UpdateCheckResults } from './update-check'
 import { installCloseToTray, createTray, refreshTray } from './tray'
 import type { TrayActions } from './tray'
 import { openUpdateWindow, type UpdatePanelState } from './update-window'
@@ -497,7 +497,7 @@ async function main(): Promise<void> {
   //
   // 以前它在窗口刚建好（splash 已可见）就发起一次 `git` 子进程：虽然不阻塞窗口显示，
   // 但它与 Runtime 启动（本版最贵的区间，实测约 3.4 s）抢同一段时间的 CPU 与磁盘。
-  // 移到界面可用之后（见下面 `reportStartup()` 之后），启动区间只剩真正必需的工作。
+  // 两层结构下移到首屏绘制后；单 renderer 没有此徽标的消费者，直接跳过。
 
   // Runtime 已经在安装包里（app.asar 的 `runtime/`），**启动时没有任何解包/复制**。
   // 应用内更新装出来的那份在 `<userData>/runtime/current`：只有在它的版本**不低于**
@@ -887,15 +887,19 @@ async function main(): Promise<void> {
   // 上面的 `navigation`（Host 未就绪时的那次尝试）已经结束或已被第二次导航取代；
   // 等它 settle，避免它在一个已经导航走的文档上抛错。
   await navigation.catch(() => {})
-  // `domReady` / `didFinishLoad` 由渲染进程的生命周期事件记（见 window.ts）；
-  // navigate 返回时页面已经加载完，因此这里就是"界面可用"。
-  markStartup('harnessUsable')
-  reportStartup()
+  // loadURL 完成只表示文档加载；首次应用绘制与空闲信号由 window.ts 单独记录。
+  // 不 await 首屏或更新查询，菜单、托盘和退出处理继续立即装配。
 
   // 界面可用之后才做非关键工作：git 徽标（一次 git 子进程）。注意单 renderer 下
   // **不再有"外壳标题栏"要更新**——窗口标题与徽标都交给 Harness 自己的页面标题，
   // 因此这里只在两层结构下生效（见 window.ts 的 setGitBadge）。
-  void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
+  if (TWO_LAYER_ARCHITECTURE) {
+    void mainWindow.whenUsable.then((usable) => {
+      if (usable && !window.isDestroyed()) {
+        void readGitInfo(workspace).then((info) => mainWindow.setGitBadge(formatGitBadge(info, '*')))
+      }
+    })
+  }
 
   // 更新相关的装配放在托盘之前：托盘与菜单都要用到同一个"打开更新窗口"入口，
   // 而它们的回调是在创建时捕获的，所以动作必须先定义好。
@@ -966,15 +970,18 @@ async function main(): Promise<void> {
 
   // 界面可用后后台检查。仅确认有新版时打开可关闭的更新窗口；离线、超时和最新版不弹窗。
   // 手动打开过更新窗口后不再自动提示，也不重新查询已经检查出来的版本。
-  if (app.isPackaged) {
-    void checkStartupUpdates({
+  const cancelStartupUpdates = app.isPackaged
+    ? scheduleStartupUpdates({
+      whenUsable: mainWindow.whenUsable,
       check: updateChecker.check,
       canNotify: () => !updatesOpened && !window.isDestroyed() && window.isVisible() && session?.quitting !== true,
       notify: (results) => showUpdates(results),
-    }).catch((error: unknown) => console.warn(`[updater] ${String(error)}`))
-  }
+      onError: (error: unknown) => console.warn(`[updater] ${String(error)}`),
+    })
+    : () => {}
 
   app.on('before-quit', () => {
+    cancelStartupUpdates()
     if (session !== undefined) session.quitting = true
   })
   app.on('will-quit', () => {

@@ -9,6 +9,7 @@
  * 使用源码压缩包（那些 tag 没有构建好的依赖闭包），也不能只凭一个 dist-tag。
  */
 import { compareRuntimeVersions, isRuntimeVersionNewer } from './runtime-version'
+import { UPDATE_CHECK_TIMEOUT_MS } from './update-check'
 
 export const RUNTIME_RELEASES_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases'
 export const RUNTIME_RELEASES_API = 'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=30'
@@ -72,7 +73,7 @@ export async function checkRuntimeRelease(
         'User-Agent': 'deepseek-harness-desktop',
         'X-GitHub-Api-Version': '2022-11-28',
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
     })
     if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status}`)
     const body: unknown = await response.json()

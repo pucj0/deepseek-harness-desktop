@@ -1,7 +1,8 @@
 import type { RuntimeReleaseCheck } from './runtime-release'
 import type { ShellCheck } from './shell-updater'
 
-export const UPDATE_CHECK_TIMEOUT_MS = 15_000
+// Network budget only; no startup delay or navigation deadline uses this value.
+export const UPDATE_CHECK_TIMEOUT_MS = 5_000
 
 /** Bound the whole check, including redirects and response parsing. Late results are ignored. */
 export async function withUpdateTimeout<T>(check: () => Promise<T>, timeoutMs = UPDATE_CHECK_TIMEOUT_MS): Promise<T> {
@@ -58,4 +59,30 @@ export async function checkStartupUpdates(deps: {
 }): Promise<void> {
   const results = await deps.check()
   if (deps.canNotify() && (results.desktop.available || results.runtime.available)) deps.notify(results)
+}
+
+/** Return immediately; only painted, idle application documents may start automatic checks. */
+export function scheduleStartupUpdates(deps: {
+  whenUsable: Promise<boolean>
+  check: () => Promise<UpdateCheckResults>
+  canNotify: () => boolean
+  notify: (results: UpdateCheckResults) => void
+  onError: (error: unknown) => void
+}): () => void {
+  let cancelled = false
+  let task: ReturnType<typeof setImmediate> | undefined
+  void deps.whenUsable.then((usable) => {
+    if (!usable || cancelled) return
+    task = setImmediate(() => {
+      task = undefined
+      if (cancelled || !deps.canNotify()) return
+      void checkStartupUpdates({
+        ...deps, canNotify: () => !cancelled && deps.canNotify(),
+      }).catch(deps.onError)
+    })
+  }).catch(deps.onError)
+  return () => {
+    cancelled = true
+    if (task !== undefined) clearImmediate(task)
+  }
 }

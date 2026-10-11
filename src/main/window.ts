@@ -44,7 +44,8 @@ import {
 } from 'electron'
 import type { ShellMenuBarEntry } from './menu'
 import { currentLocale, t } from './i18n'
-import { markStartup } from './startup-timeline'
+import { markStartup, reportStartup } from './startup-timeline'
+import { HARNESS_PAINTED_SCRIPT } from './renderer-ready'
 import { shellPageHtml } from './shell-page'
 import { splashPageHtml } from './splash-page'
 import {
@@ -232,6 +233,8 @@ export function createMainWindow(options: MainWindowOptions): {
   window: BrowserWindow
   /** Harness 官方界面所在的 webContents（单 renderer 下就是窗口自身的）。 */
   appContents: WebContents
+  /** First application paint and renderer idle; false if the window closes first. */
+  whenUsable: Promise<boolean>
   navigate: (ready: ServerReady) => Promise<void>
   /** 更新加载页的提示文案（例如解包进度）。 */
   setSplashHint: (hint: string) => void
@@ -246,6 +249,9 @@ export function createMainWindow(options: MainWindowOptions): {
   close: () => void
 } {
   const { userDataDir, iconPath, splashTitle, splashHint, menu } = options
+  let settleUsable: (usable: boolean) => void = () => {}
+  let usableSettled = false
+  const whenUsable = new Promise<boolean>((resolve) => { settleUsable = resolve })
   const state = loadState(userDataDir)
   const custom = usesCustomTitleBar()
   const titlebarHeight = custom ? TITLEBAR_HEIGHT : 0
@@ -731,6 +737,20 @@ export function createMainWindow(options: MainWindowOptions): {
     }
   }
 
+  window.once('closed', () => { settleUsable(false) })
+  const watchFirstPaint = (): void => {
+    void appContents.executeJavaScript(HARNESS_PAINTED_SCRIPT).then(() => {
+      if (usableSettled || window.isDestroyed()) return
+      usableSettled = true
+      markStartup('harnessUsable')
+      reportStartup()
+      settleUsable(true)
+    }).catch(() => {
+      // Navigation or shutdown can discard the document; the mount watchdog
+      // reports actual application failures. Never turn this into a startup gate.
+    })
+  }
+
   // ---- 标题栏 IPC：只暴露标题栏真正需要的几件事 ---------------------------
   //
   // 用 removeHandler 先清一遍：`ipcMain.handle` 对同一 channel 重复注册会抛错，
@@ -885,6 +905,7 @@ export function createMainWindow(options: MainWindowOptions): {
   return {
     window,
     appContents,
+    whenUsable,
     navigate: async (ready: ServerReady): Promise<void> => {
       appOrigin = new URL(ready.url).origin
       // Stop progress updates before navigation begins, including fast-server races.
@@ -908,6 +929,7 @@ export function createMainWindow(options: MainWindowOptions): {
       // 1.7.9 的"菜单在、界面全白"正是这种情况：文档加载成功、mount 失败，而主进程完全不知道。
       // 这里在导航之后启动一个看门狗，用**官方稳定标记**判断有没有真的渲染出来。
       void watchHarnessMount()
+      if (ready.port !== 0 && !usableSettled) watchFirstPaint()
     },
     setSplashHint: (hint: string): void => {
       if (window.isDestroyed() || navigated) return

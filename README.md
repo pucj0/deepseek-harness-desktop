@@ -133,7 +133,7 @@ Electron Desktop Shell
 ## 更新机制
 
 - **两条 GitHub 检查轨道：** **更新 → 检查更新** 同时检查本项目 `pucj0/deepseek-harness-desktop` Releases（Desktop 应用）与官方 `deepseek-ai/deepseek-harness` Releases（Harness Runtime），分别显示已安装版本、最新版本与状态。
-- **启动检查更新：** 安装版在界面就绪后自动检查两条轨道，有新版时打开可关闭的更新窗口；下载或安装仍由按钮触发。检查最长等待 15 秒，GitHub 无法访问、超时或没有新版时不弹窗，不阻塞启动；手动检查会显示网络失败原因，可稍后重试。
+- **启动检查更新：** 安装版先显示应用，确认 Harness 已挂载、首屏绘制完成并进入渲染器空闲时间后，才在后台检查两条轨道；启动没有固定等待时间，也不等待 GitHub。网络检查最多 5 秒，无法访问、超时或没有新版时静默结束；有新版时打开可关闭的更新窗口，下载或安装由按钮触发。手动检查会显示网络失败原因，可稍后重试。
 - **完整产品安装：**Desktop 应用继续通过 `electron-updater` 下载本项目 GitHub Release。一个 Release 同时携带桌面外壳、经过兼容验证的官方 Harness Runtime、桌面插件、平台安装包与 `latest*.yml`。
 - **Runtime 可在应用内直接安装：** Runtime 有新版时，更新窗口的 Runtime 轨道出现 **「安装 Runtime 并重启」**（`data-action=runtime-install`）。实现在 `src/main/runtime-updater.ts`：
   - **版本由官方 GitHub Release 授权。** 目标版本必须等于官方 `dsh-v*` Release 的最新版本；GitHub 的 source archive 永远不会被当作可运行 Runtime（源码 tag 没有构建好的依赖闭包）。同时用该 Release 的 `published_at` 算出 npm `--before = published_at + 24h`，让依赖按"该版本发布当时的仓库状态"解析——上游半波发布时 `^` 范围会把还没上架的兄弟包卷进来，24 小时窗口能等到同一次发布的兄弟包、又不会跨进下一波。与 `npm run stage` 同一条规则。

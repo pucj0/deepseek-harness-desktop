@@ -11,16 +11,13 @@
  *     埋点本身绝不能成为启动成本或失败点。
  *   * **默认开启**：启动数据只有在"真实发布产物、真实用户机器"上量才有意义，
  *     因此不做成需要开关的东西；每行只有几十字节，且只在启动期出现。
- *   * **顺序稳定**：`MARKS` 里列出的是预期的先后顺序，汇总时按它排序；
+ *   * **真实顺序**：窗口与 Host 并行启动，汇总按实际时间排序；
  *     未发生的阶段（例如失败路径）不会出现在输出里。
  */
 import { performance } from 'node:perf_hooks'
 
 /**
- * 预期发生的阶段，按先后顺序。
- *
- * 顺序本身也是契约的一部分：`scripts/test-desktop-runtime.mjs` 会检查打包启动的时间线里
- * 这些阶段**不倒退**（例如 `hostReady` 不可能早于 `hostSpawned`）。
+ * 支持的阶段名；窗口和 Host 的并行阶段不假定固定顺序。
  */
 export const MARKS = [
   'processStart',
@@ -67,10 +64,12 @@ export function markStartup(name: MarkName): number {
 /**
  * 汇总时间线。
  *
- * @returns 各阶段毫秒数（按 {@link MARKS} 排序，只含已发生的）。
+ * @returns 各阶段毫秒数（按实际发生时间排序，只含已发生的）。
  */
 export function startupTimeline(): Array<{ name: MarkName; ms: number }> {
-  return MARKS.filter((name) => recorded.has(name)).map((name) => ({ name, ms: recorded.get(name)! }))
+  return MARKS.filter((name) => recorded.has(name))
+    .map((name) => ({ name, ms: recorded.get(name)! }))
+    .sort((a, b) => a.ms - b.ms)
 }
 
 /**

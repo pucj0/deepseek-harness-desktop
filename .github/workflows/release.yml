@@ -84,6 +84,7 @@ jobs:
       - name: 验证 Git 快捷入口与启动更新检查
         run: |
           node scripts/test-project-git-header.mjs
+          node scripts/test-renderer-ready.cjs
           node scripts/test-update-check.cjs
 
       # 与"编译 TypeScript"有重叠，但保留：一旦 checkout 出的内容有问题，这一步的
