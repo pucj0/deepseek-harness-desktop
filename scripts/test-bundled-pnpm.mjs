@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { delimiter, join, resolve, sep } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
@@ -15,6 +15,8 @@ assert.ok(existsSync(electron), `Missing packaged executable: ${electron}; build
 const tempRoot = join(root, '.tmp')
 mkdirSync(tempRoot, { recursive: true })
 const scratch = mkdtempSync(join(tempRoot, 'bundled pnpm 空格-'))
+// Retain the POSIX shell required by lifecycle scripts, without system node/pnpm.
+if (process.platform !== 'win32') symlinkSync('/bin/sh', join(scratch, 'sh'))
 try {
   const nodeBin = join(resources, 'tooling')
   const pmRoot = join(resources, 'app.asar.unpacked', 'node_modules', 'pnpm')
@@ -32,7 +34,7 @@ try {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'))
   Object.assign(env, {
     ELECTRON_RUN_AS_NODE: '1', DSH_DESKTOP_NODE_EXECUTABLE: electron,
-    PATH: nodeBin, TMP: scratch, TEMP: scratch, TMPDIR: scratch,
+    PATH: `${nodeBin}${delimiter}${scratch}`, TMP: scratch, TEMP: scratch, TMPDIR: scratch,
   })
   writeFileSync(join(scratch, 'package.json'), JSON.stringify({
     name: 'packaged-pnpm-probe', private: true, scripts: { probe: 'node -e "console.log(process.versions.node)"' },

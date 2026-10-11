@@ -27,6 +27,8 @@ const source = join(scratch, 'source')
 const home = join(scratch, 'home')
 const emptyBin = join(scratch, 'empty-bin')
 for (const dir of [runtime, source, home, emptyBin]) mkdirSync(dir, { recursive: true })
+// pnpm launches POSIX scripts through `sh`; keep the OS shell, but no node/pnpm.
+if (process.platform !== 'win32') symlinkSync('/bin/sh', join(emptyBin, 'sh'))
 const resultFile = join(scratch, 'results.json')
 const fixture = join(scratch, 'fixture package')
 mkdirSync(fixture)
