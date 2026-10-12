@@ -1,16 +1,16 @@
 {
   "plugins": [
     {
-      "name": "dsh-client-ui-review",
-      "version": "1.1.1",
-      "url": "https://github.com/pucj0/dsh-client-ui-review/releases/download/v1.1.1/dsh-client-ui-review-1.1.1.tgz",
-      "sha256": "cf93d72439c24b8b92e013d1660373839f835879986fe688070a225d3145d0ea"
-    },
-    {
       "name": "dsh-client-ui-gitbar",
       "version": "1.1.1",
       "url": "https://github.com/pucj0/dsh-client-ui-gitbar/releases/download/v1.1.1/dsh-client-ui-gitbar-1.1.1.tgz",
       "sha256": "02e8022a3bdd965f9b70834c85ba47040e6c6a1ad616053df97d1abc0ad13d30"
+    },
+    {
+      "name": "dsh-client-ui-review",
+      "version": "1.1.2",
+      "url": "https://github.com/pucj0/dsh-client-ui-review/releases/download/v1.1.2/dsh-client-ui-review-1.1.2.tgz",
+      "sha256": "9db36f5dcfffa50c5879fbc2d628951f3d4f3d5a928a3c7da1007b0cc9616a59"
     }
   ]
 }

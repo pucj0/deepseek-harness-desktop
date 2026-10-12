@@ -1,6 +1,6 @@
 {
   "name": "dsh-client-ui-review",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Standalone turn review and project Git sidebar for the official dsh Web UI.",
   "type": "module",
   "main": "lib/index.js",
@@ -47,6 +47,6 @@
   },
   "scripts": {
     "check": "node scripts/check-package.mjs",
-    "test": "npm run check"
+    "test": "npm run check && node scripts/test-view-preferences.mjs && node scripts/test-turn-history.mjs"
   }
 }

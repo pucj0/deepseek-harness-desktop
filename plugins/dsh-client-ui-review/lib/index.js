@@ -21,6 +21,8 @@ import { collectCommitContext, createCommitMessageGenerator } from './commit-mes
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
 import { collectWorkspaceRoots } from './workspace-roots.js'
 import { registerGitRoutes } from './git-operations.js'
+import { createViewPreferences, isDiffMode } from './view-preferences.js'
+import { createTurnHistory } from './turn-history.js'
 
 // 「AI 补充提交信息」的其余部分（上限、提示词构造、输出规范化、失败翻译）从 host 侧
 // 原样再导出一份：它们是纯函数，`scripts/test-review-commit-message.mjs` 直接断言，
@@ -253,7 +255,7 @@ async function readGraph(cwd, options) {
   } else {
     // 不带 ref 时看**全部**分支，否则提交图上只有当前分支那条线，看不到任何分叉——
     // 而"看到分叉"正是这个视图存在的理由。
-    args.push('--all')
+    args.push('--exclude=refs/dsh-review/*', '--all')
   }
 
   const raw = await git(args, cwd)
@@ -2196,7 +2198,7 @@ async function readCompareFileDiff(cwd, a, b, path) {
  * 创建审查路由的处理器。
  * @returns `(request, response)` 处理器。
  */
-function createReviewHandler(ctx) {
+function createReviewHandler(ctx, turnHistory) {
   // AI 补充提交信息走宿主正式能力（`ctx.llm` + `ctx.agentDefaultModel`，见
   // lib/commit-message.js）。**服务在调用时才解析**：宿主没有模型 provider 时面板照样能开。
   const commitMessageGenerator =
@@ -2348,6 +2350,13 @@ function createReviewHandler(ctx) {
           sendJson(response, 405, { error: 'method not allowed' })
           return
         }
+        // Legacy/manual callers may seed an idle baseline, but must never reset
+        // a host-captured round when switching sessions or reopening the UI.
+        const recorded = await turnHistory?.select(sessionId)
+        if (recorded?.selected) {
+          sendJson(response, 200, { isRepo: true, revision: recorded.selected.revision, ...scopeFields(context, scope) })
+          return
+        }
         const revision = await snapshot(cwd, sessionId)
         // 顺手把"当前侧"的常驻索引也建起来，让第一次取差异就不必再付一次全量代价。
         // 不做这一步的话，首次 add -A 要重新哈希所有变化文件（实测约 4 秒），
@@ -2362,9 +2371,14 @@ function createReviewHandler(ctx) {
 
       // ---- 取差异：基线 vs 当前工作区 ---------------------------------------
       if (url.pathname === `${ROUTE_PREFIX}/changes`) {
-        const stored = baselines.get(sessionId)
+        const history = await turnHistory?.select(sessionId, payload.roundId)
+        if (payload.roundId && !history?.selected) {
+          sendJson(response, 404, { error: 'review round not found', code: 'roundNotFound' })
+          return
+        }
+        const stored = history?.selected ?? baselines.get(sessionId)
         if (stored === undefined) {
-          sendJson(response, 200, { isRepo: true, noBaseline: true })
+          sendJson(response, 200, { isRepo: true, noBaseline: true, rounds: history?.rounds ?? [] })
           return
         }
         // 仓库换了（会话切了项目）：旧基线无意义，要求重新记录。
@@ -2381,7 +2395,7 @@ function createReviewHandler(ctx) {
         // 早先试过"先算出变化路径、只哈希它们"，但收窄没有效果：那个仓库里 tmp/ 下的
         // 6636 个日志文件其实是被 git 跟踪的（只是工作区副本未提交），因此基线快照本来
         // 就把它们算了进去，收窄集合依然是 6640 条。让索引保持热才是真正的办法。
-        const current = await currentTree(cwd, sessionId)
+        const current = stored.after ?? await currentTree(cwd, sessionId)
 
         const [stat, names] = await Promise.all([
           git(['diff', '--numstat', stored.revision, current], cwd),
@@ -2413,6 +2427,9 @@ function createReviewHandler(ctx) {
           scope: 'turn',
           revision: stored.revision,
           takenAt: stored.takenAt,
+          rounds: history?.rounds ?? [],
+          roundId: history?.selected?.id,
+          historical: stored.status === 'completed',
           ...scopeFields(context, scope),
           ...described,
           files,
@@ -2847,7 +2864,12 @@ function createReviewHandler(ctx) {
         // 还原源：本轮基线（scope=turn）或 HEAD（scope=workspace）。
         let source
         if (payload.scope === 'turn') {
-          const stored = baselines.get(sessionId)
+          const history = await turnHistory?.select(sessionId, payload.roundId)
+          const stored = history?.selected ?? baselines.get(sessionId)
+          if (stored?.status === 'completed') {
+            sendJson(response, 409, { error: 'historical rounds are read-only', code: 'historicalRound' })
+            return
+          }
           // 基线记在**仓库**上：会话在同一个仓库里换了子目录时基线依然适用。
           if (stored === undefined || stored.repositoryRoot !== cwd) {
             sendJson(response, 400, { error: 'no baseline recorded for this turn', code: 'noBaseline' })
@@ -3430,11 +3452,57 @@ function createReviewHandler(ctx) {
  * @param ctx - host 侧 cordis 上下文。
  */
 export function apply(ctx) {
+  const turnHistory = createTurnHistory(ctx, {
+    capture: snapshot,
+    pin: (cwd, ref, revision) => git(['update-ref', ref, revision], cwd),
+  })
+  const report = error => ctx.logger?.warn?.(`review turn snapshot: ${String(error?.message ?? error)}`)
+  if (typeof ctx.on === 'function') {
+    ctx.on('agent/pre-step', async ({ agent, turn }, next) => {
+      try {
+        const sessionId = agent?.session?.id ?? agent?.id
+        const workspace = validateWorkspace(agent?.session?.header?.cwd ?? agent?.meta?.cwd, ctx)
+        if (workspace && typeof sessionId === 'string' && Number.isSafeInteger(turn) && turn > 0) {
+          const cwd = realpathSync.native((await git(['rev-parse', '--show-toplevel'], workspace)).trim())
+          const record = await turnHistory.begin(sessionId, turn, cwd)
+          baselines.set(sessionId, record)
+        }
+      } catch (error) { report(error) }
+      return await next()
+    }, { prepend: true })
+    ctx.on('session/event', (session, event) => {
+      if (event?.type === 'turn/end') void turnHistory.end(session.id, event.data.turn).catch(report)
+    })
+    ctx.on('session/flush', session => turnHistory.flush(session.id).catch(report))
+  }
+  const preferences = createViewPreferences(ctx)
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/view-preferences`,
+    handler: async (request, response) => {
+      try {
+        if (request.method === 'GET') {
+          sendJson(response, 200, preferences.read())
+        } else if (request.method === 'POST') {
+          let payload
+          try { payload = JSON.parse(await readSmallBody(request)) }
+          catch { sendJson(response, 400, { error: 'invalid body' }); return }
+          if (!isDiffMode(payload?.diffMode)) {
+            sendJson(response, 400, { error: 'invalid diff view mode' }); return
+          }
+          sendJson(response, 200, preferences.write(payload.diffMode))
+        } else {
+          response.setHeader('allow', 'GET, POST')
+          sendJson(response, 405, { error: 'method not allowed' })
+        }
+      } catch (error) {
+        sendJson(response, 500, { error: String(error?.message ?? error) })
+      }
+    },
+  }), 'review: view preferences')
   registerGitRoutes(ctx, { routePrefix: `${ROUTE_PREFIX}/git` })
   // 先按版本清理临时索引：旧索引里的 stat 缓存会让它继续沿用修好之前的记录。
   ensureIndexVersion()
 
-  const handler = createReviewHandler(ctx)
+  const handler = createReviewHandler(ctx, turnHistory)
   for (const path of [
     `${ROUTE_PREFIX}/repo-context`,
     `${ROUTE_PREFIX}/project-git-scope`,

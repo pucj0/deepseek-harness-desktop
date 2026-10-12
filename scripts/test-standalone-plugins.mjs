@@ -144,6 +144,10 @@ try {
 
     if (names.includes('review')) {
       const prefix = '/dsh-desktop/review'
+      assert.deepEqual(await call(`${prefix}/view-preferences`), { status: 200, data: { diffMode: null } })
+      assert.equal((await call(`${prefix}/view-preferences`, { diffMode: 'unified' })).status, 200)
+      assert.equal((await call(`${prefix}/view-preferences`)).data.diffMode, 'unified')
+      assert.equal(JSON.parse(readFileSync(join(profileDir, 'ui-review', 'view-preferences.json'))).diffMode, 'unified')
       const body = { workspace: repo, sessionId: `standalone-${names.join('-')}` }
       // An existing user change must be excluded from the turn baseline.
       writeFileSync(join(repo, 'file.txt'), 'user change\n')

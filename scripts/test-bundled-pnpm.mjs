@@ -38,8 +38,8 @@ try {
     const resources = ${JSON.stringify(resources)};
     const defaults = JSON.parse(fs.readFileSync(path.join(resources, 'server', 'default-plugins.json'), 'utf8')).plugins;
     assert.equal(defaults.length, 2);
+    assert.deepEqual(defaults, ${JSON.stringify(JSON.parse(readFileSync(join(root, 'src', 'server', 'default-plugins.json'), 'utf8')).plugins)});
     for (const plugin of defaults) {
-      assert.equal(plugin.version, '1.1.1');
       assert.ok(!fs.existsSync(path.join(resources, 'plugins', plugin.name)), 'Git plugin must not be bundled');
       assert.ok(!fs.existsSync(path.join(resources, 'app.asar', 'runtime', 'node_modules', plugin.name)), 'Git plugin must not remain in Runtime');
     }

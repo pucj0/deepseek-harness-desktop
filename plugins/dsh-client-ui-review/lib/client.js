@@ -23,9 +23,7 @@
 //   POST /dsh-desktop/review/changes    基线 vs 当前工作区（turn scope）
 //   POST /dsh-desktop/review/workspace  HEAD vs 当前工作区（workspace scope）
 //
-// 轮次边界怎么定：**dsh 没有轮次生命周期事件**，因此用会话的运行状态推断——agent 从
-// "未运行"转为"运行"即一轮开始。这是本次实现里最依赖推断的一处，所以刻意保守：
-// 发现没有基线且当前空闲时也会补记，避免因错过跃迁而永久失效。
+// 轮次边界由宿主的 agent/pre-step 与 session/event turn/end 记录；客户端运行状态只用于刷新。
 window.__ModuleLoader__.load({
   id: 'dsh-client-ui-review',
   factory: (require) => {
@@ -1228,6 +1226,10 @@ window.__ModuleLoader__.load({
       diffViewMode: '差异视图模式',
       diffModeUnified: '统一',
       diffModeSideBySide: '并排',
+      reviewRoundLatest: '最近一轮',
+      reviewRound: '第 {turn} 轮',
+      reviewRoundRunning: '执行中',
+      reviewRoundHistory: '选择审查轮次',
       diffBefore: '修改前',
       diffAfter: '修改后',
       diffPrevChange: '上一个改动',
@@ -1735,6 +1737,10 @@ window.__ModuleLoader__.load({
       diffViewMode: 'Diff view mode',
       diffModeUnified: 'Unified',
       diffModeSideBySide: 'Side-by-Side',
+      reviewRoundLatest: 'Latest round',
+      reviewRound: 'Round {turn}',
+      reviewRoundRunning: 'Running',
+      reviewRoundHistory: 'Select review round',
       diffBefore: 'Before',
       diffAfter: 'After',
       diffPrevChange: 'Previous change',
@@ -2033,42 +2039,73 @@ window.__ModuleLoader__.load({
     /**
      * 「差异视图模式」偏好：`unified` 还是 `side-by-side`。
      *
-     * 与自动换行一样放在模块级 + localStorage：Changes 与 Log 是两处独立的视图，而这是
+     * 模块级订阅让 Changes、Log 和本轮审查同步，宿主 profile 文件保证跨端口、跨重启恢复。
+     * localStorage 只作当前浏览器的缓存，并迁移已有选择。这是
      * **用户对"怎么看差异"的偏好**，两边必须一致（在一处切了并排，另一处也该是并排）。
      *
      * 默认 **side-by-side**：IDEA 的差异视图默认就是左右并排，而"旧行 / 新行 / 标记 / 正文"
      * 四列的统一样式在改动一多时要靠脑内对齐才能看出"这处改动前后各是什么"。统一模式没有被
      * 删掉——切回去随时可用（见工具条上的 Unified | Side-by-Side）。
      *
-     * 只写 localStorage：**不进 Harness locale，也不进工作区配置**——它是外壳自己的视图偏好，
-     * 与项目、语言都无关。
+     * 与项目、语言无关的本地用户偏好。
      */
-    const diffModeStore = (() => {
+    function createDiffModeStore() {
       const listeners = new Set()
       let mode = DIFF_MODE_SIDE_BY_SIDE
+      let hasCachedMode = false
+      let revision = 0
+      let connection
+      let writes = Promise.resolve()
+      const valid = value => value === DIFF_MODE_UNIFIED || value === DIFF_MODE_SIDE_BY_SIDE
       try {
         const stored = window.localStorage.getItem(DIFF_MODE_KEY)
-        if (stored === DIFF_MODE_UNIFIED || stored === DIFF_MODE_SIDE_BY_SIDE) mode = stored
+        if (valid(stored)) { mode = stored; hasCachedMode = true }
       } catch {
         // 读不到就用默认值（隐私模式等）。
+      }
+      const publish = value => {
+        mode = value
+        try {
+          window.localStorage.setItem(DIFF_MODE_KEY, mode)
+        } catch {
+          // 存不了也不影响本次会话内的行为。
+        }
+        for (const listener of listeners) listener()
+      }
+      const persist = value => {
+        const target = connection
+        if (!target) return
+        // Serialize rapid toggles so an older request cannot overwrite the last choice.
+        writes = writes.then(() => target.active ? target.save(value) : undefined)
+          .catch(error => console.warn('[ui-review] Could not save diff view mode', error))
       }
       return {
         get: () => mode,
         set: (value) => {
-          mode = value === DIFF_MODE_UNIFIED ? DIFF_MODE_UNIFIED : DIFF_MODE_SIDE_BY_SIDE
-          try {
-            window.localStorage.setItem(DIFF_MODE_KEY, mode)
-          } catch {
-            // 存不了也不影响本次会话内的行为。
-          }
-          for (const listener of listeners) listener()
+          revision++
+          hasCachedMode = true
+          publish(value === DIFF_MODE_UNIFIED ? DIFF_MODE_UNIFIED : DIFF_MODE_SIDE_BY_SIDE)
+          persist(mode)
         },
         subscribe: (listener) => {
           listeners.add(listener)
           return () => listeners.delete(listener)
         },
+        connect({ load, save }) {
+          const target = { save, active: true }
+          connection = target
+          const before = revision
+          const ready = Promise.resolve().then(load).then(value => {
+            if (!target.active || revision !== before) return
+            if (valid(value)) publish(value)
+            else if (hasCachedMode) persist(mode)
+          }).catch(error => console.warn('[ui-review] Could not load diff view mode', error))
+          return { ready, dispose() { target.active = false; if (connection === target) connection = undefined } }
+        },
+        flush: () => writes,
       }
-    })()
+    }
+    const diffModeStore = createDiffModeStore()
 
     /**
      * 订阅「差异视图模式」偏好。
@@ -4388,7 +4425,9 @@ window.__ModuleLoader__.load({
      * @returns `{ state, reload }`。
      */
     function useChanges(workspace, sessionId) {
-      const gate = useWorkspaceGate(workspace)
+      const [selection, setSelection] = react.useState({ sessionId, id: '' })
+      const roundId = selection.sessionId === sessionId ? selection.id : ''
+      const gate = useWorkspaceGate(`${workspace ?? ''}\u0000${sessionId ?? ''}\u0000${roundId}`)
       const generation = gate.generation
       const [state, setState] = react.useState({ generation: -1, phase: 'loading' })
 
@@ -4402,7 +4441,7 @@ window.__ModuleLoader__.load({
           setState({ generation: gate.generation, phase: 'error', message: 'noWorkspace' })
           return
         }
-        const { ticket, promise } = gate.run('changes', () => call('changes', { workspace, sessionId }), { coalesce: true })
+        const { ticket, promise } = gate.run('changes', () => call('changes', { workspace, sessionId, ...(roundId ? { roundId } : {}) }), { coalesce: true })
         if (!gate.isCurrent(ticket)) return
         const outcome = await promise
         if (!gate.accept(ticket)) return
@@ -4411,16 +4450,18 @@ window.__ModuleLoader__.load({
             ? { generation: ticket.generation, phase: 'ready', result: outcome.value }
             : { generation: ticket.generation, phase: 'error', message: String(outcome.cause?.message ?? outcome.cause) },
         )
-      }, [gate, workspace, sessionId, generation])
+      }, [gate, workspace, sessionId, generation, roundId])
 
       react.useEffect(() => {
         void reload()
+        const timer = setInterval(() => void reload(), POLL_MS)
+        return () => clearInterval(timer)
       }, [reload])
 
       // 换代（换了工作区/对话）后旧数据立即作废：这一帧就回到加载态，绝不显示上一个
       // 项目的差异。
       const fresh = state.generation === generation ? state : { generation, phase: 'loading' }
-      return { state: fresh, reload }
+      return { state: fresh, reload, roundId, selectRound: id => setSelection({ sessionId, id }) }
     }
 
     /**
@@ -11535,6 +11576,7 @@ window.__ModuleLoader__.load({
          message: current.phase === 'error' ? current.message : '',
          ...(result?.truncated === true ? { note: t('truncated') } : {}),
          ...(props?.onClose !== undefined ? { onClose: props.onClose } : {}),
+         headerAction: props.headerAction,
          ...(typeof props?.wrap === 'boolean' ? { wrap: props.wrap } : {}),
        })
      }
@@ -11695,6 +11737,7 @@ window.__ModuleLoader__.load({
             'data-review-diff-header': '',
             style: {
               display: 'flex',
+              flexWrap: 'wrap',
               alignItems: 'center',
               gap: '7px',
               flexShrink: 0,
@@ -11710,15 +11753,10 @@ window.__ModuleLoader__.load({
             status,
           ),
           // 路径：目录压暗 + 中间省略（`direction: rtl` 让省略号落在中间偏左），文件名永远可见。
-          dir === ''
-            ? null
-            : react.createElement(
-                'span',
-                { style: { flexShrink: 1, minWidth: 0, color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta } },
-                `\u200e${dir}/`,
-              ),
-          react.createElement('span', { style: { flexShrink: 0, fontWeight: 600, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta }, title: file?.path ?? '' }, base),
-          react.createElement('span', { style: { flex: '1 1 auto', minWidth: '6px' } }),
+          react.createElement('span', {
+            'data-review-diff-filetitle': '', title: file?.path ?? '',
+            style: { flex: '1 1 140px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta },
+          }, file?.path ?? ''),
           react.createElement(
             'span',
             { 'data-review-diff-stats': '', style: { flexShrink: 0, fontFamily: CODE_FONT, fontSize: reviewFont.codeMeta, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } },
@@ -11747,6 +11785,7 @@ window.__ModuleLoader__.load({
                 iconButton('next-change', t('diffNextChange'), () => stepHunk(1), undefined, '↓'),
               ),
           modeSwitch(),
+          props.headerAction ?? null,
           // 自动换行开关：默认开启，关掉后回到 `pre` + 横向滚动（看原始横向结构时用）。
           iconButton('wrap', wrap ? t('diffWrapOn') : t('diffWrapOff'), onToggleWrap, wrap, wrap ? '↵' : '→'),
           onClose === undefined ? null : iconButton('close', t('diffClose'), onClose, undefined, '✕'),
@@ -11819,6 +11858,8 @@ window.__ModuleLoader__.load({
         note: props?.note,
         margin: props?.margin ?? '2px 0 8px',
         dense: true,
+        onClose: props.onClose,
+        headerAction: props.headerAction,
       })
     }
 
@@ -12048,7 +12089,7 @@ window.__ModuleLoader__.load({
             // `data-review-row` 带**路径**而不只是空标记：下面那个暂存标记要靠它才能
             // 对应到具体文件，否则"哪个文件已暂存"在 DOM 上无法核验（脚本与人工都一样）。
             { key: file.path, 'data-review-row': file.path, 'data-review-file-row': '' },
-            react.createElement(
+            open ? null : react.createElement(
               'div',
               {
                 className: 'dsh-review-file-row',
@@ -12230,7 +12271,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'dsh-review-revert',
                   'data-review-icon-button': '',
-                  disabled: working,
+                  disabled: working || result?.historical === true,
                   title: t('revert'),
                   'aria-label': working ? t('reverting') : t('revert'),
                   onClick: () => setConfirming(file.path),
@@ -12261,8 +12302,11 @@ window.__ModuleLoader__.load({
                     workspace: props.workspace,
                     revision: props.revision,
                     onStats: noteStats,
+                    onClose: () => setExpanded(''),
+                    headerAction: result?.historical === true ? null : react.createElement('button', { type: 'button', 'data-review-icon-button': '', title: t('revert'), 'aria-label': t('revert'), onClick: () => setConfirming(file.path) }, '↶'),
                   })
-                : react.createElement(FileDiff, { t, file, diff })
+                : react.createElement(FileDiff, { t, file, diff, onClose: () => setExpanded(''),
+                    headerAction: result?.historical === true ? null : react.createElement('button', { type: 'button', 'data-review-icon-button': '', title: t('revert'), 'aria-label': t('revert'), onClick: () => setConfirming(file.path) }, '↶') })
               : null,
           )
         }),
@@ -16594,7 +16638,7 @@ window.__ModuleLoader__.load({
      *
      * 三件事，一件都不多做：
      *   1. 显示本轮改动数量（`/changes` 的元数据，节流轮询）；
-     *   2. 记录本轮基线（会话由"未运行"转为"运行"时记一次，空闲且缺基线时自愈补记）；
+     *   2. 基线由宿主按真实轮次记录，不随挂载、切会话或运行状态变化而重置；
      *   3. 点击 → `openReviewSidebar`（只可能落在 `REVIEW_KIND` 上，绝不碰 `GIT_KIND`）。
      *
      * 它**不再**持有任何开合状态：关闭、宽度、全屏、resize 全部归官方右侧栏。
@@ -16618,15 +16662,7 @@ window.__ModuleLoader__.load({
       const [count, setCount] = react.useState(null)
       const [trouble, setTrouble] = react.useState('')
 
-      // 记录基线：只在"未运行 -> 运行"的跃迁上做一次。
-      const wasRunning = react.useRef(false)
-      react.useEffect(() => {
-        if (workspace === undefined || sessionId === undefined) return
-        const justStarted = running && !wasRunning.current
-        wasRunning.current = running
-        if (!justStarted) return
-        void call('baseline', { workspace, sessionId }).catch(() => undefined)
-      }, [running, workspace, sessionId])
+      // Real turn boundaries are captured by the host before agent execution.
 
       // 刷新改动文件数；顺带做基线自愈。
       react.useEffect(() => {
@@ -16639,13 +16675,6 @@ window.__ModuleLoader__.load({
             // "后台每 10 秒重算一次全仓库差异"会一直存在（那份正文只有点开某个文件才需要）。
             const result = await call('changes', { workspace, sessionId, metadataOnly: true })
             if (!alive) return
-            if (result?.noBaseline === true && !running) {
-              // 空闲时补记：agent 不在运行就不可能产生改动，因此这一刻正是"下一轮开始前"。
-              // 需要自愈是因为基线原本只在跃迁时记录，而"挂载时该轮已在跑"与"记录失败后
-              // 不再重试"这两种情况都会让它永久缺失。
-              await call('baseline', { workspace, sessionId }).catch(() => undefined)
-              return
-            }
             setCount(result?.isRepo === false || result?.noBaseline === true ? null : (result?.files?.length ?? 0))
             setTrouble('')
           } catch (cause) {
@@ -16761,6 +16790,13 @@ window.__ModuleLoader__.load({
               flexShrink: 0,
             },
           },
+          react.createElement('select', {
+            'data-review-round-select': '', 'aria-label': t('reviewRoundHistory'),
+            value: turn.roundId ?? '', onChange: event => turn.selectRound?.(event.target.value),
+            style: { maxWidth: '220px', minWidth: 0, border: `1px solid ${BORDER}`, borderRadius: '6px', padding: '4px 6px', background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-primary)', font: 'inherit' },
+          }, react.createElement('option', { value: '' }, t('reviewRoundLatest')),
+          ...(turn.state.result?.rounds ?? []).map(round => react.createElement('option', { key: round.id, value: round.id },
+            `${t('reviewRound', { turn: round.turn })} · ${new Date(round.takenAt).toLocaleString()}${round.status === 'running' ? ` · ${t('reviewRoundRunning')}` : ''}`))),
           react.createElement(
             'span',
             { 'data-review-turn-count': '', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: uiPx(12) } },
@@ -16859,6 +16895,21 @@ window.__ModuleLoader__.load({
      * @param ctx - 客户端 cordis 上下文。
      */
     function apply(ctx) {
+      if (typeof window.fetch === 'function') {
+        ctx.effect(() => {
+          const request = async (diffMode) => {
+            const response = await window.fetch(`${API}/view-preferences`, {
+              method: diffMode === undefined ? 'GET' : 'POST', credentials: 'same-origin',
+              headers: { accept: 'application/json', ...(diffMode === undefined ? {} : { 'content-type': 'application/json' }) },
+              ...(diffMode === undefined ? {} : { body: JSON.stringify({ diffMode }) }),
+              signal: AbortSignal.timeout(10000),
+            })
+            if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            return (await response.json()).diffMode
+          }
+          return diffModeStore.connect({ load: () => request(), save: value => request(value) }).dispose
+        }, 'review: persistent diff mode')
+      }
       ctx.effect(() => {
         const style = document.createElement('style')
         style.dataset.plugin = name
@@ -17176,6 +17227,7 @@ window.__ModuleLoader__.load({
       charDiff: charDiffRange,
       build: buildDiffModel,
       modeStore: diffModeStore,
+      createModeStore: createDiffModeStore,
       modes: { unified: DIFF_MODE_UNIFIED, sideBySide: DIFF_MODE_SIDE_BY_SIDE },
     }
     exports.__diffViewerForTest = ReviewDiffViewer

@@ -69,7 +69,7 @@ dsh web
 
 ### 独立安装 Git 插件到官方 dsh
 
-`ui-review` 与 `ui-gitbar` 已拆成两个可单独安装的插件，无需 Electron 或 Desktop。可以只装一个，也可以同时安装，已在官方 `@deepseek-ai/dsh 0.2.0-rc.1` 的 Web profile 验证。独立仓库是 [dsh-client-ui-review](https://github.com/pucj0/dsh-client-ui-review) 与 [dsh-client-ui-gitbar](https://github.com/pucj0/dsh-client-ui-gitbar)，当前发布版本为 **1.1.1**。
+`ui-review` 与 `ui-gitbar` 已拆成两个可单独安装的插件，无需 Electron 或 Desktop。可以只装一个，也可以同时安装，已在官方 `@deepseek-ai/dsh 0.2.0-rc.1` 的 Web profile 验证。独立仓库是 [dsh-client-ui-review](https://github.com/pucj0/dsh-client-ui-review)（**1.1.2**）与 [dsh-client-ui-gitbar](https://github.com/pucj0/dsh-client-ui-gitbar)（**1.1.1**）。
 
 - [dsh-client-ui-review](plugins/dsh-client-ui-review/README.md)：本轮审查、项目 Git Sidebar、Changes、Log、差异、冲突编辑与提交工作流。
 - [dsh-client-ui-gitbar](plugins/dsh-client-ui-gitbar/README.md)：输入框上方的分支、标签、更新、推送与 Smart Checkout 工具条。
@@ -77,7 +77,7 @@ dsh web
 选择安装一个或两个 GitHub Release 包：
 
 ```powershell
-dsh plugin --profile web add https://github.com/pucj0/dsh-client-ui-review/releases/download/v1.1.1/dsh-client-ui-review-1.1.1.tgz
+dsh plugin --profile web add https://github.com/pucj0/dsh-client-ui-review/releases/download/v1.1.2/dsh-client-ui-review-1.1.2.tgz
 dsh plugin --profile web add https://github.com/pucj0/dsh-client-ui-gitbar/releases/download/v1.1.1/dsh-client-ui-gitbar-1.1.1.tgz
 dsh web
 ```
