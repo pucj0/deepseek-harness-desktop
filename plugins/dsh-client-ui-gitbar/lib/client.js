@@ -4034,7 +4034,9 @@ window.__ModuleLoader__.load({
         item('checkout', t('menuTagCheckout'), () => onCheckout(entry)),
         item('create-branch', t('menuTagCreateBranch'), () => onDialog({ kind: 'create', branch: { name: entry.name } })),
         separator('sep1'),
-        item('compare', t('menuTagCompare'), () => onCompare(entry)),
+        typeof window.__dshDesktopReviewCompare?.open === 'function'
+          ? item('compare', t('menuTagCompare'), () => onCompare(entry))
+          : null,
         item('push', t('menuTagPush'), () => onPushTag(entry)),
         item('copy', t('menuTagCopy'), () => copyToClipboard(entry.name)),
         separator('sep2'),

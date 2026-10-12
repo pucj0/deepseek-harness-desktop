@@ -54,6 +54,7 @@ import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { installClientModuleCache } from './client-module-cache.mjs'
 import { desktopPackageManager } from './package-manager.mjs'
+import { DEFAULT_PLUGIN_NAMES, ensureDefaultPlugins } from './default-plugins.mjs'
 
 installClientModuleCache()
 
@@ -66,7 +67,7 @@ const PROFILE_ROOT_FILENAME = 'cordis.yml'
 const DESKTOP_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
 /**
- * 随本应用内置的客户端插件（profile bundle）。
+ * 随本应用内置的外壳集成插件（profile bundle）。Git 插件由默认安装器管理。
  *
  * 放在 runtime/node_modules 下由 `scripts/stage-runtime.mjs` 就位；每个插件导出
  * `./client` 与 `dsh.bundle.patch`，因此既提供 host 半边也提供客户端半边。
@@ -76,8 +77,6 @@ const DESKTOP_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
  * `linkBundledPlugins` 会把它们链进 profile 的 node_modules。
  */
 const BUNDLED_PLUGINS = [
-  'dsh-client-ui-gitbar',
-  'dsh-client-ui-review',
   'dsh-client-ui-typography',
   'dsh-client-ui-shell-bridge',
 ]
@@ -190,8 +189,13 @@ function parseArgs(argv) {
 function reconcileBundles(dir, available) {
   const manifestPath = join(dir, 'package.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  const wanted = [...DESKTOP_BUNDLES, ...available]
   const current = manifest.dsh?.profile?.bundles
+  // Preserve independently installed plugins and the user's activation choices.
+  // Only the shell integration packages are managed as bundled resources.
+  const custom = Array.isArray(current) ? current.filter(name =>
+    !DESKTOP_BUNDLES.includes(name) && !BUNDLED_PLUGINS.includes(name)
+    && (!DEFAULT_PLUGIN_NAMES.includes(name) || existsSync(join(dir, 'node_modules', name, 'package.json')))) : []
+  const wanted = [...new Set([...DESKTOP_BUNDLES, ...available, ...custom])]
 
   // 只在真的不同时才写文件：profile 目录被 dsh 监听，无谓的写入会触发重载。
   if (
@@ -833,8 +837,6 @@ async function main() {
   process.chdir(workspace)
 
   const profileDir = ensureProfile(home, installAnchor, options.bundledPluginsDir)
-  const profile = loadProfileDirectory(BIN_NAME, profileDir, installAnchor)
-  mark(`profile 装载（${profile.layers.length} 个 bundle 层）`)
 
   // 把工作区路径交给插件，供 gitbar 的 host 半边调用 git。
   //
@@ -849,6 +851,17 @@ async function main() {
   // 应用侧登记的工作区列表，用来判断会话请求的目录是否合法。读不到的话，用户在应用里
   // 选过的其它项目都会被判为"未登记"而拒绝，徽章就仍显示外壳那个仓库的分支。
   process.env.DSH_HOME = home
+
+  // The two Git plugins are downloaded into the user's writable profile, never
+  // into the immutable runtime or installation resources.
+  try {
+    await ensureDefaultPlugins({ home, profileDir, installAnchor })
+  } catch (error) {
+    console.error(`[dsh-desktop] 默认插件安装检查失败，本次继续启动：${String(error?.message ?? error)}`)
+  }
+  reconcileBundles(profileDir, linkBundledPlugins(profileDir, installAnchor, options.bundledPluginsDir))
+  const profile = loadProfileDirectory(BIN_NAME, profileDir, installAnchor)
+  mark(`profile 装载（${profile.layers.length} 个 bundle 层）`)
 
   // Make the installation's dependency closure resolvable for this profile. Which
   // mechanism applies depends on the dsh version being booted (see

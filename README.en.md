@@ -1,5 +1,7 @@
 # DeepSeek Harness Desktop
 
+The Git plugins have independent GitHub repositories: [review](https://github.com/pucj0/dsh-client-ui-review) and [gitbar](https://github.com/pucj0/dsh-client-ui-gitbar). Install either versioned Release tarball with `dsh plugin --profile web add <tarball-URL>`, restart dsh and refresh the page. Neither requires Desktop or the other plugin; tested with official dsh 0.2.0-rc.1. Desktop no longer bundles their code: on first launch it downloads pinned Release assets, verifies SHA-256 and installs them through the official plugin manager into the writable Desktop profile. Later launches work offline; failed installs retry, and intentional uninstall/disable choices are preserved. Typography and shell-bridge remain bundled. The plugin directories in this repository are development/test snapshots only. See `src/server/default-plugins.json` for pinned versions, `npm run test:default-plugins-real` for real download/migration tests and `npm run test:plugin-composer` for real UI layout checks.
+
 **[中文](README.md) | English**
 
 DeepSeek Harness Desktop is an installable desktop client for [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness).

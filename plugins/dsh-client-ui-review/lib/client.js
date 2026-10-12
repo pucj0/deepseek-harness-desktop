@@ -1,7 +1,7 @@
 // review 的客户端半边。它承载**两个语义完全不同的界面**，两者只共享最底层的差异渲染器：
 //
 //   1. 本轮审查（turn scope）——"这一轮 agent 改了什么"
-//      入口：输入框上方的 `TurnReviewChip`（`dsh.desktop.composer.actions`）**与**
+//      入口：输入框上方的 `TurnReviewChip`（`conversation.input.dock`）**与**
 //            Harness 官方右侧栏的 **审查 / Review 标签**
 //      正文：`ReviewSidebarTab` → `TurnReviewPanel`（`sidebar.right.pane.tab`）
 //      数据：`/changes`，基线 = 本轮开始时记录的快照（baseline vs 当前工作区）
@@ -511,13 +511,29 @@ window.__ModuleLoader__.load({
     /** 稳定插件名，用于诊断。 */
     const name = 'dsh-client-ui-review'
 
-    /**
-     * 「本轮修改」入口所在的槽位。
-     *
-     * 由 gitbar 声明（`conversation.input.dock` 的子槽，list / **session** 作用域），因此挂在
-     * 这里的组件能拿到 `sessionId` 与 `useSessions`——本轮基线与本轮改动数都属于那一轮对话。
-     */
-    const TURN_CHIP_SLOT = 'dsh.desktop.composer.actions'
+    // Official session-scoped dock: available even when gitbar is not installed.
+    const TURN_CHIP_SLOT = 'conversation.input.dock'
+    const SHARED_COMPOSER_SLOT = 'dsh.desktop.composer.actions'
+
+    // The official dock is a vertical stack. A chip registered directly there
+    // stretches across the conversation. Own a composer-sized fallback row,
+    // and move the chip into gitbar's row while that optional slot is declared.
+    const composerRow = (() => {
+      let shared = false
+      const listeners = new Set()
+      return {
+        peek: () => shared,
+        set(value) {
+          if (shared === value) return
+          shared = value
+          for (const listener of listeners) listener()
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    })()
 
     /** 官方右侧栏：标签正文与标签标题的两个 keyed 槽位（两个标签各占一个 key）。 */
     const GIT_TAB_SLOT = 'sidebar.right.pane.tab'
@@ -565,14 +581,8 @@ window.__ModuleLoader__.load({
     /** 路由前缀，与 host 半边一致。 */
     const API = '/dsh-desktop/review'
 
-    /**
-     * gitbar 宿主的路由前缀。
-     *
-     * 储藏（`refs/stash`）由 gitbar 拥有：列表与 push/apply/pop/drop 都在那边，因为
-     * "这次冲突是不是储藏造成的"属于操作状态那一整块知识。本插件只读/写它的路由，
-     * 不自己碰 `.git`（与冲突面板调 `/op/continue` 是同一条既有约定）。
-     */
-    const GITBAR_API = '/dsh-desktop/gitbar'
+    // Review ships the Git operations host under its own namespace.
+    const GITBAR_API = `${API}/git`
 
     /** 概览轮询间隔。
      *
@@ -7366,7 +7376,7 @@ window.__ModuleLoader__.load({
         const query = new URLSearchParams({ cwd: workspace })
         if (repositoryRoot !== '') query.set('repository', repositoryRoot)
         try {
-          const response = await fetch(`/dsh-desktop/gitbar/${route}?${query.toString()}`, {
+          const response = await fetch(`${GITBAR_API}/${route}?${query.toString()}`, {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -16676,6 +16686,8 @@ window.__ModuleLoader__.load({
             display: 'inline-flex',
             alignItems: 'center',
             flex: '0 1 auto',
+            width: 'max-content',
+            alignSelf: 'flex-start',
             minWidth: 0,
             maxWidth: '100%',
             gap: '6px',
@@ -16819,6 +16831,23 @@ window.__ModuleLoader__.load({
      * @param props - `{ t, workspace, sessionId }`。
      * @returns React 元素。
      */
+    function StandaloneTurnReviewDock(props) {
+      const shared = react.useSyncExternalStore(composerRow.subscribe, composerRow.peek, () => false)
+      if (shared) return null
+      return react.createElement('div', {
+        'data-review-composer-dock': '',
+        style: {
+          display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', minWidth: 0,
+          boxSizing: 'border-box', alignSelf: 'center',
+          width: 'calc(100% - var(--dsh-composer-side-clearance, 16px) - var(--dsh-composer-side-clearance, 16px))',
+          maxWidth: 'var(--dsh-composer-card-max-width, 100%)',
+          margin: '0 0 calc(-22px - var(--dsh-composer-stack-gap, 6px))',
+          padding: '8px 12px 30px', borderRadius: '22px 22px 0 0',
+          background: 'var(--dsw-alias-bg-module-platform, #f3f3f3)', fontFamily: UI_FONT,
+        },
+      }, react.createElement(TurnReviewChip, props))
+    }
+
     function TurnReviewPanelConnected(props) {
       const { t, workspace, sessionId } = props
       const turn = useChanges(workspace, sessionId)
@@ -16955,11 +16984,26 @@ window.__ModuleLoader__.load({
                 locale: NS,
                 inject: () => ({ t: ctx.locale.bind(NS) }),
               },
-              TurnReviewChip,
+              StandaloneTurnReviewDock,
             ),
           ),
         'dsh-client-ui-review: turn review chip',
       )
+
+      // Optional composition: slots.inject waits for gitbar's declaration and
+      // disposes its callback when that declaration disappears. It is not a
+      // required service or npm dependency, and either load order works.
+      ctx.effect(() => ctx.slots.inject(SHARED_COMPOSER_SLOT, () => {
+        const dispose = ctx.slots.register({
+          name: SHARED_COMPOSER_SLOT, id: TURN_CHIP_ID, order: TURN_CHIP_ORDER, locale: NS,
+          inject: () => ({ t: ctx.locale.bind(NS) }),
+        }, TurnReviewChip)
+        composerRow.set(true)
+        return () => {
+          dispose()
+          composerRow.set(false)
+        }
+      }), 'dsh-client-ui-review: optional shared composer row')
 
       // ---- 官方右侧栏：两个标签，两组互不相干的注册 ---------------------------------
       //
@@ -17214,6 +17258,8 @@ window.__ModuleLoader__.load({
     exports.__turnReviewPanelForTest = TurnReviewPanel
     exports.__turnReviewPanelConnectedForTest = TurnReviewPanelConnected
     exports.__turnReviewChipForTest = TurnReviewChip
+    exports.__standaloneTurnReviewDockForTest = StandaloneTurnReviewDock
+    exports.__composerRowForTest = composerRow
     /**
      * 侧栏导航入口导出给测试：它统一了"把侧栏切到审查标签"这一个动作。
      *

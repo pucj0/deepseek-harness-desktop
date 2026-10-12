@@ -414,8 +414,8 @@ globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
   // ---- gitbar（跨插件的只读/写路由：重置）----
-  if (target.includes('/dsh-desktop/gitbar/')) {
-    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
+  if (target.includes('/dsh-desktop/review/git/')) {
+    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/review/git/') + '/dsh-desktop/review/git/'.length).split('?')[0]
     const revision = new URLSearchParams(target.split('?')[1] ?? '').get('revision') ?? ''
     requests.push({ url: target, route: `gitbar:${gitbarRoute}`, body })
     // 交互式变基的**失败**夹具体：优先于成功夹具（含只读路由的失败，例如计划读不到）。
@@ -2008,8 +2008,8 @@ console.log('=== 20. 分支选择器下拉：权威 refs 清单（含带 `/` 的
   check('   当前分支带 current 标记', masterRow?.props?.['data-graph-ref-current'], 'true')
   check('   当前分支行文案带 ✓', textOf(masterRow), '\u2713 master')
   // 数据源确实是 gitbar 的两条只读路由，而不是提交页里的 decoration（需求 12/13/17）。
-  check('   清单取自 gitbar /branches', requests.some((r) => r.url.includes('/dsh-desktop/gitbar/branches')), 'true')
-  check('   清单取自 gitbar /tags', requests.some((r) => r.url.includes('/dsh-desktop/gitbar/tags')), 'true')
+  check('   清单取自 gitbar /branches', requests.some((r) => r.url.includes('/dsh-desktop/review/git/branches')), 'true')
+  check('   清单取自 gitbar /tags', requests.some((r) => r.url.includes('/dsh-desktop/review/git/tags')), 'true')
 }
 
 console.log('')

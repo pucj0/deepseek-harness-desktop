@@ -31,6 +31,26 @@ try {
   if (configured.error) throw configured.error
   assert.equal(configured.status, 0, configured.stderr)
   assert.deepEqual(JSON.parse(configured.stdout), { DSH_DESKTOP_PNPM_CLI: cli, DSH_DESKTOP_NODE_BIN: nodeBin })
+  const distribution = spawnSync(electron, ['-e', `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const resources = ${JSON.stringify(resources)};
+    const defaults = JSON.parse(fs.readFileSync(path.join(resources, 'server', 'default-plugins.json'), 'utf8')).plugins;
+    assert.equal(defaults.length, 2);
+    for (const plugin of defaults) {
+      assert.equal(plugin.version, '1.1.1');
+      assert.ok(!fs.existsSync(path.join(resources, 'plugins', plugin.name)), 'Git plugin must not be bundled');
+      assert.ok(!fs.existsSync(path.join(resources, 'app.asar', 'runtime', 'node_modules', plugin.name)), 'Git plugin must not remain in Runtime');
+    }
+    for (const name of ['default-plugins.mjs', 'default-plugins.json']) {
+      assert.ok(fs.existsSync(path.join(resources, 'app.asar', 'runtime', name)), 'Default installer must be staged');
+    }
+    console.log('PASS packaged distribution: both Git plugins excluded; pinned default installer included');
+  `], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+  if (distribution.error) throw distribution.error
+  assert.equal(distribution.status, 0, distribution.stderr)
+  process.stdout.write(distribution.stdout)
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'))
   Object.assign(env, {
     ELECTRON_RUN_AS_NODE: '1', DSH_DESKTOP_NODE_EXECUTABLE: electron,

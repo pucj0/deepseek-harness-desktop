@@ -43,6 +43,8 @@ dsh web
 
 这些能力由本仓库的 `gitbar` 和 `review` 插件提供，运行在官方 Harness Web UI 中：
 
+两个 Git 插件各自在独立 GitHub 仓库发布。Desktop 安装包不携带它们的代码，而是在首次启动时默认下载固定版本的 Release tgz、验证 SHA-256，并通过官方插件管理器安装到 Desktop profile。之后启动复用已安装版本；下载失败仍可进入核心界面，下次启动重试；主动卸载或禁用的插件不会被反复装回。
+
 - **Git 工具条与 Smart Checkout：**显示当前分支、未提交状态及相对上游的领先/落后；切换分支时先让 Git 正常携带兼容修改。只有 Git 明确拒绝覆盖本地修改时，宿主才用带唯一标记与稳定 OID 的安全储藏执行“储藏 → 切换 → `apply --index` → 验证 → 精确删除”。已暂存、未暂存和未跟踪文件都会保护；恢复冲突时留在目标分支并进入现有冲突编辑器，安全储藏绝不删除。
 - **官方右侧 Sidebar 有两个标签：**「审查」与「Git」，语义完全不同。
   - 会话右上角提供项目 Git 图标，新会话页面也可用；点击直接打开并展开当前项目的 Git 标签，旁边保留侧栏开关。
@@ -64,6 +66,27 @@ dsh web
 - **实现约定：**所有 Git 命令都以仓库根为工作目录、用 `execFile` + 参数数组执行（不拼字符串），客户端只能传标量，引用/远端/提交号逐一校验；网络与 `--continue` 类操作以非交互方式执行（不会挂在不存在的终端提示或编辑器上）。
 
 ## 下载安装
+
+### 独立安装 Git 插件到官方 dsh
+
+`ui-review` 与 `ui-gitbar` 已拆成两个可单独安装的插件，无需 Electron 或 Desktop。可以只装一个，也可以同时安装，已在官方 `@deepseek-ai/dsh 0.2.0-rc.1` 的 Web profile 验证。独立仓库是 [dsh-client-ui-review](https://github.com/pucj0/dsh-client-ui-review) 与 [dsh-client-ui-gitbar](https://github.com/pucj0/dsh-client-ui-gitbar)，当前发布版本为 **1.1.1**。
+
+- [dsh-client-ui-review](plugins/dsh-client-ui-review/README.md)：本轮审查、项目 Git Sidebar、Changes、Log、差异、冲突编辑与提交工作流。
+- [dsh-client-ui-gitbar](plugins/dsh-client-ui-gitbar/README.md)：输入框上方的分支、标签、更新、推送与 Smart Checkout 工具条。
+
+选择安装一个或两个 GitHub Release 包：
+
+```powershell
+dsh plugin --profile web add https://github.com/pucj0/dsh-client-ui-review/releases/download/v1.1.1/dsh-client-ui-review-1.1.1.tgz
+dsh plugin --profile web add https://github.com/pucj0/dsh-client-ui-gitbar/releases/download/v1.1.1/dsh-client-ui-gitbar-1.1.1.tgz
+dsh web
+```
+
+需要官方 dsh、Git 和 pnpm，安装后重启 dsh 并刷新页面。也可以在独立插件仓库执行 `npm pack`，再安装本地 tgz。Desktop 自带 pnpm，首次启动会默认安装，不需要用户执行这些命令。源码中的 `plugins/dsh-client-ui-review` 与 `plugins/dsh-client-ui-gitbar` 保留作开发及回归用快照，不进入桌面交付产物。
+
+`npm run test:standalone-plugins` 验证官方 dsh 中单装/同装；`npm run test:plugin-composer` 在真实 Electron 界面检查工具条；`npm run test:default-plugins` 检查离线、重试和卸载策略；`npm run test:default-plugins-real` 从真实 GitHub Release 安装并验证旧内置链接迁移、后续启动和卸载/禁用保留。
+
+### 安装 Desktop 应用
 
 从 [GitHub Releases](https://github.com/pucj0/deepseek-harness-desktop/releases) 选择对应平台的附件。以下文件名来自当前打包配置与发布工作流；文件名不含版本号，版本由 Release 标签标识。
 
@@ -117,10 +140,13 @@ Electron Desktop Shell
         官方 Agent Runtime 与 Web UI
                      ▲
                      │ 官方 bundle / UI 插件机制
-        gitbar / review / typography
+        profile 内动态安装的 gitbar / review
+        内置 typography / shell-bridge
 ```
 
-外壳在独立子进程中，通过官方 `loadProfileDirectory()` 等入口加载应用拥有的 `desktop` profile。Web 服务监听本机随机端口，由 Electron 窗口承载。官方运行时包不被 fork；桌面插件随外壳发布，并在每次启动时同步到当前使用的运行时。
+外壳在独立子进程中，通过官方 `loadProfileDirectory()` 等入口加载应用拥有的 `desktop` profile。Web 服务监听本机随机端口，由 Electron 窗口承载。官方运行时包不被 fork；字号和外壳桥接插件仍随应用发布，Git 插件则独立发布并默认安装到可写 profile，运行时更新后继续沿用。
+
+动态安装入口为 `src/server/default-plugins.mjs`，固定版本、Release 地址和校验值在 `src/server/default-plugins.json`。安装状态记在 `<DSH_HOME>/profiles/desktop/default-plugins-state.json`，已验证的包缓存保存在同一 profile 的 `.default-plugin-cache/`。如需完全手动管理，可设置 `DSH_DESKTOP_DEFAULT_PLUGINS=0`；已安装或手动卸载的状态仍由官方插件管理器管理。
 
 **没有第二份便携 Node。** Electron 44 自带 Node 24，Runtime 与 npm 都由 `process.execPath` 以 `ELECTRON_RUN_AS_NODE=1` 的 Node 模式执行，因此安装包里只有一份 node 可执行文件。应用内更新 Runtime 所需的 npm CLI 作为**生产依赖**随包发布（版本精确锁定），由 `asarUnpack` 解到真实路径 `resources/app.asar.unpacked/node_modules/npm/bin/npm-cli.js`——npm 是被 `spawn` 出来的进程，不能住在 `app.asar` 内部。
 

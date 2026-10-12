@@ -1195,7 +1195,7 @@ posts.length = 0
   await ui.settle()
   check('   单击标签弹出标签菜单', ui.find('data-desktop-sc-tagmenu', 'v1.5.8') === null, 'false')
   const items = ui.findAll('data-desktop-sc-tagitem').map((node) => node.props['data-desktop-sc-tagitem'])
-  check('   菜单条目（签出 / 建分支 / 比较 / 推送 / 复制 / 删除）', items.join(','), 'checkout,create-branch,compare,push,copy,delete')
+  check('   独立安装时菜单不显示依赖 review 的比较入口', items.join(','), 'checkout,create-branch,push,copy,delete')
 }
 
 // 「推送标记」→ 单推这一条（绝不 --tags）。

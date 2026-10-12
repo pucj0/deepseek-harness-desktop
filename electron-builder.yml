@@ -45,22 +45,26 @@ compression: normal
 # is where the child actually runs it from (see `serverRunEntry` in src/main/paths.ts):
 # inside app.asar nothing can be written at startup, so the copy must already be there.
 extraResources:
-  # 随应用携带的客户端插件（gitbar / review / typography / shell-bridge）。
+  # 只携带 typography / shell-bridge；两个 Git 插件从独立 Release 默认安装。
   #
   # 插件不在 dsh 的依赖闭包里；开发运行与打包运行都需要外壳在启动时同步与当前版本配套的
   # 插件（见 plugin-sync.ts）。这份散文件是不依赖运行时目录布局的来源，也保证外壳、插件
   # 与 bundled Runtime 总是来自同一个 Release。
   #
-  # 刻意不加 `filter` 白名单：插件将来多一个 .mjs / .cjs 文件时，白名单会**静默漏掉**
-  # 它，而那只有在打包后的应用里才暴露出来。整个目录只有十几 KB 的源码，全带上更安全。
+  # 以插件目录为白名单，目录内文件全部保留；独立 Git 插件不进入安装包。
   - from: plugins
     to: plugins
+    filter:
+      - 'dsh-client-ui-typography/**/*'
+      - 'dsh-client-ui-shell-bridge/**/*'
   - from: src/server
     to: server
     filter:
       - 'server.mjs'
       - 'client-module-cache.mjs'
       - 'package-manager.mjs'
+      - 'default-plugins.mjs'
+      - 'default-plugins.json'
   - from: src/tooling
     to: tooling
   - from: build/icon.png

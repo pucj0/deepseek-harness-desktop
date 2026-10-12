@@ -2,10 +2,13 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { prepareStandalonePlugins } from './prepare-standalone-plugins.mjs'
+import { DEFAULT_PLUGIN_NAMES } from '../src/server/default-plugins.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 
 export function syncBundledPlugins({ runtimeDir = join(ROOT, 'runtime'), pluginsDir = join(ROOT, 'plugins') } = {}) {
+  if (resolve(pluginsDir) === join(ROOT, 'plugins')) prepareStandalonePlugins()
   const runtime = resolve(runtimeDir)
   const modules = join(runtime, 'node_modules')
   if (!existsSync(join(modules, '@deepseek-ai', 'dsh', 'package.json'))) {
@@ -19,7 +22,16 @@ export function syncBundledPlugins({ runtimeDir = join(ROOT, 'runtime'), plugins
   const plugins = readdirSync(pluginsDir, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && existsSync(join(pluginsDir, entry.name, 'package.json')))
     .map(entry => entry.name)
+    .filter(name => !DEFAULT_PLUGIN_NAMES.includes(name))
     .sort()
+
+  // Clean the old Desktop-owned copies, so the runtime installation anchor
+  // cannot shadow the independently installed profile packages in development.
+  for (const name of DEFAULT_PLUGIN_NAMES) {
+    const destination = resolve(modulesPath, name)
+    if (dirname(destination) !== modulesPath) throw new Error('sync-plugins: unsafe legacy destination')
+    rmSync(destination, { recursive: true, force: true })
+  }
 
   for (const plugin of plugins) {
     const source = resolve(pluginsDir, plugin)

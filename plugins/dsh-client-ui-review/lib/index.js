@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { collectCommitContext, createCommitMessageGenerator } from './commit-message.js'
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
+import { collectWorkspaceRoots } from './workspace-roots.js'
+import { registerGitRoutes } from './git-operations.js'
 
 // 「AI 补充提交信息」的其余部分（上限、提示词构造、输出规范化、失败翻译）从 host 侧
 // 原样再导出一份：它们是纯函数，`scripts/test-review-commit-message.mjs` 直接断言，
@@ -746,27 +748,8 @@ function withLineCounts(files, numstat) {
  * 页面都能让宿主进程对任意目录执行 git 命令。
  * @returns 允许的绝对路径数组。
  */
-function collectAllowedRoots() {
-  const roots = new Set()
-  const shell = process.env.DSH_DESKTOP_WORKSPACE
-  if (typeof shell === 'string' && shell !== '') roots.add(shell)
-
-  const home = process.env.DSH_HOME
-  if (typeof home === 'string' && home !== '') {
-    try {
-      const parsed = JSON.parse(readFileSync(join(home, 'storages', 'workspace.json'), 'utf8'))
-      const table = parsed?.tables?.workspaces
-      if (table !== null && typeof table === 'object') {
-        for (const record of Object.values(table)) {
-          const root = record?.root ?? record?.path
-          if (typeof root === 'string' && root !== '') roots.add(root)
-        }
-      }
-    } catch {
-      // 文件不存在或结构变化——只用外壳工作区即可。
-    }
-  }
-  return [...roots]
+function collectAllowedRoots(ctx) {
+  return collectWorkspaceRoots(ctx)
 }
 
 /**
@@ -774,7 +757,7 @@ function collectAllowedRoots() {
  * @param requested - 请求给出的路径。
  * @returns 通过校验的真实路径，否则 undefined。
  */
-function validateWorkspace(requested) {
+function validateWorkspace(requested, ctx) {
   if (typeof requested !== 'string' || requested === '' || !isAbsolute(requested)) return undefined
   let real
   try {
@@ -782,7 +765,7 @@ function validateWorkspace(requested) {
   } catch {
     return undefined
   }
-  for (const root of collectAllowedRoots()) {
+  for (const root of collectAllowedRoots(ctx)) {
     try {
       if (realpathSync.native(root) === real) return real
     } catch {
@@ -2249,7 +2232,7 @@ function createReviewHandler(ctx) {
       // 于是永远返回 400，面板一直显示"选择要查看的项目"（实测踩到过）。
       if (url.pathname === `${ROUTE_PREFIX}/roots`) {
         const roots = []
-        for (const root of collectAllowedRoots()) {
+        for (const root of collectAllowedRoots(ctx)) {
           try {
             roots.push(realpathSync.native(root))
           } catch {
@@ -2281,7 +2264,7 @@ function createReviewHandler(ctx) {
         return
       }
 
-      const workspace = validateWorkspace(payload.workspace ?? url.searchParams.get('workspace'))
+      const workspace = validateWorkspace(payload.workspace ?? url.searchParams.get('workspace'), ctx)
       if (workspace === undefined) {
         sendJson(response, 400, {
           error: 'workspace not allowed',
@@ -3447,6 +3430,7 @@ function createReviewHandler(ctx) {
  * @param ctx - host 侧 cordis 上下文。
  */
 export function apply(ctx) {
+  registerGitRoutes(ctx, { routePrefix: `${ROUTE_PREFIX}/git` })
   // 先按版本清理临时索引：旧索引里的 stat 缓存会让它继续沿用修好之前的记录。
   ensureIndexVersion()
 

@@ -347,8 +347,8 @@ let headCommit = {
 
 const fetchBase = async (url, init) => {
   const target = String(url)
-  if (target.includes('/dsh-desktop/gitbar/')) {
-    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
+  if (target.includes('/dsh-desktop/review/git/')) {
+    const gitbarRoute = target.slice(target.indexOf('/dsh-desktop/review/git/') + '/dsh-desktop/review/git/'.length).split('?')[0]
     // gitbar 的写路由（reset）也要**留下请求体**：撤销提交/重置的断言看的就是它发了什么。
     requests.push({ route: `gitbar:${gitbarRoute}`, body: init?.body === undefined ? undefined : JSON.parse(init.body), url: target })
     if (gitbarRoute === 'stash/list') return { ok: true, text: async () => JSON.stringify({ isRepo: true, stashes: [], stashCount: 0 }) }

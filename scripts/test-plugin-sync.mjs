@@ -57,8 +57,8 @@ const read = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : undefine
 console.log('=== 1. 运行时被换掉后：插件被补齐 ===')
 const bundled = join(work, 'resources', 'plugins')
 mkdirSync(bundled, { recursive: true })
-writePlugin(bundled, 'dsh-client-ui-gitbar', '// gitbar v1\n')
-writePlugin(bundled, 'dsh-client-ui-review', '// review v1\n')
+writePlugin(bundled, 'dsh-client-ui-typography', '// gitbar v1\n')
+writePlugin(bundled, 'dsh-client-ui-shell-bridge', '// review v1\n')
 // 一个与插件无关的目录必须被忽略。
 mkdirSync(join(bundled, '.cache'), { recursive: true })
 writeFileSync(join(bundled, '.cache', 'junk.txt'), 'x')
@@ -68,10 +68,10 @@ const active = writeRuntime(join(work, 'runtime', '0.1.5-rc.2'))
 const first = sync.syncPluginsIntoRuntime(active, [bundled])
 console.log(`  来源: ${first.source}`)
 check('发现的插件数', first.available.length, 2)
-check('写入的插件', first.written.join(','), 'dsh-client-ui-gitbar,dsh-client-ui-review')
+check('写入的插件', first.written.join(','), 'dsh-client-ui-shell-bridge,dsh-client-ui-typography')
 check('无失败', first.failures.length, 0)
-check('gitbar 客户端就位', read(join(active, 'node_modules', 'dsh-client-ui-gitbar', 'lib', 'client.js')), '// gitbar v1\n')
-check('review 的 host 半边就位', read(join(active, 'node_modules', 'dsh-client-ui-review', 'lib', 'index.js')), '// dsh-client-ui-review host\n')
+check('gitbar 客户端就位', read(join(active, 'node_modules', 'dsh-client-ui-typography', 'lib', 'client.js')), '// gitbar v1\n')
+check('review 的 host 半边就位', read(join(active, 'node_modules', 'dsh-client-ui-shell-bridge', 'lib', 'index.js')), '// dsh-client-ui-shell-bridge host\n')
 check('非包目录未被复制', existsSync(join(active, 'node_modules', 'not-a-package')), 'false')
 check('隐藏目录未被复制', existsSync(join(active, 'node_modules', '.cache')), 'false')
 
@@ -79,27 +79,27 @@ console.log('')
 console.log('=== 2. 再次同步：内容一致就不重写 ===')
 const second = sync.syncPluginsIntoRuntime(active, [bundled])
 check('无需写入', second.written.length, 0)
-check('全部保留', second.kept.join(','), 'dsh-client-ui-gitbar,dsh-client-ui-review')
+check('全部保留', second.kept.join(','), 'dsh-client-ui-shell-bridge,dsh-client-ui-typography')
 
 console.log('')
 console.log('=== 3. 外壳升级带来新版本：旧副本被刷新 ===')
-writePlugin(bundled, 'dsh-client-ui-gitbar', '// gitbar v2 with longer body\n')
+writePlugin(bundled, 'dsh-client-ui-typography', '// gitbar v2 with longer body\n')
 const third = sync.syncPluginsIntoRuntime(active, [bundled])
-check('刷新了 gitbar', third.written.join(','), 'dsh-client-ui-gitbar')
-check('内容已更新', read(join(active, 'node_modules', 'dsh-client-ui-gitbar', 'lib', 'client.js')), '// gitbar v2 with longer body\n')
+check('刷新了 gitbar', third.written.join(','), 'dsh-client-ui-typography')
+check('内容已更新', read(join(active, 'node_modules', 'dsh-client-ui-typography', 'lib', 'client.js')), '// gitbar v2 with longer body\n')
 
 console.log('')
 console.log('=== 4. 覆盖时不留残骸 ===')
-writeFileSync(join(bundled, 'dsh-client-ui-review', 'lib', 'stale.js'), '// 旧版才有\n')
+writeFileSync(join(bundled, 'dsh-client-ui-shell-bridge', 'lib', 'stale.js'), '// 旧版才有\n')
 sync.syncPluginsIntoRuntime(active, [bundled])
-check('新文件被复制', existsSync(join(active, 'node_modules', 'dsh-client-ui-review', 'lib', 'stale.js')), 'true')
-rmSync(join(bundled, 'dsh-client-ui-review', 'lib', 'stale.js'))
+check('新文件被复制', existsSync(join(active, 'node_modules', 'dsh-client-ui-shell-bridge', 'lib', 'stale.js')), 'true')
+rmSync(join(bundled, 'dsh-client-ui-shell-bridge', 'lib', 'stale.js'))
 sync.syncPluginsIntoRuntime(active, [bundled])
-check('源里删除后目标不再残留', existsSync(join(active, 'node_modules', 'dsh-client-ui-review', 'lib', 'stale.js')), 'false')
+check('源里删除后目标不再残留', existsSync(join(active, 'node_modules', 'dsh-client-ui-shell-bridge', 'lib', 'stale.js')), 'false')
 
 console.log('')
 console.log('=== 5. 候选顺序：应用自带那份优先，损坏的运行时被跳过 ===')
-const brokenRuntime = writeRuntime(join(work, 'runtime', '0.1.5-rc.1'), { plugins: ['dsh-client-ui-gitbar'] })
+const brokenRuntime = writeRuntime(join(work, 'runtime', '0.1.5-rc.1'), { plugins: ['dsh-client-ui-typography'] })
 const repaired = writeRuntime(join(work, 'runtime', '0.1.5-rc.3'))
 const fourth = sync.syncPluginsIntoRuntime(repaired, [brokenRuntime, bundled])
 check('采用了可用的那份', fourth.source, bundled)
@@ -119,7 +119,7 @@ check('从运行时的 node_modules 取到了插件', fifth.written.join(','), '
 check('名单声明但缺失的插件不会被算作可用', fifth.available.length, 1)
 
 // 名单里登记了、但包里没有：这份运行时不能当来源。
-const declaredOnly = writeRuntime(join(work, 'runtime', 'declared-only'), { plugins: ['dsh-client-ui-gitbar'] })
+const declaredOnly = writeRuntime(join(work, 'runtime', 'declared-only'), { plugins: ['dsh-client-ui-typography'] })
 check('登记但缺失 → 来源不可用', String(sync.readPluginSource(declaredOnly)), 'undefined')
 
 console.log('')
@@ -128,7 +128,7 @@ const lonely = writeRuntime(join(work, 'runtime', 'lonely'))
 const empty = sync.syncPluginsIntoRuntime(lonely, [join(work, 'resources', 'does-not-exist')])
 check('没有写入', empty.written.length, 0)
 check('没有可用来源', empty.available.length, 0)
-check('没有凭空造出插件目录', existsSync(join(lonely, 'node_modules', 'dsh-client-ui-gitbar')), 'false')
+check('没有凭空造出插件目录', existsSync(join(lonely, 'node_modules', 'dsh-client-ui-typography')), 'false')
 
 const missingRuntime = join(work, 'runtime', 'never-existed')
 const absent = sync.syncPluginsIntoRuntime(missingRuntime, [bundled])
@@ -170,7 +170,7 @@ console.log('=== 9. 启动入口 syncPluginsAtStartup：修复时报告，正常
  * 与它要守的行为毫无关系。
  */
 const bundledPluginCount = readdirSync(join(ROOT, 'plugins'), { withFileTypes: true }).filter(
-  (entry) => entry.isDirectory() && existsSync(join(ROOT, 'plugins', entry.name, 'package.json')),
+  (entry) => entry.isDirectory() && !['dsh-client-ui-review', 'dsh-client-ui-gitbar'].includes(entry.name) && existsSync(join(ROOT, 'plugins', entry.name, 'package.json')),
 ).length
 
 const freshRuntime = writeRuntime(join(work, 'runtime', '0.1.5-rc.9'))
@@ -228,16 +228,16 @@ console.log('=== 10. 真实仓库的 plugins/ 是可用的来源 ===')
 const real = sync.readPluginSource(join(ROOT, 'plugins'))
 check('仓库 plugins/ 可解析', real !== undefined, 'true')
 console.log(`  实际插件: ${real === undefined ? '(无)' : real.names.join(', ')}`)
-check('至少包含三个内置插件', (real?.names.length ?? 0) >= 3, 'true')
+check('包含两个外壳集成插件', (real?.names.length ?? 0) >= 2, 'true')
 // 走一遍真实来源 + 假运行时的完整链路，确保真实包结构也能被复制。
 const realTarget = writeRuntime(join(work, 'runtime', 'real-source'))
 const realSync = sync.syncPluginsIntoRuntime(realTarget, [join(ROOT, 'plugins')])
 check('真实插件全部就位', realSync.written.length, real?.names.length ?? 0)
-check('客户端 bundle 可读', existsSync(join(realTarget, 'node_modules', 'dsh-client-ui-review', 'lib', 'client.js')), 'true')
-check('package.json 可读', existsSync(join(realTarget, 'node_modules', 'dsh-client-ui-review', 'package.json')), 'true')
+check('客户端 bundle 可读', existsSync(join(realTarget, 'node_modules', 'dsh-client-ui-shell-bridge', 'lib', 'client.js')), 'true')
+check('package.json 可读', existsSync(join(realTarget, 'node_modules', 'dsh-client-ui-shell-bridge', 'package.json')), 'true')
 // 复制过去的内容必须与源逐字节一致，否则 dsh 会加载到一个半成品。
-const sourceText = read(join(ROOT, 'plugins', 'dsh-client-ui-review', 'lib', 'client.js'))
-const targetText = read(join(realTarget, 'node_modules', 'dsh-client-ui-review', 'lib', 'client.js'))
+const sourceText = read(join(ROOT, 'plugins', 'dsh-client-ui-shell-bridge', 'lib', 'client.js'))
+const targetText = read(join(realTarget, 'node_modules', 'dsh-client-ui-shell-bridge', 'lib', 'client.js'))
 check('客户端 bundle 内容一致', sourceText === targetText && sourceText !== undefined, 'true')
 
 // 插件目录里**不止 client.js / index.js** 的文件也必须一起复制过去。
@@ -248,12 +248,12 @@ check('客户端 bundle 内容一致', sourceText === targetText && sourceText !
 // 同步改成按后缀挑选，那两个测试会在开发机上照常通过（它们读的是源目录），
 // 只有打包安装后的用户会遇到"文件不存在"。
 for (const extra of [
-  join('lib', 'graph-layout.js'),
+  'cordis.patch.yml',
   // host 侧新增的模块：`lib/index.js` 是静态 import 它的，缺了就是插件加载失败。
-  join('lib', 'commit-message.js'),
+  'package.json',
 ]) {
-  const from = read(join(ROOT, 'plugins', 'dsh-client-ui-review', extra))
-  const to = read(join(realTarget, 'node_modules', 'dsh-client-ui-review', extra))
+  const from = read(join(ROOT, 'plugins', 'dsh-client-ui-shell-bridge', extra))
+  const to = read(join(realTarget, 'node_modules', 'dsh-client-ui-shell-bridge', extra))
   check(`附属文件 ${extra} 已复制且内容一致`, from !== undefined && from === to, 'true')
 }
 

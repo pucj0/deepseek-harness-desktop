@@ -192,7 +192,7 @@ globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
   requests.push({ url: target, body })
-  if (target.includes('/dsh-desktop/gitbar/')) {
+  if (target.includes('/dsh-desktop/review/git/')) {
     writes.push({ route: 'gitbar', url: target, body })
     if (gitbarGate !== null) await gitbarGate
     if (writeError !== null) return respond(writeError.payload, false)
@@ -463,7 +463,7 @@ await rerender(snapshotWith([conflictedEntry, stagedEntry, changedEntry]))
 await check('「提交合并」打到 gitbar 的 op/continue', () => {
   const write = writes.find((entry) => entry.route === 'gitbar')
   assert.ok(write !== undefined, 'no gitbar request')
-  assert.match(write.url, /\/dsh-desktop\/gitbar\/op\/continue/u)
+  assert.match(write.url, /\/dsh-desktop\/review\/git\/op\/continue/u)
 })
 writes.length = 0
 click(find(nodes, 'data-conflict-abort'))
@@ -471,7 +471,7 @@ await rerender(snapshotWith([conflictedEntry, stagedEntry, changedEntry]))
 await check('「中止合并」打到 op/abort 且带 kind=merge', () => {
   const write = writes.find((entry) => entry.route === 'gitbar')
   assert.ok(write !== undefined)
-  assert.match(write.url, /\/dsh-desktop\/gitbar\/op\/abort/u)
+  assert.match(write.url, /\/dsh-desktop\/review\/git\/op\/abort/u)
   assert.deepEqual(write.body, { kind: 'merge' })
 })
 const rebaseSnapshot = { ...snapshotWith([conflictedEntry]), operationType: 'rebase' }
@@ -506,7 +506,7 @@ await rerender(cherryPickSnapshot)
 await check('摘取的中止带 kind=cherry-pick', () => {
   const write = writes.find((entry) => entry.route === 'gitbar')
   assert.ok(write !== undefined, 'no gitbar request')
-  assert.match(write.url, /\/dsh-desktop\/gitbar\/op\/abort/u)
+  assert.match(write.url, /\/dsh-desktop\/review\/git\/op\/abort/u)
   assert.deepEqual(write.body, { kind: 'cherry-pick' })
 })
 

@@ -253,11 +253,11 @@ const graphRequests = []
 const inventoryRequests = []
 globalThis.fetch = async (url, init) => {
   const target = String(url)
-  if (target.includes('/dsh-desktop/gitbar/branches')) {
+  if (target.includes('/dsh-desktop/review/git/branches')) {
     inventoryRequests.push({ route: 'branches', url: target })
     return { ok: true, text: async () => JSON.stringify(INVENTORY_BRANCHES) }
   }
-  if (target.includes('/dsh-desktop/gitbar/tags')) {
+  if (target.includes('/dsh-desktop/review/git/tags')) {
     inventoryRequests.push({ route: 'tags', url: target })
     return { ok: true, text: async () => JSON.stringify(INVENTORY_TAGS) }
   }

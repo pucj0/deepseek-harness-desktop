@@ -236,7 +236,7 @@ try {
     const page1Only = await get('graph', '&limit=3')
     const inFirstPage = page1Only.body.commits.flatMap((c) => c.localBranches ?? [])
     check('   legacy/support 不在第一页的 decoration 里（前提成立）', inFirstPage.includes('legacy/support'), false)
-    const branches = await (await fetch(`${base}/dsh-desktop/gitbar/branches?cwd=${encodeURIComponent(repo)}`)).json()
+    const branches = await (await fetch(`${base}/dsh-desktop/review/git/branches?cwd=${encodeURIComponent(repo)}`)).json()
     const names = (branches.branches ?? []).map((entry) => entry.name)
     checkTrue('   权威清单里仍然有 legacy/support', names.includes('legacy/support'))
     // 权威清单里的分类同样按 namespace：三个带斜杠的都是本地。

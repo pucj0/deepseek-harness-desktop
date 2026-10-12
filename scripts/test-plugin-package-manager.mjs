@@ -34,7 +34,7 @@ const fixture = join(scratch, 'fixture package')
 mkdirSync(fixture)
 writeFileSync(join(fixture, 'package.json'), JSON.stringify({ name: 'desktop-package-fixture', version: '1.0.0', main: 'index.js' }))
 writeFileSync(join(fixture, 'index.js'), 'module.exports = 42\n')
-for (const name of ['client-module-cache.mjs', 'package-manager.mjs']) {
+for (const name of ['client-module-cache.mjs', 'package-manager.mjs', 'default-plugins.mjs', 'default-plugins.json']) {
   writeFileSync(join(source, name), readFileSync(join(root, 'src', 'server', name)))
 }
 // The hook runs only in this temporary entry, after the unmodified production boot.
@@ -57,7 +57,7 @@ writeFileSync(join(source, 'server.mjs'), script.replace('await reportSettingsSu
     assert.equal(version.stdout.trim(), ${JSON.stringify(require('pnpm').version)})
     const registries = await manager.registries()
     assert.ok(['http:', 'https:'].includes(new URL(registries.resolved).protocol))
-    assert.equal((await manager.listBundles()).filter(x => x.name.startsWith('dsh-client-ui-')).length, 4)
+    assert.equal((await manager.listBundles()).filter(x => x.name.startsWith('dsh-client-ui-')).length, 2)
     assert.ok((await manager.listPlugins()).length > 0)
     const operationDir = ${JSON.stringify(join(scratch, 'operation profile'))}
     mkdirSync(operationDir, { recursive: true })
@@ -121,6 +121,7 @@ try {
   env.TEMP = scratch
   env.TMPDIR = scratch
   env.ELECTRON_RUN_AS_NODE = '1'
+  env.DSH_DESKTOP_DEFAULT_PLUGINS = '0'
   server = new DshServer({
     runtime: {
       dir: runtime, installAnchor: join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),

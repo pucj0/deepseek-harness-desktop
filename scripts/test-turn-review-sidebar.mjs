@@ -6,7 +6,7 @@
 // 「当前没有可用的工作区 / 0 个文件」。
 //
 // 根因（必须保持修好的形状）：
-//   * 入口 `TurnReviewChip` 挂在 `dsh.desktop.composer.actions`（**session** 作用域），
+//   * 入口 `TurnReviewChip` 挂在 `conversation.input.dock`（**session** 作用域），
 //     能拿到 `sessionId` 与 `useSessions`，所以它算得出 4 个文件；
 //   * 旧实现点开的是一个挂在 `shell.overlay`（**root** 作用域）上的自制浮层
 //     `TurnReviewDrawer`，它的注册只注入了 `t` —— 那个槽位的 props 里**没有** `useSessions`，
@@ -320,6 +320,7 @@ const sidebarRightTabs = {
     return () => {}
   },
 }
+let optionalComposerEffect
 const ctx = {
   effect(fn) {
     fn()
@@ -327,6 +328,10 @@ const ctx = {
   locale: { register() {}, bind: () => (key) => key },
   slots: {
     inject(_name, callback) {
+      if (_name === 'dsh.desktop.composer.actions') {
+        optionalComposerEffect = callback
+        return () => {}
+      }
       callback()
     },
     register(options, component) {
@@ -343,7 +348,7 @@ const ctx = {
 }
 loaded.apply(ctx)
 
-const CHIP_KEY = 'dsh.desktop.composer.actions:review-changes'
+const CHIP_KEY = 'conversation.input.dock:review-changes'
 const REVIEW_BODY_KEY = 'sidebar.right.pane.tab:dsh-client-ui-review/review'
 const REVIEW_TITLE_KEY = 'sidebar.right.pane.tab.title:dsh-client-ui-review/review'
 const GIT_BODY_KEY = 'sidebar.right.pane.tab:dsh-client-ui-review/git'
@@ -645,5 +650,19 @@ console.log('=== Case F：静态契约 —— 自制抽屉已经彻底消失 ===
 }
 
 console.log('')
-console.log(failures === 0 ? '本轮审查走官方右侧栏，且入口与标签共用同一份会话上下文' : `${failures} 项失败`)
+console.log('=== Case G：可选的同排工具条跟随槽位声明与卸载 ===')
+check('独立安装使用自有工具条', loaded.__composerRowForTest.peek(), false)
+const stopSharedRow = optionalComposerEffect()
+check('gitbar 声明子槽后切到同排', loaded.__composerRowForTest.peek(), true)
+has('同排子槽注册了原有审查入口', entries.get('dsh.desktop.composer.actions:review-changes') === loaded.__turnReviewChipForTest)
+const joinedDock = render(loaded.__standaloneTurnReviewDockForTest, {}, 'shared-dock').tree
+check('同排模式不渲染第二条工具条', joinedDock === null, true)
+stopSharedRow()
+check('gitbar 卸载后恢复独立工具条', loaded.__composerRowForTest.peek(), false)
+const ownDock = render(loaded.__standaloneTurnReviewDockForTest, {}, 'own-dock').tree
+has('独立工具条按输入框宽度对齐', ownDock.props.style.maxWidth.includes('--dsh-composer-card-max-width'))
+const stopAlreadyPresent = optionalComposerEffect()
+check('gitbar 先加载时也能加入同排', loaded.__composerRowForTest.peek(), true)
+stopAlreadyPresent()
+console.log(failures === 0 ? '本轮审查走官方侧栏，入口上下文与可选同排工具条正确' : `${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)

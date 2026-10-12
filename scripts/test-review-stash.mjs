@@ -198,8 +198,8 @@ const twoStashes = [
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const body = init?.body === undefined ? undefined : JSON.parse(init.body)
-  if (target.includes('/dsh-desktop/gitbar/')) {
-    const route = target.slice(target.indexOf('/dsh-desktop/gitbar/') + '/dsh-desktop/gitbar/'.length).split('?')[0]
+  if (target.includes('/dsh-desktop/review/git/')) {
+    const route = target.slice(target.indexOf('/dsh-desktop/review/git/') + '/dsh-desktop/review/git/'.length).split('?')[0]
     if (route === 'stash/list') return respond({ isRepo: true, stashes: stashList, stashCount: stashList.length })
     posts.push({ route: `gitbar:${route}`, body })
     if (route === 'stash/drop' && stashDropError !== null) return respond(stashDropError, false)

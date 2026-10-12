@@ -97,7 +97,7 @@ function resolveServerEntry(runtime: RuntimeLocation): string {
   if (resolve(runtime.serverEntry) === resolve(target)) return target
 
   try {
-    for (const name of ['client-module-cache.mjs', 'package-manager.mjs', path.basename(runtime.serverEntry)]) {
+    for (const name of ['client-module-cache.mjs', 'package-manager.mjs', 'default-plugins.mjs', 'default-plugins.json', path.basename(runtime.serverEntry)]) {
       const source = readFileSync(path.join(path.dirname(runtime.serverEntry), name))
       const destination = name === path.basename(runtime.serverEntry) ? target : path.join(runtime.dir, name)
       let current: Buffer | undefined
@@ -153,7 +153,8 @@ export class DshServer extends EventEmitter {
   async start(): Promise<ServerReady> {
     if (this.child !== undefined) throw new Error('dsh-desktop: server already started')
 
-    const { runtime, dshHome, workspace, env, readyTimeoutMs = 120_000 } = this.options
+    // First launch may download and install two default plugins before boot.
+    const { runtime, dshHome, workspace, env, readyTimeoutMs = 240_000 } = this.options
     const registerWorkspace = this.options.registerWorkspace === true
     const forgetWorkspaces = this.options.forgetWorkspaces ?? []
 

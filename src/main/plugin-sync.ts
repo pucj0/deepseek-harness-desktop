@@ -25,6 +25,9 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import type { Dirent } from 'node:fs'
 import { join } from 'node:path'
 
+/** These packages belong to the writable profile and their independent repos. */
+const DYNAMIC_PLUGINS = ['dsh-client-ui-review', 'dsh-client-ui-gitbar']
+
 /** 一次同步的结果。 */
 export interface PluginSyncOutcome {
   /** 实际使用的来源目录；没找到任何可用来源时为 undefined。 */
@@ -101,6 +104,7 @@ export function listPluginPackages(dir: string): string[] {
   return readEntries(dir)
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
     .map((entry) => entry.name)
+    .filter((name) => !DYNAMIC_PLUGINS.includes(name))
     .filter((name) => existsSync(join(dir, name, 'package.json')))
     .sort()
 }
@@ -114,7 +118,7 @@ export function declaredPlugins(runtimeDir: string): string[] {
   try {
     const meta = JSON.parse(readFileSync(join(runtimeDir, 'runtime.json'), 'utf8')) as { plugins?: unknown }
     if (!Array.isArray(meta.plugins)) return []
-    return meta.plugins.filter((name): name is string => typeof name === 'string' && name !== '')
+    return meta.plugins.filter((name): name is string => typeof name === 'string' && name !== '' && !DYNAMIC_PLUGINS.includes(name))
   } catch {
     return []
   }
@@ -243,7 +247,7 @@ export function syncPluginsAtStartup(options: {
     messages.push(`[dsh-desktop] 警告: 内置插件 ${failure.name} 同步失败: ${failure.reason}`)
   }
   if (outcome.available.length === 0) {
-    messages.push('[dsh-desktop] 警告: 没有找到随应用携带的内置插件，分支徽章与改动审查将不可用。')
+    messages.push('[dsh-desktop] 警告: 没有找到外壳桥接与字号插件。')
   }
   return { outcome, messages }
 }

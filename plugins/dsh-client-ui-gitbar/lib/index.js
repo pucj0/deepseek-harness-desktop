@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { createProjectGitScope, createRepoContextResolver } from './repo-context.js'
+import { collectWorkspaceRoots } from './workspace-roots.js'
 
 /** 插件名，用于诊断与 effect 标签。 */
 export const name = 'gitbar'
@@ -186,54 +187,9 @@ const NON_INTERACTIVE_ENV = {
 }
 
 
-/**
- * 解析外壳启动时的工作区。
- *
- * 优先取外壳注入的环境变量：`server.mjs` 在启动时已经知道工作区，注入它比让插件
- * 靠 `process.cwd()` 猜测更可靠（当前目录会被其它代码改变）。两者都拿不到时不报错，
- * 而是返回 undefined 由调用方给出明确诊断。
- *
- * @returns 绝对路径，或 undefined。
- */
-function shellWorkspace() {
-  const injected = process.env.DSH_DESKTOP_WORKSPACE
-  if (typeof injected === 'string' && injected !== '') return injected
-  return process.cwd()
-}
-
-/**
- * 收集允许被当作工作区的目录。
- *
- * = 外壳启动时的工作区 + 应用侧登记过的所有工作区。后者存在
- * `<home>/storages/workspace.json`（同一份文件应用界面用来列出可选项目）。
- *
- * 读不到或不认识该文件时退化为"只有外壳工作区"，而不是抛错——本地化/多项目是增强，
- * 不该因为它而让整个插件挂不上。
- *
- * @returns 绝对路径数组（可能只含外壳工作区）。
- */
-function collectAllowedRoots() {
-  const roots = new Set()
-  const shell = shellWorkspace()
-  if (shell !== undefined) roots.add(shell)
-
-  const home = process.env.DSH_HOME
-  if (typeof home === 'string' && home !== '') {
-    const file = join(home, 'storages', 'workspace.json')
-    try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8'))
-      const table = parsed?.tables?.workspaces
-      if (table !== null && typeof table === 'object') {
-        for (const record of Object.values(table)) {
-          const root = record?.root ?? record?.path
-          if (typeof root === 'string' && root !== '') roots.add(root)
-        }
-      }
-    } catch {
-      // 文件不存在或结构变化——只用外壳工作区即可。
-    }
-  }
-  return [...roots]
+// Allowed roots come from the official live registry and launch context.
+function collectAllowedRoots(ctx) {
+  return collectWorkspaceRoots(ctx)
 }
 
 /**
@@ -2011,7 +1967,8 @@ async function advanceInteractiveRebase(cwd, gitDir) {
  *
  * @returns `(request, response)` 处理器。
  */
-function createGitHandler() {
+function createGitHandler(ctx, routePrefix = ROUTE_PREFIX) {
+  const ROUTE_PREFIX = routePrefix
   return async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://localhost')
@@ -2020,7 +1977,7 @@ function createGitHandler() {
       //
       // 重读的原因：应用侧的 `workspace.json` 会在运行中被更新（用户新选一个项目），
       // 而在 apply 时算一次就会把新项目挡在门外。重读一个小 JSON 的成本可以忽略。
-      const workspace = resolveRequestWorkspace(url, collectAllowedRoots())
+      const workspace = resolveRequestWorkspace(url, collectAllowedRoots(ctx))
       if (workspace === undefined) {
         sendJson(response, 400, {
           error: 'workspace not allowed',
@@ -3618,12 +3575,13 @@ function asStartPoint(value) {
  * 挂载插件。
  * @param ctx - host 侧 cordis 上下文。
  */
-export function apply(ctx) {
+export function registerGitRoutes(ctx, { routePrefix = ROUTE_PREFIX } = {}) {
+  const ROUTE_PREFIX = routePrefix
   // 工作区在**每次请求**里解析（见 createGitHandler），因为会话可以选择自己的项目：
   // 那只存在应用侧状态里（`<home>/storages/workspace.json`），外壳启动时的
   // `--workspace` 只是其中之一。不这样处理，用户切换项目后徽章会继续显示上一个
   // 仓库的分支——实测踩到过。
-  const handler = createGitHandler()
+  const handler = createGitHandler(ctx, ROUTE_PREFIX)
 
   // 注册为多条精确路由而不是一条前缀路由：webServer 的 kind 只有 exact 与 prefix
   // 两类语义，用精确路径可以让"哪些路径属于本插件"在注册表里一目了然。
@@ -3666,4 +3624,10 @@ export function apply(ctx) {
   for (const path of routes) {
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }), `gitbar: ${path}`)
   }
+}
+
+// Public Cordis entry point. Review embeds the same implementation under its
+// own route prefix; installing both packages never registers duplicate paths.
+export function apply(ctx) {
+  registerGitRoutes(ctx)
 }

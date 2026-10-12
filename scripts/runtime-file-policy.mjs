@@ -147,6 +147,8 @@ const DESKTOP_DROP_NATIVE_PAYLOAD = [
 export function desktopRuntimeExclusion(path, target = DEFAULT_TARGET) {
   const parts = path.split('/').filter((part) => part !== '')
   if (parts.length === 0) return undefined
+  // Git extensions are installed from their independent GitHub Releases.
+  if (['dsh-client-ui-review', 'dsh-client-ui-gitbar'].includes(parts[0])) return '独立动态安装的 Git 插件'
 
   // 包名占几段（`@scope/name` 是两段）。
   const nameParts = parts[0]?.startsWith('@') === true ? 2 : 1
